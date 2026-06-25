@@ -1,0 +1,75 @@
+name: Build Plugin
+
+on:
+  push:
+    branches: [ main, master ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Linux x86_64 Plugin
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Build plugin
+        run: |
+          cd go
+          GOOS=linux GOARCH=amd64 go build -buildmode=plugin -o ../usage-statistics.so main.go
+          cd ..
+          ls -lh usage-statistics.so
+          file usage-statistics.so
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: usage-statistics-plugin
+          path: usage-statistics.so
+          retention-days: 90
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: usage-statistics.so
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  test:
+    name: Verify Build
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: usage-statistics-plugin
+
+      - name: Verify plugin file
+        run: |
+          ls -lh usage-statistics.so
+          file usage-statistics.so
+          if [ ! -f "usage-statistics.so" ]; then
+            echo "Plugin file not found!"
+            exit 1
+          fi
+          SIZE=$(stat -f%z usage-statistics.so 2>/dev/null || stat -c%s usage-statistics.so)
+          if [ "$SIZE" -lt 1000000 ]; then
+            echo "Plugin file too small (< 1MB), probably incomplete"
+            exit 1
+          fi
+          echo "✓ Plugin file verified"
