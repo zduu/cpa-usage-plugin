@@ -417,7 +417,7 @@ body{margin:0;min-height:100vh;background:#f6f7f9;color:#262626}
 button,input,select{font:inherit}
 button{cursor:pointer}
 .shell{width:min(100%,1640px);margin:0 auto;padding:20px}
-.header{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap}
+.header{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap;padding-right:200px}
 h1{margin:0;font-size:22px;line-height:1.2;font-weight:700;letter-spacing:0}
 .toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .toolbar label{font-size:12px;color:#7a756f;font-weight:700}
@@ -477,8 +477,11 @@ tr:last-child td{border-bottom:0}
 .priceMeta{display:flex;gap:10px;color:#6f6963;font-size:12px;flex-wrap:wrap}
 .healthSummary{display:flex;gap:14px;align-items:baseline;flex-wrap:wrap}
 .healthRate{font-size:18px;font-weight:800}
-.healthScroller{overflow:auto;padding-bottom:4px}
-.healthGrid{display:grid;grid-template-columns:repeat(96,12px);grid-auto-rows:12px;gap:4px;min-width:max-content}
+.healthScroller{overflow-x:auto;overflow-y:hidden;padding-bottom:8px;scrollbar-width:thin;scrollbar-color:#c0c0c0 transparent}
+.healthScroller::-webkit-scrollbar{height:6px}
+.healthScroller::-webkit-scrollbar-track{background:transparent}
+.healthScroller::-webkit-scrollbar-thumb{background:#c0c0c0;border-radius:3px}
+.healthGrid{display:grid;grid-template-columns:repeat(96,12px);grid-auto-rows:12px;grid-auto-flow:column;gap:4px;min-width:max-content}
 .healthCell{width:12px;height:12px;border-radius:2px;background:#ececec;border:1px solid rgba(0,0,0,.04);cursor:pointer}
 .legend{display:flex;gap:6px;align-items:center;color:#8b8680;font-size:11px;margin-top:8px;flex-wrap:wrap}
 .legendDot{width:12px;height:12px;border-radius:2px;display:inline-block}
