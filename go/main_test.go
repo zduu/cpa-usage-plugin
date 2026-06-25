@@ -88,3 +88,53 @@ func TestUsageRecordUnmarshalAcceptsSnakeCaseFields(t *testing.T) {
 		t.Fatalf("detail fields not decoded: %#v", record.Detail)
 	}
 }
+
+func TestRecordStoresMaskedClientAPIKeyAndCleanSource(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Record(UsageRecord{
+		Provider:  "openai-compatible-opencode",
+		AuthType:  "apikey",
+		AuthIndex: "5312415661d8a481",
+		Source:    "openai-compatible-opencode · apikey · 5312415661d8a481",
+		APIKey:    "sk-test-client-key-zy",
+		Model:     "deepseek-v3.1",
+		Detail: UsageDetail{
+			InputTokens:  10,
+			OutputTokens: 5,
+			TotalTokens:  15,
+		},
+	})
+
+	snapshot := stats.Snapshot()
+	api, ok := snapshot.APIs["openai-compatible-opencode"]
+	if !ok {
+		t.Fatalf("snapshot APIs = %#v, want clean upstream key", snapshot.APIs)
+	}
+	details := api.Models["deepseek-v3.1"].Details
+	if len(details) != 1 {
+		t.Fatalf("details len = %d, want 1", len(details))
+	}
+	detail := details[0]
+	if detail.Source != "openai-compatible-opencode" {
+		t.Fatalf("detail source = %q, want clean source", detail.Source)
+	}
+	if detail.APIKey != "sk******zy" {
+		t.Fatalf("detail api key = %q, want masked key", detail.APIKey)
+	}
+	if detail.AuthIndex != "5312415661d8a481" {
+		t.Fatalf("credential column value = %q", detail.AuthIndex)
+	}
+}
+
+func TestStripCredentialSuffix(t *testing.T) {
+	tests := map[string]string{
+		"openai-compatible-opencode · apikey · 5312415661d8a481": "openai-compatible-opencode",
+		"openai-compatibility:opencode:a4e4860e4fc0":             "openai-compatibility:opencode",
+		"deepseek": "deepseek",
+	}
+	for input, want := range tests {
+		if got := stripCredentialSuffix(input); got != want {
+			t.Fatalf("stripCredentialSuffix(%q) = %q, want %q", input, got, want)
+		}
+	}
+}

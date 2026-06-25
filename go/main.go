@@ -380,6 +380,14 @@ tr:last-child td{border-bottom:0}
 .barTrack{height:8px;background:#eeeeee;border-radius:999px;overflow:hidden}
 .barFill{height:100%;background:#8b8680;border-radius:999px}
 .errorText{max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.apiCardGrid{display:grid;gap:12px}
+.apiCard{border:1px solid #dedede;border-radius:8px;padding:16px;background:#fff;display:grid;grid-template-columns:1fr auto;gap:12px;align-items:center}
+.apiName{font-size:18px;font-weight:800;color:#2f2f2f;margin-bottom:10px}
+.apiChips{display:flex;gap:8px;flex-wrap:wrap}
+.chip{display:inline-flex;align-items:center;border:1px solid #e0e0e0;background:#fafafa;border-radius:999px;padding:6px 12px;color:#6f6963;font-size:13px}
+.apiArrow{font-size:22px;color:#6f6963}
+.segmented{display:flex;gap:8px;flex-wrap:wrap}
+.segmented .btn.active{border-color:#8b8680;background:#f7f7f7;color:#262626}
 .priceGrid{display:grid;grid-template-columns:2fr repeat(3,1fr) auto;gap:8px;align-items:end}
 .priceList{display:grid;gap:6px;margin-top:12px}
 .priceItem{display:flex;justify-content:space-between;gap:10px;align-items:center;border:1px solid #e5e5e5;border-radius:8px;padding:8px 10px}
@@ -399,8 +407,8 @@ tr:last-child td{border-bottom:0}
 .tooltip .ok{color:#10b981}.tooltip .bad{color:#c65746}
 .hidden{display:none!important}
 @media(max-width:1120px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.layout{grid-template-columns:1fr}.detailGrid{grid-template-columns:repeat(3,minmax(0,1fr))}.splitGrid{grid-template-columns:1fr}}
-@media(max-width:640px){.shell{padding:14px}h1{font-size:20px}.cards{grid-template-columns:1fr}.value{font-size:24px}.priceGrid{grid-template-columns:1fr}.detailGrid{grid-template-columns:1fr}.barItem{grid-template-columns:1fr}.btn,.select,.input{width:100%}.toolbar{width:100%}.toolbar>*{flex:1 1 150px}}
-@media(prefers-color-scheme:dark){:root{background:#111315;color:#f2f2f2}body{background:#111315;color:#f2f2f2}.panel,.stat,th,.btn,.select,.input{background:#181b1f;border-color:#30343a;color:#f2f2f2}.spark,.empty,.metric{background:#121417;border-color:#30343a}.clickableRow:hover td,.selectedRow td{background:#20242a}.barTrack{background:#2a2f35}.label,th,.subtle,.updated,.neutral,.meta,.legend,.metricLabel{color:#a8a29b}td{border-color:#30343a}.nameCell{color:#f2f2f2}.pill{background:#20242a;border-color:#3a3f46;color:#c9c3bc}.healthCell{background:#2a2f35}.tooltip{background:#f2f2f2;color:#1b1b1b}}
+@media(max-width:640px){.shell{padding:14px}h1{font-size:20px}.cards{grid-template-columns:1fr}.value{font-size:24px}.priceGrid{grid-template-columns:1fr}.detailGrid{grid-template-columns:1fr}.barItem{grid-template-columns:1fr}.apiCard{grid-template-columns:1fr}.btn,.select,.input{width:100%}.toolbar{width:100%}.toolbar>*{flex:1 1 150px}}
+@media(prefers-color-scheme:dark){:root{background:#111315;color:#f2f2f2}body{background:#111315;color:#f2f2f2}.panel,.stat,th,.btn,.select,.input,.apiCard{background:#181b1f;border-color:#30343a;color:#f2f2f2}.spark,.empty,.metric,.chip{background:#121417;border-color:#30343a}.clickableRow:hover td,.selectedRow td{background:#20242a}.barTrack{background:#2a2f35}.label,th,.subtle,.updated,.neutral,.meta,.legend,.metricLabel,.chip{color:#a8a29b}td{border-color:#30343a}.nameCell,.apiName{color:#f2f2f2}.pill{background:#20242a;border-color:#3a3f46;color:#c9c3bc}.healthCell{background:#2a2f35}.tooltip{background:#f2f2f2;color:#1b1b1b}}
 </style>
 </head>
 <body>
@@ -449,16 +457,27 @@ tr:last-child td{border-bottom:0}
       <div class="priceList" id="priceList"></div>
     </div>
     <div class="panel">
-      <div class="panelHead"><h2>凭证统计</h2><span class="subtle">按来源/凭证聚合成功率</span></div>
+      <div class="panelHead"><h2>来源统计</h2><span class="subtle">按上游来源聚合成功率</span></div>
       <div class="tableWrap" id="credentialStats"></div>
     </div>
+    <div class="panel full">
+      <div class="panelHead">
+        <div><h2>API 详细统计</h2><div class="subtle">按调用 CPA 服务的 API key 聚合。</div></div>
+        <div class="segmented">
+          <button class="btn active" data-api-sort="requests">请求次数</button>
+          <button class="btn" data-api-sort="tokens">Token数量</button>
+          <button class="btn" data-api-sort="cost">总花费</button>
+        </div>
+      </div>
+      <div id="clientApiStats"></div>
+    </div>
     <div class="panel">
-      <div class="panelHead"><h2>接口详细统计</h2><span class="subtle">按插件可识别的提供商、来源和凭证聚合</span></div>
+      <div class="panelHead"><h2>上游接口统计</h2><span class="subtle">按上游提供商和来源聚合</span></div>
       <div class="tableWrap" id="apiStats"></div>
     </div>
     <div class="panel full">
       <div class="panelHead">
-        <div><h2>接口详情</h2><div class="subtle" id="apiDetailTitle">选择一个接口查看模型、凭证、错误和最近请求。</div></div>
+        <div><h2>上游接口详情</h2><div class="subtle" id="apiDetailTitle">选择一个上游接口查看模型、来源、错误和最近请求。</div></div>
         <div class="toolbar"><button id="exportApiCsv" class="btn">导出当前接口表格</button><button id="exportApiJson" class="btn">导出当前接口明细</button></div>
       </div>
       <div id="apiDetail"></div>
@@ -493,19 +512,33 @@ const $=(id)=>document.getElementById(id);
 const setText=(id,value)=>{$(id).textContent=value};
 const esc=(value)=>String(value??'').replace(/[&<>"']/g,(ch)=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 const num=(value)=>Number.isFinite(Number(value))?Number(value):0;
-const compact=(value)=>new Intl.NumberFormat('zh-CN',{notation:'compact',maximumFractionDigits:1}).format(num(value));
+function compact(value){const n=num(value),abs=Math.abs(n);const trim=(v)=>v.toFixed(1).replace(/\.0$/,'');if(abs>=1e6)return trim(n/1e6)+'M';if(abs>=1e3)return trim(n/1e3)+'k';return fmt.format(n)}
 const pct=(value)=>Number.isFinite(value)?value.toFixed(1)+'%':'-';
 const formatMs=(value)=>Number.isFinite(value)&&value>0?(value>=1000?(value/1000).toFixed(2)+'秒':Math.round(value)+'毫秒'):'-';
 let selectedApi='';
+let clientApiSort='requests';
 function loadPrices(){try{return JSON.parse(localStorage.getItem(storeKey)||'{}')||{}}catch{return {}}}
 function savePrices(){localStorage.setItem(storeKey,JSON.stringify(modelPrices))}
 function timestampMs(value){const ms=Date.parse(value);return Number.isFinite(ms)?ms:0}
 function totalTokens(detail){const t=detail.tokens||{};return num(t.total_tokens)||num(t.input_tokens)+num(t.output_tokens)+num(t.reasoning_tokens)+Math.max(num(t.cached_tokens),num(t.cache_tokens))}
 function detailCost(detail){const p=modelPrices[detail.model];if(!p)return 0;const t=detail.tokens||{};const cached=Math.max(num(t.cached_tokens),num(t.cache_tokens));const input=Math.max(num(t.input_tokens)-cached,0);const output=Math.max(num(t.output_tokens),0);return input/1e6*num(p.prompt)+output/1e6*num(p.completion)+cached/1e6*num(p.cache)}
-function looksLikeKey(v){return typeof v==='string'&&(v.startsWith('sk-')||v.startsWith('AIza')||v.startsWith('hf_')||v.length>=80)}
-function sourceLabel(detail){const s=detail.source||'';if(s&&!looksLikeKey(s))return s;const p=detail.provider||'';if(p&&!looksLikeKey(p))return p;const a=detail.auth_id||'';if(a&&!looksLikeKey(a))return a;return detail.auth_index||'未知来源'}
-function sourceKey(detail){return sourceLabel(detail)+'|'+(detail.auth_index||'')+'|'+(detail.auth_type||'')}
-function friendlyApiName(apiName){if(!apiName)return'未知接口';const parts=apiName.split(' · ').filter(function(p){return !looksLikeKey(p)});return parts.length?parts.join(' · '):apiName}
+function looksLikeKey(v){return typeof v==='string'&&(v.startsWith('sk-')||v.startsWith('AIza')||v.startsWith('hf_')||v.startsWith('pk_')||v.startsWith('rk_')||v.length>=80)}
+function looksLikeCredentialId(v){const s=String(v||'').trim();return /^[a-f0-9]{8,}$/i.test(s)||/^[0-9a-f]{12,}$/i.test(s)||s.length>=32}
+function isCredentialMarker(v){return /^(api[-_ ]?key|apikey|key|credential|auth)$/i.test(String(v||'').trim())}
+function trimCredentialSuffix(value){
+  let s=String(value??'').trim();if(!s)return '';
+  const dot=s.split(' · ').map((p)=>p.trim()).filter(Boolean);
+  const marker=dot.findIndex(isCredentialMarker);
+  if(marker>0)return dot.slice(0,marker).join(' · ');
+  if(dot.length>1&&looksLikeCredentialId(dot[dot.length-1]))return dot.slice(0,-1).join(' · ');
+  const colon=s.split(':').map((p)=>p.trim()).filter(Boolean);
+  if(colon.length>=3&&looksLikeCredentialId(colon[colon.length-1]))return colon.slice(0,-1).join(':');
+  return s;
+}
+function sourceLabel(detail){const s=trimCredentialSuffix(detail.source);if(s&&!looksLikeKey(s))return s;const p=trimCredentialSuffix(detail.provider);if(p&&!looksLikeKey(p))return p;return '未知来源'}
+function sourceKey(detail){return sourceLabel(detail)}
+function friendlyApiName(apiName){const clean=trimCredentialSuffix(apiName);if(!clean)return'未知接口';const parts=clean.split(' · ').filter(function(p){return !looksLikeKey(p)&&!isCredentialMarker(p)&&!looksLikeCredentialId(p)});return parts.length?parts.join(' · '):clean}
+function clientApiLabel(detail){return detail.api_key||'未知 API'}
 function avg(values){const xs=values.map(num).filter((v)=>v>0);return xs.length?xs.reduce((a,b)=>a+b,0)/xs.length:0}
 function collectDetails(data){
   const rows=[];const apis=data?.apis||{};
@@ -605,9 +638,14 @@ function renderPrices(){
   document.querySelectorAll('[data-del-price]').forEach((btn)=>btn.onclick=()=>{delete modelPrices[btn.dataset.delPrice];savePrices();rerender()});
 }
 function renderCredentials(){
-  const map=new Map(); details.forEach((d)=>{const key=sourceKey(d); const row=map.get(key)||{name:sourceLabel(d),type:d.auth_type||d.provider||'',success:0,failure:0,total:0}; d.failed?row.failure++:row.success++; row.total=row.success+row.failure; map.set(key,row)});
+  const map=new Map(); details.forEach((d)=>{const key=sourceKey(d); const row=map.get(key)||{name:sourceLabel(d),type:trimCredentialSuffix(d.provider||''),success:0,failure:0,total:0}; d.failed?row.failure++:row.success++; row.total=row.success+row.failure; map.set(key,row)});
   const rows=[...map.values()].sort((a,b)=>b.total-a.total);
-  $('credentialStats').innerHTML=rows.length?'<table><thead><tr><th>凭证</th><th>请求次数</th><th>成功率</th></tr></thead><tbody>'+rows.map((r)=>{const rate=r.total?r.success/r.total*100:100;return '<tr><td class="nameCell">'+esc(r.name)+(r.type?'<span class="pill">'+esc(r.type)+'</span>':'')+'</td><td>'+fmt.format(r.total)+' <span class="ok">('+fmt.format(r.success)+'</span> <span class="bad">'+fmt.format(r.failure)+')</span></td><td class="'+(rate>=95?'ok':rate>=80?'neutral':'bad')+'">'+pct(rate)+'</td></tr>'}).join('')+'</tbody></table>':'<div class="empty">暂无凭证数据</div>';
+  $('credentialStats').innerHTML=rows.length?'<table><thead><tr><th>来源</th><th>请求次数</th><th>成功率</th></tr></thead><tbody>'+rows.map((r)=>{const rate=r.total?r.success/r.total*100:100;return '<tr><td class="nameCell">'+esc(r.name)+(r.type&&r.type!==r.name?'<span class="pill">'+esc(r.type)+'</span>':'')+'</td><td>'+fmt.format(r.total)+' <span class="ok">('+fmt.format(r.success)+'</span> <span class="bad">'+fmt.format(r.failure)+')</span></td><td class="'+(rate>=95?'ok':rate>=80?'neutral':'bad')+'">'+pct(rate)+'</td></tr>'}).join('')+'</tbody></table>':'<div class="empty">暂无来源数据</div>';
+}
+function renderClientApiStats(){
+  const rows=groupedRows(details,clientApiLabel,clientApiLabel).sort((a,b)=>clientApiSort==='tokens'?b.tokens-a.tokens:clientApiSort==='cost'?b.cost-a.cost:b.requests-a.requests);
+  document.querySelectorAll('[data-api-sort]').forEach((btn)=>btn.classList.toggle('active',btn.dataset.apiSort===clientApiSort));
+  $('clientApiStats').innerHTML=rows.length?'<div class="apiCardGrid">'+rows.map((r)=>'<div class="apiCard"><div><div class="apiName">'+esc(r.name)+'</div><div class="apiChips"><span class="chip">请求次数: '+fmt.format(r.requests)+'（<span class="ok">'+fmt.format(r.success)+'</span> <span class="bad">'+fmt.format(r.failure)+'</span>）</span><span class="chip">Token数量: '+compact(r.tokens)+'</span><span class="chip">总花费: '+money.format(r.cost)+'</span></div></div><div class="apiArrow">▶</div></div>').join('')+'</div>':'<div class="empty">暂无 API key 请求数据</div>';
 }
 function renderApiStats(){
   const rows=Object.entries(usage?.apis||{}).map(([api,a])=>({api,requests:num(a.total_requests),success:num(a.success_count),failure:num(a.failure_count),tokens:num(a.total_tokens),models:a.models||{},details:collectDetails({apis:{[api]:a}})})).sort((a,b)=>b.requests-a.requests);
@@ -633,7 +671,7 @@ function currentApiDetails(){
 }
 function renderApiDetail(){
   const api=selectedApi, apiData=api&&usage?.apis?.[api], rows=currentApiDetails();
-  if(!apiData||!rows.length){setText('apiDetailTitle','选择一个接口查看模型、凭证、错误和最近请求。');$('apiDetail').innerHTML='<div class="empty">暂无接口详情</div>';return}
+  if(!apiData||!rows.length){setText('apiDetailTitle','选择一个上游接口查看模型、来源、错误和最近请求。');$('apiDetail').innerHTML='<div class="empty">暂无接口详情</div>';return}
   const requests=rows.length, success=rows.filter((d)=>!d.failed).length, failure=requests-success, rate=requests?success/requests*100:100;
   const tokens=rows.reduce((s,d)=>s+d.total_tokens,0), cached=rows.reduce((s,d)=>s+d.cached_tokens,0), reasoning=rows.reduce((s,d)=>s+d.reasoning_tokens,0), cost=rows.reduce((s,d)=>s+d.cost,0);
   const models=groupedRows(rows,(d)=>d.model,(d)=>d.model||'unknown');
@@ -647,9 +685,9 @@ function renderApiDetail(){
     metric('总 token',compact(tokens),'缓存 '+compact(cached)+' · 思考 '+compact(reasoning))+
     metric('平均延迟',formatMs(avg(rows.map((d)=>d.latency_ms))),'TTFT '+formatMs(avg(rows.map((d)=>d.ttft_ms))))+
     metric('估算花费',money.format(cost))+
-    metric('模型数',fmt.format(models.length),'凭证/来源 '+fmt.format(sources.length))+
+    metric('模型数',fmt.format(models.length),'来源 '+fmt.format(sources.length))+
     '</div>'+
-    '<div class="splitGrid">'+bars('模型分布',models,requests,'暂无模型数据')+bars('凭证/来源分布',sources,requests,'暂无凭证数据')+'</div>'+
+    '<div class="splitGrid">'+bars('模型分布',models,requests,'暂无模型数据')+bars('来源分布',sources,requests,'暂无来源数据')+'</div>'+
     '<div class="splitGrid"><div><div class="subtle" style="margin-bottom:8px">错误统计</div>'+
     (errorRows.length?'<div class="tableWrap"><table><thead><tr><th>状态码</th><th>次数</th><th>错误</th></tr></thead><tbody>'+errorRows.slice(0,10).map((r)=>'<tr><td class="bad">'+esc(r.status)+'</td><td>'+fmt.format(r.count)+'</td><td class="errorText">'+esc(r.failure)+'</td></tr>').join('')+'</tbody></table></div>':'<div class="empty">暂无失败请求</div>')+
     '</div><div><div class="subtle" style="margin-bottom:8px">最近请求</div>'+
@@ -674,7 +712,7 @@ function download(name,text,type){const a=document.createElement('a');a.href=URL
 function rowsCsv(rows){const head=['时间','接口','模型','来源','凭证','结果','延迟毫秒','TTFT毫秒','输入 token','输出 token','思考 token','缓存 token','总 token','状态码','错误'];return [head,...rows.map((d)=>[d.timestamp,d.api,d.model,sourceLabel(d),d.auth_index||'',d.failed?'失败':'成功',num(d.latency_ms),num(d.ttft_ms),num(d.tokens?.input_tokens),num(d.tokens?.output_tokens),num(d.tokens?.reasoning_tokens),d.cached_tokens,d.total_tokens,d.status_code||'',d.failure||''])].map((row)=>row.map((v)=>'"'+String(v??'').replace(/"/g,'""')+'"').join(',')).join('\\n')}
 function exportRows(kind){const rows=[...details]; const stamp=new Date().toISOString().replace(/[:.]/g,'-'); if(kind==='json'){download('usage-events-'+stamp+'.json',JSON.stringify(rows,null,2),'application/json;charset=utf-8');return} download('usage-events-'+stamp+'.csv',rowsCsv(rows),'text/csv;charset=utf-8')}
 function exportApiRows(kind){const rows=currentApiDetails();if(!rows.length)return;const stamp=new Date().toISOString().replace(/[:.]/g,'-');const name=(friendlyApiName(selectedApi)||'api').replace(/[\\\\/:*?"<>|\\s]+/g,'-').slice(0,80);if(kind==='json'){download('usage-api-'+name+'-'+stamp+'.json',JSON.stringify(rows,null,2),'application/json;charset=utf-8');return}download('usage-api-'+name+'-'+stamp+'.csv',rowsCsv(rows),'text/csv;charset=utf-8')}
-function rerender(){details=collectDetails(usage);renderPrices();renderStats();renderHealth();renderCredentials();renderApiStats();renderApiDetail();renderModelStats();renderFilters();renderEvents()}
+function rerender(){details=collectDetails(usage);renderPrices();renderStats();renderHealth();renderCredentials();renderClientApiStats();renderApiStats();renderApiDetail();renderModelStats();renderFilters();renderEvents()}
 async function load() {
   try {
     const response = await fetch('./dashboard-data', { cache: 'no-store' });
@@ -689,6 +727,7 @@ $('range').value=localStorage.getItem(rangeKey)||'24h'; $('range').onchange=()=>
 $('refreshBtn').onclick=load;
 $('savePrice').onclick=()=>{const m=$('priceModel').value;if(!m)return;const prompt=num($('pricePrompt').value), completion=num($('priceCompletion').value), cache=$('priceCache').value===''?prompt:num($('priceCache').value);modelPrices[m]={prompt,completion,cache};savePrices();$('pricePrompt').value='';$('priceCompletion').value='';$('priceCache').value='';rerender()};
 $('priceModel').onchange=()=>{const p=modelPrices[$('priceModel').value]||{};$('pricePrompt').value=p.prompt??'';$('priceCompletion').value=p.completion??'';$('priceCache').value=p.cache??''};
+document.querySelectorAll('[data-api-sort]').forEach((btn)=>btn.onclick=()=>{clientApiSort=btn.dataset.apiSort||'requests';renderClientApiStats()});
 ['filterModel','filterSource','filterAuth'].forEach((id)=>$(id).onchange=renderEvents); $('clearFilters').onclick=()=>{['filterModel','filterSource','filterAuth'].forEach((id)=>$(id).value='');renderEvents()};
 $('exportRowsCsv').onclick=()=>exportRows('csv'); $('exportRowsJson').onclick=()=>exportRows('json');
 $('exportApiCsv').onclick=()=>exportApiRows('csv'); $('exportApiJson').onclick=()=>exportApiRows('json');
@@ -1045,6 +1084,7 @@ type RequestDetail struct {
 	Timestamp  time.Time           `json:"timestamp"`
 	LatencyMs  int64               `json:"latency_ms"`
 	TTFTMs     int64               `json:"ttft_ms,omitempty"`
+	APIKey     string              `json:"api_key,omitempty"`
 	Source     string              `json:"source"`
 	Provider   string              `json:"provider,omitempty"`
 	AuthID     string              `json:"auth_id,omitempty"`
@@ -1167,6 +1207,7 @@ func (s *RequestStatistics) Record(record UsageRecord) {
 		Timestamp: timestamp,
 		LatencyMs: record.Latency.Milliseconds(),
 		TTFTMs:    record.TTFT.Milliseconds(),
+		APIKey:    maskAPIKey(record.APIKey),
 		Source:    usageSource(record),
 		Provider:  strings.TrimSpace(record.Provider),
 		AuthID:    strings.TrimSpace(record.AuthID),
@@ -1415,25 +1456,74 @@ func looksLikeSecretKey(raw string) bool {
 	return false
 }
 
+func maskAPIKey(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	if len(s) <= 4 {
+		return s[:1] + "******"
+	}
+	prefix := 2
+	suffix := 2
+	if len(s) < prefix+suffix {
+		return s[:1] + "******" + s[len(s)-1:]
+	}
+	return s[:prefix] + "******" + s[len(s)-suffix:]
+}
+
+func stripCredentialSuffix(raw string) string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return ""
+	}
+	parts := strings.Split(value, " · ")
+	for i, part := range parts {
+		normalized := strings.ToLower(strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(part, "-", ""), "_", "")))
+		if normalized == "apikey" || normalized == "key" || normalized == "credential" || normalized == "auth" {
+			if i > 0 {
+				return strings.Join(parts[:i], " · ")
+			}
+		}
+	}
+	if len(parts) > 1 && looksLikeCredentialID(parts[len(parts)-1]) {
+		return strings.Join(parts[:len(parts)-1], " · ")
+	}
+	colonParts := strings.Split(value, ":")
+	if len(colonParts) >= 3 && looksLikeCredentialID(colonParts[len(colonParts)-1]) {
+		return strings.Join(colonParts[:len(colonParts)-1], ":")
+	}
+	return value
+}
+
+func looksLikeCredentialID(raw string) bool {
+	s := strings.TrimSpace(raw)
+	if len(s) >= 8 {
+		allHex := true
+		for _, ch := range s {
+			if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')) {
+				allHex = false
+				break
+			}
+		}
+		if allHex {
+			return true
+		}
+	}
+	return len(s) >= 32 && !strings.ContainsAny(s, " /.-_")
+}
+
 // friendlySourceName turns a raw source value into a human-readable label.
 // It never leaks API keys.
 func friendlySourceName(record UsageRecord) string {
 	provider := strings.TrimSpace(record.Provider)
 	executor := strings.TrimSpace(record.ExecutorType)
-	source := strings.TrimSpace(record.Source)
-	authType := strings.TrimSpace(record.AuthType)
-	authIndex := strings.TrimSpace(record.AuthIndex)
-	authID := strings.TrimSpace(record.AuthID)
+	source := stripCredentialSuffix(record.Source)
 
 	// If source is a clean name (not a key), use it directly.
 	if source != "" && !looksLikeSecretKey(source) {
 		return source
 	}
-	// AuthID from OAuth / auth files is usually a clean identifier.
-	if authID != "" && !looksLikeSecretKey(authID) {
-		return authID
-	}
-	// Build from provider / executor + auth info.
 	name := provider
 	if name == "" {
 		name = executor
@@ -1441,23 +1531,13 @@ func friendlySourceName(record UsageRecord) string {
 	if name == "" {
 		name = "unknown"
 	}
-	// Append authType for disambiguation (e.g. "opencode · openai").
-	if authType != "" && authType != name {
-		name = name + " · " + authType
-	}
-	// Append authIndex if present (e.g. "opencode · openai · 3").
-	if authIndex != "" {
-		name = name + " · " + authIndex
-	}
-	return name
+	return stripCredentialSuffix(name)
 }
 
 func usageGroupKey(record UsageRecord) string {
 	provider := strings.TrimSpace(record.Provider)
 	executor := strings.TrimSpace(record.ExecutorType)
-	source := strings.TrimSpace(record.Source)
-	authType := strings.TrimSpace(record.AuthType)
-	authIndex := strings.TrimSpace(record.AuthIndex)
+	source := stripCredentialSuffix(record.Source)
 
 	parts := make([]string, 0, 3)
 	if provider != "" {
@@ -1465,14 +1545,9 @@ func usageGroupKey(record UsageRecord) string {
 	} else if executor != "" {
 		parts = append(parts, executor)
 	}
-	if authType != "" && authType != provider && authType != executor {
-		parts = append(parts, authType)
-	}
 	// Use friendly name for the source part — never leak keys.
-	if source != "" && !looksLikeSecretKey(source) {
+	if source != "" && !looksLikeSecretKey(source) && source != provider && source != executor {
 		parts = append(parts, source)
-	} else if authIndex != "" {
-		parts = append(parts, authIndex)
 	}
 	if len(parts) == 0 {
 		return "未知接口"
