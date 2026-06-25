@@ -8,66 +8,88 @@
 
 ## 2. 放入插件目录
 
-### 直接部署
+### Docker 部署（推荐）
 
-将 `usage-statistics.so` 放到 CPA/CLIProxyAPI 的插件目录中。示例：
+CPA（CLIProxyAPI）通常以 Docker 方式运行，镜像为 `eceasy/cli-proxy-api:latest`。
+
+#### 方式一：docker cp（简单快速）
+
+将下载的 `.so` 文件复制到运行中的容器内：
 
 ```bash
-mkdir -p /opt/cliproxyapi/plugins
-cp usage-statistics.so /opt/cliproxyapi/plugins/
-chmod 755 /opt/cliproxyapi/plugins/usage-statistics.so
+docker cp usage-statistics.so cli-proxy-api:/CLIProxyAPI/plugins/
+docker exec cli-proxy-api chmod 755 /CLIProxyAPI/plugins/usage-statistics.so
 ```
 
-实际目录以你的 CPA 配置为准。
+> 容器名和插件目录以实际为准：可通过 `docker ps` 查看容器名，通过 `docker exec <容器名> ls /CLIProxyAPI/plugins/` 确认插件目录。
 
-### Docker 部署
+#### 方式二：volume 挂载（持久化）
 
-如果 CPA 以 Docker 方式运行，通过 volume 将插件挂载到容器内：
+将宿主目录挂载到容器，插件放在宿主目录即可：
 
-```yaml
-# docker-compose.yml 示例
-version: "3"
-services:
-  cliproxyapi:
-    image: your-cpa-image:tag
-    ports:
-      - "8787:8787"
-    volumes:
-      - ./plugins:/app/plugins        # 将插件目录挂载到容器
-      - ./config:/app/config
-      - ./data:/app/data
+```bash
+# 先在宿主创建插件目录并放入 .so 文件
+mkdir -p /home/<用户>/docker/CLIProxyAPI/plugins
+cp usage-statistics.so /home/<用户>/docker/CLIProxyAPI/plugins/
 ```
 
-或将宿主目录映射到容器：
+然后更新 `docker run` 命令，添加插件目录挂载：
 
 ```bash
 docker run -d \
-  --name cliproxyapi \
-  -v /opt/cliproxyapi/plugins:/app/plugins \
-  -v /opt/cliproxyapi/config:/app/config \
-  -p 8787:8787 \
-  your-cpa-image:tag
+  --name cli-proxy-api \
+  -v /home/<用户>/docker/CLIProxyAPI/config.yaml:/CLIProxyAPI/config.yaml \
+  -v /home/<用户>/docker/CLIProxyAPI/auths:/root/.cli-proxy-api \
+  -v /home/<用户>/docker/CLIProxyAPI/logs:/CLIProxyAPI/logs \
+  -v /home/<用户>/docker/CLIProxyAPI/plugins:/CLIProxyAPI/plugins \
+  -p 8317:8317 \
+  -e TZ=Asia/Shanghai \
+  eceasy/cli-proxy-api:latest
 ```
 
-> 插件目录路径（`/app/plugins`）需与 CPA 容器内的实际路径一致，请参考你的 CPA Docker 镜像文档。
+> **注意**：容器内工作目录为 `/CLIProxyAPI`，插件目录路径为 `/CLIProxyAPI/plugins`（在插件配置中通过 `dir` 字段指定，默认值通常为 `plugins`，即相对于工作目录的路径）。挂载时确保宿主目录路径和容器内路径正确对应。
+
+### 直接部署（非 Docker）
+
+如果 CPA 直接运行在宿主机上，将 `usage-statistics.so` 放到 CPA 工作目录下的 `plugins` 子目录：
+
+```bash
+cp usage-statistics.so /path/to/CLIProxyAPI/plugins/
+chmod 755 /path/to/CLIProxyAPI/plugins/usage-statistics.so
+```
 
 ## 3. 启用插件
 
-在 CPA 配置中启用插件系统，并启用 `usage-statistics`：
+在 CPA 配置文件（通常为 `config.yaml`）中启用插件系统，并启用 `usage-statistics`：
 
 ```yaml
 plugins:
   enabled: true
+  dir: plugins
   configs:
     usage-statistics:
       enabled: true
 ```
 
-然后重启 CPA 服务。
+然后重启 CPA 服务：
+
+```bash
+# Docker 方式
+docker restart cli-proxy-api
+```
+
+启动后查看日志确认插件加载成功：
+
+```text
+pluginhost: plugin loaded plugin_id=usage-statistics path=plugins/usage-statistics.so
+pluginhost: plugin registered plugin_id=usage-statistics plugin_name=用量统计 version=1.0.0
+```
 
 ## 4. 查看统计
 
-登录 CPA 管理端，在菜单中打开“用量统计”。
+登录 CPA 管理端（默认 `http://<服务器IP>:8317/management.html`），在菜单中打开"用量统计"。
+
+> 管理 API 调用需要在请求头中包含管理密钥（`x-management-key`），密钥为 CPA 配置中 `remote-management.secret-key` 设置的值。
 
 页面包含：
 
@@ -81,12 +103,17 @@ plugins:
 
 页面右上角可导入/导出统计数据。
 
-也可以使用管理接口：
+也可以使用管理接口（需要携带管理密钥）：
 
 ```bash
-curl http://127.0.0.1:8787/v0/management/plugins/usage-statistics/usage/export
-curl -X POST http://127.0.0.1:8787/v0/management/plugins/usage-statistics/usage/import \
+# 导出
+curl http://127.0.0.1:8317/v0/management/plugins/usage-statistics/usage/export \
+  -H 'x-management-key: <你的管理密钥>'
+
+# 导入
+curl -X POST http://127.0.0.1:8317/v0/management/plugins/usage-statistics/usage/import \
   -H 'Content-Type: application/json' \
+  -H 'x-management-key: <你的管理密钥>' \
   --data-binary @usage-export.json
 ```
 
