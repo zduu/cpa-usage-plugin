@@ -301,6 +301,21 @@ configs:
 	}
 }
 
+func TestDashboardMarkupContainsHealthRowsApiSelectorAndBackoff(t *testing.T) {
+	checks := map[string]string{
+		"health grid seven rows":       "grid-template-rows:repeat(7,12px)",
+		"upstream api selector":        `id="apiSelect"`,
+		"selector options are updated": "$('apiSelect').innerHTML",
+		"poll scheduler exists":        "function schedulePoll",
+		"failure backoff exists":       "function nextFailureDelay",
+	}
+	for name, needle := range checks {
+		if !strings.Contains(dashboardHTML, needle) {
+			t.Fatalf("%s: dashboardHTML missing %q", name, needle)
+		}
+	}
+}
+
 func TestEmptyLogResponseHeadersDefaultsToNil(t *testing.T) {
 	cfg := defaultRuntimeConfig()
 	if cfg.LogResponseHeaders != "" {
@@ -756,4 +771,3 @@ func BenchmarkSnapshot(b *testing.B) {
 		_ = stats.Snapshot()
 	}
 }
-

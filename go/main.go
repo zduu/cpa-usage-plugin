@@ -519,7 +519,7 @@ tr:last-child td{border-bottom:0}
 .healthScroller::-webkit-scrollbar{height:6px}
 .healthScroller::-webkit-scrollbar-track{background:transparent}
 .healthScroller::-webkit-scrollbar-thumb{background:#c0c0c0;border-radius:3px}
-.healthGrid{display:grid;grid-template-columns:repeat(96,12px);grid-auto-rows:12px;grid-auto-flow:column;gap:4px;min-width:max-content}
+.healthGrid{display:grid;grid-template-columns:repeat(96,12px);grid-template-rows:repeat(7,12px);grid-auto-flow:row;gap:4px;min-width:max-content}
 .healthCell{width:12px;height:12px;border-radius:2px;background:#ececec;border:1px solid rgba(0,0,0,.04);cursor:pointer}
 .legend{display:flex;gap:6px;align-items:center;color:#8b8680;font-size:11px;margin-top:8px;flex-wrap:wrap}
 .legendDot{width:12px;height:12px;border-radius:2px;display:inline-block}
@@ -602,7 +602,7 @@ tr:last-child td{border-bottom:0}
     <div class="panel full">
       <div class="panelHead">
         <div><h2>上游接口详情</h2><div class="subtle" id="apiDetailTitle">选择一个上游接口查看模型、来源、错误和最近请求。</div></div>
-        <div class="toolbar"><button id="exportApiCsv" class="btn">导出当前接口表格</button><button id="exportApiJson" class="btn">导出当前接口明细</button></div>
+        <div class="toolbar"><label for="apiSelect">上游接口</label><select id="apiSelect" class="select"></select><button id="exportApiCsv" class="btn">导出当前接口表格</button><button id="exportApiJson" class="btn">导出当前接口明细</button></div>
       </div>
       <div id="apiDetail"></div>
     </div>
@@ -641,6 +641,7 @@ const pct=(value)=>Number.isFinite(value)?value.toFixed(1)+'%':'-';
 const formatMs=(value)=>Number.isFinite(value)&&value>0?(value>=1000?(value/1000).toFixed(2)+'秒':Math.round(value)+'毫秒'):'-';
 let selectedApi='';
 let clientApiSort='requests';
+let pollTimer=null, pollFailures=0;
 function loadPrices(){try{return JSON.parse(localStorage.getItem(storeKey)||'{}')||{}}catch{return {}}}
 function savePrices(){localStorage.setItem(storeKey,JSON.stringify(modelPrices))}
 function timestampMs(value){const ms=Date.parse(value);return Number.isFinite(ms)?ms:0}
@@ -776,6 +777,10 @@ function renderApiStats(){
   rows.forEach((r)=>{r.cost=r.details.reduce((s,d)=>s+d.cost,0);r.avgLatency=avg(r.details.map((d)=>d.latency_ms));r.successRate=r.requests?r.success/r.requests*100:100});
   if(rows.length&&(!selectedApi||!rows.some((r)=>r.api===selectedApi)))selectedApi=rows[0].api;
   if(!rows.length)selectedApi='';
+  $('apiSelect').innerHTML=rows.length?rows.map((r)=>'<option value="'+esc(r.api)+'">'+esc(friendlyApiName(r.api))+'</option>').join(''):'<option value="">暂无上游接口</option>';
+  $('apiSelect').value=selectedApi;
+  $('apiSelect').disabled=!rows.length;
+  $('apiSelect').onchange=()=>{selectedApi=$('apiSelect').value;renderApiStats();renderApiDetail()};
   $('apiStats').innerHTML=rows.length?'<table><thead><tr><th>接口</th><th>请求</th><th>成功率</th><th>token</th><th>平均延迟</th><th>花费</th><th>模型</th></tr></thead><tbody>'+rows.map((r)=>'<tr class="clickableRow '+(r.api===selectedApi?'selectedRow':'')+'" data-api="'+esc(r.api)+'"><td class="nameCell">'+esc(friendlyApiName(r.api))+'</td><td>'+fmt.format(r.requests)+' <span class="ok">('+fmt.format(r.success)+'</span> <span class="bad">'+fmt.format(r.failure)+')</span></td><td class="'+(r.successRate>=95?'ok':r.successRate>=80?'neutral':'bad')+'">'+pct(r.successRate)+'</td><td>'+compact(r.tokens)+'</td><td>'+formatMs(r.avgLatency)+'</td><td>'+money.format(r.cost)+'</td><td>'+Object.keys(r.models).slice(0,4).map(esc).join('、')+'</td></tr>').join('')+'</tbody></table>':'<div class="empty">暂无接口数据</div>';
   document.querySelectorAll('[data-api]').forEach((row)=>row.onclick=()=>{selectedApi=row.getAttribute('data-api')||'';renderApiStats();renderApiDetail()});
 }
@@ -837,14 +842,18 @@ function rowsCsv(rows){const head=['时间','接口','模型','来源','凭证',
 function exportRows(kind){const rows=[...details]; const stamp=new Date().toISOString().replace(/[:.]/g,'-'); if(kind==='json'){download('usage-events-'+stamp+'.json',JSON.stringify(rows,null,2),'application/json;charset=utf-8');return} download('usage-events-'+stamp+'.csv',rowsCsv(rows),'text/csv;charset=utf-8')}
 function exportApiRows(kind){const rows=currentApiDetails();if(!rows.length)return;const stamp=new Date().toISOString().replace(/[:.]/g,'-');const name=(friendlyApiName(selectedApi)||'api').replace(/[\\\\/:*?"<>|\\s]+/g,'-').slice(0,80);if(kind==='json'){download('usage-api-'+name+'-'+stamp+'.json',JSON.stringify(rows,null,2),'application/json;charset=utf-8');return}download('usage-api-'+name+'-'+stamp+'.csv',rowsCsv(rows),'text/csv;charset=utf-8')}
 function rerender(){details=collectDetails(usage);renderPrices();renderStats();renderHealth();renderCredentials();renderClientApiStats();renderApiStats();renderApiDetail();renderModelStats();renderFilters();renderEvents()}
+function schedulePoll(delayMs){if(pollTimer)clearTimeout(pollTimer);pollTimer=setTimeout(load,delayMs)}
+function nextFailureDelay(){return Math.min(300000,[5000,15000,45000,90000,180000][Math.min(pollFailures-1,4)]||300000)}
 async function load() {
   try {
     const response = await fetch('./dashboard-data', { cache: 'no-store' });
     if (!response.ok) throw new Error('请求失败：' + response.status);
     const data = await response.json();
     rawUsage=data.usage||{}; usage=filteredUsage(rawUsage,$('range').value); setText('updated','更新于 '+new Date(data.generated_at||Date.now()).toLocaleTimeString()); rerender();
+    pollFailures=0;schedulePoll(30000);
   } catch (error) {
     setText('updated', error.message || '加载用量统计失败');
+    pollFailures++;schedulePoll(nextFailureDelay());
   }
 }
 $('range').value=localStorage.getItem(rangeKey)||'24h'; $('range').onchange=()=>{localStorage.setItem(rangeKey,$('range').value); usage=filteredUsage(rawUsage,$('range').value); rerender()};
@@ -857,7 +866,7 @@ $('exportRowsCsv').onclick=()=>exportRows('csv'); $('exportRowsJson').onclick=()
 $('exportApiCsv').onclick=()=>exportApiRows('csv'); $('exportApiJson').onclick=()=>exportApiRows('json');
 $('exportBtn').onclick=async()=>{const r=await fetch('./usage/export',{cache:'no-store'});download('usage-export-'+new Date().toISOString().replace(/[:.]/g,'-')+'.json',JSON.stringify(await r.json(),null,2),'application/json;charset=utf-8')};
 $('importBtn').onclick=()=>$('importFile').click(); $('importFile').onchange=async(e)=>{const file=e.target.files?.[0]; if(!file)return; const text=await file.text(); const r=await fetch('./usage/import',{method:'POST',headers:{'Content-Type':'application/json'},body:text}); if(!r.ok)alert('导入失败'); await load(); e.target.value=''};
-load(); // schedulePoll inside load() handles subsequent polls
+load();
 </script>
 </body>
 </html>`
