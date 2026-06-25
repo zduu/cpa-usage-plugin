@@ -1546,8 +1546,8 @@ func (s *RequestStatistics) Record(record UsageRecord) {
 
 	// Prune (retention + max-details) with decrement-on-eviction; no sort on normal write.
 	s.pruneLocked(now, false)
-	// Rebuild only the seen set (cheaper than full aggregate rebuild).
-	s.rebuildSeenLocked(now)
+	// Prune stale seen entries; the seen map is maintained incrementally.
+	s.pruneSeenLocked(now)
 }
 
 func (s *RequestStatistics) updateAPIStats(apiSt *apiStats, model string, detail RequestDetail) {
@@ -2011,6 +2011,9 @@ func stripCredentialSuffix(raw string) string {
 		}
 	}
 	if len(parts) > 1 && looksLikeCredentialID(parts[len(parts)-1]) {
+		return strings.Join(parts[:len(parts)-1], " · ")
+	}
+	if len(parts) > 1 && looksLikeSecretKey(parts[len(parts)-1]) {
 		return strings.Join(parts[:len(parts)-1], " · ")
 	}
 	colonParts := strings.Split(value, ":")
