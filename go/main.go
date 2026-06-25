@@ -137,6 +137,8 @@ func handleMethod(method string, requestBody []byte) ([]byte, error) {
 		return handleRegister()
 	case "plugin.reconfigure":
 		return handleReconfigure()
+	case "management.register":
+		return handleManagementRegister()
 	case "usage.handle":
 		return handleUsage(requestBody)
 	case "management.handle":
@@ -157,8 +159,8 @@ func handleRegister() ([]byte, error) {
 	}
 
 	capabilities := map[string]interface{}{
-		"usage_plugin":    true,
-		"management_api":  true,
+		"usage_plugin":   true,
+		"management_api": true,
 	}
 
 	result := map[string]interface{}{
@@ -197,7 +199,11 @@ func handleManagement(requestBody []byte) ([]byte, error) {
 	}
 
 	// Route based on path
-	if req.Method == "GET" && strings.HasSuffix(req.Path, "/usage") {
+	if req.Method == "GET" && strings.HasSuffix(req.Path, "/dashboard") {
+		return handleDashboardPage()
+	} else if req.Method == "GET" && strings.HasSuffix(req.Path, "/dashboard-data") {
+		return handleDashboardData()
+	} else if req.Method == "GET" && strings.HasSuffix(req.Path, "/usage") {
 		return handleGetUsage()
 	} else if req.Method == "GET" && strings.HasSuffix(req.Path, "/usage/export") {
 		return handleExportUsage()
@@ -206,6 +212,80 @@ func handleManagement(requestBody []byte) ([]byte, error) {
 	}
 
 	return errorEnvelope("not_found", "endpoint not found"), nil
+}
+
+func handleManagementRegister() ([]byte, error) {
+	result := map[string]interface{}{
+		"routes": []map[string]interface{}{
+			{
+				"method":      "GET",
+				"path":        "/plugins/usage-statistics/usage",
+				"description": "Usage statistics JSON API.",
+			},
+			{
+				"method":      "GET",
+				"path":        "/plugins/usage-statistics/usage/export",
+				"description": "Export usage statistics.",
+			},
+			{
+				"method":      "POST",
+				"path":        "/plugins/usage-statistics/usage/import",
+				"description": "Import usage statistics.",
+			},
+		},
+		"resources": []map[string]interface{}{
+			{
+				"path":        "/dashboard",
+				"menu":        "CPA Usage Statistics",
+				"description": "Usage, token, and request statistics.",
+			},
+			{
+				"path":        "/dashboard-data",
+				"description": "Dashboard data endpoint.",
+			},
+		},
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return nil, err
+	}
+	return okEnvelopeJSON(string(raw))
+}
+
+func handleDashboardData() ([]byte, error) {
+	snapshot := stats.Snapshot()
+	responseData := map[string]interface{}{
+		"usage":           snapshot,
+		"failed_requests": snapshot.FailureCount,
+		"generated_at":    time.Now().UTC().Format(time.RFC3339),
+	}
+	responseJSON, err := json.Marshal(responseData)
+	if err != nil {
+		return nil, err
+	}
+
+	resp := ManagementResponse{
+		StatusCode: http.StatusOK,
+		Headers: map[string][]string{
+			"Content-Type":  {"application/json; charset=utf-8"},
+			"Cache-Control": {"no-store"},
+		},
+		Body: responseJSON,
+	}
+
+	return okEnvelopeJSON(string(mustMarshal(resp)))
+}
+
+func handleDashboardPage() ([]byte, error) {
+	resp := ManagementResponse{
+		StatusCode: http.StatusOK,
+		Headers: map[string][]string{
+			"Content-Type":  {"text/html; charset=utf-8"},
+			"Cache-Control": {"no-store"},
+		},
+		Body: []byte(dashboardHTML),
+	}
+	return okEnvelopeJSON(string(mustMarshal(resp)))
 }
 
 func handleGetUsage() ([]byte, error) {
@@ -231,6 +311,104 @@ func handleGetUsage() ([]byte, error) {
 
 	return okEnvelopeJSON(string(mustMarshal(resp)))
 }
+
+const dashboardHTML = `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CPA Usage Statistics</title>
+<style>
+:root{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f7f8fb;color:#18202f}
+*{box-sizing:border-box}
+body{margin:0;padding:28px;background:linear-gradient(180deg,#f7f8fb,#eef2f7);min-height:100vh}
+.shell{max-width:1120px;margin:0 auto}
+.header{display:flex;justify-content:space-between;gap:16px;align-items:flex-end;margin-bottom:20px}
+h1{margin:0;font-size:28px;line-height:1.15}
+.muted{color:#687386;font-size:13px}
+.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:16px}
+.card,.panel{background:#fff;border:1px solid #dbe2ea;border-radius:8px;box-shadow:0 8px 22px rgba(20,32,50,.06)}
+.card{padding:16px}
+.label{font-size:12px;color:#687386;margin-bottom:8px}
+.value{font-size:26px;font-weight:750;font-variant-numeric:tabular-nums}
+.panel{padding:16px;margin-top:12px}
+.panel h2{font-size:16px;margin:0 0 12px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:10px;border-bottom:1px solid #e6ebf1}
+th{font-size:11px;text-transform:uppercase;color:#687386}
+tr:last-child td{border-bottom:0}
+.empty{padding:26px;text-align:center;color:#687386}
+.status{display:inline-flex;align-items:center;gap:8px;padding:7px 10px;border:1px solid #dbe2ea;border-radius:999px;background:#fff;font-size:12px;color:#405066}
+.dot{width:8px;height:8px;border-radius:999px;background:#22c55e}
+@media(max-width:760px){body{padding:16px}.header{display:block}.grid{grid-template-columns:1fr 1fr}.value{font-size:22px}}
+@media(max-width:460px){.grid{grid-template-columns:1fr}}
+@media(prefers-color-scheme:dark){:root{background:#10141c;color:#eef3f9}body{background:linear-gradient(180deg,#10141c,#151b25)}.card,.panel,.status{background:#171e29;border-color:#2b3544;box-shadow:none}.muted,.label,th,.empty{color:#9ba8ba}td,th{border-color:#2b3544}}
+</style>
+</head>
+<body>
+<main class="shell">
+  <div class="header">
+    <div>
+      <h1>CPA Usage Statistics</h1>
+      <div class="muted" id="subtitle">Loading usage statistics...</div>
+    </div>
+    <div class="status"><span class="dot"></span><span id="status">Live</span></div>
+  </div>
+  <section class="grid">
+    <div class="card"><div class="label">Total Requests</div><div class="value" id="totalRequests">-</div></div>
+    <div class="card"><div class="label">Successful</div><div class="value" id="successCount">-</div></div>
+    <div class="card"><div class="label">Failed</div><div class="value" id="failureCount">-</div></div>
+    <div class="card"><div class="label">Total Tokens</div><div class="value" id="totalTokens">-</div></div>
+  </section>
+  <section class="panel">
+    <h2>Models</h2>
+    <div id="models"></div>
+  </section>
+</main>
+<script>
+const fmt = new Intl.NumberFormat();
+const setText = (id, value) => { document.getElementById(id).textContent = value; };
+const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+function collectModels(usage) {
+  const rows = [];
+  const apis = usage?.apis || {};
+  for (const [api, apiStats] of Object.entries(apis)) {
+    const models = apiStats?.models || {};
+    for (const [model, modelStats] of Object.entries(models)) {
+      rows.push({ api, model, requests: modelStats?.total_requests || 0, tokens: modelStats?.total_tokens || 0 });
+    }
+  }
+  rows.sort((a, b) => b.requests - a.requests || b.tokens - a.tokens);
+  return rows.slice(0, 50);
+}
+async function load() {
+  try {
+    const response = await fetch('./dashboard-data', { cache: 'no-store' });
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    const data = await response.json();
+    const usage = data.usage || {};
+    setText('totalRequests', fmt.format(usage.total_requests || 0));
+    setText('successCount', fmt.format(usage.success_count || 0));
+    setText('failureCount', fmt.format(usage.failure_count || 0));
+    setText('totalTokens', fmt.format(usage.total_tokens || 0));
+    setText('subtitle', 'Updated ' + new Date(data.generated_at || Date.now()).toLocaleString());
+    const rows = collectModels(usage);
+    document.getElementById('models').innerHTML = rows.length
+      ? '<table><thead><tr><th>API</th><th>Model</th><th>Requests</th><th>Tokens</th></tr></thead><tbody>' + rows.map((row) =>
+          '<tr><td>' + esc(row.api) + '</td><td>' + esc(row.model) + '</td><td>' + fmt.format(row.requests) + '</td><td>' + fmt.format(row.tokens) + '</td></tr>'
+        ).join('') + '</tbody></table>'
+      : '<div class="empty">No usage records yet.</div>';
+    setText('status', 'Live');
+  } catch (error) {
+    setText('status', 'Error');
+    setText('subtitle', error.message || 'Failed to load usage statistics');
+  }
+}
+load();
+setInterval(load, 30000);
+</script>
+</body>
+</html>`
 
 func handleExportUsage() ([]byte, error) {
 	snapshot := stats.Snapshot()
@@ -259,8 +437,8 @@ func handleExportUsage() ([]byte, error) {
 
 func handleImportUsage(body []byte) ([]byte, error) {
 	var importPayload struct {
-		Version int                 `json:"version"`
-		Usage   StatisticsSnapshot  `json:"usage"`
+		Version int                `json:"version"`
+		Usage   StatisticsSnapshot `json:"usage"`
 	}
 
 	if err := json.Unmarshal(body, &importPayload); err != nil {
@@ -328,23 +506,23 @@ func mustMarshal(v interface{}) []byte {
 // ============================================================================
 
 type UsageRecord struct {
-	Provider        string            `json:"provider"`
-	ExecutorType    string            `json:"executor_type"`
-	Model           string            `json:"model"`
-	Alias           string            `json:"alias"`
-	APIKey          string            `json:"api_key"`
-	AuthID          string            `json:"auth_id"`
-	AuthIndex       string            `json:"auth_index"`
-	AuthType        string            `json:"auth_type"`
-	Source          string            `json:"source"`
-	ReasoningEffort string            `json:"reasoning_effort"`
-	ServiceTier     string            `json:"service_tier"`
-	RequestedAt     time.Time         `json:"requested_at"`
-	Latency         time.Duration     `json:"latency"`
-	TTFT            time.Duration     `json:"ttft"`
-	Failed          bool              `json:"failed"`
-	Failure         UsageFailure      `json:"failure"`
-	Detail          UsageDetail       `json:"detail"`
+	Provider        string              `json:"provider"`
+	ExecutorType    string              `json:"executor_type"`
+	Model           string              `json:"model"`
+	Alias           string              `json:"alias"`
+	APIKey          string              `json:"api_key"`
+	AuthID          string              `json:"auth_id"`
+	AuthIndex       string              `json:"auth_index"`
+	AuthType        string              `json:"auth_type"`
+	Source          string              `json:"source"`
+	ReasoningEffort string              `json:"reasoning_effort"`
+	ServiceTier     string              `json:"service_tier"`
+	RequestedAt     time.Time           `json:"requested_at"`
+	Latency         time.Duration       `json:"latency"`
+	TTFT            time.Duration       `json:"ttft"`
+	Failed          bool                `json:"failed"`
+	Failure         UsageFailure        `json:"failure"`
+	Detail          UsageDetail         `json:"detail"`
 	ResponseHeaders map[string][]string `json:"response_headers"`
 }
 
@@ -410,12 +588,12 @@ type modelStats struct {
 }
 
 type RequestDetail struct {
-	Timestamp time.Time   `json:"timestamp"`
-	LatencyMs int64       `json:"latency_ms"`
-	Source    string      `json:"source"`
-	AuthIndex string      `json:"auth_index"`
-	Tokens    TokenStats  `json:"tokens"`
-	Failed    bool        `json:"failed"`
+	Timestamp time.Time  `json:"timestamp"`
+	LatencyMs int64      `json:"latency_ms"`
+	Source    string     `json:"source"`
+	AuthIndex string     `json:"auth_index"`
+	Tokens    TokenStats `json:"tokens"`
+	Failed    bool       `json:"failed"`
 }
 
 type TokenStats struct {
