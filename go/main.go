@@ -56,6 +56,7 @@ static void free_host_buffer(void* ptr, size_t len) {
 import "C"
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -243,6 +244,14 @@ func handleManagementRegister() ([]byte, error) {
 				"path":        "/dashboard-data",
 				"description": "用量统计看板数据。",
 			},
+			{
+				"path":        "/usage/export",
+				"description": "用量统计导出数据。",
+			},
+			{
+				"path":        "/usage/import",
+				"description": "用量统计导入数据。",
+			},
 		},
 	}
 	raw, err := json.Marshal(result)
@@ -319,91 +328,276 @@ const dashboardHTML = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>用量统计</title>
 <style>
-:root{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f7f8fb;color:#18202f}
+:root{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;background:#f6f7f9;color:#262626}
 *{box-sizing:border-box}
-body{margin:0;padding:28px;background:linear-gradient(180deg,#f7f8fb,#eef2f7);min-height:100vh}
-.shell{max-width:1120px;margin:0 auto}
-.header{display:flex;justify-content:space-between;gap:16px;align-items:flex-end;margin-bottom:20px}
-h1{margin:0;font-size:28px;line-height:1.15}
-.muted{color:#687386;font-size:13px}
-.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:16px}
-.card,.panel{background:#fff;border:1px solid #dbe2ea;border-radius:8px;box-shadow:0 8px 22px rgba(20,32,50,.06)}
-.card{padding:16px}
-.label{font-size:12px;color:#687386;margin-bottom:8px}
-.value{font-size:26px;font-weight:750;font-variant-numeric:tabular-nums}
-.panel{padding:16px;margin-top:12px}
-.panel h2{font-size:16px;margin:0 0 12px}
-table{width:100%;border-collapse:collapse;font-size:13px}
-th,td{text-align:left;padding:10px;border-bottom:1px solid #e6ebf1}
-th{font-size:11px;text-transform:uppercase;color:#687386}
+body{margin:0;min-height:100vh;background:#f6f7f9;color:#262626}
+button,input,select{font:inherit}
+button{cursor:pointer}
+.shell{width:min(100%,1640px);margin:0 auto;padding:24px}
+.header{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:22px;flex-wrap:wrap}
+h1{margin:0;font-size:34px;line-height:1.1;font-weight:800;letter-spacing:0}
+.toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.toolbar label{font-size:14px;color:#7a756f;font-weight:700}
+.select,.input{height:40px;border:1px solid #dedede;border-radius:8px;background:#fff;color:#262626;padding:0 12px;min-width:0}
+.btn{height:40px;border:1px solid #d9d9d9;border-radius:8px;background:#fff;color:#333;padding:0 14px;font-weight:700;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+.btn:hover{border-color:#b8b8b8}
+.btn.primary{background:#262626;color:#fff;border-color:#262626}
+.btn.danger{color:#b42318;border-color:#f1c5bf}
+.updated{color:#9a948d;font-size:14px;white-space:nowrap}
+.cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin-bottom:16px}
+.stat{background:#fff;border:1px solid #dedede;border-radius:12px;padding:22px;min-height:160px;box-shadow:0 10px 30px rgba(0,0,0,.04);position:relative;overflow:hidden}
+.stat:before{content:"";position:absolute;left:0;right:0;top:0;height:4px;background:#8b8680}
+.stat.green:before{background:#22c55e}.stat.purple:before{background:#8b5cf6}.stat.orange:before{background:#f97316}.stat.amber:before{background:#f59e0b}
+.label{color:#9a948d;font-size:15px;font-weight:800;margin-bottom:18px}
+.value{font-size:42px;line-height:1;font-weight:850;letter-spacing:0;font-variant-numeric:tabular-nums}
+.meta{margin-top:14px;color:#6f6963;font-size:15px;display:flex;gap:14px;flex-wrap:wrap}
+.ok{color:#10b981}.bad{color:#c65746}.neutral{color:#7a756f}
+.spark{width:100%;height:54px;margin-top:20px;border:1px solid #e2e2e2;border-radius:8px;background:#f8f8f8}
+.layout{display:grid;grid-template-columns:1.05fr .95fr;gap:16px}
+.full{grid-column:1/-1}
+.panel{background:#fff;border:1px solid #dedede;border-radius:12px;padding:20px;box-shadow:0 10px 30px rgba(0,0,0,.035);min-width:0}
+.panel h2{margin:0;font-size:21px;line-height:1.2}
+.panelHead{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap}
+.subtle{color:#8b8680;font-size:13px}
+.tableWrap{overflow:auto;max-height:520px}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{text-align:left;padding:13px 12px;border-bottom:1px solid #e5e5e5;vertical-align:middle;white-space:nowrap}
+th{color:#9a948d;font-size:13px;font-weight:800;background:#fff;position:sticky;top:0;z-index:1}
 tr:last-child td{border-bottom:0}
-.empty{padding:26px;text-align:center;color:#687386}
-.status{display:inline-flex;align-items:center;gap:8px;padding:7px 10px;border:1px solid #dbe2ea;border-radius:999px;background:#fff;font-size:12px;color:#405066}
-.dot{width:8px;height:8px;border-radius:999px;background:#22c55e}
-@media(max-width:760px){body{padding:16px}.header{display:block}.grid{grid-template-columns:1fr 1fr}.value{font-size:22px}}
-@media(max-width:460px){.grid{grid-template-columns:1fr}}
-@media(prefers-color-scheme:dark){:root{background:#10141c;color:#eef3f9}body{background:linear-gradient(180deg,#10141c,#151b25)}.card,.panel,.status{background:#171e29;border-color:#2b3544;box-shadow:none}.muted,.label,th,.empty{color:#9ba8ba}td,th{border-color:#2b3544}}
+.nameCell{font-weight:750;color:#2f2f2f;white-space:normal;min-width:180px}
+.pill{display:inline-flex;align-items:center;border:1px solid #dedede;background:#f7f7f7;border-radius:999px;padding:3px 9px;font-size:12px;font-weight:800;color:#6f6963;margin-left:8px}
+.empty{padding:28px;text-align:center;color:#8b8680;background:#f8f8f8;border-radius:8px}
+.priceGrid{display:grid;grid-template-columns:2fr repeat(3,1fr) auto;gap:10px;align-items:end}
+.priceList{display:grid;gap:8px;margin-top:14px}
+.priceItem{display:flex;justify-content:space-between;gap:12px;align-items:center;border:1px solid #e5e5e5;border-radius:8px;padding:10px 12px}
+.priceMeta{display:flex;gap:12px;color:#6f6963;font-size:13px;flex-wrap:wrap}
+.healthSummary{display:flex;gap:18px;align-items:baseline;flex-wrap:wrap}
+.healthRate{font-size:24px;font-weight:850}
+.healthScroller{overflow:auto;padding-bottom:4px}
+.healthGrid{display:grid;grid-template-columns:repeat(96,8px);grid-auto-rows:8px;gap:3px;min-width:max-content}
+.healthCell{width:8px;height:8px;border-radius:2px;background:#ececec;border:1px solid rgba(0,0,0,.04)}
+.healthCell.active{cursor:default}
+.legend{display:flex;gap:8px;align-items:center;color:#8b8680;font-size:12px;margin-top:10px;flex-wrap:wrap}
+.legendDot{width:10px;height:10px;border-radius:2px;display:inline-block}
+.filters{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+.eventsMeta{display:flex;justify-content:space-between;color:#8b8680;font-size:13px;margin-bottom:8px;gap:10px;flex-wrap:wrap}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace}
+.nowrap{white-space:nowrap}
+.tooltip{position:fixed;z-index:20;background:#262626;color:#fff;border-radius:8px;padding:8px 10px;font-size:12px;pointer-events:none;box-shadow:0 12px 28px rgba(0,0,0,.22);max-width:260px}
+.hidden{display:none!important}
+@media(max-width:1120px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.layout{grid-template-columns:1fr}}
+@media(max-width:640px){.shell{padding:16px}h1{font-size:28px}.cards{grid-template-columns:1fr}.value{font-size:34px}.priceGrid{grid-template-columns:1fr}.btn,.select,.input{width:100%}.toolbar{width:100%}.toolbar>*{flex:1 1 150px}}
+@media(prefers-color-scheme:dark){:root{background:#111315;color:#f2f2f2}body{background:#111315;color:#f2f2f2}.panel,.stat,th,.btn,.select,.input{background:#181b1f;border-color:#30343a;color:#f2f2f2}.spark,.empty{background:#121417;border-color:#30343a}.label,th,.subtle,.updated,.neutral,.meta,.legend{color:#a8a29b}td{border-color:#30343a}.nameCell{color:#f2f2f2}.pill{background:#20242a;border-color:#3a3f46;color:#c9c3bc}.healthCell{background:#2a2f35}.tooltip{background:#f2f2f2;color:#1b1b1b}}
 </style>
 </head>
 <body>
 <main class="shell">
   <div class="header">
-    <div>
-      <h1>用量统计</h1>
-      <div class="muted" id="subtitle">正在加载用量统计...</div>
+    <h1>使用统计</h1>
+    <div class="toolbar">
+      <label for="range">时间范围</label>
+      <select id="range" class="select">
+        <option value="7h">最近7小时</option>
+        <option value="24h" selected>最近24小时</option>
+        <option value="7d">最近7天</option>
+        <option value="all">全部</option>
+      </select>
+      <button id="exportBtn" class="btn">导出数据</button>
+      <button id="importBtn" class="btn">导入数据</button>
+      <button id="refreshBtn" class="btn primary">刷新</button>
+      <input id="importFile" type="file" accept="application/json,.json" class="hidden">
+      <span class="updated" id="updated">正在加载...</span>
     </div>
-    <div class="status"><span class="dot"></span><span id="status">正常</span></div>
   </div>
-  <section class="grid">
-    <div class="card"><div class="label">总请求数</div><div class="value" id="totalRequests">-</div></div>
-    <div class="card"><div class="label">成功请求</div><div class="value" id="successCount">-</div></div>
-    <div class="card"><div class="label">失败请求</div><div class="value" id="failureCount">-</div></div>
-    <div class="card"><div class="label">总令牌数</div><div class="value" id="totalTokens">-</div></div>
+  <section class="cards">
+    <div class="stat"><div class="label">总请求数</div><div class="value" id="totalRequests">-</div><div class="meta"><span class="ok" id="successText">成功请求：-</span><span class="bad" id="failureText">失败请求：-</span><span id="avgLatency">平均延迟：-</span></div><svg id="requestSpark" class="spark"></svg></div>
+    <div class="stat purple"><div class="label">总令牌数</div><div class="value" id="totalTokens">-</div><div class="meta"><span id="cachedText">缓存令牌：-</span><span id="reasoningText">思考令牌：-</span></div><svg id="tokenSpark" class="spark"></svg></div>
+    <div class="stat green"><div class="label">每分钟请求</div><div class="value" id="rpm">-</div><div class="meta"><span id="rpmMeta">最近30分钟请求：-</span></div><svg id="rpmSpark" class="spark"></svg></div>
+    <div class="stat amber"><div class="label">总花费</div><div class="value" id="totalCost">-</div><div class="meta"><span id="costMeta">按本页模型价格估算</span></div><svg id="costSpark" class="spark"></svg></div>
   </section>
-  <section class="panel">
-    <h2>模型用量</h2>
-    <div id="models"></div>
+  <section class="panel full">
+    <div class="panelHead">
+      <div><h2>服务健康监测</h2><div class="subtle">最近7天，15分钟一个网格；绿色代表成功率高，红色代表失败较多。</div></div>
+      <div class="healthSummary"><span>成功率</span><span class="healthRate" id="healthRate">-</span><span class="ok" id="healthSuccess">成功 -</span><span class="bad" id="healthFailure">失败 -</span></div>
+    </div>
+    <div class="healthScroller"><div class="healthGrid" id="healthGrid"></div></div>
+    <div class="legend"><span>少</span><span class="legendDot" style="background:#ef4444"></span><span class="legendDot" style="background:#facc15"></span><span class="legendDot" style="background:#22c55e"></span><span>多</span><span>灰色为无请求</span></div>
+  </section>
+  <section class="layout">
+    <div class="panel">
+      <div class="panelHead"><h2>模型价格设置</h2><span class="subtle">单位：美元 / 百万令牌，保存在当前浏览器</span></div>
+      <div class="priceGrid">
+        <div><label class="subtle">模型</label><select id="priceModel" class="select"></select></div>
+        <div><label class="subtle">输入价格</label><input id="pricePrompt" class="input" type="number" min="0" step="0.0001" placeholder="0.0000"></div>
+        <div><label class="subtle">输出价格</label><input id="priceCompletion" class="input" type="number" min="0" step="0.0001" placeholder="0.0000"></div>
+        <div><label class="subtle">缓存价格</label><input id="priceCache" class="input" type="number" min="0" step="0.0001" placeholder="默认同输入"></div>
+        <button id="savePrice" class="btn primary">保存</button>
+      </div>
+      <div class="priceList" id="priceList"></div>
+    </div>
+    <div class="panel">
+      <div class="panelHead"><h2>凭证统计</h2><span class="subtle">按来源/凭证聚合成功率</span></div>
+      <div class="tableWrap" id="credentialStats"></div>
+    </div>
+    <div class="panel">
+      <div class="panelHead"><h2>接口详细统计</h2><span class="subtle">按插件可识别的提供商、来源和凭证聚合</span></div>
+      <div class="tableWrap" id="apiStats"></div>
+    </div>
+    <div class="panel">
+      <div class="panelHead"><h2>模型统计</h2><span class="subtle">请求数、令牌、平均延迟、成功率和估算花费</span></div>
+      <div class="tableWrap" id="modelStats"></div>
+    </div>
+    <div class="panel full">
+      <div class="panelHead">
+        <div><h2>请求事件明细</h2><div class="subtle">最多显示最近500条，可按模型、来源、凭证筛选并导出。</div></div>
+        <div class="toolbar"><button id="clearFilters" class="btn">清除筛选</button><button id="exportRowsCsv" class="btn">导出表格</button><button id="exportRowsJson" class="btn">导出明细</button></div>
+      </div>
+      <div class="filters">
+        <select id="filterModel" class="select"></select>
+        <select id="filterSource" class="select"></select>
+        <select id="filterAuth" class="select"></select>
+      </div>
+      <div class="eventsMeta"><span id="eventsCount">-</span><span>延迟单位：毫秒</span></div>
+      <div class="tableWrap" id="events"></div>
+    </div>
   </section>
 </main>
+<div id="tooltip" class="tooltip hidden"></div>
 <script>
-const fmt = new Intl.NumberFormat();
-const setText = (id, value) => { document.getElementById(id).textContent = value; };
-const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
-function collectModels(usage) {
-  const rows = [];
-  const apis = usage?.apis || {};
-  for (const [api, apiStats] of Object.entries(apis)) {
-    const models = apiStats?.models || {};
-    for (const [model, modelStats] of Object.entries(models)) {
-      rows.push({ api, model, requests: modelStats?.total_requests || 0, tokens: modelStats?.total_tokens || 0 });
-    }
-  }
-  rows.sort((a, b) => b.requests - a.requests || b.tokens - a.tokens);
-  return rows.slice(0, 50);
+const storeKey='cpa-usage-model-prices-v1';
+const rangeKey='cpa-usage-range-v1';
+const fmt=new Intl.NumberFormat('zh-CN');
+const money=new Intl.NumberFormat('zh-CN',{style:'currency',currency:'USD',maximumFractionDigits:2});
+let rawUsage=null, usage=null, details=[], modelPrices=loadPrices();
+const $=(id)=>document.getElementById(id);
+const setText=(id,value)=>{$(id).textContent=value};
+const esc=(value)=>String(value??'').replace(/[&<>"']/g,(ch)=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+const num=(value)=>Number.isFinite(Number(value))?Number(value):0;
+const compact=(value)=>new Intl.NumberFormat('zh-CN',{notation:'compact',maximumFractionDigits:1}).format(num(value));
+const pct=(value)=>Number.isFinite(value)?value.toFixed(1)+'%':'-';
+const formatMs=(value)=>Number.isFinite(value)&&value>0?(value>=1000?(value/1000).toFixed(2)+'秒':Math.round(value)+'毫秒'):'-';
+function loadPrices(){try{return JSON.parse(localStorage.getItem(storeKey)||'{}')||{}}catch{return {}}}
+function savePrices(){localStorage.setItem(storeKey,JSON.stringify(modelPrices))}
+function timestampMs(value){const ms=Date.parse(value);return Number.isFinite(ms)?ms:0}
+function totalTokens(detail){const t=detail.tokens||{};return num(t.total_tokens)||num(t.input_tokens)+num(t.output_tokens)+num(t.reasoning_tokens)+Math.max(num(t.cached_tokens),num(t.cache_tokens))}
+function detailCost(detail){const p=modelPrices[detail.model];if(!p)return 0;const t=detail.tokens||{};const cached=Math.max(num(t.cached_tokens),num(t.cache_tokens));const input=Math.max(num(t.input_tokens)-cached,0);const output=Math.max(num(t.output_tokens),0);return input/1e6*num(p.prompt)+output/1e6*num(p.completion)+cached/1e6*num(p.cache)}
+function sourceLabel(detail){return detail.source||detail.auth_id||(detail.auth_index?'凭证 #'+detail.auth_index:'未知凭证')}
+function sourceKey(detail){return sourceLabel(detail)+'|'+(detail.auth_index||'')+'|'+(detail.auth_type||'')}
+function collectDetails(data){
+  const rows=[];const apis=data?.apis||{};
+  Object.entries(apis).forEach(([api,apiData])=>{
+    Object.entries(apiData?.models||{}).forEach(([model,modelData])=>{
+      (modelData?.details||[]).forEach((d,index)=>{
+        const tokens=d.tokens||{};
+        rows.push({...d,api,model,index,timestamp_ms:timestampMs(d.timestamp),total_tokens:totalTokens(d),cached_tokens:Math.max(num(tokens.cached_tokens),num(tokens.cache_tokens)),reasoning_tokens:num(tokens.reasoning_tokens),cost:0});
+      });
+    });
+  });
+  rows.forEach((row)=>{row.cost=detailCost(row)});
+  return rows.sort((a,b)=>b.timestamp_ms-a.timestamp_ms);
 }
+function filteredUsage(data,range){
+  if(!data||range==='all')return data;
+  const ms={ '7h':7*3600e3, '24h':24*3600e3, '7d':7*24*3600e3 }[range]||24*3600e3;
+  const start=Date.now()-ms;
+  const copy={...data,total_requests:0,success_count:0,failure_count:0,total_tokens:0,apis:{}};
+  Object.entries(data.apis||{}).forEach(([api,apiData])=>{
+    const apiCopy={...apiData,total_requests:0,success_count:0,failure_count:0,total_tokens:0,models:{}};
+    Object.entries(apiData.models||{}).forEach(([model,modelData])=>{
+      const ds=(modelData.details||[]).filter((d)=>timestampMs(d.timestamp)>=start&&timestampMs(d.timestamp)<=Date.now());
+      if(!ds.length)return;
+      const success=ds.filter((d)=>!d.failed).length;
+      const failure=ds.length-success;
+      const tokens=ds.reduce((sum,d)=>sum+totalTokens(d),0);
+      apiCopy.models[model]={...modelData,details:ds,total_requests:ds.length,success_count:success,failure_count:failure,total_tokens:tokens};
+      apiCopy.total_requests+=ds.length;apiCopy.success_count+=success;apiCopy.failure_count+=failure;apiCopy.total_tokens+=tokens;
+    });
+    if(apiCopy.total_requests>0){copy.apis[api]=apiCopy;copy.total_requests+=apiCopy.total_requests;copy.success_count+=apiCopy.success_count;copy.failure_count+=apiCopy.failure_count;copy.total_tokens+=apiCopy.total_tokens}
+  });
+  return copy;
+}
+function bucketSeries(rows,metric,minutes,count){
+  const now=Date.now();const step=minutes*60e3;const start=now-step*count;const arr=new Array(count).fill(0);
+  rows.forEach((d)=>{const idx=Math.floor((d.timestamp_ms-start)/step);if(idx>=0&&idx<count)arr[idx]+=metric==='tokens'?d.total_tokens:metric==='cost'?d.cost:1});
+  return arr;
+}
+function drawSpark(id,values,color){
+  const svg=$(id); const w=svg.clientWidth||320, h=54; const max=Math.max(...values,1); const points=values.map((v,i)=>[i*(w/(Math.max(values.length-1,1))),h-8-(v/max)*(h-16)]);
+  const d=points.map((p,i)=>(i?'L':'M')+p[0].toFixed(1)+' '+p[1].toFixed(1)).join(' ');
+  svg.setAttribute('viewBox','0 0 '+w+' '+h);
+  svg.innerHTML='<path d="'+d+'" fill="none" stroke="'+color+'" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>';
+}
+function renderStats(){
+  const success=num(usage?.success_count), failure=num(usage?.failure_count), total=num(usage?.total_requests);
+  const cached=details.reduce((s,d)=>s+d.cached_tokens,0), reasoning=details.reduce((s,d)=>s+d.reasoning_tokens,0), cost=details.reduce((s,d)=>s+d.cost,0);
+  const latencies=details.map((d)=>num(d.latency_ms)).filter((v)=>v>0);
+  const avg=latencies.length?latencies.reduce((a,b)=>a+b,0)/latencies.length:0;
+  const recent=details.filter((d)=>d.timestamp_ms>=Date.now()-30*60e3);
+  setText('totalRequests',fmt.format(total));setText('successText','成功请求：'+fmt.format(success));setText('failureText','失败请求：'+fmt.format(failure));setText('avgLatency','平均延迟：'+formatMs(avg));
+  setText('totalTokens',compact(num(usage?.total_tokens)));setText('cachedText','缓存令牌：'+compact(cached));setText('reasoningText','思考令牌：'+compact(reasoning));
+  setText('rpm',(recent.length/30).toFixed(2));setText('rpmMeta','最近30分钟请求：'+fmt.format(recent.length));
+  setText('totalCost',money.format(cost));setText('costMeta','总令牌数：'+compact(num(usage?.total_tokens)));
+  drawSpark('requestSpark',bucketSeries(details,'requests',60,48),'#8b8680');drawSpark('tokenSpark',bucketSeries(details,'tokens',60,48),'#8b5cf6');drawSpark('rpmSpark',bucketSeries(details,'requests',5,48),'#22c55e');drawSpark('costSpark',bucketSeries(details,'cost',60,48),'#f59e0b');
+}
+function healthColor(rate){if(rate<0)return ''; const stops=[[239,68,68],[250,204,21],[34,197,94]]; const seg=rate<.5?0:1; const t=seg===0?rate*2:(rate-.5)*2; const a=stops[seg],b=stops[seg+1]; return 'rgb('+a.map((v,i)=>Math.round(v+(b[i]-v)*t)).join(',')+')'}
+function renderHealth(){
+  const count=672, step=15*60e3, now=Date.now(), start=now-count*step; const stats=Array.from({length:count},()=>({s:0,f:0}));
+  details.forEach((d)=>{if(d.timestamp_ms<start||d.timestamp_ms>now)return; const idx=count-1-Math.floor((now-d.timestamp_ms)/step); if(idx>=0&&idx<count){d.failed?stats[idx].f++:stats[idx].s++}});
+  let totalS=0,totalF=0; const html=stats.map((x,i)=>{totalS+=x.s;totalF+=x.f;const total=x.s+x.f;const rate=total?x.s/total:-1;const t0=new Date(start+i*step),t1=new Date(start+(i+1)*step);const title=t0.toLocaleString()+' - '+t1.toLocaleString()+'\\n成功 '+x.s+'，失败 '+x.f+(total?'，成功率 '+pct(rate*100):'');return '<div class="healthCell '+(total?'active':'')+'" title="'+esc(title)+'" style="'+(total?'background:'+healthColor(rate):'')+'"></div>'}).join('');
+  $('healthGrid').innerHTML=html; const total=totalS+totalF; setText('healthRate',total?pct(totalS/total*100):'-'); setText('healthSuccess','成功 '+fmt.format(totalS)); setText('healthFailure','失败 '+fmt.format(totalF));
+}
+function modelNames(){return [...new Set(details.map((d)=>d.model).filter(Boolean))].sort((a,b)=>a.localeCompare(b))}
+function renderPrices(){
+  const selected=$('priceModel').value; $('priceModel').innerHTML='<option value="">选择模型</option>'+modelNames().map((m)=>'<option value="'+esc(m)+'">'+esc(m)+'</option>').join(''); $('priceModel').value=selected;
+  const entries=Object.entries(modelPrices);
+  $('priceList').innerHTML=entries.length?entries.map(([m,p])=>'<div class="priceItem"><div><strong>'+esc(m)+'</strong><div class="priceMeta"><span>输入 '+num(p.prompt).toFixed(4)+'</span><span>输出 '+num(p.completion).toFixed(4)+'</span><span>缓存 '+num(p.cache).toFixed(4)+'</span></div></div><button class="btn danger" data-del-price="'+esc(m)+'">删除</button></div>').join(''):'<div class="empty">暂无价格设置，设置后会显示估算花费。</div>';
+  document.querySelectorAll('[data-del-price]').forEach((btn)=>btn.onclick=()=>{delete modelPrices[btn.dataset.delPrice];savePrices();rerender()});
+}
+function renderCredentials(){
+  const map=new Map(); details.forEach((d)=>{const key=sourceKey(d); const row=map.get(key)||{name:sourceLabel(d),type:d.auth_type||d.provider||'',success:0,failure:0,total:0}; d.failed?row.failure++:row.success++; row.total=row.success+row.failure; map.set(key,row)});
+  const rows=[...map.values()].sort((a,b)=>b.total-a.total);
+  $('credentialStats').innerHTML=rows.length?'<table><thead><tr><th>凭证</th><th>请求次数</th><th>成功率</th></tr></thead><tbody>'+rows.map((r)=>{const rate=r.total?r.success/r.total*100:100;return '<tr><td class="nameCell">'+esc(r.name)+(r.type?'<span class="pill">'+esc(r.type)+'</span>':'')+'</td><td>'+fmt.format(r.total)+' <span class="ok">('+fmt.format(r.success)+'</span> <span class="bad">'+fmt.format(r.failure)+')</span></td><td class="'+(rate>=95?'ok':rate>=80?'neutral':'bad')+'">'+pct(rate)+'</td></tr>'}).join('')+'</tbody></table>':'<div class="empty">暂无凭证数据</div>';
+}
+function renderApiStats(){
+  const rows=Object.entries(usage?.apis||{}).map(([api,a])=>({api,requests:num(a.total_requests),success:num(a.success_count),failure:num(a.failure_count),tokens:num(a.total_tokens),models:a.models||{},cost:collectDetails({apis:{[api]:a}}).reduce((s,d)=>s+d.cost,0)})).sort((a,b)=>b.requests-a.requests);
+  $('apiStats').innerHTML=rows.length?'<table><thead><tr><th>接口</th><th>请求</th><th>令牌</th><th>花费</th><th>模型</th></tr></thead><tbody>'+rows.map((r)=>'<tr><td class="nameCell">'+esc(r.api)+'</td><td>'+fmt.format(r.requests)+' <span class="ok">('+fmt.format(r.success)+'</span> <span class="bad">'+fmt.format(r.failure)+')</span></td><td>'+compact(r.tokens)+'</td><td>'+money.format(r.cost)+'</td><td>'+Object.keys(r.models).slice(0,4).map(esc).join('、')+'</td></tr>').join('')+'</tbody></table>':'<div class="empty">暂无接口数据</div>';
+}
+function renderModelStats(){
+  const map=new Map(); details.forEach((d)=>{const r=map.get(d.model)||{model:d.model,requests:0,success:0,failure:0,tokens:0,cost:0,latency:[]}; r.requests++; d.failed?r.failure++:r.success++; r.tokens+=d.total_tokens; r.cost+=d.cost; if(num(d.latency_ms)>0)r.latency.push(num(d.latency_ms)); map.set(d.model,r)});
+  const rows=[...map.values()].sort((a,b)=>b.requests-a.requests);
+  $('modelStats').innerHTML=rows.length?'<table><thead><tr><th>模型</th><th>请求</th><th>令牌</th><th>平均延迟</th><th>成功率</th><th>花费</th></tr></thead><tbody>'+rows.map((r)=>{const rate=r.requests?r.success/r.requests*100:100; const avg=r.latency.length?r.latency.reduce((a,b)=>a+b,0)/r.latency.length:0; return '<tr><td class="nameCell">'+esc(r.model)+'</td><td>'+fmt.format(r.requests)+' <span class="ok">('+fmt.format(r.success)+'</span> <span class="bad">'+fmt.format(r.failure)+')</span></td><td>'+compact(r.tokens)+'</td><td>'+formatMs(avg)+'</td><td class="'+(rate>=95?'ok':rate>=80?'neutral':'bad')+'">'+pct(rate)+'</td><td>'+money.format(r.cost)+'</td></tr>'}).join('')+'</tbody></table>':'<div class="empty">暂无模型数据</div>';
+}
+function renderFilters(){
+  const fill=(id,label,values)=>{const old=$(id).value;$(id).innerHTML='<option value="">全部'+label+'</option>'+values.map((v)=>'<option value="'+esc(v)+'">'+esc(v)+'</option>').join('');$(id).value=[...values,''].includes(old)?old:''};
+  fill('filterModel','模型',modelNames()); fill('filterSource','来源',[...new Set(details.map(sourceLabel))].sort()); fill('filterAuth','凭证',[...new Set(details.map((d)=>d.auth_index||'-'))].sort());
+}
+function renderEvents(){
+  const fm=$('filterModel').value, fs=$('filterSource').value, fa=$('filterAuth').value;
+  const rows=details.filter((d)=>(!fm||d.model===fm)&&(!fs||sourceLabel(d)===fs)&&(!fa||(d.auth_index||'-')===fa));
+  setText('eventsCount','共 '+fmt.format(rows.length)+' 条，显示 '+fmt.format(Math.min(rows.length,500))+' 条');
+  $('events').innerHTML=rows.length?'<table><thead><tr><th>时间</th><th>模型</th><th>来源</th><th>凭证</th><th>结果</th><th>延迟</th><th>输入</th><th>输出</th><th>思考</th><th>缓存</th><th>总计</th></tr></thead><tbody>'+rows.slice(0,500).map((d)=>'<tr><td>'+new Date(d.timestamp_ms).toLocaleString()+'</td><td class="nameCell">'+esc(d.model)+'</td><td>'+esc(sourceLabel(d))+'</td><td>'+(esc(d.auth_index||'-'))+'</td><td class="'+(d.failed?'bad':'ok')+'">'+(d.failed?'失败':'成功')+'</td><td>'+formatMs(num(d.latency_ms))+'</td><td>'+fmt.format(num(d.tokens?.input_tokens))+'</td><td>'+fmt.format(num(d.tokens?.output_tokens))+'</td><td>'+fmt.format(num(d.tokens?.reasoning_tokens))+'</td><td>'+fmt.format(d.cached_tokens)+'</td><td>'+fmt.format(d.total_tokens)+'</td></tr>').join('')+'</tbody></table>':'<div class="empty">暂无请求事件</div>';
+}
+function download(name,text,type){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type}));a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}
+function exportRows(kind){const rows=[...details]; const stamp=new Date().toISOString().replace(/[:.]/g,'-'); if(kind==='json'){download('usage-events-'+stamp+'.json',JSON.stringify(rows,null,2),'application/json;charset=utf-8');return} const head=['时间','模型','来源','凭证','结果','延迟毫秒','输入令牌','输出令牌','思考令牌','缓存令牌','总令牌']; const csv=[head,...rows.map((d)=>[d.timestamp,d.model,sourceLabel(d),d.auth_index||'',d.failed?'失败':'成功',num(d.latency_ms),num(d.tokens?.input_tokens),num(d.tokens?.output_tokens),num(d.tokens?.reasoning_tokens),d.cached_tokens,d.total_tokens])].map((row)=>row.map((v)=>'"'+String(v??'').replace(/"/g,'""')+'"').join(',')).join('\\n'); download('usage-events-'+stamp+'.csv',csv,'text/csv;charset=utf-8')}
+function rerender(){details=collectDetails(usage);renderPrices();renderStats();renderHealth();renderCredentials();renderApiStats();renderModelStats();renderFilters();renderEvents()}
 async function load() {
   try {
     const response = await fetch('./dashboard-data', { cache: 'no-store' });
     if (!response.ok) throw new Error('请求失败：' + response.status);
     const data = await response.json();
-    const usage = data.usage || {};
-    setText('totalRequests', fmt.format(usage.total_requests || 0));
-    setText('successCount', fmt.format(usage.success_count || 0));
-    setText('failureCount', fmt.format(usage.failure_count || 0));
-    setText('totalTokens', fmt.format(usage.total_tokens || 0));
-    setText('subtitle', '更新于 ' + new Date(data.generated_at || Date.now()).toLocaleString());
-    const rows = collectModels(usage);
-    document.getElementById('models').innerHTML = rows.length
-      ? '<table><thead><tr><th>接口</th><th>模型</th><th>请求数</th><th>令牌数</th></tr></thead><tbody>' + rows.map((row) =>
-          '<tr><td>' + esc(row.api) + '</td><td>' + esc(row.model) + '</td><td>' + fmt.format(row.requests) + '</td><td>' + fmt.format(row.tokens) + '</td></tr>'
-        ).join('') + '</tbody></table>'
-      : '<div class="empty">暂无用量记录。</div>';
-    setText('status', '正常');
+    rawUsage=data.usage||{}; usage=filteredUsage(rawUsage,$('range').value); setText('updated','更新于 '+new Date(data.generated_at||Date.now()).toLocaleTimeString()); rerender();
   } catch (error) {
-    setText('status', '异常');
-    setText('subtitle', error.message || '加载用量统计失败');
+    setText('updated', error.message || '加载用量统计失败');
   }
 }
+$('range').value=localStorage.getItem(rangeKey)||'24h'; $('range').onchange=()=>{localStorage.setItem(rangeKey,$('range').value); usage=filteredUsage(rawUsage,$('range').value); rerender()};
+$('refreshBtn').onclick=load;
+$('savePrice').onclick=()=>{const m=$('priceModel').value;if(!m)return;const prompt=num($('pricePrompt').value), completion=num($('priceCompletion').value), cache=$('priceCache').value===''?prompt:num($('priceCache').value);modelPrices[m]={prompt,completion,cache};savePrices();$('pricePrompt').value='';$('priceCompletion').value='';$('priceCache').value='';rerender()};
+$('priceModel').onchange=()=>{const p=modelPrices[$('priceModel').value]||{};$('pricePrompt').value=p.prompt??'';$('priceCompletion').value=p.completion??'';$('priceCache').value=p.cache??''};
+['filterModel','filterSource','filterAuth'].forEach((id)=>$(id).onchange=renderEvents); $('clearFilters').onclick=()=>{['filterModel','filterSource','filterAuth'].forEach((id)=>$(id).value='');renderEvents()};
+$('exportRowsCsv').onclick=()=>exportRows('csv'); $('exportRowsJson').onclick=()=>exportRows('json');
+$('exportBtn').onclick=async()=>{const r=await fetch('./usage/export',{cache:'no-store'});download('usage-export-'+new Date().toISOString().replace(/[:.]/g,'-')+'.json',JSON.stringify(await r.json(),null,2),'application/json;charset=utf-8')};
+$('importBtn').onclick=()=>$('importFile').click(); $('importFile').onchange=async(e)=>{const file=e.target.files?.[0]; if(!file)return; const text=await file.text(); const r=await fetch('./usage/import',{method:'POST',headers:{'Content-Type':'application/json'},body:text}); if(!r.ok)alert('导入失败'); await load(); e.target.value=''};
 load();
 setInterval(load, 30000);
 </script>
@@ -577,23 +771,35 @@ type RequestStatistics struct {
 
 type apiStats struct {
 	TotalRequests int64
+	SuccessCount  int64
+	FailureCount  int64
 	TotalTokens   int64
 	Models        map[string]*modelStats
 }
 
 type modelStats struct {
 	TotalRequests int64
+	SuccessCount  int64
+	FailureCount  int64
 	TotalTokens   int64
 	Details       []RequestDetail
 }
 
 type RequestDetail struct {
-	Timestamp time.Time  `json:"timestamp"`
-	LatencyMs int64      `json:"latency_ms"`
-	Source    string     `json:"source"`
-	AuthIndex string     `json:"auth_index"`
-	Tokens    TokenStats `json:"tokens"`
-	Failed    bool       `json:"failed"`
+	Timestamp  time.Time           `json:"timestamp"`
+	LatencyMs  int64               `json:"latency_ms"`
+	TTFTMs     int64               `json:"ttft_ms,omitempty"`
+	Source     string              `json:"source"`
+	Provider   string              `json:"provider,omitempty"`
+	AuthID     string              `json:"auth_id,omitempty"`
+	AuthIndex  string              `json:"auth_index"`
+	AuthType   string              `json:"auth_type,omitempty"`
+	Thinking   UsageThinking       `json:"thinking,omitempty"`
+	Tokens     TokenStats          `json:"tokens"`
+	Failed     bool                `json:"failed"`
+	StatusCode int                 `json:"status_code,omitempty"`
+	Failure    string              `json:"failure,omitempty"`
+	Headers    map[string][]string `json:"headers,omitempty"`
 }
 
 type TokenStats struct {
@@ -601,7 +807,15 @@ type TokenStats struct {
 	OutputTokens    int64 `json:"output_tokens"`
 	ReasoningTokens int64 `json:"reasoning_tokens"`
 	CachedTokens    int64 `json:"cached_tokens"`
+	CacheTokens     int64 `json:"cache_tokens"`
 	TotalTokens     int64 `json:"total_tokens"`
+}
+
+type UsageThinking struct {
+	Intensity string `json:"intensity,omitempty"`
+	Mode      string `json:"mode,omitempty"`
+	Level     string `json:"level,omitempty"`
+	Budget    int64  `json:"budget,omitempty"`
 }
 
 type StatisticsSnapshot struct {
@@ -620,12 +834,16 @@ type StatisticsSnapshot struct {
 
 type APISnapshot struct {
 	TotalRequests int64                    `json:"total_requests"`
+	SuccessCount  int64                    `json:"success_count"`
+	FailureCount  int64                    `json:"failure_count"`
 	TotalTokens   int64                    `json:"total_tokens"`
 	Models        map[string]ModelSnapshot `json:"models"`
 }
 
 type ModelSnapshot struct {
 	TotalRequests int64           `json:"total_requests"`
+	SuccessCount  int64           `json:"success_count"`
+	FailureCount  int64           `json:"failure_count"`
 	TotalTokens   int64           `json:"total_tokens"`
 	Details       []RequestDetail `json:"details"`
 }
@@ -662,13 +880,7 @@ func (s *RequestStatistics) Record(record UsageRecord) {
 		totalTokens = record.Detail.InputTokens + record.Detail.OutputTokens + record.Detail.ReasoningTokens
 	}
 
-	statsKey := record.APIKey
-	if statsKey == "" {
-		statsKey = record.Source
-	}
-	if statsKey == "" {
-		statsKey = "unknown"
-	}
+	statsKey := usageGroupKey(record)
 
 	modelName := record.Model
 	if modelName == "" {
@@ -698,16 +910,25 @@ func (s *RequestStatistics) Record(record UsageRecord) {
 	s.updateAPIStats(apiSt, modelName, RequestDetail{
 		Timestamp: timestamp,
 		LatencyMs: record.Latency.Milliseconds(),
-		Source:    record.Source,
-		AuthIndex: record.AuthIndex,
+		TTFTMs:    record.TTFT.Milliseconds(),
+		Source:    usageSource(record),
+		Provider:  strings.TrimSpace(record.Provider),
+		AuthID:    strings.TrimSpace(record.AuthID),
+		AuthIndex: strings.TrimSpace(record.AuthIndex),
+		AuthType:  strings.TrimSpace(record.AuthType),
+		Thinking:  usageThinking(record),
 		Tokens: TokenStats{
 			InputTokens:     record.Detail.InputTokens,
 			OutputTokens:    record.Detail.OutputTokens,
 			ReasoningTokens: record.Detail.ReasoningTokens,
 			CachedTokens:    record.Detail.CachedTokens,
+			CacheTokens:     maxInt64(record.Detail.CachedTokens, record.Detail.CacheReadTokens+record.Detail.CacheCreationTokens),
 			TotalTokens:     totalTokens,
 		},
-		Failed: record.Failed,
+		Failed:     record.Failed,
+		StatusCode: record.Failure.StatusCode,
+		Failure:    trimLong(record.Failure.Body, 500),
+		Headers:    record.ResponseHeaders,
 	})
 
 	s.requestsByDay[dayKey]++
@@ -718,6 +939,11 @@ func (s *RequestStatistics) Record(record UsageRecord) {
 
 func (s *RequestStatistics) updateAPIStats(apiSt *apiStats, model string, detail RequestDetail) {
 	apiSt.TotalRequests++
+	if detail.Failed {
+		apiSt.FailureCount++
+	} else {
+		apiSt.SuccessCount++
+	}
 	apiSt.TotalTokens += detail.Tokens.TotalTokens
 
 	modelSt, ok := apiSt.Models[model]
@@ -726,6 +952,11 @@ func (s *RequestStatistics) updateAPIStats(apiSt *apiStats, model string, detail
 		apiSt.Models[model] = modelSt
 	}
 	modelSt.TotalRequests++
+	if detail.Failed {
+		modelSt.FailureCount++
+	} else {
+		modelSt.SuccessCount++
+	}
 	modelSt.TotalTokens += detail.Tokens.TotalTokens
 	modelSt.Details = append(modelSt.Details, detail)
 }
@@ -748,6 +979,8 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 	for apiName, apiSt := range s.apis {
 		apiSnapshot := APISnapshot{
 			TotalRequests: apiSt.TotalRequests,
+			SuccessCount:  apiSt.SuccessCount,
+			FailureCount:  apiSt.FailureCount,
 			TotalTokens:   apiSt.TotalTokens,
 			Models:        make(map[string]ModelSnapshot, len(apiSt.Models)),
 		}
@@ -756,6 +989,8 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 			copy(details, modelSt.Details)
 			apiSnapshot.Models[modelName] = ModelSnapshot{
 				TotalRequests: modelSt.TotalRequests,
+				SuccessCount:  modelSt.SuccessCount,
+				FailureCount:  modelSt.FailureCount,
 				TotalTokens:   modelSt.TotalTokens,
 				Details:       details,
 			}
@@ -883,7 +1118,7 @@ func dedupKey(apiName, modelName string, detail RequestDetail) string {
 	timestamp := detail.Timestamp.UTC().Format(time.RFC3339Nano)
 	tokens := detail.Tokens
 	return fmt.Sprintf(
-		"%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d",
+		"%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d|%d",
 		apiName,
 		modelName,
 		timestamp,
@@ -894,6 +1129,81 @@ func dedupKey(apiName, modelName string, detail RequestDetail) string {
 		tokens.OutputTokens,
 		tokens.ReasoningTokens,
 		tokens.CachedTokens,
+		tokens.CacheTokens,
 		tokens.TotalTokens,
 	)
+}
+
+func usageGroupKey(record UsageRecord) string {
+	provider := strings.TrimSpace(record.Provider)
+	executor := strings.TrimSpace(record.ExecutorType)
+	source := strings.TrimSpace(record.Source)
+	authType := strings.TrimSpace(record.AuthType)
+	authIndex := strings.TrimSpace(record.AuthIndex)
+	apiKey := strings.TrimSpace(record.APIKey)
+
+	parts := make([]string, 0, 3)
+	if provider != "" {
+		parts = append(parts, provider)
+	} else if executor != "" {
+		parts = append(parts, executor)
+	}
+	if authType != "" {
+		parts = append(parts, authType)
+	}
+	if source != "" {
+		parts = append(parts, source)
+	} else if authIndex != "" {
+		parts = append(parts, "凭证 #"+authIndex)
+	} else if apiKey != "" {
+		parts = append(parts, "密钥 "+fingerprint(apiKey))
+	}
+	if len(parts) == 0 {
+		return "未知接口"
+	}
+	return strings.Join(parts, " · ")
+}
+
+func usageSource(record UsageRecord) string {
+	if source := strings.TrimSpace(record.Source); source != "" {
+		return source
+	}
+	if authID := strings.TrimSpace(record.AuthID); authID != "" {
+		return authID
+	}
+	if authIndex := strings.TrimSpace(record.AuthIndex); authIndex != "" {
+		return "凭证 #" + authIndex
+	}
+	if apiKey := strings.TrimSpace(record.APIKey); apiKey != "" {
+		return "密钥 " + fingerprint(apiKey)
+	}
+	return "未知凭证"
+}
+
+func usageThinking(record UsageRecord) UsageThinking {
+	effort := strings.TrimSpace(record.ReasoningEffort)
+	if effort == "" {
+		return UsageThinking{}
+	}
+	return UsageThinking{Intensity: effort, Level: effort}
+}
+
+func fingerprint(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return fmt.Sprintf("%x", sum[:4])
+}
+
+func trimLong(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	return value[:limit] + "..."
+}
+
+func maxInt64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }
