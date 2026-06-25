@@ -56,6 +56,9 @@ static void free_host_buffer(void* ptr, size_t len) {
 import "C"
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -158,43 +161,45 @@ func handleMethod(method string, requestBody []byte) ([]byte, error) {
 func handleRegister(requestBody []byte) ([]byte, error) {
 	applyRuntimeConfig(requestBody)
 
-	metadata := map[string]interface{}{
-		"Name":             "用量统计",
-		"Version":          "1.0.0",
-		"Author":           "本地维护",
-		"GitHubRepository": "https://github.com/zduu/cpa-usage-plugin",
-		"Logo":             "",
-		"ConfigFields": []map[string]interface{}{
-			{
-				"Name":        "max_details_per_model",
-				"Type":        "integer",
-				"Default":     defaultMaxDetailsPerModel,
-				"Description": "每个上游接口/模型最多保留的请求明细条数。",
-			},
-			{
-				"Name":        "retention_days",
-				"Type":        "integer",
-				"Default":     defaultRetentionDays,
-				"Description": "内存统计最多保留的天数，0 表示不按时间淘汰。",
-			},
-			{
-				"Name":        "dedup_window_minutes",
-				"Type":        "integer",
-				"Default":     defaultDedupWindowMinutes,
-				"Description": "usage 记录去重窗口分钟数，0 表示关闭去重。",
+	result := PluginRegisterResponse{
+		SchemaVersion: 1,
+		Metadata: PluginMetadata{
+			Name:             "用量统计",
+			Version:          "1.0.0",
+			Author:           "本地维护",
+			GitHubRepository: "https://github.com/zduu/cpa-usage-plugin",
+			Logo:             "",
+			ConfigFields: []ConfigField{
+				{
+					Name:        "max_details_per_model",
+					Type:        "integer",
+					Default:     defaultMaxDetailsPerModel,
+					Description: "每个上游接口/模型最多保留的请求明细条数。",
+				},
+				{
+					Name:        "retention_days",
+					Type:        "integer",
+					Default:     defaultRetentionDays,
+					Description: "内存统计最多保留的天数，0 表示不按时间淘汰。",
+				},
+				{
+					Name:        "dedup_window_minutes",
+					Type:        "integer",
+					Default:     defaultDedupWindowMinutes,
+					Description: "usage 记录去重窗口分钟数，0 表示关闭去重。",
+				},
+				{
+					Name:        "log_response_headers",
+					Type:        "string",
+					Default:     "",
+					Description: "允许记录的响应头名称列表（逗号分隔），支持 * 通配符。留空不记录任何响应头。",
+				},
 			},
 		},
-	}
-
-	capabilities := map[string]interface{}{
-		"usage_plugin":   true,
-		"management_api": true,
-	}
-
-	result := map[string]interface{}{
-		"schema_version": 1,
-		"metadata":       metadata,
-		"capabilities":   capabilities,
+		Capabilities: PluginCapabilities{
+			UsagePlugin:   true,
+			ManagementAPI: true,
+		},
 	}
 
 	resultJSON, err := json.Marshal(result)
@@ -213,6 +218,7 @@ type runtimeConfig struct {
 	MaxDetailsPerModel int
 	RetentionDays      int
 	DedupWindowMinutes int
+	LogResponseHeaders string // comma-separated header name patterns ("*" wildcard)
 }
 
 func defaultRuntimeConfig() runtimeConfig {
@@ -220,6 +226,7 @@ func defaultRuntimeConfig() runtimeConfig {
 		MaxDetailsPerModel: defaultMaxDetailsPerModel,
 		RetentionDays:      defaultRetentionDays,
 		DedupWindowMinutes: defaultDedupWindowMinutes,
+		LogResponseHeaders: "",
 	}
 }
 
@@ -239,6 +246,9 @@ func parseRuntimeConfig(requestBody []byte) runtimeConfig {
 	cfg.MaxDetailsPerModel = yamlInt(yamlText, "max_details_per_model", cfg.MaxDetailsPerModel)
 	cfg.RetentionDays = yamlInt(yamlText, "retention_days", cfg.RetentionDays)
 	cfg.DedupWindowMinutes = yamlInt(yamlText, "dedup_window_minutes", cfg.DedupWindowMinutes)
+	if s := yamlString(yamlText, "log_response_headers"); s != "" {
+		cfg.LogResponseHeaders = s
+	}
 	return cfg
 }
 
@@ -248,10 +258,17 @@ func yamlInt(yamlText, key string, fallback int) int {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		name, value, ok := strings.Cut(line, ":")
-		if !ok || strings.TrimSpace(name) != key {
+		// Match "key:" anywhere in the line to support nested YAML.
+		prefix := key + ":"
+		idx := strings.Index(line, prefix)
+		if idx < 0 {
 			continue
 		}
+		// Ensure the key token starts at the beginning or after whitespace.
+		if idx > 0 && line[idx-1] != ' ' && line[idx-1] != '\t' {
+			continue
+		}
+		value := strings.TrimSpace(line[idx+len(prefix):])
 		value = strings.Trim(strings.TrimSpace(value), `"'`)
 		if value == "" {
 			return fallback
@@ -263,6 +280,27 @@ func yamlInt(yamlText, key string, fallback int) int {
 		return parsed
 	}
 	return fallback
+}
+
+func yamlString(yamlText, key string) string {
+	for _, line := range strings.Split(yamlText, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		prefix := key + ":"
+		idx := strings.Index(line, prefix)
+		if idx < 0 {
+			continue
+		}
+		if idx > 0 && line[idx-1] != ' ' && line[idx-1] != '\t' {
+			continue
+		}
+		value := strings.TrimSpace(line[idx+len(prefix):])
+		value = strings.Trim(strings.TrimSpace(value), `"'`)
+		return strings.TrimSpace(value)
+	}
+	return ""
 }
 
 func handleUsage(requestBody []byte) ([]byte, error) {
@@ -299,41 +337,41 @@ func handleManagement(requestBody []byte) ([]byte, error) {
 }
 
 func handleManagementRegister() ([]byte, error) {
-	result := map[string]interface{}{
-		"routes": []map[string]interface{}{
+	result := ManagementRegisterResponse{
+		Routes: []ManagementRoute{
 			{
-				"method":      "GET",
-				"path":        "/plugins/usage-statistics/usage",
-				"description": "获取用量统计数据。",
+				Method:      "GET",
+				Path:        "/plugins/usage-statistics/usage",
+				Description: "获取用量统计数据。",
 			},
 			{
-				"method":      "GET",
-				"path":        "/plugins/usage-statistics/usage/export",
-				"description": "导出用量统计数据。",
+				Method:      "GET",
+				Path:        "/plugins/usage-statistics/usage/export",
+				Description: "导出用量统计数据。",
 			},
 			{
-				"method":      "POST",
-				"path":        "/plugins/usage-statistics/usage/import",
-				"description": "导入用量统计数据。",
+				Method:      "POST",
+				Path:        "/plugins/usage-statistics/usage/import",
+				Description: "导入用量统计数据。",
 			},
 		},
-		"resources": []map[string]interface{}{
+		Resources: []ManagementResource{
 			{
-				"path":        "/dashboard",
-				"menu":        "用量统计",
-				"description": "请求、token 和模型用量统计。",
+				Path:        "/dashboard",
+				Menu:        "用量统计",
+				Description: "请求、token 和模型用量统计。",
 			},
 			{
-				"path":        "/dashboard-data",
-				"description": "用量统计看板数据。",
+				Path:        "/dashboard-data",
+				Description: "用量统计看板数据。",
 			},
 			{
-				"path":        "/usage/export",
-				"description": "用量统计导出数据。",
+				Path:        "/usage/export",
+				Description: "用量统计导出数据。",
 			},
 			{
-				"path":        "/usage/import",
-				"description": "用量统计导入数据。",
+				Path:        "/usage/import",
+				Description: "用量统计导入数据。",
 			},
 		},
 	}
@@ -819,8 +857,7 @@ $('exportRowsCsv').onclick=()=>exportRows('csv'); $('exportRowsJson').onclick=()
 $('exportApiCsv').onclick=()=>exportApiRows('csv'); $('exportApiJson').onclick=()=>exportApiRows('json');
 $('exportBtn').onclick=async()=>{const r=await fetch('./usage/export',{cache:'no-store'});download('usage-export-'+new Date().toISOString().replace(/[:.]/g,'-')+'.json',JSON.stringify(await r.json(),null,2),'application/json;charset=utf-8')};
 $('importBtn').onclick=()=>$('importFile').click(); $('importFile').onchange=async(e)=>{const file=e.target.files?.[0]; if(!file)return; const text=await file.text(); const r=await fetch('./usage/import',{method:'POST',headers:{'Content-Type':'application/json'},body:text}); if(!r.ok)alert('导入失败'); await load(); e.target.value=''};
-load();
-setInterval(load, 30000);
+load(); // schedulePoll inside load() handles subsequent polls
 </script>
 </body>
 </html>`
@@ -828,10 +865,10 @@ setInterval(load, 30000);
 func handleExportUsage() ([]byte, error) {
 	snapshot := stats.Snapshot()
 
-	exportPayload := map[string]interface{}{
-		"version":     1,
-		"exported_at": time.Now().UTC().Format(time.RFC3339),
-		"usage":       snapshot,
+	exportPayload := ExportPayload{
+		Version:    1,
+		ExportedAt: time.Now().UTC().Format(time.RFC3339),
+		Usage:      snapshot,
 	}
 
 	exportJSON, err := json.Marshal(exportPayload)
@@ -851,6 +888,14 @@ func handleExportUsage() ([]byte, error) {
 }
 
 func handleImportUsage(body []byte) ([]byte, error) {
+	const maxBodySize = 50 * 1024 * 1024 // 50 MB
+	const maxRecordCount = 200000
+
+	if len(body) > maxBodySize {
+		return errorEnvelope("payload_too_large",
+			fmt.Sprintf("import body exceeds max size of %d bytes", maxBodySize)), nil
+	}
+
 	var importPayload struct {
 		Version int                `json:"version"`
 		Usage   StatisticsSnapshot `json:"usage"`
@@ -864,14 +909,47 @@ func handleImportUsage(body []byte) ([]byte, error) {
 		return errorEnvelope("unsupported_version", "unsupported version"), nil
 	}
 
+	// Pre-count records and validate bounds.
+	recordCount := 0
+	for _, apiSnapshot := range importPayload.Usage.APIs {
+		for _, modelSnapshot := range apiSnapshot.Models {
+			recordCount += len(modelSnapshot.Details)
+		}
+	}
+	if recordCount > maxRecordCount {
+		return errorEnvelope("too_many_records",
+			fmt.Sprintf("import payload contains %d records, max allowed is %d", recordCount, maxRecordCount)), nil
+	}
+
+	// Validate individual records for boundary issues.
+	for _, apiSnapshot := range importPayload.Usage.APIs {
+		for _, modelSnapshot := range apiSnapshot.Models {
+			for _, detail := range modelSnapshot.Details {
+				if detail.LatencyMs < 0 {
+					detail.LatencyMs = 0
+				}
+				if detail.TTFTMs < 0 {
+					detail.TTFTMs = 0
+				}
+				t := detail.Tokens
+				if t.TotalTokens < 0 || t.InputTokens < 0 || t.OutputTokens < 0 ||
+					t.ReasoningTokens < 0 || t.CachedTokens < 0 || t.CacheTokens < 0 {
+					return errorEnvelope("invalid_record",
+						"negative token count found in import payload"), nil
+				}
+			}
+		}
+	}
+
 	result := stats.MergeSnapshot(importPayload.Usage)
 	snapshot := stats.Snapshot()
 
-	responseData := map[string]interface{}{
-		"added":           result.Added,
-		"skipped":         result.Skipped,
-		"total_requests":  snapshot.TotalRequests,
-		"failed_requests": snapshot.FailureCount,
+	responseData := ImportResponse{
+		Added:              result.Added,
+		Skipped:            result.Skipped,
+		IgnoredByRetention: result.IgnoredByRetention,
+		TotalRequests:      snapshot.TotalRequests,
+		FailedRequests:     snapshot.FailureCount,
 	}
 
 	responseJSON, err := json.Marshal(responseData)
@@ -1130,6 +1208,68 @@ type ManagementResponse struct {
 	Body       []byte              `json:"body"`
 }
 
+// PluginRegisterResponse is the structured response for plugin.register.
+type PluginRegisterResponse struct {
+	SchemaVersion int                `json:"schema_version"`
+	Metadata      PluginMetadata     `json:"metadata"`
+	Capabilities  PluginCapabilities `json:"capabilities"`
+}
+
+type PluginMetadata struct {
+	Name             string        `json:"Name"`
+	Version          string        `json:"Version"`
+	Author           string        `json:"Author"`
+	GitHubRepository string        `json:"GitHubRepository"`
+	Logo             string        `json:"Logo"`
+	ConfigFields     []ConfigField `json:"ConfigFields"`
+}
+
+type ConfigField struct {
+	Name        string      `json:"Name"`
+	Type        string      `json:"Type"`
+	Default     interface{} `json:"Default"`
+	Description string      `json:"Description"`
+}
+
+type PluginCapabilities struct {
+	UsagePlugin   bool `json:"usage_plugin"`
+	ManagementAPI bool `json:"management_api"`
+}
+
+// ManagementRegisterResponse is the structured response for management.register.
+type ManagementRegisterResponse struct {
+	Routes    []ManagementRoute    `json:"routes"`
+	Resources []ManagementResource `json:"resources"`
+}
+
+type ManagementRoute struct {
+	Method      string `json:"method"`
+	Path        string `json:"path"`
+	Description string `json:"description"`
+}
+
+type ManagementResource struct {
+	Path        string `json:"path"`
+	Menu        string `json:"menu,omitempty"`
+	Description string `json:"description"`
+}
+
+// ExportPayload is the structured response for /usage/export.
+type ExportPayload struct {
+	Version    int                `json:"version"`
+	ExportedAt string             `json:"exported_at"`
+	Usage      StatisticsSnapshot `json:"usage"`
+}
+
+// ImportResponse is the structured response for /usage/import.
+type ImportResponse struct {
+	Added              int64 `json:"added"`
+	Skipped            int64 `json:"skipped"`
+	IgnoredByRetention int64 `json:"ignored_by_retention"`
+	TotalRequests      int64 `json:"total_requests"`
+	FailedRequests     int64 `json:"failed_requests"`
+}
+
 // ============================================================================
 // Statistics Storage
 // ============================================================================
@@ -1153,6 +1293,10 @@ type RequestStatistics struct {
 	requestsByHour map[int]int64
 	tokensByDay    map[string]int64
 	tokensByHour   map[int]int64
+
+	// Header filtering: only write response headers whose lowercase name
+	// appears in this set (or "*" for all). Empty means log none.
+	logResponseHeaders map[string]bool
 }
 
 type apiStats struct {
@@ -1176,6 +1320,7 @@ type RequestDetail struct {
 	LatencyMs  int64               `json:"latency_ms"`
 	TTFTMs     int64               `json:"ttft_ms,omitempty"`
 	APIKey     string              `json:"api_key,omitempty"`
+	APIKeyHash string              `json:"api_key_hash,omitempty"`
 	Source     string              `json:"source"`
 	Provider   string              `json:"provider,omitempty"`
 	AuthID     string              `json:"auth_id,omitempty"`
@@ -1236,8 +1381,41 @@ type ModelSnapshot struct {
 }
 
 type MergeResult struct {
-	Added   int64 `json:"added"`
-	Skipped int64 `json:"skipped"`
+	Added              int64 `json:"added"`
+	Skipped            int64 `json:"skipped"`
+	IgnoredByRetention int64 `json:"ignored_by_retention"`
+}
+
+// apiKeySalt is a per-process random salt used to produce stable grouping IDs
+// for API keys without leaking the original key.  Two keys that happen to share
+// the same masked prefix will produce different hashes.
+var apiKeySalt string
+
+// hourKeys pre-computes "00" through "23" so Snapshot never allocates strings.
+var hourKeys = [24]string{
+	"00", "01", "02", "03", "04", "05", "06", "07",
+	"08", "09", "10", "11", "12", "13", "14", "15",
+	"16", "17", "18", "19", "20", "21", "22", "23",
+}
+
+func init() {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// Fallback: deterministic salt
+		for i := range b {
+			b[i] = byte(i * 17)
+		}
+	}
+	apiKeySalt = hex.EncodeToString(b[:])
+}
+
+func hashAPIKey(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	h := sha256.Sum224([]byte(apiKeySalt + ":" + s))
+	return hex.EncodeToString(h[:])
 }
 
 var stats = NewRequestStatistics()
@@ -1271,7 +1449,10 @@ func (s *RequestStatistics) Configure(cfg runtimeConfig) {
 	if cfg.DedupWindowMinutes >= 0 {
 		s.dedupWindow = time.Duration(cfg.DedupWindowMinutes) * time.Minute
 	}
-	s.pruneLocked(time.Now())
+	if cfg.LogResponseHeaders != "" {
+		s.logResponseHeaders = parseHeaderWhitelist(cfg.LogResponseHeaders)
+	}
+	s.pruneLocked(time.Now(), true) // sort here: config may shrink retention/max
 	s.rebuildAggregatesLocked()
 	s.rebuildSeenLocked(time.Now())
 }
@@ -1302,7 +1483,8 @@ func (s *RequestStatistics) Record(record UsageRecord) {
 		Timestamp: timestamp,
 		LatencyMs: record.Latency.Milliseconds(),
 		TTFTMs:    record.TTFT.Milliseconds(),
-		APIKey:    maskAPIKey(record.APIKey),
+		APIKey:     maskAPIKey(record.APIKey),
+		APIKeyHash: hashAPIKey(record.APIKey),
 		Source:    usageSource(record),
 		Provider:  strings.TrimSpace(record.Provider),
 		AuthID:    strings.TrimSpace(record.AuthID),
@@ -1319,8 +1501,8 @@ func (s *RequestStatistics) Record(record UsageRecord) {
 		},
 		Failed:     record.Failed,
 		StatusCode: record.Failure.StatusCode,
-		Failure:    trimLong(record.Failure.Body, 500),
-		Headers:    record.ResponseHeaders,
+		Failure:    trimLong(redactSensitiveText(record.Failure.Body), 500),
+		Headers:    filterHeaders(record.ResponseHeaders, s.logResponseHeaders),
 	}
 	dedup := dedupKey(statsKey, modelName, detail)
 
@@ -1343,8 +1525,28 @@ func (s *RequestStatistics) Record(record UsageRecord) {
 	}
 
 	s.updateAPIStats(apiSt, modelName, detail)
-	s.pruneLocked(now)
-	s.rebuildAggregatesLocked()
+
+	// Increment global top-level and time-series counters (incremental path).
+	if totalTokens < 0 {
+		totalTokens = 0
+	}
+	s.totalRequests++
+	if detail.Failed {
+		s.failureCount++
+	} else {
+		s.successCount++
+	}
+	s.totalTokens += totalTokens
+	dayKey := timestamp.Format("2006-01-02")
+	hourKey := timestamp.Hour()
+	s.requestsByDay[dayKey]++
+	s.requestsByHour[hourKey]++
+	s.tokensByDay[dayKey] += totalTokens
+	s.tokensByHour[hourKey] += totalTokens
+
+	// Prune (retention + max-details) with decrement-on-eviction; no sort on normal write.
+	s.pruneLocked(now, false)
+	// Rebuild only the seen set (cheaper than full aggregate rebuild).
 	s.rebuildSeenLocked(now)
 }
 
@@ -1372,7 +1574,7 @@ func (s *RequestStatistics) updateAPIStats(apiSt *apiStats, model string, detail
 	modelSt.Details = append(modelSt.Details, detail)
 }
 
-func (s *RequestStatistics) pruneLocked(now time.Time) {
+func (s *RequestStatistics) pruneLocked(now time.Time, sortNeeded bool) {
 	if s == nil {
 		return
 	}
@@ -1391,20 +1593,32 @@ func (s *RequestStatistics) pruneLocked(now time.Time) {
 				continue
 			}
 			details := modelSt.Details
+			// Filter by retention and decrement counters for removed entries.
 			if !cutoff.IsZero() {
-				filtered := details[:0]
-				for _, detail := range details {
-					if detail.Timestamp.IsZero() || !detail.Timestamp.Before(cutoff) {
-						filtered = append(filtered, detail)
+				kept := details[:0]
+				for _, d := range details {
+					if d.Timestamp.IsZero() || !d.Timestamp.Before(cutoff) {
+						kept = append(kept, d)
+					} else {
+						s.decrementCounters(d, apiSt, modelSt)
 					}
 				}
-				details = filtered
+				details = kept
 			}
-			sort.SliceStable(details, func(i, j int) bool {
-				return details[i].Timestamp.Before(details[j].Timestamp)
-			})
+			// Only sort when explicitly requested (e.g. after import or reconfigure).
+			if sortNeeded {
+				sort.SliceStable(details, func(i, j int) bool {
+					return details[i].Timestamp.Before(details[j].Timestamp)
+				})
+			}
+			// Trim to max and decrement counters for removed entries.
 			if s.maxDetailsPerModel >= 0 && len(details) > s.maxDetailsPerModel {
-				details = append([]RequestDetail(nil), details[len(details)-s.maxDetailsPerModel:]...)
+				keep := s.maxDetailsPerModel
+				removed := details[:len(details)-keep]
+				for _, d := range removed {
+					s.decrementCounters(d, apiSt, modelSt)
+				}
+				details = append([]RequestDetail(nil), details[len(details)-keep:]...)
 			}
 			modelSt.Details = details
 			if len(modelSt.Details) == 0 {
@@ -1415,6 +1629,46 @@ func (s *RequestStatistics) pruneLocked(now time.Time) {
 			delete(s.apis, apiName)
 		}
 	}
+}
+
+// decrementCounters subtracts one detail's contribution from the global,
+// API-level, model-level, and time-series counters. It must only be called
+// when a detail is removed from storage (retention expiry or max-detail trim).
+func (s *RequestStatistics) decrementCounters(d RequestDetail, apiSt *apiStats, modelSt *modelStats) {
+	totalTokens := d.Tokens.TotalTokens
+	if totalTokens < 0 {
+		totalTokens = 0
+	}
+	s.totalRequests--
+	if d.Failed {
+		s.failureCount--
+	} else {
+		s.successCount--
+	}
+	s.totalTokens -= totalTokens
+
+	apiSt.TotalRequests--
+	if d.Failed {
+		apiSt.FailureCount--
+	} else {
+		apiSt.SuccessCount--
+	}
+	apiSt.TotalTokens -= totalTokens
+
+	modelSt.TotalRequests--
+	if d.Failed {
+		modelSt.FailureCount--
+	} else {
+		modelSt.SuccessCount--
+	}
+	modelSt.TotalTokens -= totalTokens
+
+	dayKey := d.Timestamp.Format("2006-01-02")
+	hourKey := d.Timestamp.Hour()
+	s.requestsByDay[dayKey]--
+	s.requestsByHour[hourKey]--
+	s.tokensByDay[dayKey] -= totalTokens
+	s.tokensByHour[hourKey] -= totalTokens
 }
 
 func (s *RequestStatistics) rebuildAggregatesLocked() {
@@ -1512,10 +1766,11 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 		result.RequestsByDay[k] = v
 	}
 
-	result.RequestsByHour = make(map[string]int64, len(s.requestsByHour))
+	result.RequestsByHour = make(map[string]int64, 24)
 	for hour, v := range s.requestsByHour {
-		key := fmt.Sprintf("%02d", hour)
-		result.RequestsByHour[key] = v
+		if hour >= 0 && hour < 24 {
+			result.RequestsByHour[hourKeys[hour]] = v
+		}
 	}
 
 	result.TokensByDay = make(map[string]int64, len(s.tokensByDay))
@@ -1523,10 +1778,11 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 		result.TokensByDay[k] = v
 	}
 
-	result.TokensByHour = make(map[string]int64, len(s.tokensByHour))
+	result.TokensByHour = make(map[string]int64, 24)
 	for hour, v := range s.tokensByHour {
-		key := fmt.Sprintf("%02d", hour)
-		result.TokensByHour[key] = v
+		if hour >= 0 && hour < 24 {
+			result.TokensByHour[hourKeys[hour]] = v
+		}
 	}
 
 	return result
@@ -1540,6 +1796,14 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Pre-compute retention cutoff so expired records are counted as ignored
+	// rather than added then immediately pruned.
+	now := time.Now()
+	var cutoff time.Time
+	if s.retention > 0 {
+		cutoff = now.Add(-s.retention)
+	}
 
 	seen := make(map[string]struct{})
 	for apiName, apiSt := range s.apis {
@@ -1576,10 +1840,16 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 
 			for _, detail := range modelSnapshot.Details {
 				if detail.Timestamp.IsZero() {
-					detail.Timestamp = time.Now()
+					detail.Timestamp = now
 				}
 				if detail.LatencyMs < 0 {
 					detail.LatencyMs = 0
+				}
+
+				// Pre-filter by retention: expired records never enter storage.
+				if !cutoff.IsZero() && !detail.Timestamp.IsZero() && detail.Timestamp.Before(cutoff) {
+					result.IgnoredByRetention++
+					continue
 				}
 
 				key := dedupKey(apiName, modelName, detail)
@@ -1595,9 +1865,9 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 		}
 	}
 
-	s.pruneLocked(time.Now())
+	s.pruneLocked(now, true) // sort after import: records may arrive out of order
 	s.rebuildAggregatesLocked()
-	s.rebuildSeenLocked(time.Now())
+	s.rebuildSeenLocked(now)
 	return result
 }
 
@@ -1730,7 +2000,8 @@ func stripCredentialSuffix(raw string) string {
 	if value == "" {
 		return ""
 	}
-	parts := strings.Split(value, " · ")
+	// Split on common separators: " · ", " - ", " | ", "/"
+	parts := splitBySeparators(value)
 	for i, part := range parts {
 		normalized := strings.ToLower(strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(part, "-", ""), "_", "")))
 		if normalized == "apikey" || normalized == "key" || normalized == "credential" || normalized == "auth" {
@@ -1747,6 +2018,23 @@ func stripCredentialSuffix(raw string) string {
 		return strings.Join(colonParts[:len(colonParts)-1], ":")
 	}
 	return value
+}
+
+// splitBySeparators splits s on " · ", " - ", " | ", or "/" in priority order.
+func splitBySeparators(s string) []string {
+	if strings.Contains(s, " · ") {
+		return strings.Split(s, " · ")
+	}
+	if strings.Contains(s, " - ") {
+		return strings.Split(s, " - ")
+	}
+	if strings.Contains(s, " | ") {
+		return strings.Split(s, " | ")
+	}
+	if strings.Contains(s, "/") {
+		return strings.Split(s, "/")
+	}
+	return []string{s}
 }
 
 func looksLikeCredentialID(raw string) bool {
@@ -1799,8 +2087,20 @@ func usageGroupKey(record UsageRecord) string {
 		parts = append(parts, executor)
 	}
 	// Use friendly name for the source part — never leak keys.
-	if source != "" && !looksLikeSecretKey(source) && source != provider && source != executor {
-		parts = append(parts, source)
+	// Remove source != provider/exclusive check so e.g. "openai" + "openai-prod"
+	// source is not merged with bare "openai".
+	if source != "" && !looksLikeSecretKey(source) {
+		// Skip if source duplicates provider or executor exactly.
+		dup := false
+		for _, p := range parts {
+			if p == source {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			parts = append(parts, source)
+		}
 	}
 	if len(parts) == 0 {
 		return "未知接口"
@@ -1833,4 +2133,191 @@ func maxInt64(a, b int64) int64 {
 		return a
 	}
 	return b
+}
+
+// parseHeaderWhitelist converts a comma-separated list of header names
+// into a lookup set keyed by lowercase name. Supports "*" as wildcard to
+// record ALL headers.
+func parseHeaderWhitelist(raw string) map[string]bool {
+	set := make(map[string]bool)
+	for _, name := range strings.Split(raw, ",") {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		set[strings.ToLower(name)] = true
+	}
+	return set
+}
+
+// filterHeaders returns a copy of headers containing only keys whose
+// lowercase name is in the whitelist. If whitelist contains "*", all
+// headers are copied. If whitelist is nil or empty, nil is returned
+// (log no headers).
+func filterHeaders(headers map[string][]string, whitelist map[string]bool) map[string][]string {
+	if len(headers) == 0 {
+		return nil
+	}
+	if len(whitelist) == 0 {
+		return nil
+	}
+	if whitelist["*"] {
+		out := make(map[string][]string, len(headers))
+		for k, v := range headers {
+			vv := make([]string, len(v))
+			copy(vv, v)
+			out[k] = vv
+		}
+		return out
+	}
+	out := make(map[string][]string)
+	for k, v := range headers {
+		if whitelist[strings.ToLower(k)] {
+			vv := make([]string, len(v))
+			copy(vv, v)
+			out[k] = vv
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// redactSensitiveText removes common API key patterns, auth headers,
+// and long token-like strings from error bodies before storage.
+func redactSensitiveText(value string) string {
+	if value == "" {
+		return ""
+	}
+	// Redact known key prefix patterns: sk-xxx -> sk******xx
+	value = redactKeyPrefix(value, "sk-")
+	value = redactKeyPrefix(value, "AIza")
+	value = redactKeyPrefix(value, "hf_")
+	value = redactKeyPrefix(value, "pk_")
+	value = redactKeyPrefix(value, "rk_")
+
+	// Redact Authorization: / Bearer headers
+	value = redactAuthHeader(value, "Authorization:")
+	value = redactAuthHeader(value, "authorization:")
+	value = redactAuthHeader(value, "Bearer ")
+	value = redactAuthHeader(value, "bearer ")
+
+	// Redact x-api-key: header
+	value = redactAuthHeader(value, "X-API-Key:")
+	value = redactAuthHeader(value, "x-api-key:")
+	value = redactAuthHeader(value, "Api-Key:")
+	value = redactAuthHeader(value, "api-key:")
+
+	// Redact URL query params carrying secrets
+	value = redactQueryParam(value, "key")
+	value = redactQueryParam(value, "token")
+	value = redactQueryParam(value, "api_key")
+	value = redactQueryParam(value, "apikey")
+
+	return value
+}
+
+const redactedMarker = "******"
+
+func redactKeyPrefix(s, prefix string) string {
+	result := s
+	for {
+		idx := strings.Index(result, prefix)
+		if idx < 0 {
+			break
+		}
+		end := strings.IndexFunc(result[idx+len(prefix):], func(r rune) bool {
+			return !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') && !(r >= '0' && r <= '9') && r != '-' && r != '_'
+		})
+		var token string
+		if end < 0 {
+			token = result[idx:]
+		} else {
+			token = result[idx : idx+len(prefix)+end]
+		}
+		masked := maskToken(token)
+		result = strings.Replace(result, token, masked, 1)
+	}
+	return result
+}
+
+func redactAuthHeader(s, marker string) string {
+	idx := strings.Index(s, marker)
+	if idx < 0 {
+		return s
+	}
+	rest := s[idx+len(marker):]
+	// Skip optional whitespace after marker
+	rest = strings.TrimLeft(rest, " \t")
+	if rest == "" {
+		return s
+	}
+	// Find end of token (space, comma, newline, or end of string)
+	end := strings.IndexAny(rest, " ,\n\r;")
+	var token string
+	if end < 0 {
+		token = rest
+	} else {
+		token = rest[:end]
+	}
+	if len(token) == 0 {
+		return s
+	}
+	// Only redact if it looks like a secret
+	if !looksLikeSecretToken(token) {
+		return s
+	}
+	masked := maskToken(token)
+	return strings.Replace(s, marker+" "+token, marker+" "+masked, 1)
+}
+
+func redactQueryParam(s, param string) string {
+	// Match param=value in URL query strings
+	prefixes := []string{param + "=", param + " %3D ", param + "%3D"}
+	for _, prefix := range prefixes {
+		idx := strings.Index(s, prefix)
+		if idx < 0 {
+			continue
+		}
+		afterIdx := idx + len(prefix)
+		rest := s[afterIdx:]
+		end := strings.IndexAny(rest, " &;\n\r")
+		var value string
+		if end < 0 {
+			value = rest
+		} else {
+			value = rest[:end]
+		}
+		if len(value) > 0 && looksLikeSecretToken(value) {
+			s = s[:afterIdx] + redactedMarker + s[afterIdx+len(value):]
+		}
+	}
+	return s
+}
+
+func looksLikeSecretToken(s string) bool {
+	s = strings.TrimSpace(s)
+	if len(s) < 8 {
+		return false
+	}
+	// Known prefixes
+	for _, p := range []string{"sk-", "AIza", "hf_", "pk_", "rk_"} {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	// Long alphanumeric sequences (>=32 chars)
+	if len(s) >= 32 && !strings.Contains(s, " ") {
+		return true
+	}
+	return false
+}
+
+func maskToken(token string) string {
+	if len(token) <= 4 {
+		return redactedMarker
+	}
+	show := 2
+	return token[:show] + redactedMarker + token[len(token)-show:]
 }
