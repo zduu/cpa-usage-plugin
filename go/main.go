@@ -236,8 +236,8 @@ func handleManagementRegister() ([]byte, error) {
 		"resources": []map[string]interface{}{
 			{
 				"path":        "/dashboard",
-				"menu":        "CPA Usage Statistics",
-				"description": "Usage, token, and request statistics.",
+				"menu":        "用量统计",
+				"description": "请求、Token 和模型用量统计。",
 			},
 			{
 				"path":        "/dashboard-data",
@@ -317,7 +317,7 @@ const dashboardHTML = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CPA Usage Statistics</title>
+<title>用量统计</title>
 <style>
 :root{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f7f8fb;color:#18202f}
 *{box-sizing:border-box}
@@ -349,19 +349,19 @@ tr:last-child td{border-bottom:0}
 <main class="shell">
   <div class="header">
     <div>
-      <h1>CPA Usage Statistics</h1>
-      <div class="muted" id="subtitle">Loading usage statistics...</div>
+      <h1>用量统计</h1>
+      <div class="muted" id="subtitle">正在加载用量统计...</div>
     </div>
-    <div class="status"><span class="dot"></span><span id="status">Live</span></div>
+    <div class="status"><span class="dot"></span><span id="status">正常</span></div>
   </div>
   <section class="grid">
-    <div class="card"><div class="label">Total Requests</div><div class="value" id="totalRequests">-</div></div>
-    <div class="card"><div class="label">Successful</div><div class="value" id="successCount">-</div></div>
-    <div class="card"><div class="label">Failed</div><div class="value" id="failureCount">-</div></div>
-    <div class="card"><div class="label">Total Tokens</div><div class="value" id="totalTokens">-</div></div>
+    <div class="card"><div class="label">总请求数</div><div class="value" id="totalRequests">-</div></div>
+    <div class="card"><div class="label">成功请求</div><div class="value" id="successCount">-</div></div>
+    <div class="card"><div class="label">失败请求</div><div class="value" id="failureCount">-</div></div>
+    <div class="card"><div class="label">总 Token</div><div class="value" id="totalTokens">-</div></div>
   </section>
   <section class="panel">
-    <h2>Models</h2>
+    <h2>模型用量</h2>
     <div id="models"></div>
   </section>
 </main>
@@ -391,17 +391,17 @@ async function load() {
     setText('successCount', fmt.format(usage.success_count || 0));
     setText('failureCount', fmt.format(usage.failure_count || 0));
     setText('totalTokens', fmt.format(usage.total_tokens || 0));
-    setText('subtitle', 'Updated ' + new Date(data.generated_at || Date.now()).toLocaleString());
+    setText('subtitle', '更新于 ' + new Date(data.generated_at || Date.now()).toLocaleString());
     const rows = collectModels(usage);
     document.getElementById('models').innerHTML = rows.length
-      ? '<table><thead><tr><th>API</th><th>Model</th><th>Requests</th><th>Tokens</th></tr></thead><tbody>' + rows.map((row) =>
+      ? '<table><thead><tr><th>API</th><th>模型</th><th>请求数</th><th>Token 数</th></tr></thead><tbody>' + rows.map((row) =>
           '<tr><td>' + esc(row.api) + '</td><td>' + esc(row.model) + '</td><td>' + fmt.format(row.requests) + '</td><td>' + fmt.format(row.tokens) + '</td></tr>'
         ).join('') + '</tbody></table>'
-      : '<div class="empty">No usage records yet.</div>';
-    setText('status', 'Live');
+      : '<div class="empty">暂无用量记录。</div>';
+    setText('status', '正常');
   } catch (error) {
-    setText('status', 'Error');
-    setText('subtitle', error.message || 'Failed to load usage statistics');
+    setText('status', '异常');
+    setText('subtitle', error.message || '加载用量统计失败');
   }
 }
 load();
