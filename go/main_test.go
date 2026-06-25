@@ -301,6 +301,37 @@ configs:
 	}
 }
 
+func TestUpdateConfigParsing(t *testing.T) {
+	yaml := []byte(`
+configs:
+  usage-statistics:
+    update_enabled: true
+    update_version: "v1.1.0"
+`)
+	raw := []byte(`{"config_yaml":"` + base64.StdEncoding.EncodeToString(yaml) + `"}`)
+
+	cfg := parseRuntimeConfig(raw)
+	if !cfg.UpdateEnabled {
+		t.Fatal("update_enabled should be true")
+	}
+	if cfg.UpdateVersion != "v1.1.0" {
+		t.Fatalf("update_version = %q, want v1.1.0", cfg.UpdateVersion)
+	}
+}
+
+func TestRegisterResponseExposesUpdateConfigFields(t *testing.T) {
+	raw, err := handleRegister(nil)
+	if err != nil {
+		t.Fatalf("handleRegister() error = %v", err)
+	}
+	if !strings.Contains(string(raw), `"Name":"update_enabled"`) {
+		t.Fatalf("register response missing update_enabled: %s", raw)
+	}
+	if !strings.Contains(string(raw), `"Name":"update_version"`) {
+		t.Fatalf("register response missing update_version: %s", raw)
+	}
+}
+
 func TestDashboardMarkupContainsHealthRowsApiSelectorAndBackoff(t *testing.T) {
 	checks := map[string]string{
 		"health grid seven rows":       "grid-template-rows:repeat(7,12px)",

@@ -165,7 +165,7 @@ func handleRegister(requestBody []byte) ([]byte, error) {
 		SchemaVersion: 1,
 		Metadata: PluginMetadata{
 			Name:             "用量统计",
-			Version:          "1.1.0",
+			Version:          "1.2.0",
 			Author:           "本地维护",
 			GitHubRepository: "https://github.com/zduu/cpa-usage-plugin",
 			Logo:             "",
@@ -194,6 +194,18 @@ func handleRegister(requestBody []byte) ([]byte, error) {
 					Default:     "",
 					Description: "允许记录的响应头名称列表（逗号分隔），支持 * 通配符。留空不记录任何响应头。",
 				},
+				{
+					Name:        "update_enabled",
+					Type:        "boolean",
+					Default:     false,
+					Description: "是否允许外部更新脚本拉取 GitHub Release 并替换插件文件。替换后需要手动重启 CPA。",
+				},
+				{
+					Name:        "update_version",
+					Type:        "string",
+					Default:     "latest",
+					Description: "更新目标版本。latest 表示最新 Release；也可填写 v1.1.0 这类固定版本。",
+				},
 			},
 		},
 		Capabilities: PluginCapabilities{
@@ -219,6 +231,8 @@ type runtimeConfig struct {
 	RetentionDays      int
 	DedupWindowMinutes int
 	LogResponseHeaders string // comma-separated header name patterns ("*" wildcard)
+	UpdateEnabled     bool
+	UpdateVersion     string
 }
 
 func defaultRuntimeConfig() runtimeConfig {
@@ -227,6 +241,8 @@ func defaultRuntimeConfig() runtimeConfig {
 		RetentionDays:      defaultRetentionDays,
 		DedupWindowMinutes: defaultDedupWindowMinutes,
 		LogResponseHeaders: "",
+		UpdateEnabled:     false,
+		UpdateVersion:     "latest",
 	}
 }
 
@@ -248,6 +264,10 @@ func parseRuntimeConfig(requestBody []byte) runtimeConfig {
 	cfg.DedupWindowMinutes = yamlInt(yamlText, "dedup_window_minutes", cfg.DedupWindowMinutes)
 	if s := yamlString(yamlText, "log_response_headers"); s != "" {
 		cfg.LogResponseHeaders = s
+	}
+	cfg.UpdateEnabled = yamlBool(yamlText, "update_enabled", cfg.UpdateEnabled)
+	if s := yamlString(yamlText, "update_version"); s != "" {
+		cfg.UpdateVersion = s
 	}
 	return cfg
 }
@@ -301,6 +321,18 @@ func yamlString(yamlText, key string) string {
 		return strings.TrimSpace(value)
 	}
 	return ""
+}
+
+func yamlBool(yamlText, key string, fallback bool) bool {
+	value := strings.ToLower(yamlString(yamlText, key))
+	switch value {
+	case "true", "yes", "on", "1":
+		return true
+	case "false", "no", "off", "0":
+		return false
+	default:
+		return fallback
+	}
 }
 
 func handleUsage(requestBody []byte) ([]byte, error) {
