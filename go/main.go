@@ -150,10 +150,10 @@ func handleMethod(method string, requestBody []byte) ([]byte, error) {
 
 func handleRegister() ([]byte, error) {
 	metadata := map[string]interface{}{
-		"Name":             "CPA Usage Statistics",
+		"Name":             "用量统计",
 		"Version":          "1.0.0",
-		"Author":           "router-for-me",
-		"GitHubRepository": "https://github.com/router-for-me/CLIProxyAPI",
+		"Author":           "本地维护",
+		"GitHubRepository": "https://github.com/zduu/cpa-usage-plugin",
 		"Logo":             "",
 		"ConfigFields":     []interface{}{},
 	}
@@ -220,28 +220,28 @@ func handleManagementRegister() ([]byte, error) {
 			{
 				"method":      "GET",
 				"path":        "/plugins/usage-statistics/usage",
-				"description": "Usage statistics JSON API.",
+				"description": "获取用量统计数据。",
 			},
 			{
 				"method":      "GET",
 				"path":        "/plugins/usage-statistics/usage/export",
-				"description": "Export usage statistics.",
+				"description": "导出用量统计数据。",
 			},
 			{
 				"method":      "POST",
 				"path":        "/plugins/usage-statistics/usage/import",
-				"description": "Import usage statistics.",
+				"description": "导入用量统计数据。",
 			},
 		},
 		"resources": []map[string]interface{}{
 			{
 				"path":        "/dashboard",
 				"menu":        "用量统计",
-				"description": "请求、Token 和模型用量统计。",
+				"description": "请求、令牌和模型用量统计。",
 			},
 			{
 				"path":        "/dashboard-data",
-				"description": "Dashboard data endpoint.",
+				"description": "用量统计看板数据。",
 			},
 		},
 	}
@@ -358,7 +358,7 @@ tr:last-child td{border-bottom:0}
     <div class="card"><div class="label">总请求数</div><div class="value" id="totalRequests">-</div></div>
     <div class="card"><div class="label">成功请求</div><div class="value" id="successCount">-</div></div>
     <div class="card"><div class="label">失败请求</div><div class="value" id="failureCount">-</div></div>
-    <div class="card"><div class="label">总 Token</div><div class="value" id="totalTokens">-</div></div>
+    <div class="card"><div class="label">总令牌数</div><div class="value" id="totalTokens">-</div></div>
   </section>
   <section class="panel">
     <h2>模型用量</h2>
@@ -384,7 +384,7 @@ function collectModels(usage) {
 async function load() {
   try {
     const response = await fetch('./dashboard-data', { cache: 'no-store' });
-    if (!response.ok) throw new Error('HTTP ' + response.status);
+    if (!response.ok) throw new Error('请求失败：' + response.status);
     const data = await response.json();
     const usage = data.usage || {};
     setText('totalRequests', fmt.format(usage.total_requests || 0));
@@ -394,7 +394,7 @@ async function load() {
     setText('subtitle', '更新于 ' + new Date(data.generated_at || Date.now()).toLocaleString());
     const rows = collectModels(usage);
     document.getElementById('models').innerHTML = rows.length
-      ? '<table><thead><tr><th>API</th><th>模型</th><th>请求数</th><th>Token 数</th></tr></thead><tbody>' + rows.map((row) =>
+      ? '<table><thead><tr><th>接口</th><th>模型</th><th>请求数</th><th>令牌数</th></tr></thead><tbody>' + rows.map((row) =>
           '<tr><td>' + esc(row.api) + '</td><td>' + esc(row.model) + '</td><td>' + fmt.format(row.requests) + '</td><td>' + fmt.format(row.tokens) + '</td></tr>'
         ).join('') + '</tbody></table>'
       : '<div class="empty">暂无用量记录。</div>';
