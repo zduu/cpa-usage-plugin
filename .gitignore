@@ -1,0 +1,17 @@
+# 构建产物
+*.so
+*.dylib
+*.dll
+
+# Go
+go.sum
+
+# 临时文件
+*.backup.*
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
