@@ -304,6 +304,8 @@ configs:
 func TestDashboardMarkupContainsHealthRowsApiSelectorAndBackoff(t *testing.T) {
 	checks := map[string]string{
 		"health grid seven rows":       "grid-template-rows:repeat(7,12px)",
+		"health grid explicit columns": "grid-column:'+col+';grid-row:'+row",
+		"health grid column order":     "row=rows-(age%rows)",
 		"upstream api selector":        `id="apiSelect"`,
 		"selector options are updated": "$('apiSelect').innerHTML",
 		"poll scheduler exists":        "function schedulePoll",

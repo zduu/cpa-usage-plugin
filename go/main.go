@@ -519,7 +519,7 @@ tr:last-child td{border-bottom:0}
 .healthScroller::-webkit-scrollbar{height:6px}
 .healthScroller::-webkit-scrollbar-track{background:transparent}
 .healthScroller::-webkit-scrollbar-thumb{background:#c0c0c0;border-radius:3px}
-.healthGrid{display:grid;grid-template-columns:repeat(96,12px);grid-template-rows:repeat(7,12px);grid-auto-flow:row;gap:4px;min-width:max-content}
+.healthGrid{display:grid;grid-template-columns:repeat(96,12px);grid-template-rows:repeat(7,12px);gap:4px;min-width:max-content}
 .healthCell{width:12px;height:12px;border-radius:2px;background:#ececec;border:1px solid rgba(0,0,0,.04);cursor:pointer}
 .legend{display:flex;gap:6px;align-items:center;color:#8b8680;font-size:11px;margin-top:8px;flex-wrap:wrap}
 .legendDot{width:12px;height:12px;border-radius:2px;display:inline-block}
@@ -722,6 +722,7 @@ function renderStats(){
   drawSpark('requestSpark',bucketSeries(details,'requests',60,48),'#8b8680');drawSpark('tokenSpark',bucketSeries(details,'tokens',60,48),'#8b5cf6');drawSpark('rpmSpark',bucketSeries(details,'requests',5,48),'#22c55e');drawSpark('costSpark',bucketSeries(details,'cost',60,48),'#f59e0b');
 }
 function healthColor(rate){if(rate<0)return ''; const stops=[[239,68,68],[250,204,21],[34,197,94]]; const seg=rate<.5?0:1; const t=seg===0?rate*2:(rate-.5)*2; const a=stops[seg],b=stops[seg+1]; return 'rgb('+a.map((v,i)=>Math.round(v+(b[i]-v)*t)).join(',')+')'}
+function healthCellStyle(i,count,total,rate){const rows=7,cols=Math.ceil(count/rows),age=count-1-i,col=cols-Math.floor(age/rows),row=rows-(age%rows);return 'grid-column:'+col+';grid-row:'+row+';'+(total?'background:'+healthColor(rate):'')}
 function renderHealth(){
   const count=672, step=15*60e3, now=Date.now(), start=now-count*step; const stats=Array.from({length:count},()=>({s:0,f:0}));
   details.forEach((d)=>{if(d.timestamp_ms<start||d.timestamp_ms>now)return; const idx=count-1-Math.floor((now-d.timestamp_ms)/step); if(idx>=0&&idx<count){d.failed?stats[idx].f++:stats[idx].s++}});
@@ -732,7 +733,7 @@ function renderHealth(){
     const timeRange=t0.toLocaleString()+' - '+t1.toLocaleString();
     const tip='<span>'+timeRange+'</span><br>'+(total?'<span class="ok">成功 '+x.s+'</span> <span class="bad">失败 '+x.f+'</span> <span>成功率 '+pct(rate*100)+'</span>':'<span>无请求</span>');
     tooltips.push(tip);
-    cells.push('<div class="healthCell '+(total?'active':'')+'" data-health-idx="'+i+'" style="'+(total?'background:'+healthColor(rate):'')+'"></div>');
+    cells.push('<div class="healthCell '+(total?'active':'')+'" data-health-idx="'+i+'" style="'+healthCellStyle(i,count,total,rate)+'"></div>');
   });
   $('healthGrid').innerHTML=cells.join('');
   const tip=$('tooltip');
