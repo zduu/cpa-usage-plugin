@@ -56,17 +56,23 @@ static void free_host_buffer(void* ptr, size_t len) {
 import "C"
 
 import (
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unsafe"
 )
 
-const abiVersion uint32 = 1
+const (
+	abiVersion                uint32 = 1
+	defaultMaxDetailsPerModel        = 5000
+	defaultRetentionDays             = 30
+	defaultDedupWindowMinutes        = 24 * 60
+)
 
 type envelope struct {
 	OK     bool            `json:"ok"`
@@ -135,9 +141,9 @@ func cliproxyPluginShutdown() {
 func handleMethod(method string, requestBody []byte) ([]byte, error) {
 	switch method {
 	case "plugin.register":
-		return handleRegister()
+		return handleRegister(requestBody)
 	case "plugin.reconfigure":
-		return handleReconfigure()
+		return handleReconfigure(requestBody)
 	case "management.register":
 		return handleManagementRegister()
 	case "usage.handle":
@@ -149,14 +155,35 @@ func handleMethod(method string, requestBody []byte) ([]byte, error) {
 	}
 }
 
-func handleRegister() ([]byte, error) {
+func handleRegister(requestBody []byte) ([]byte, error) {
+	applyRuntimeConfig(requestBody)
+
 	metadata := map[string]interface{}{
 		"Name":             "用量统计",
 		"Version":          "1.0.0",
 		"Author":           "本地维护",
 		"GitHubRepository": "https://github.com/zduu/cpa-usage-plugin",
 		"Logo":             "",
-		"ConfigFields":     []interface{}{},
+		"ConfigFields": []map[string]interface{}{
+			{
+				"Name":        "max_details_per_model",
+				"Type":        "integer",
+				"Default":     defaultMaxDetailsPerModel,
+				"Description": "每个上游接口/模型最多保留的请求明细条数。",
+			},
+			{
+				"Name":        "retention_days",
+				"Type":        "integer",
+				"Default":     defaultRetentionDays,
+				"Description": "内存统计最多保留的天数，0 表示不按时间淘汰。",
+			},
+			{
+				"Name":        "dedup_window_minutes",
+				"Type":        "integer",
+				"Default":     defaultDedupWindowMinutes,
+				"Description": "usage 记录去重窗口分钟数，0 表示关闭去重。",
+			},
+		},
 	}
 
 	capabilities := map[string]interface{}{
@@ -178,8 +205,64 @@ func handleRegister() ([]byte, error) {
 	return okEnvelopeJSON(string(resultJSON))
 }
 
-func handleReconfigure() ([]byte, error) {
-	return handleRegister()
+func handleReconfigure(requestBody []byte) ([]byte, error) {
+	return handleRegister(requestBody)
+}
+
+type runtimeConfig struct {
+	MaxDetailsPerModel int
+	RetentionDays      int
+	DedupWindowMinutes int
+}
+
+func defaultRuntimeConfig() runtimeConfig {
+	return runtimeConfig{
+		MaxDetailsPerModel: defaultMaxDetailsPerModel,
+		RetentionDays:      defaultRetentionDays,
+		DedupWindowMinutes: defaultDedupWindowMinutes,
+	}
+}
+
+func applyRuntimeConfig(requestBody []byte) {
+	stats.Configure(parseRuntimeConfig(requestBody))
+}
+
+func parseRuntimeConfig(requestBody []byte) runtimeConfig {
+	cfg := defaultRuntimeConfig()
+	var req struct {
+		ConfigYAML []byte `json:"config_yaml"`
+	}
+	if len(requestBody) == 0 || json.Unmarshal(requestBody, &req) != nil || len(req.ConfigYAML) == 0 {
+		return cfg
+	}
+	yamlText := string(req.ConfigYAML)
+	cfg.MaxDetailsPerModel = yamlInt(yamlText, "max_details_per_model", cfg.MaxDetailsPerModel)
+	cfg.RetentionDays = yamlInt(yamlText, "retention_days", cfg.RetentionDays)
+	cfg.DedupWindowMinutes = yamlInt(yamlText, "dedup_window_minutes", cfg.DedupWindowMinutes)
+	return cfg
+}
+
+func yamlInt(yamlText, key string, fallback int) int {
+	for _, line := range strings.Split(yamlText, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		name, value, ok := strings.Cut(line, ":")
+		if !ok || strings.TrimSpace(name) != key {
+			continue
+		}
+		value = strings.Trim(strings.TrimSpace(value), `"'`)
+		if value == "" {
+			return fallback
+		}
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 0 {
+			return fallback
+		}
+		return parsed
+	}
+	return fallback
 }
 
 func handleUsage(requestBody []byte) ([]byte, error) {
@@ -1051,6 +1134,11 @@ type ManagementResponse struct {
 type RequestStatistics struct {
 	mu sync.RWMutex
 
+	maxDetailsPerModel int
+	retention          time.Duration
+	dedupWindow        time.Duration
+	seen               map[string]time.Time
+
 	totalRequests int64
 	successCount  int64
 	failureCount  int64
@@ -1153,12 +1241,36 @@ var stats = NewRequestStatistics()
 
 func NewRequestStatistics() *RequestStatistics {
 	return &RequestStatistics{
-		apis:           make(map[string]*apiStats),
-		requestsByDay:  make(map[string]int64),
-		requestsByHour: make(map[int]int64),
-		tokensByDay:    make(map[string]int64),
-		tokensByHour:   make(map[int]int64),
+		maxDetailsPerModel: defaultMaxDetailsPerModel,
+		retention:          time.Duration(defaultRetentionDays) * 24 * time.Hour,
+		dedupWindow:        time.Duration(defaultDedupWindowMinutes) * time.Minute,
+		seen:               make(map[string]time.Time),
+		apis:               make(map[string]*apiStats),
+		requestsByDay:      make(map[string]int64),
+		requestsByHour:     make(map[int]int64),
+		tokensByDay:        make(map[string]int64),
+		tokensByHour:       make(map[int]int64),
 	}
+}
+
+func (s *RequestStatistics) Configure(cfg runtimeConfig) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cfg.MaxDetailsPerModel >= 0 {
+		s.maxDetailsPerModel = cfg.MaxDetailsPerModel
+	}
+	if cfg.RetentionDays >= 0 {
+		s.retention = time.Duration(cfg.RetentionDays) * 24 * time.Hour
+	}
+	if cfg.DedupWindowMinutes >= 0 {
+		s.dedupWindow = time.Duration(cfg.DedupWindowMinutes) * time.Minute
+	}
+	s.pruneLocked(time.Now())
+	s.rebuildAggregatesLocked()
+	s.rebuildSeenLocked(time.Now())
 }
 
 func (s *RequestStatistics) Record(record UsageRecord) {
@@ -1183,27 +1295,7 @@ func (s *RequestStatistics) Record(record UsageRecord) {
 		modelName = "unknown"
 	}
 
-	dayKey := timestamp.Format("2006-01-02")
-	hourKey := timestamp.Hour()
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.totalRequests++
-	if record.Failed {
-		s.failureCount++
-	} else {
-		s.successCount++
-	}
-	s.totalTokens += totalTokens
-
-	apiSt, ok := s.apis[statsKey]
-	if !ok {
-		apiSt = &apiStats{Models: make(map[string]*modelStats)}
-		s.apis[statsKey] = apiSt
-	}
-
-	s.updateAPIStats(apiSt, modelName, RequestDetail{
+	detail := RequestDetail{
 		Timestamp: timestamp,
 		LatencyMs: record.Latency.Milliseconds(),
 		TTFTMs:    record.TTFT.Milliseconds(),
@@ -1226,12 +1318,31 @@ func (s *RequestStatistics) Record(record UsageRecord) {
 		StatusCode: record.Failure.StatusCode,
 		Failure:    trimLong(record.Failure.Body, 500),
 		Headers:    record.ResponseHeaders,
-	})
+	}
+	dedup := dedupKey(statsKey, modelName, detail)
 
-	s.requestsByDay[dayKey]++
-	s.requestsByHour[hourKey]++
-	s.tokensByDay[dayKey] += totalTokens
-	s.tokensByHour[hourKey] += totalTokens
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
+	s.pruneSeenLocked(now)
+	if s.dedupWindow > 0 {
+		if _, exists := s.seen[dedup]; exists {
+			return
+		}
+		s.seen[dedup] = now
+	}
+
+	apiSt, ok := s.apis[statsKey]
+	if !ok {
+		apiSt = &apiStats{Models: make(map[string]*modelStats)}
+		s.apis[statsKey] = apiSt
+	}
+
+	s.updateAPIStats(apiSt, modelName, detail)
+	s.pruneLocked(now)
+	s.rebuildAggregatesLocked()
+	s.rebuildSeenLocked(now)
 }
 
 func (s *RequestStatistics) updateAPIStats(apiSt *apiStats, model string, detail RequestDetail) {
@@ -1256,6 +1367,104 @@ func (s *RequestStatistics) updateAPIStats(apiSt *apiStats, model string, detail
 	}
 	modelSt.TotalTokens += detail.Tokens.TotalTokens
 	modelSt.Details = append(modelSt.Details, detail)
+}
+
+func (s *RequestStatistics) pruneLocked(now time.Time) {
+	if s == nil {
+		return
+	}
+	var cutoff time.Time
+	if s.retention > 0 {
+		cutoff = now.Add(-s.retention)
+	}
+	for apiName, apiSt := range s.apis {
+		if apiSt == nil {
+			delete(s.apis, apiName)
+			continue
+		}
+		for modelName, modelSt := range apiSt.Models {
+			if modelSt == nil {
+				delete(apiSt.Models, modelName)
+				continue
+			}
+			details := modelSt.Details
+			if !cutoff.IsZero() {
+				filtered := details[:0]
+				for _, detail := range details {
+					if detail.Timestamp.IsZero() || !detail.Timestamp.Before(cutoff) {
+						filtered = append(filtered, detail)
+					}
+				}
+				details = filtered
+			}
+			sort.SliceStable(details, func(i, j int) bool {
+				return details[i].Timestamp.Before(details[j].Timestamp)
+			})
+			if s.maxDetailsPerModel >= 0 && len(details) > s.maxDetailsPerModel {
+				details = append([]RequestDetail(nil), details[len(details)-s.maxDetailsPerModel:]...)
+			}
+			modelSt.Details = details
+			if len(modelSt.Details) == 0 {
+				delete(apiSt.Models, modelName)
+			}
+		}
+		if len(apiSt.Models) == 0 {
+			delete(s.apis, apiName)
+		}
+	}
+}
+
+func (s *RequestStatistics) rebuildAggregatesLocked() {
+	if s == nil {
+		return
+	}
+	s.totalRequests = 0
+	s.successCount = 0
+	s.failureCount = 0
+	s.totalTokens = 0
+	s.requestsByDay = make(map[string]int64)
+	s.requestsByHour = make(map[int]int64)
+	s.tokensByDay = make(map[string]int64)
+	s.tokensByHour = make(map[int]int64)
+	for _, apiSt := range s.apis {
+		apiSt.TotalRequests = 0
+		apiSt.SuccessCount = 0
+		apiSt.FailureCount = 0
+		apiSt.TotalTokens = 0
+		for _, modelSt := range apiSt.Models {
+			modelSt.TotalRequests = 0
+			modelSt.SuccessCount = 0
+			modelSt.FailureCount = 0
+			modelSt.TotalTokens = 0
+			for _, detail := range modelSt.Details {
+				totalTokens := detail.Tokens.TotalTokens
+				if totalTokens < 0 {
+					totalTokens = 0
+				}
+				s.totalRequests++
+				apiSt.TotalRequests++
+				modelSt.TotalRequests++
+				if detail.Failed {
+					s.failureCount++
+					apiSt.FailureCount++
+					modelSt.FailureCount++
+				} else {
+					s.successCount++
+					apiSt.SuccessCount++
+					modelSt.SuccessCount++
+				}
+				s.totalTokens += totalTokens
+				apiSt.TotalTokens += totalTokens
+				modelSt.TotalTokens += totalTokens
+				dayKey := detail.Timestamp.Format("2006-01-02")
+				hourKey := detail.Timestamp.Hour()
+				s.requestsByDay[dayKey]++
+				s.requestsByHour[hourKey]++
+				s.tokensByDay[dayKey] += totalTokens
+				s.tokensByHour[hourKey] += totalTokens
+			}
+		}
+	}
 }
 
 func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
@@ -1383,6 +1592,9 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 		}
 	}
 
+	s.pruneLocked(time.Now())
+	s.rebuildAggregatesLocked()
+	s.rebuildSeenLocked(time.Now())
 	return result
 }
 
@@ -1409,6 +1621,44 @@ func (s *RequestStatistics) recordImported(apiName, modelName string, apiSt *api
 	s.requestsByHour[hourKey]++
 	s.tokensByDay[dayKey] += totalTokens
 	s.tokensByHour[hourKey] += totalTokens
+}
+
+func (s *RequestStatistics) pruneSeenLocked(now time.Time) {
+	if s == nil || s.dedupWindow <= 0 {
+		return
+	}
+	cutoff := now.Add(-s.dedupWindow)
+	for key, seenAt := range s.seen {
+		if seenAt.Before(cutoff) {
+			delete(s.seen, key)
+		}
+	}
+}
+
+func (s *RequestStatistics) rebuildSeenLocked(now time.Time) {
+	if s == nil {
+		return
+	}
+	if s.dedupWindow <= 0 {
+		s.seen = make(map[string]time.Time)
+		return
+	}
+	s.seen = make(map[string]time.Time)
+	cutoff := now.Add(-s.dedupWindow)
+	for apiName, apiSt := range s.apis {
+		for modelName, modelSt := range apiSt.Models {
+			for _, detail := range modelSt.Details {
+				seenAt := detail.Timestamp
+				if seenAt.IsZero() {
+					seenAt = now
+				}
+				if seenAt.Before(cutoff) {
+					continue
+				}
+				s.seen[dedupKey(apiName, modelName, detail)] = seenAt
+			}
+		}
+	}
 }
 
 func dedupKey(apiName, modelName string, detail RequestDetail) string {
@@ -1565,11 +1815,6 @@ func usageThinking(record UsageRecord) UsageThinking {
 		return UsageThinking{}
 	}
 	return UsageThinking{Intensity: effort, Level: effort}
-}
-
-func fingerprint(value string) string {
-	sum := sha256.Sum256([]byte(value))
-	return fmt.Sprintf("%x", sum[:4])
 }
 
 func trimLong(value string, limit int) string {

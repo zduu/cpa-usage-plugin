@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"testing"
 	"time"
@@ -136,5 +137,98 @@ func TestStripCredentialSuffix(t *testing.T) {
 		if got := stripCredentialSuffix(input); got != want {
 			t.Fatalf("stripCredentialSuffix(%q) = %q, want %q", input, got, want)
 		}
+	}
+}
+
+func TestRecordDeduplicatesRepeatedUsageRecords(t *testing.T) {
+	stats := NewRequestStatistics()
+	when := time.Date(2026, 6, 25, 10, 0, 0, 0, time.UTC)
+	record := UsageRecord{
+		Provider:    "deepseek",
+		Model:       "deepseek-v3.1",
+		AuthIndex:   "auth-1",
+		RequestedAt: when,
+		Detail: UsageDetail{
+			InputTokens:  10,
+			OutputTokens: 5,
+			TotalTokens:  15,
+		},
+	}
+
+	stats.Record(record)
+	stats.Record(record)
+
+	snapshot := stats.Snapshot()
+	if snapshot.TotalRequests != 1 || snapshot.TotalTokens != 15 {
+		t.Fatalf("snapshot = %#v, want one deduplicated request", snapshot)
+	}
+}
+
+func TestRecordPrunesByMaxDetailsPerModelAndRebuildsTotals(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 2, RetentionDays: 0, DedupWindowMinutes: 0})
+	base := time.Date(2026, 6, 25, 10, 0, 0, 0, time.UTC)
+	for i := 0; i < 3; i++ {
+		stats.Record(UsageRecord{
+			Provider:    "deepseek",
+			Model:       "deepseek-v3.1",
+			RequestedAt: base.Add(time.Duration(i) * time.Minute),
+			Detail: UsageDetail{
+				InputTokens: int64(i + 1),
+				TotalTokens: int64(i + 1),
+			},
+		})
+	}
+
+	snapshot := stats.Snapshot()
+	model := snapshot.APIs["deepseek"].Models["deepseek-v3.1"]
+	if snapshot.TotalRequests != 2 || snapshot.TotalTokens != 5 {
+		t.Fatalf("snapshot totals = requests %d tokens %d, want 2/5", snapshot.TotalRequests, snapshot.TotalTokens)
+	}
+	if len(model.Details) != 2 {
+		t.Fatalf("details len = %d, want 2", len(model.Details))
+	}
+	if model.Details[0].Tokens.TotalTokens != 2 || model.Details[1].Tokens.TotalTokens != 3 {
+		t.Fatalf("kept details = %#v, want last two records", model.Details)
+	}
+}
+
+func TestRecordPrunesByRetentionDays(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 10, RetentionDays: 1, DedupWindowMinutes: 0})
+
+	stats.Record(UsageRecord{
+		Provider:    "deepseek",
+		Model:       "deepseek-v3.1",
+		RequestedAt: time.Now().Add(-48 * time.Hour),
+		Detail:      UsageDetail{TotalTokens: 100},
+	})
+	stats.Record(UsageRecord{
+		Provider:    "deepseek",
+		Model:       "deepseek-v3.1",
+		RequestedAt: time.Now(),
+		Detail:      UsageDetail{TotalTokens: 7},
+	})
+
+	snapshot := stats.Snapshot()
+	if snapshot.TotalRequests != 1 || snapshot.TotalTokens != 7 {
+		t.Fatalf("snapshot after retention prune = %#v, want only recent record", snapshot)
+	}
+}
+
+func TestParseRuntimeConfigFromLifecycleConfigYAML(t *testing.T) {
+	yaml := []byte(`
+plugins:
+  configs:
+    usage-statistics:
+      max_details_per_model: 123
+      retention_days: 9
+      dedup_window_minutes: 45
+`)
+	raw := []byte(`{"config_yaml":"` + base64.StdEncoding.EncodeToString(yaml) + `"}`)
+
+	cfg := parseRuntimeConfig(raw)
+	if cfg.MaxDetailsPerModel != 123 || cfg.RetentionDays != 9 || cfg.DedupWindowMinutes != 45 {
+		t.Fatalf("config = %#v", cfg)
 	}
 }
