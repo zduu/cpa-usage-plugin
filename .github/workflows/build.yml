@@ -27,10 +27,12 @@ jobs:
       - name: Build plugin
         run: |
           cd go
-          GOOS=linux GOARCH=amd64 go build -buildmode=plugin -o ../usage-statistics.so main.go
+          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildmode=c-shared -buildvcs=false -o ../usage-statistics.so main.go
           cd ..
+          rm -f usage-statistics.h
           ls -lh usage-statistics.so
           file usage-statistics.so
+          nm -D usage-statistics.so | grep ' cliproxy_plugin_init$'
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -73,4 +75,5 @@ jobs:
             echo "Plugin file too small (< 1MB), probably incomplete"
             exit 1
           fi
+          nm -D usage-statistics.so | grep ' cliproxy_plugin_init$'
           echo "✓ Plugin file verified"

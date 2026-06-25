@@ -5,8 +5,9 @@ echo "Building CPA Usage Statistics Plugin..."
 
 # Build Go plugin
 cd go
-go build -buildmode=plugin -o ../usage-statistics.so main.go
+CGO_ENABLED=1 go build -buildmode=c-shared -buildvcs=false -o ../usage-statistics.so main.go
 cd ..
+rm -f usage-statistics.h
 
 echo "Plugin built successfully: usage-statistics.so"
 echo ""
