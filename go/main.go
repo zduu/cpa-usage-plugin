@@ -367,6 +367,19 @@ tr:last-child td{border-bottom:0}
 .nameCell{font-weight:700;color:#2f2f2f;white-space:normal;min-width:160px}
 .pill{display:inline-flex;align-items:center;border:1px solid #dedede;background:#f7f7f7;border-radius:999px;padding:2px 7px;font-size:11px;font-weight:700;color:#6f6963;margin-left:6px}
 .empty{padding:24px;text-align:center;color:#8b8680;background:#f8f8f8;border-radius:8px;font-size:13px}
+.clickableRow{cursor:pointer}
+.clickableRow:hover td{background:#f8f8f8}
+.selectedRow td{background:#f1f5f9}
+.detailGrid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px;margin-bottom:14px}
+.metric{border:1px solid #e5e5e5;border-radius:8px;padding:10px;background:#fafafa;min-height:74px}
+.metricLabel{font-size:11px;color:#8b8680;font-weight:800;margin-bottom:8px}
+.metricValue{font-size:20px;font-weight:800;font-variant-numeric:tabular-nums;line-height:1.1}
+.splitGrid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
+.barList{display:grid;gap:8px}
+.barItem{display:grid;grid-template-columns:minmax(120px,1fr) minmax(160px,2fr) auto;gap:10px;align-items:center;font-size:12px}
+.barTrack{height:8px;background:#eeeeee;border-radius:999px;overflow:hidden}
+.barFill{height:100%;background:#8b8680;border-radius:999px}
+.errorText{max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .priceGrid{display:grid;grid-template-columns:2fr repeat(3,1fr) auto;gap:8px;align-items:end}
 .priceList{display:grid;gap:6px;margin-top:12px}
 .priceItem{display:flex;justify-content:space-between;gap:10px;align-items:center;border:1px solid #e5e5e5;border-radius:8px;padding:8px 10px}
@@ -375,8 +388,7 @@ tr:last-child td{border-bottom:0}
 .healthRate{font-size:18px;font-weight:800}
 .healthScroller{overflow:auto;padding-bottom:4px}
 .healthGrid{display:grid;grid-template-columns:repeat(96,12px);grid-auto-rows:12px;gap:4px;min-width:max-content}
-.healthCell{width:12px;height:12px;border-radius:2px;background:#ececec;border:1px solid rgba(0,0,0,.04)}
-.healthCell.active{cursor:default}
+.healthCell{width:12px;height:12px;border-radius:2px;background:#ececec;border:1px solid rgba(0,0,0,.04);cursor:pointer}
 .legend{display:flex;gap:6px;align-items:center;color:#8b8680;font-size:11px;margin-top:8px;flex-wrap:wrap}
 .legendDot{width:12px;height:12px;border-radius:2px;display:inline-block}
 .filters{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
@@ -386,9 +398,9 @@ tr:last-child td{border-bottom:0}
 .tooltip{position:fixed;z-index:20;background:#262626;color:#fff;border-radius:8px;padding:8px 10px;font-size:11px;pointer-events:none;box-shadow:0 12px 28px rgba(0,0,0,.22);max-width:260px;line-height:1.6;white-space:nowrap}
 .tooltip .ok{color:#10b981}.tooltip .bad{color:#c65746}
 .hidden{display:none!important}
-@media(max-width:1120px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.layout{grid-template-columns:1fr}}
-@media(max-width:640px){.shell{padding:14px}h1{font-size:20px}.cards{grid-template-columns:1fr}.value{font-size:24px}.priceGrid{grid-template-columns:1fr}.btn,.select,.input{width:100%}.toolbar{width:100%}.toolbar>*{flex:1 1 150px}}
-@media(prefers-color-scheme:dark){:root{background:#111315;color:#f2f2f2}body{background:#111315;color:#f2f2f2}.panel,.stat,th,.btn,.select,.input{background:#181b1f;border-color:#30343a;color:#f2f2f2}.spark,.empty{background:#121417;border-color:#30343a}.label,th,.subtle,.updated,.neutral,.meta,.legend{color:#a8a29b}td{border-color:#30343a}.nameCell{color:#f2f2f2}.pill{background:#20242a;border-color:#3a3f46;color:#c9c3bc}.healthCell{background:#2a2f35}.tooltip{background:#f2f2f2;color:#1b1b1b}}
+@media(max-width:1120px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.layout{grid-template-columns:1fr}.detailGrid{grid-template-columns:repeat(3,minmax(0,1fr))}.splitGrid{grid-template-columns:1fr}}
+@media(max-width:640px){.shell{padding:14px}h1{font-size:20px}.cards{grid-template-columns:1fr}.value{font-size:24px}.priceGrid{grid-template-columns:1fr}.detailGrid{grid-template-columns:1fr}.barItem{grid-template-columns:1fr}.btn,.select,.input{width:100%}.toolbar{width:100%}.toolbar>*{flex:1 1 150px}}
+@media(prefers-color-scheme:dark){:root{background:#111315;color:#f2f2f2}body{background:#111315;color:#f2f2f2}.panel,.stat,th,.btn,.select,.input{background:#181b1f;border-color:#30343a;color:#f2f2f2}.spark,.empty,.metric{background:#121417;border-color:#30343a}.clickableRow:hover td,.selectedRow td{background:#20242a}.barTrack{background:#2a2f35}.label,th,.subtle,.updated,.neutral,.meta,.legend,.metricLabel{color:#a8a29b}td{border-color:#30343a}.nameCell{color:#f2f2f2}.pill{background:#20242a;border-color:#3a3f46;color:#c9c3bc}.healthCell{background:#2a2f35}.tooltip{background:#f2f2f2;color:#1b1b1b}}
 </style>
 </head>
 <body>
@@ -444,6 +456,13 @@ tr:last-child td{border-bottom:0}
       <div class="panelHead"><h2>接口详细统计</h2><span class="subtle">按插件可识别的提供商、来源和凭证聚合</span></div>
       <div class="tableWrap" id="apiStats"></div>
     </div>
+    <div class="panel full">
+      <div class="panelHead">
+        <div><h2>接口详情</h2><div class="subtle" id="apiDetailTitle">选择一个接口查看模型、凭证、错误和最近请求。</div></div>
+        <div class="toolbar"><button id="exportApiCsv" class="btn">导出当前接口表格</button><button id="exportApiJson" class="btn">导出当前接口明细</button></div>
+      </div>
+      <div id="apiDetail"></div>
+    </div>
     <div class="panel">
       <div class="panelHead"><h2>模型统计</h2><span class="subtle">请求数、token、平均延迟、成功率和估算花费</span></div>
       <div class="tableWrap" id="modelStats"></div>
@@ -477,6 +496,7 @@ const num=(value)=>Number.isFinite(Number(value))?Number(value):0;
 const compact=(value)=>new Intl.NumberFormat('zh-CN',{notation:'compact',maximumFractionDigits:1}).format(num(value));
 const pct=(value)=>Number.isFinite(value)?value.toFixed(1)+'%':'-';
 const formatMs=(value)=>Number.isFinite(value)&&value>0?(value>=1000?(value/1000).toFixed(2)+'秒':Math.round(value)+'毫秒'):'-';
+let selectedApi='';
 function loadPrices(){try{return JSON.parse(localStorage.getItem(storeKey)||'{}')||{}}catch{return {}}}
 function savePrices(){localStorage.setItem(storeKey,JSON.stringify(modelPrices))}
 function timestampMs(value){const ms=Date.parse(value);return Number.isFinite(ms)?ms:0}
@@ -486,6 +506,7 @@ function looksLikeKey(v){return typeof v==='string'&&(v.startsWith('sk-')||v.sta
 function sourceLabel(detail){const s=detail.source||'';if(s&&!looksLikeKey(s))return s;const p=detail.provider||'';if(p&&!looksLikeKey(p))return p;const a=detail.auth_id||'';if(a&&!looksLikeKey(a))return a;return detail.auth_index||'未知来源'}
 function sourceKey(detail){return sourceLabel(detail)+'|'+(detail.auth_index||'')+'|'+(detail.auth_type||'')}
 function friendlyApiName(apiName){if(!apiName)return'未知接口';const parts=apiName.split(' · ').filter(function(p){return !looksLikeKey(p)});return parts.length?parts.join(' · '):apiName}
+function avg(values){const xs=values.map(num).filter((v)=>v>0);return xs.length?xs.reduce((a,b)=>a+b,0)/xs.length:0}
 function collectDetails(data){
   const rows=[];const apis=data?.apis||{};
   Object.entries(apis).forEach(([api,apiData])=>{
@@ -551,20 +572,24 @@ function renderHealth(){
     totalS+=x.s;totalF+=x.f;const total=x.s+x.f;const rate=total?x.s/total:-1;
     const t0=new Date(start+i*step),t1=new Date(start+(i+1)*step);
     const timeRange=t0.toLocaleString()+' - '+t1.toLocaleString();
-    const tip='<span>'+timeRange+'</span><br><span class="ok">成功 '+x.s+'</span> <span class="bad">失败 '+x.f+'</span>'+(total?' <span>成功率 '+pct(rate*100)+'</span>':'');
+    const tip='<span>'+timeRange+'</span><br>'+(total?'<span class="ok">成功 '+x.s+'</span> <span class="bad">失败 '+x.f+'</span> <span>成功率 '+pct(rate*100)+'</span>':'<span>无请求</span>');
     tooltips.push(tip);
     cells.push('<div class="healthCell '+(total?'active':'')+'" data-health-idx="'+i+'" style="'+(total?'background:'+healthColor(rate):'')+'"></div>');
   });
   $('healthGrid').innerHTML=cells.join('');
   const tip=$('tooltip');
-  $('healthGrid').onmouseover=function(e){
-    const cell=e.target.closest('.healthCell');
-    if(!cell||!cell.classList.contains('active')){tip.classList.add('hidden');return}
+  const showTip=function(cell){
+    if(!cell)return;
     const idx=parseInt(cell.dataset.healthIdx);if(isNaN(idx)||idx<0||idx>=count){tip.classList.add('hidden');return}
     tip.innerHTML=tooltips[idx];tip.classList.remove('hidden');
-    const r=cell.getBoundingClientRect();let left=r.right+6,top=r.top-4;
-    if(left+260>window.innerWidth)left=r.left-266;if(top+60>window.innerHeight)top=window.innerHeight-70;
+    const r=cell.getBoundingClientRect();let left=r.right+8,top=r.top-6;
+    if(left+260>window.innerWidth)left=r.left-268;if(top+64>window.innerHeight)top=window.innerHeight-74;if(top<6)top=6;
     tip.style.left=left+'px';tip.style.top=top+'px';
+  };
+  $('healthGrid').onmouseover=function(e){
+    const cell=e.target.closest('.healthCell');
+    if(!cell){tip.classList.add('hidden');return}
+    showTip(cell);
   };
   $('healthGrid').onmouseleave=function(e){
     if(!e.relatedTarget||!e.relatedTarget.closest('.healthCell'))tip.classList.add('hidden');
@@ -585,8 +610,50 @@ function renderCredentials(){
   $('credentialStats').innerHTML=rows.length?'<table><thead><tr><th>凭证</th><th>请求次数</th><th>成功率</th></tr></thead><tbody>'+rows.map((r)=>{const rate=r.total?r.success/r.total*100:100;return '<tr><td class="nameCell">'+esc(r.name)+(r.type?'<span class="pill">'+esc(r.type)+'</span>':'')+'</td><td>'+fmt.format(r.total)+' <span class="ok">('+fmt.format(r.success)+'</span> <span class="bad">'+fmt.format(r.failure)+')</span></td><td class="'+(rate>=95?'ok':rate>=80?'neutral':'bad')+'">'+pct(rate)+'</td></tr>'}).join('')+'</tbody></table>':'<div class="empty">暂无凭证数据</div>';
 }
 function renderApiStats(){
-  const rows=Object.entries(usage?.apis||{}).map(([api,a])=>({api,requests:num(a.total_requests),success:num(a.success_count),failure:num(a.failure_count),tokens:num(a.total_tokens),models:a.models||{},cost:collectDetails({apis:{[api]:a}}).reduce((s,d)=>s+d.cost,0)})).sort((a,b)=>b.requests-a.requests);
-  $('apiStats').innerHTML=rows.length?'<table><thead><tr><th>接口</th><th>请求</th><th>token</th><th>花费</th><th>模型</th></tr></thead><tbody>'+rows.map((r)=>'<tr><td class="nameCell">'+esc(friendlyApiName(r.api))+'</td><td>'+fmt.format(r.requests)+' <span class="ok">('+fmt.format(r.success)+'</span> <span class="bad">'+fmt.format(r.failure)+')</span></td><td>'+compact(r.tokens)+'</td><td>'+money.format(r.cost)+'</td><td>'+Object.keys(r.models).slice(0,4).map(esc).join('、')+'</td></tr>').join('')+'</tbody></table>':'<div class="empty">暂无接口数据</div>';
+  const rows=Object.entries(usage?.apis||{}).map(([api,a])=>({api,requests:num(a.total_requests),success:num(a.success_count),failure:num(a.failure_count),tokens:num(a.total_tokens),models:a.models||{},details:collectDetails({apis:{[api]:a}})})).sort((a,b)=>b.requests-a.requests);
+  rows.forEach((r)=>{r.cost=r.details.reduce((s,d)=>s+d.cost,0);r.avgLatency=avg(r.details.map((d)=>d.latency_ms));r.successRate=r.requests?r.success/r.requests*100:100});
+  if(rows.length&&(!selectedApi||!rows.some((r)=>r.api===selectedApi)))selectedApi=rows[0].api;
+  if(!rows.length)selectedApi='';
+  $('apiStats').innerHTML=rows.length?'<table><thead><tr><th>接口</th><th>请求</th><th>成功率</th><th>token</th><th>平均延迟</th><th>花费</th><th>模型</th></tr></thead><tbody>'+rows.map((r)=>'<tr class="clickableRow '+(r.api===selectedApi?'selectedRow':'')+'" data-api="'+esc(r.api)+'"><td class="nameCell">'+esc(friendlyApiName(r.api))+'</td><td>'+fmt.format(r.requests)+' <span class="ok">('+fmt.format(r.success)+'</span> <span class="bad">'+fmt.format(r.failure)+')</span></td><td class="'+(r.successRate>=95?'ok':r.successRate>=80?'neutral':'bad')+'">'+pct(r.successRate)+'</td><td>'+compact(r.tokens)+'</td><td>'+formatMs(r.avgLatency)+'</td><td>'+money.format(r.cost)+'</td><td>'+Object.keys(r.models).slice(0,4).map(esc).join('、')+'</td></tr>').join('')+'</tbody></table>':'<div class="empty">暂无接口数据</div>';
+  document.querySelectorAll('[data-api]').forEach((row)=>row.onclick=()=>{selectedApi=row.getAttribute('data-api')||'';renderApiStats();renderApiDetail()});
+}
+function groupedRows(rows,keyFn,nameFn){
+  const map=new Map();
+  rows.forEach((d)=>{const key=keyFn(d);const r=map.get(key)||{name:nameFn(d),requests:0,success:0,failure:0,tokens:0,cached:0,reasoning:0,cost:0,latency:[],ttft:[]};r.requests++;d.failed?r.failure++:r.success++;r.tokens+=d.total_tokens;r.cached+=d.cached_tokens;r.reasoning+=d.reasoning_tokens;r.cost+=d.cost;if(num(d.latency_ms)>0)r.latency.push(num(d.latency_ms));if(num(d.ttft_ms)>0)r.ttft.push(num(d.ttft_ms));map.set(key,r)});
+  return [...map.values()].sort((a,b)=>b.requests-a.requests);
+}
+function bars(title,rows,total,emptyText){
+  if(!rows.length)return '<div><div class="subtle" style="margin-bottom:8px">'+esc(title)+'</div><div class="empty">'+esc(emptyText)+'</div></div>';
+  return '<div><div class="subtle" style="margin-bottom:8px">'+esc(title)+'</div><div class="barList">'+rows.slice(0,8).map((r)=>{const width=total?Math.max(4,Math.round(r.requests/total*100)):0;return '<div class="barItem"><div class="nameCell">'+esc(r.name)+'</div><div class="barTrack"><div class="barFill" style="width:'+width+'%"></div></div><div>'+fmt.format(r.requests)+' 次</div></div>'}).join('')+'</div></div>';
+}
+function metric(label,value,extra){return '<div class="metric"><div class="metricLabel">'+esc(label)+'</div><div class="metricValue">'+value+'</div>'+(extra?'<div class="subtle" style="margin-top:6px">'+extra+'</div>':'')+'</div>'}
+function currentApiDetails(){
+  if(!selectedApi||!usage?.apis?.[selectedApi])return [];
+  return collectDetails({apis:{[selectedApi]:usage.apis[selectedApi]}});
+}
+function renderApiDetail(){
+  const api=selectedApi, apiData=api&&usage?.apis?.[api], rows=currentApiDetails();
+  if(!apiData||!rows.length){setText('apiDetailTitle','选择一个接口查看模型、凭证、错误和最近请求。');$('apiDetail').innerHTML='<div class="empty">暂无接口详情</div>';return}
+  const requests=rows.length, success=rows.filter((d)=>!d.failed).length, failure=requests-success, rate=requests?success/requests*100:100;
+  const tokens=rows.reduce((s,d)=>s+d.total_tokens,0), cached=rows.reduce((s,d)=>s+d.cached_tokens,0), reasoning=rows.reduce((s,d)=>s+d.reasoning_tokens,0), cost=rows.reduce((s,d)=>s+d.cost,0);
+  const models=groupedRows(rows,(d)=>d.model,(d)=>d.model||'unknown');
+  const sources=groupedRows(rows,sourceKey,sourceLabel);
+  const errors=rows.filter((d)=>d.failed).reduce((map,d)=>{const key=(d.status_code||0)+'|'+(d.failure||'');const r=map.get(key)||{status:d.status_code||'-',failure:d.failure||'未返回错误内容',count:0};r.count++;map.set(key,r);return map},new Map());
+  const errorRows=[...errors.values()].sort((a,b)=>b.count-a.count);
+  setText('apiDetailTitle',friendlyApiName(api));
+  $('apiDetail').innerHTML='<div class="detailGrid">'+
+    metric('请求数',fmt.format(requests),'<span class="ok">成功 '+fmt.format(success)+'</span> <span class="bad">失败 '+fmt.format(failure)+'</span>')+
+    metric('成功率','<span class="'+(rate>=95?'ok':rate>=80?'neutral':'bad')+'">'+pct(rate)+'</span>')+
+    metric('总 token',compact(tokens),'缓存 '+compact(cached)+' · 思考 '+compact(reasoning))+
+    metric('平均延迟',formatMs(avg(rows.map((d)=>d.latency_ms))),'TTFT '+formatMs(avg(rows.map((d)=>d.ttft_ms))))+
+    metric('估算花费',money.format(cost))+
+    metric('模型数',fmt.format(models.length),'凭证/来源 '+fmt.format(sources.length))+
+    '</div>'+
+    '<div class="splitGrid">'+bars('模型分布',models,requests,'暂无模型数据')+bars('凭证/来源分布',sources,requests,'暂无凭证数据')+'</div>'+
+    '<div class="splitGrid"><div><div class="subtle" style="margin-bottom:8px">错误统计</div>'+
+    (errorRows.length?'<div class="tableWrap"><table><thead><tr><th>状态码</th><th>次数</th><th>错误</th></tr></thead><tbody>'+errorRows.slice(0,10).map((r)=>'<tr><td class="bad">'+esc(r.status)+'</td><td>'+fmt.format(r.count)+'</td><td class="errorText">'+esc(r.failure)+'</td></tr>').join('')+'</tbody></table></div>':'<div class="empty">暂无失败请求</div>')+
+    '</div><div><div class="subtle" style="margin-bottom:8px">最近请求</div>'+
+    '<div class="tableWrap"><table><thead><tr><th>时间</th><th>模型</th><th>结果</th><th>延迟</th><th>token</th><th>来源</th></tr></thead><tbody>'+rows.slice(0,120).map((d)=>'<tr><td>'+new Date(d.timestamp_ms).toLocaleString()+'</td><td class="nameCell">'+esc(d.model)+'</td><td class="'+(d.failed?'bad':'ok')+'">'+(d.failed?'失败':'成功')+'</td><td>'+formatMs(num(d.latency_ms))+'</td><td>'+fmt.format(d.total_tokens)+'</td><td>'+esc(sourceLabel(d))+'</td></tr>').join('')+'</tbody></table></div></div></div>';
 }
 function renderModelStats(){
   const map=new Map(); details.forEach((d)=>{const r=map.get(d.model)||{model:d.model,requests:0,success:0,failure:0,tokens:0,cost:0,latency:[]}; r.requests++; d.failed?r.failure++:r.success++; r.tokens+=d.total_tokens; r.cost+=d.cost; if(num(d.latency_ms)>0)r.latency.push(num(d.latency_ms)); map.set(d.model,r)});
@@ -604,8 +671,10 @@ function renderEvents(){
   $('events').innerHTML=rows.length?'<table><thead><tr><th>时间</th><th>模型</th><th>来源</th><th>凭证</th><th>结果</th><th>延迟</th><th>输入</th><th>输出</th><th>思考</th><th>缓存</th><th>总计</th></tr></thead><tbody>'+rows.slice(0,500).map((d)=>'<tr><td>'+new Date(d.timestamp_ms).toLocaleString()+'</td><td class="nameCell">'+esc(d.model)+'</td><td>'+esc(sourceLabel(d))+'</td><td>'+(esc(d.auth_index||'-'))+'</td><td class="'+(d.failed?'bad':'ok')+'">'+(d.failed?'失败':'成功')+'</td><td>'+formatMs(num(d.latency_ms))+'</td><td>'+fmt.format(num(d.tokens?.input_tokens))+'</td><td>'+fmt.format(num(d.tokens?.output_tokens))+'</td><td>'+fmt.format(num(d.tokens?.reasoning_tokens))+'</td><td>'+fmt.format(d.cached_tokens)+'</td><td>'+fmt.format(d.total_tokens)+'</td></tr>').join('')+'</tbody></table>':'<div class="empty">暂无请求事件</div>';
 }
 function download(name,text,type){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type}));a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}
-function exportRows(kind){const rows=[...details]; const stamp=new Date().toISOString().replace(/[:.]/g,'-'); if(kind==='json'){download('usage-events-'+stamp+'.json',JSON.stringify(rows,null,2),'application/json;charset=utf-8');return} const head=['时间','模型','来源','凭证','结果','延迟毫秒','输入 token','输出 token','思考 token','缓存 token','总 token']; const csv=[head,...rows.map((d)=>[d.timestamp,d.model,sourceLabel(d),d.auth_index||'',d.failed?'失败':'成功',num(d.latency_ms),num(d.tokens?.input_tokens),num(d.tokens?.output_tokens),num(d.tokens?.reasoning_tokens),d.cached_tokens,d.total_tokens])].map((row)=>row.map((v)=>'"'+String(v??'').replace(/"/g,'""')+'"').join(',')).join('\\n'); download('usage-events-'+stamp+'.csv',csv,'text/csv;charset=utf-8')}
-function rerender(){details=collectDetails(usage);renderPrices();renderStats();renderHealth();renderCredentials();renderApiStats();renderModelStats();renderFilters();renderEvents()}
+function rowsCsv(rows){const head=['时间','接口','模型','来源','凭证','结果','延迟毫秒','TTFT毫秒','输入 token','输出 token','思考 token','缓存 token','总 token','状态码','错误'];return [head,...rows.map((d)=>[d.timestamp,d.api,d.model,sourceLabel(d),d.auth_index||'',d.failed?'失败':'成功',num(d.latency_ms),num(d.ttft_ms),num(d.tokens?.input_tokens),num(d.tokens?.output_tokens),num(d.tokens?.reasoning_tokens),d.cached_tokens,d.total_tokens,d.status_code||'',d.failure||''])].map((row)=>row.map((v)=>'"'+String(v??'').replace(/"/g,'""')+'"').join(',')).join('\\n')}
+function exportRows(kind){const rows=[...details]; const stamp=new Date().toISOString().replace(/[:.]/g,'-'); if(kind==='json'){download('usage-events-'+stamp+'.json',JSON.stringify(rows,null,2),'application/json;charset=utf-8');return} download('usage-events-'+stamp+'.csv',rowsCsv(rows),'text/csv;charset=utf-8')}
+function exportApiRows(kind){const rows=currentApiDetails();if(!rows.length)return;const stamp=new Date().toISOString().replace(/[:.]/g,'-');const name=(friendlyApiName(selectedApi)||'api').replace(/[\\\\/:*?"<>|\\s]+/g,'-').slice(0,80);if(kind==='json'){download('usage-api-'+name+'-'+stamp+'.json',JSON.stringify(rows,null,2),'application/json;charset=utf-8');return}download('usage-api-'+name+'-'+stamp+'.csv',rowsCsv(rows),'text/csv;charset=utf-8')}
+function rerender(){details=collectDetails(usage);renderPrices();renderStats();renderHealth();renderCredentials();renderApiStats();renderApiDetail();renderModelStats();renderFilters();renderEvents()}
 async function load() {
   try {
     const response = await fetch('./dashboard-data', { cache: 'no-store' });
@@ -622,6 +691,7 @@ $('savePrice').onclick=()=>{const m=$('priceModel').value;if(!m)return;const pro
 $('priceModel').onchange=()=>{const p=modelPrices[$('priceModel').value]||{};$('pricePrompt').value=p.prompt??'';$('priceCompletion').value=p.completion??'';$('priceCache').value=p.cache??''};
 ['filterModel','filterSource','filterAuth'].forEach((id)=>$(id).onchange=renderEvents); $('clearFilters').onclick=()=>{['filterModel','filterSource','filterAuth'].forEach((id)=>$(id).value='');renderEvents()};
 $('exportRowsCsv').onclick=()=>exportRows('csv'); $('exportRowsJson').onclick=()=>exportRows('json');
+$('exportApiCsv').onclick=()=>exportApiRows('csv'); $('exportApiJson').onclick=()=>exportApiRows('json');
 $('exportBtn').onclick=async()=>{const r=await fetch('./usage/export',{cache:'no-store'});download('usage-export-'+new Date().toISOString().replace(/[:.]/g,'-')+'.json',JSON.stringify(await r.json(),null,2),'application/json;charset=utf-8')};
 $('importBtn').onclick=()=>$('importFile').click(); $('importFile').onchange=async(e)=>{const file=e.target.files?.[0]; if(!file)return; const text=await file.text(); const r=await fetch('./usage/import',{method:'POST',headers:{'Content-Type':'application/json'},body:text}); if(!r.ok)alert('导入失败'); await load(); e.target.value=''};
 load();
@@ -746,9 +816,123 @@ type UsageRecord struct {
 	ResponseHeaders map[string][]string `json:"response_headers"`
 }
 
+func (r *UsageRecord) UnmarshalJSON(data []byte) error {
+	type usageRecord UsageRecord
+	var current usageRecord
+	if err := json.Unmarshal(data, &current); err != nil {
+		return err
+	}
+
+	var legacy struct {
+		Provider        string              `json:"Provider"`
+		ExecutorType    string              `json:"ExecutorType"`
+		Model           string              `json:"Model"`
+		Alias           string              `json:"Alias"`
+		APIKey          string              `json:"APIKey"`
+		AuthID          string              `json:"AuthID"`
+		AuthIndex       string              `json:"AuthIndex"`
+		AuthType        string              `json:"AuthType"`
+		Source          string              `json:"Source"`
+		ReasoningEffort string              `json:"ReasoningEffort"`
+		ServiceTier     string              `json:"ServiceTier"`
+		RequestedAt     time.Time           `json:"RequestedAt"`
+		Latency         time.Duration       `json:"Latency"`
+		TTFT            time.Duration       `json:"TTFT"`
+		Failed          bool                `json:"Failed"`
+		Failure         UsageFailure        `json:"Failure"`
+		Detail          UsageDetail         `json:"Detail"`
+		ResponseHeaders map[string][]string `json:"ResponseHeaders"`
+	}
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		return err
+	}
+
+	if current.Provider == "" {
+		current.Provider = legacy.Provider
+	}
+	if current.ExecutorType == "" {
+		current.ExecutorType = legacy.ExecutorType
+	}
+	if current.Model == "" {
+		current.Model = legacy.Model
+	}
+	if current.Alias == "" {
+		current.Alias = legacy.Alias
+	}
+	if current.APIKey == "" {
+		current.APIKey = legacy.APIKey
+	}
+	if current.AuthID == "" {
+		current.AuthID = legacy.AuthID
+	}
+	if current.AuthIndex == "" {
+		current.AuthIndex = legacy.AuthIndex
+	}
+	if current.AuthType == "" {
+		current.AuthType = legacy.AuthType
+	}
+	if current.Source == "" {
+		current.Source = legacy.Source
+	}
+	if current.ReasoningEffort == "" {
+		current.ReasoningEffort = legacy.ReasoningEffort
+	}
+	if current.ServiceTier == "" {
+		current.ServiceTier = legacy.ServiceTier
+	}
+	if current.RequestedAt.IsZero() {
+		current.RequestedAt = legacy.RequestedAt
+	}
+	if current.Latency == 0 {
+		current.Latency = legacy.Latency
+	}
+	if current.TTFT == 0 {
+		current.TTFT = legacy.TTFT
+	}
+	current.Failed = current.Failed || legacy.Failed
+	if current.Failure == (UsageFailure{}) {
+		current.Failure = legacy.Failure
+	}
+	if current.Detail == (UsageDetail{}) {
+		current.Detail = legacy.Detail
+	}
+	if current.ResponseHeaders == nil {
+		current.ResponseHeaders = legacy.ResponseHeaders
+	}
+
+	*r = UsageRecord(current)
+	return nil
+}
+
 type UsageFailure struct {
 	StatusCode int    `json:"status_code"`
 	Body       string `json:"body"`
+}
+
+func (f *UsageFailure) UnmarshalJSON(data []byte) error {
+	type usageFailure UsageFailure
+	var current usageFailure
+	if err := json.Unmarshal(data, &current); err != nil {
+		return err
+	}
+
+	var legacy struct {
+		StatusCode int    `json:"StatusCode"`
+		Body       string `json:"Body"`
+	}
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		return err
+	}
+
+	if current.StatusCode == 0 {
+		current.StatusCode = legacy.StatusCode
+	}
+	if current.Body == "" {
+		current.Body = legacy.Body
+	}
+
+	*f = UsageFailure(current)
+	return nil
 }
 
 type UsageDetail struct {
@@ -759,6 +943,52 @@ type UsageDetail struct {
 	CacheReadTokens     int64 `json:"cache_read_tokens"`
 	CacheCreationTokens int64 `json:"cache_creation_tokens"`
 	TotalTokens         int64 `json:"total_tokens"`
+}
+
+func (d *UsageDetail) UnmarshalJSON(data []byte) error {
+	type usageDetail UsageDetail
+	var current usageDetail
+	if err := json.Unmarshal(data, &current); err != nil {
+		return err
+	}
+
+	var legacy struct {
+		InputTokens         int64 `json:"InputTokens"`
+		OutputTokens        int64 `json:"OutputTokens"`
+		ReasoningTokens     int64 `json:"ReasoningTokens"`
+		CachedTokens        int64 `json:"CachedTokens"`
+		CacheReadTokens     int64 `json:"CacheReadTokens"`
+		CacheCreationTokens int64 `json:"CacheCreationTokens"`
+		TotalTokens         int64 `json:"TotalTokens"`
+	}
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		return err
+	}
+
+	if current.InputTokens == 0 {
+		current.InputTokens = legacy.InputTokens
+	}
+	if current.OutputTokens == 0 {
+		current.OutputTokens = legacy.OutputTokens
+	}
+	if current.ReasoningTokens == 0 {
+		current.ReasoningTokens = legacy.ReasoningTokens
+	}
+	if current.CachedTokens == 0 {
+		current.CachedTokens = legacy.CachedTokens
+	}
+	if current.CacheReadTokens == 0 {
+		current.CacheReadTokens = legacy.CacheReadTokens
+	}
+	if current.CacheCreationTokens == 0 {
+		current.CacheCreationTokens = legacy.CacheCreationTokens
+	}
+	if current.TotalTokens == 0 {
+		current.TotalTokens = legacy.TotalTokens
+	}
+
+	*d = UsageDetail(current)
+	return nil
 }
 
 type ManagementRequest struct {
