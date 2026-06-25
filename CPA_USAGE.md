@@ -2,13 +2,13 @@
 
 ## 1. 下载插件
 
-从 GitHub Actions 的 `Build Plugin` workflow 下载 `usage-statistics-plugin` artifact，解压得到：
+从 [GitHub Releases](https://github.com/zduu/cpa-usage-plugin/releases) 下载最新版本的 `usage-statistics.so`。
 
-```text
-usage-statistics.so
-```
+> 也可以从 GitHub Actions 的 `Build Plugin` workflow 下载 `usage-statistics-plugin` artifact 自行构建。
 
 ## 2. 放入插件目录
+
+### 直接部署
 
 将 `usage-statistics.so` 放到 CPA/CLIProxyAPI 的插件目录中。示例：
 
@@ -19,6 +19,37 @@ chmod 755 /opt/cliproxyapi/plugins/usage-statistics.so
 ```
 
 实际目录以你的 CPA 配置为准。
+
+### Docker 部署
+
+如果 CPA 以 Docker 方式运行，通过 volume 将插件挂载到容器内：
+
+```yaml
+# docker-compose.yml 示例
+version: "3"
+services:
+  cliproxyapi:
+    image: your-cpa-image:tag
+    ports:
+      - "8787:8787"
+    volumes:
+      - ./plugins:/app/plugins        # 将插件目录挂载到容器
+      - ./config:/app/config
+      - ./data:/app/data
+```
+
+或将宿主目录映射到容器：
+
+```bash
+docker run -d \
+  --name cliproxyapi \
+  -v /opt/cliproxyapi/plugins:/app/plugins \
+  -v /opt/cliproxyapi/config:/app/config \
+  -p 8787:8787 \
+  your-cpa-image:tag
+```
+
+> 插件目录路径（`/app/plugins`）需与 CPA 容器内的实际路径一致，请参考你的 CPA Docker 镜像文档。
 
 ## 3. 启用插件
 
