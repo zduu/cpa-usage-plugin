@@ -82,7 +82,7 @@ docker restart cli-proxy-api
 
 ```text
 pluginhost: plugin loaded plugin_id=usage-statistics path=plugins/usage-statistics.so
-pluginhost: plugin registered plugin_id=usage-statistics plugin_name=用量统计 version=1.0.0
+pluginhost: plugin registered plugin_id=usage-statistics plugin_name=用量统计 version=1.1.0
 ```
 
 ## 4. 查看统计
