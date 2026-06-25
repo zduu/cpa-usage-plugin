@@ -238,7 +238,7 @@ func handleManagementRegister() ([]byte, error) {
 			{
 				"path":        "/dashboard",
 				"menu":        "用量统计",
-				"description": "请求、令牌和模型用量统计。",
+				"description": "请求、token 和模型用量统计。",
 			},
 			{
 				"path":        "/dashboard-data",
@@ -333,60 +333,61 @@ const dashboardHTML = `<!doctype html>
 body{margin:0;min-height:100vh;background:#f6f7f9;color:#262626}
 button,input,select{font:inherit}
 button{cursor:pointer}
-.shell{width:min(100%,1640px);margin:0 auto;padding:24px}
-.header{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:22px;flex-wrap:wrap}
-h1{margin:0;font-size:34px;line-height:1.1;font-weight:800;letter-spacing:0}
-.toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.toolbar label{font-size:14px;color:#7a756f;font-weight:700}
-.select,.input{height:40px;border:1px solid #dedede;border-radius:8px;background:#fff;color:#262626;padding:0 12px;min-width:0}
-.btn{height:40px;border:1px solid #d9d9d9;border-radius:8px;background:#fff;color:#333;padding:0 14px;font-weight:700;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+.shell{width:min(100%,1640px);margin:0 auto;padding:20px}
+.header{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap}
+h1{margin:0;font-size:22px;line-height:1.2;font-weight:700;letter-spacing:0}
+.toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.toolbar label{font-size:12px;color:#7a756f;font-weight:700}
+.select,.input{height:36px;border:1px solid #dedede;border-radius:8px;background:#fff;color:#262626;padding:0 10px;min-width:0;font-size:13px}
+.btn{height:36px;border:1px solid #d9d9d9;border-radius:8px;background:#fff;color:#333;padding:0 12px;font-weight:700;font-size:13px;box-shadow:0 1px 2px rgba(0,0,0,.04)}
 .btn:hover{border-color:#b8b8b8}
 .btn.primary{background:#262626;color:#fff;border-color:#262626}
 .btn.danger{color:#b42318;border-color:#f1c5bf}
-.updated{color:#9a948d;font-size:14px;white-space:nowrap}
-.cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin-bottom:16px}
-.stat{background:#fff;border:1px solid #dedede;border-radius:12px;padding:22px;min-height:160px;box-shadow:0 10px 30px rgba(0,0,0,.04);position:relative;overflow:hidden}
-.stat:before{content:"";position:absolute;left:0;right:0;top:0;height:4px;background:#8b8680}
+.updated{color:#9a948d;font-size:12px;white-space:nowrap}
+.cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:14px}
+.stat{background:#fff;border:1px solid #dedede;border-radius:12px;padding:16px;min-height:130px;box-shadow:0 10px 30px rgba(0,0,0,.04);position:relative;overflow:hidden}
+.stat:before{content:"";position:absolute;left:0;right:0;top:0;height:3px;background:#8b8680}
 .stat.green:before{background:#22c55e}.stat.purple:before{background:#8b5cf6}.stat.orange:before{background:#f97316}.stat.amber:before{background:#f59e0b}
-.label{color:#9a948d;font-size:15px;font-weight:800;margin-bottom:18px}
-.value{font-size:42px;line-height:1;font-weight:850;letter-spacing:0;font-variant-numeric:tabular-nums}
-.meta{margin-top:14px;color:#6f6963;font-size:15px;display:flex;gap:14px;flex-wrap:wrap}
+.label{color:#9a948d;font-size:12px;font-weight:700;margin-bottom:12px}
+.value{font-size:26px;line-height:1;font-weight:800;letter-spacing:0;font-variant-numeric:tabular-nums}
+.meta{margin-top:10px;color:#6f6963;font-size:12px;display:flex;gap:10px;flex-wrap:wrap}
 .ok{color:#10b981}.bad{color:#c65746}.neutral{color:#7a756f}
-.spark{width:100%;height:54px;margin-top:20px;border:1px solid #e2e2e2;border-radius:8px;background:#f8f8f8}
-.layout{display:grid;grid-template-columns:1.05fr .95fr;gap:16px}
+.spark{width:100%;height:44px;margin-top:14px;border:1px solid #e2e2e2;border-radius:8px;background:#f8f8f8}
+.layout{display:grid;grid-template-columns:1.05fr .95fr;gap:14px}
 .full{grid-column:1/-1}
-.panel{background:#fff;border:1px solid #dedede;border-radius:12px;padding:20px;box-shadow:0 10px 30px rgba(0,0,0,.035);min-width:0}
-.panel h2{margin:0;font-size:21px;line-height:1.2}
-.panelHead{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap}
-.subtle{color:#8b8680;font-size:13px}
+.panel{background:#fff;border:1px solid #dedede;border-radius:12px;padding:16px;box-shadow:0 10px 30px rgba(0,0,0,.035);min-width:0}
+.panel h2{margin:0;font-size:16px;line-height:1.2}
+.panelHead{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}
+.subtle{color:#8b8680;font-size:12px}
 .tableWrap{overflow:auto;max-height:520px}
-table{width:100%;border-collapse:collapse;font-size:14px}
-th,td{text-align:left;padding:13px 12px;border-bottom:1px solid #e5e5e5;vertical-align:middle;white-space:nowrap}
-th{color:#9a948d;font-size:13px;font-weight:800;background:#fff;position:sticky;top:0;z-index:1}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th,td{text-align:left;padding:10px 10px;border-bottom:1px solid #e5e5e5;vertical-align:middle;white-space:nowrap}
+th{color:#9a948d;font-size:11px;font-weight:800;background:#fff;position:sticky;top:0;z-index:1}
 tr:last-child td{border-bottom:0}
-.nameCell{font-weight:750;color:#2f2f2f;white-space:normal;min-width:180px}
-.pill{display:inline-flex;align-items:center;border:1px solid #dedede;background:#f7f7f7;border-radius:999px;padding:3px 9px;font-size:12px;font-weight:800;color:#6f6963;margin-left:8px}
-.empty{padding:28px;text-align:center;color:#8b8680;background:#f8f8f8;border-radius:8px}
-.priceGrid{display:grid;grid-template-columns:2fr repeat(3,1fr) auto;gap:10px;align-items:end}
-.priceList{display:grid;gap:8px;margin-top:14px}
-.priceItem{display:flex;justify-content:space-between;gap:12px;align-items:center;border:1px solid #e5e5e5;border-radius:8px;padding:10px 12px}
-.priceMeta{display:flex;gap:12px;color:#6f6963;font-size:13px;flex-wrap:wrap}
-.healthSummary{display:flex;gap:18px;align-items:baseline;flex-wrap:wrap}
-.healthRate{font-size:24px;font-weight:850}
+.nameCell{font-weight:700;color:#2f2f2f;white-space:normal;min-width:160px}
+.pill{display:inline-flex;align-items:center;border:1px solid #dedede;background:#f7f7f7;border-radius:999px;padding:2px 7px;font-size:11px;font-weight:700;color:#6f6963;margin-left:6px}
+.empty{padding:24px;text-align:center;color:#8b8680;background:#f8f8f8;border-radius:8px;font-size:13px}
+.priceGrid{display:grid;grid-template-columns:2fr repeat(3,1fr) auto;gap:8px;align-items:end}
+.priceList{display:grid;gap:6px;margin-top:12px}
+.priceItem{display:flex;justify-content:space-between;gap:10px;align-items:center;border:1px solid #e5e5e5;border-radius:8px;padding:8px 10px}
+.priceMeta{display:flex;gap:10px;color:#6f6963;font-size:12px;flex-wrap:wrap}
+.healthSummary{display:flex;gap:14px;align-items:baseline;flex-wrap:wrap}
+.healthRate{font-size:18px;font-weight:800}
 .healthScroller{overflow:auto;padding-bottom:4px}
-.healthGrid{display:grid;grid-template-columns:repeat(96,8px);grid-auto-rows:8px;gap:3px;min-width:max-content}
-.healthCell{width:8px;height:8px;border-radius:2px;background:#ececec;border:1px solid rgba(0,0,0,.04)}
+.healthGrid{display:grid;grid-template-columns:repeat(96,12px);grid-auto-rows:12px;gap:4px;min-width:max-content}
+.healthCell{width:12px;height:12px;border-radius:2px;background:#ececec;border:1px solid rgba(0,0,0,.04)}
 .healthCell.active{cursor:default}
-.legend{display:flex;gap:8px;align-items:center;color:#8b8680;font-size:12px;margin-top:10px;flex-wrap:wrap}
-.legendDot{width:10px;height:10px;border-radius:2px;display:inline-block}
-.filters{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
-.eventsMeta{display:flex;justify-content:space-between;color:#8b8680;font-size:13px;margin-bottom:8px;gap:10px;flex-wrap:wrap}
+.legend{display:flex;gap:6px;align-items:center;color:#8b8680;font-size:11px;margin-top:8px;flex-wrap:wrap}
+.legendDot{width:12px;height:12px;border-radius:2px;display:inline-block}
+.filters{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+.eventsMeta{display:flex;justify-content:space-between;color:#8b8680;font-size:12px;margin-bottom:6px;gap:8px;flex-wrap:wrap}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace}
 .nowrap{white-space:nowrap}
-.tooltip{position:fixed;z-index:20;background:#262626;color:#fff;border-radius:8px;padding:8px 10px;font-size:12px;pointer-events:none;box-shadow:0 12px 28px rgba(0,0,0,.22);max-width:260px}
+.tooltip{position:fixed;z-index:20;background:#262626;color:#fff;border-radius:8px;padding:8px 10px;font-size:11px;pointer-events:none;box-shadow:0 12px 28px rgba(0,0,0,.22);max-width:260px;line-height:1.6;white-space:nowrap}
+.tooltip .ok{color:#10b981}.tooltip .bad{color:#c65746}
 .hidden{display:none!important}
 @media(max-width:1120px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.layout{grid-template-columns:1fr}}
-@media(max-width:640px){.shell{padding:16px}h1{font-size:28px}.cards{grid-template-columns:1fr}.value{font-size:34px}.priceGrid{grid-template-columns:1fr}.btn,.select,.input{width:100%}.toolbar{width:100%}.toolbar>*{flex:1 1 150px}}
+@media(max-width:640px){.shell{padding:14px}h1{font-size:20px}.cards{grid-template-columns:1fr}.value{font-size:24px}.priceGrid{grid-template-columns:1fr}.btn,.select,.input{width:100%}.toolbar{width:100%}.toolbar>*{flex:1 1 150px}}
 @media(prefers-color-scheme:dark){:root{background:#111315;color:#f2f2f2}body{background:#111315;color:#f2f2f2}.panel,.stat,th,.btn,.select,.input{background:#181b1f;border-color:#30343a;color:#f2f2f2}.spark,.empty{background:#121417;border-color:#30343a}.label,th,.subtle,.updated,.neutral,.meta,.legend{color:#a8a29b}td{border-color:#30343a}.nameCell{color:#f2f2f2}.pill{background:#20242a;border-color:#3a3f46;color:#c9c3bc}.healthCell{background:#2a2f35}.tooltip{background:#f2f2f2;color:#1b1b1b}}
 </style>
 </head>
@@ -411,7 +412,7 @@ tr:last-child td{border-bottom:0}
   </div>
   <section class="cards">
     <div class="stat"><div class="label">总请求数</div><div class="value" id="totalRequests">-</div><div class="meta"><span class="ok" id="successText">成功请求：-</span><span class="bad" id="failureText">失败请求：-</span><span id="avgLatency">平均延迟：-</span></div><svg id="requestSpark" class="spark"></svg></div>
-    <div class="stat purple"><div class="label">总令牌数</div><div class="value" id="totalTokens">-</div><div class="meta"><span id="cachedText">缓存令牌：-</span><span id="reasoningText">思考令牌：-</span></div><svg id="tokenSpark" class="spark"></svg></div>
+    <div class="stat purple"><div class="label">总 token 数</div><div class="value" id="totalTokens">-</div><div class="meta"><span id="cachedText">缓存 token：-</span><span id="reasoningText">思考 token：-</span></div><svg id="tokenSpark" class="spark"></svg></div>
     <div class="stat green"><div class="label">每分钟请求</div><div class="value" id="rpm">-</div><div class="meta"><span id="rpmMeta">最近30分钟请求：-</span></div><svg id="rpmSpark" class="spark"></svg></div>
     <div class="stat amber"><div class="label">总花费</div><div class="value" id="totalCost">-</div><div class="meta"><span id="costMeta">按本页模型价格估算</span></div><svg id="costSpark" class="spark"></svg></div>
   </section>
@@ -425,7 +426,7 @@ tr:last-child td{border-bottom:0}
   </section>
   <section class="layout">
     <div class="panel">
-      <div class="panelHead"><h2>模型价格设置</h2><span class="subtle">单位：美元 / 百万令牌，保存在当前浏览器</span></div>
+      <div class="panelHead"><h2>模型价格设置</h2><span class="subtle">单位：美元 / 百万 token，保存在当前浏览器</span></div>
       <div class="priceGrid">
         <div><label class="subtle">模型</label><select id="priceModel" class="select"></select></div>
         <div><label class="subtle">输入价格</label><input id="pricePrompt" class="input" type="number" min="0" step="0.0001" placeholder="0.0000"></div>
@@ -444,7 +445,7 @@ tr:last-child td{border-bottom:0}
       <div class="tableWrap" id="apiStats"></div>
     </div>
     <div class="panel">
-      <div class="panelHead"><h2>模型统计</h2><span class="subtle">请求数、令牌、平均延迟、成功率和估算花费</span></div>
+      <div class="panelHead"><h2>模型统计</h2><span class="subtle">请求数、token、平均延迟、成功率和估算花费</span></div>
       <div class="tableWrap" id="modelStats"></div>
     </div>
     <div class="panel full">
@@ -481,7 +482,7 @@ function savePrices(){localStorage.setItem(storeKey,JSON.stringify(modelPrices))
 function timestampMs(value){const ms=Date.parse(value);return Number.isFinite(ms)?ms:0}
 function totalTokens(detail){const t=detail.tokens||{};return num(t.total_tokens)||num(t.input_tokens)+num(t.output_tokens)+num(t.reasoning_tokens)+Math.max(num(t.cached_tokens),num(t.cache_tokens))}
 function detailCost(detail){const p=modelPrices[detail.model];if(!p)return 0;const t=detail.tokens||{};const cached=Math.max(num(t.cached_tokens),num(t.cache_tokens));const input=Math.max(num(t.input_tokens)-cached,0);const output=Math.max(num(t.output_tokens),0);return input/1e6*num(p.prompt)+output/1e6*num(p.completion)+cached/1e6*num(p.cache)}
-function sourceLabel(detail){return detail.source||detail.auth_id||(detail.auth_index?'凭证 #'+detail.auth_index:'未知凭证')}
+function sourceLabel(detail){return detail.source||detail.provider||detail.auth_id||detail.auth_index||'未知来源'}
 function sourceKey(detail){return sourceLabel(detail)+'|'+(detail.auth_index||'')+'|'+(detail.auth_type||'')}
 function collectDetails(data){
   const rows=[];const apis=data?.apis||{};
@@ -534,17 +535,40 @@ function renderStats(){
   const avg=latencies.length?latencies.reduce((a,b)=>a+b,0)/latencies.length:0;
   const recent=details.filter((d)=>d.timestamp_ms>=Date.now()-30*60e3);
   setText('totalRequests',fmt.format(total));setText('successText','成功请求：'+fmt.format(success));setText('failureText','失败请求：'+fmt.format(failure));setText('avgLatency','平均延迟：'+formatMs(avg));
-  setText('totalTokens',compact(num(usage?.total_tokens)));setText('cachedText','缓存令牌：'+compact(cached));setText('reasoningText','思考令牌：'+compact(reasoning));
+  setText('totalTokens',compact(num(usage?.total_tokens)));setText('cachedText','缓存 token：'+compact(cached));setText('reasoningText','思考 token：'+compact(reasoning));
   setText('rpm',(recent.length/30).toFixed(2));setText('rpmMeta','最近30分钟请求：'+fmt.format(recent.length));
-  setText('totalCost',money.format(cost));setText('costMeta','总令牌数：'+compact(num(usage?.total_tokens)));
+  setText('totalCost',money.format(cost));setText('costMeta','总 token 数：'+compact(num(usage?.total_tokens)));
   drawSpark('requestSpark',bucketSeries(details,'requests',60,48),'#8b8680');drawSpark('tokenSpark',bucketSeries(details,'tokens',60,48),'#8b5cf6');drawSpark('rpmSpark',bucketSeries(details,'requests',5,48),'#22c55e');drawSpark('costSpark',bucketSeries(details,'cost',60,48),'#f59e0b');
 }
 function healthColor(rate){if(rate<0)return ''; const stops=[[239,68,68],[250,204,21],[34,197,94]]; const seg=rate<.5?0:1; const t=seg===0?rate*2:(rate-.5)*2; const a=stops[seg],b=stops[seg+1]; return 'rgb('+a.map((v,i)=>Math.round(v+(b[i]-v)*t)).join(',')+')'}
 function renderHealth(){
   const count=672, step=15*60e3, now=Date.now(), start=now-count*step; const stats=Array.from({length:count},()=>({s:0,f:0}));
   details.forEach((d)=>{if(d.timestamp_ms<start||d.timestamp_ms>now)return; const idx=count-1-Math.floor((now-d.timestamp_ms)/step); if(idx>=0&&idx<count){d.failed?stats[idx].f++:stats[idx].s++}});
-  let totalS=0,totalF=0; const html=stats.map((x,i)=>{totalS+=x.s;totalF+=x.f;const total=x.s+x.f;const rate=total?x.s/total:-1;const t0=new Date(start+i*step),t1=new Date(start+(i+1)*step);const title=t0.toLocaleString()+' - '+t1.toLocaleString()+'\\n成功 '+x.s+'，失败 '+x.f+(total?'，成功率 '+pct(rate*100):'');return '<div class="healthCell '+(total?'active':'')+'" title="'+esc(title)+'" style="'+(total?'background:'+healthColor(rate):'')+'"></div>'}).join('');
-  $('healthGrid').innerHTML=html; const total=totalS+totalF; setText('healthRate',total?pct(totalS/total*100):'-'); setText('healthSuccess','成功 '+fmt.format(totalS)); setText('healthFailure','失败 '+fmt.format(totalF));
+  let totalS=0,totalF=0; const cells=[]; const tooltips=[];
+  stats.forEach((x,i)=>{
+    totalS+=x.s;totalF+=x.f;const total=x.s+x.f;const rate=total?x.s/total:-1;
+    const t0=new Date(start+i*step),t1=new Date(start+(i+1)*step);
+    const timeRange=t0.toLocaleString()+' - '+t1.toLocaleString();
+    const tip='<span>'+timeRange+'</span><br><span class="ok">成功 '+x.s+'</span> <span class="bad">失败 '+x.f+'</span>'+(total?' <span>成功率 '+pct(rate*100)+'</span>':'');
+    tooltips.push(tip);
+    cells.push('<div class="healthCell '+(total?'active':'')+'" data-health-idx="'+i+'" style="'+(total?'background:'+healthColor(rate):'')+'"></div>');
+  });
+  $('healthGrid').innerHTML=cells.join('');
+  const tip=$('tooltip');
+  $('healthGrid').onmouseover=function(e){
+    const cell=e.target.closest('.healthCell');
+    if(!cell||!cell.classList.contains('active')){tip.classList.add('hidden');return}
+    const idx=parseInt(cell.dataset.healthIdx);if(isNaN(idx)||idx<0||idx>=count){tip.classList.add('hidden');return}
+    tip.innerHTML=tooltips[idx];tip.classList.remove('hidden');
+    const r=cell.getBoundingClientRect();let left=r.right+6,top=r.top-4;
+    if(left+260>window.innerWidth)left=r.left-266;if(top+60>window.innerHeight)top=window.innerHeight-70;
+    tip.style.left=left+'px';tip.style.top=top+'px';
+  };
+  $('healthGrid').onmouseleave=function(e){
+    if(!e.relatedTarget||!e.relatedTarget.closest('.healthCell'))tip.classList.add('hidden');
+  };
+  $('healthGrid').onmouseout=function(e){const t=e.relatedTarget;if(!t||!t.closest('.healthCell'))tip.classList.add('hidden')};
+  const total=totalS+totalF; setText('healthRate',total?pct(totalS/total*100):'-'); setText('healthSuccess','成功 '+fmt.format(totalS)); setText('healthFailure','失败 '+fmt.format(totalF));
 }
 function modelNames(){return [...new Set(details.map((d)=>d.model).filter(Boolean))].sort((a,b)=>a.localeCompare(b))}
 function renderPrices(){
@@ -560,12 +584,12 @@ function renderCredentials(){
 }
 function renderApiStats(){
   const rows=Object.entries(usage?.apis||{}).map(([api,a])=>({api,requests:num(a.total_requests),success:num(a.success_count),failure:num(a.failure_count),tokens:num(a.total_tokens),models:a.models||{},cost:collectDetails({apis:{[api]:a}}).reduce((s,d)=>s+d.cost,0)})).sort((a,b)=>b.requests-a.requests);
-  $('apiStats').innerHTML=rows.length?'<table><thead><tr><th>接口</th><th>请求</th><th>令牌</th><th>花费</th><th>模型</th></tr></thead><tbody>'+rows.map((r)=>'<tr><td class="nameCell">'+esc(r.api)+'</td><td>'+fmt.format(r.requests)+' <span class="ok">('+fmt.format(r.success)+'</span> <span class="bad">'+fmt.format(r.failure)+')</span></td><td>'+compact(r.tokens)+'</td><td>'+money.format(r.cost)+'</td><td>'+Object.keys(r.models).slice(0,4).map(esc).join('、')+'</td></tr>').join('')+'</tbody></table>':'<div class="empty">暂无接口数据</div>';
+  $('apiStats').innerHTML=rows.length?'<table><thead><tr><th>接口</th><th>请求</th><th>token</th><th>花费</th><th>模型</th></tr></thead><tbody>'+rows.map((r)=>'<tr><td class="nameCell">'+esc(r.api)+'</td><td>'+fmt.format(r.requests)+' <span class="ok">('+fmt.format(r.success)+'</span> <span class="bad">'+fmt.format(r.failure)+')</span></td><td>'+compact(r.tokens)+'</td><td>'+money.format(r.cost)+'</td><td>'+Object.keys(r.models).slice(0,4).map(esc).join('、')+'</td></tr>').join('')+'</tbody></table>':'<div class="empty">暂无接口数据</div>';
 }
 function renderModelStats(){
   const map=new Map(); details.forEach((d)=>{const r=map.get(d.model)||{model:d.model,requests:0,success:0,failure:0,tokens:0,cost:0,latency:[]}; r.requests++; d.failed?r.failure++:r.success++; r.tokens+=d.total_tokens; r.cost+=d.cost; if(num(d.latency_ms)>0)r.latency.push(num(d.latency_ms)); map.set(d.model,r)});
   const rows=[...map.values()].sort((a,b)=>b.requests-a.requests);
-  $('modelStats').innerHTML=rows.length?'<table><thead><tr><th>模型</th><th>请求</th><th>令牌</th><th>平均延迟</th><th>成功率</th><th>花费</th></tr></thead><tbody>'+rows.map((r)=>{const rate=r.requests?r.success/r.requests*100:100; const avg=r.latency.length?r.latency.reduce((a,b)=>a+b,0)/r.latency.length:0; return '<tr><td class="nameCell">'+esc(r.model)+'</td><td>'+fmt.format(r.requests)+' <span class="ok">('+fmt.format(r.success)+'</span> <span class="bad">'+fmt.format(r.failure)+')</span></td><td>'+compact(r.tokens)+'</td><td>'+formatMs(avg)+'</td><td class="'+(rate>=95?'ok':rate>=80?'neutral':'bad')+'">'+pct(rate)+'</td><td>'+money.format(r.cost)+'</td></tr>'}).join('')+'</tbody></table>':'<div class="empty">暂无模型数据</div>';
+  $('modelStats').innerHTML=rows.length?'<table><thead><tr><th>模型</th><th>请求</th><th>token</th><th>平均延迟</th><th>成功率</th><th>花费</th></tr></thead><tbody>'+rows.map((r)=>{const rate=r.requests?r.success/r.requests*100:100; const avg=r.latency.length?r.latency.reduce((a,b)=>a+b,0)/r.latency.length:0; return '<tr><td class="nameCell">'+esc(r.model)+'</td><td>'+fmt.format(r.requests)+' <span class="ok">('+fmt.format(r.success)+'</span> <span class="bad">'+fmt.format(r.failure)+')</span></td><td>'+compact(r.tokens)+'</td><td>'+formatMs(avg)+'</td><td class="'+(rate>=95?'ok':rate>=80?'neutral':'bad')+'">'+pct(rate)+'</td><td>'+money.format(r.cost)+'</td></tr>'}).join('')+'</tbody></table>':'<div class="empty">暂无模型数据</div>';
 }
 function renderFilters(){
   const fill=(id,label,values)=>{const old=$(id).value;$(id).innerHTML='<option value="">全部'+label+'</option>'+values.map((v)=>'<option value="'+esc(v)+'">'+esc(v)+'</option>').join('');$(id).value=[...values,''].includes(old)?old:''};
@@ -578,7 +602,7 @@ function renderEvents(){
   $('events').innerHTML=rows.length?'<table><thead><tr><th>时间</th><th>模型</th><th>来源</th><th>凭证</th><th>结果</th><th>延迟</th><th>输入</th><th>输出</th><th>思考</th><th>缓存</th><th>总计</th></tr></thead><tbody>'+rows.slice(0,500).map((d)=>'<tr><td>'+new Date(d.timestamp_ms).toLocaleString()+'</td><td class="nameCell">'+esc(d.model)+'</td><td>'+esc(sourceLabel(d))+'</td><td>'+(esc(d.auth_index||'-'))+'</td><td class="'+(d.failed?'bad':'ok')+'">'+(d.failed?'失败':'成功')+'</td><td>'+formatMs(num(d.latency_ms))+'</td><td>'+fmt.format(num(d.tokens?.input_tokens))+'</td><td>'+fmt.format(num(d.tokens?.output_tokens))+'</td><td>'+fmt.format(num(d.tokens?.reasoning_tokens))+'</td><td>'+fmt.format(d.cached_tokens)+'</td><td>'+fmt.format(d.total_tokens)+'</td></tr>').join('')+'</tbody></table>':'<div class="empty">暂无请求事件</div>';
 }
 function download(name,text,type){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type}));a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}
-function exportRows(kind){const rows=[...details]; const stamp=new Date().toISOString().replace(/[:.]/g,'-'); if(kind==='json'){download('usage-events-'+stamp+'.json',JSON.stringify(rows,null,2),'application/json;charset=utf-8');return} const head=['时间','模型','来源','凭证','结果','延迟毫秒','输入令牌','输出令牌','思考令牌','缓存令牌','总令牌']; const csv=[head,...rows.map((d)=>[d.timestamp,d.model,sourceLabel(d),d.auth_index||'',d.failed?'失败':'成功',num(d.latency_ms),num(d.tokens?.input_tokens),num(d.tokens?.output_tokens),num(d.tokens?.reasoning_tokens),d.cached_tokens,d.total_tokens])].map((row)=>row.map((v)=>'"'+String(v??'').replace(/"/g,'""')+'"').join(',')).join('\\n'); download('usage-events-'+stamp+'.csv',csv,'text/csv;charset=utf-8')}
+function exportRows(kind){const rows=[...details]; const stamp=new Date().toISOString().replace(/[:.]/g,'-'); if(kind==='json'){download('usage-events-'+stamp+'.json',JSON.stringify(rows,null,2),'application/json;charset=utf-8');return} const head=['时间','模型','来源','凭证','结果','延迟毫秒','输入 token','输出 token','思考 token','缓存 token','总 token']; const csv=[head,...rows.map((d)=>[d.timestamp,d.model,sourceLabel(d),d.auth_index||'',d.failed?'失败':'成功',num(d.latency_ms),num(d.tokens?.input_tokens),num(d.tokens?.output_tokens),num(d.tokens?.reasoning_tokens),d.cached_tokens,d.total_tokens])].map((row)=>row.map((v)=>'"'+String(v??'').replace(/"/g,'""')+'"').join(',')).join('\\n'); download('usage-events-'+stamp+'.csv',csv,'text/csv;charset=utf-8')}
 function rerender(){details=collectDetails(usage);renderPrices();renderStats();renderHealth();renderCredentials();renderApiStats();renderModelStats();renderFilters();renderEvents()}
 async function load() {
   try {
@@ -1140,7 +1164,6 @@ func usageGroupKey(record UsageRecord) string {
 	source := strings.TrimSpace(record.Source)
 	authType := strings.TrimSpace(record.AuthType)
 	authIndex := strings.TrimSpace(record.AuthIndex)
-	apiKey := strings.TrimSpace(record.APIKey)
 
 	parts := make([]string, 0, 3)
 	if provider != "" {
@@ -1154,9 +1177,7 @@ func usageGroupKey(record UsageRecord) string {
 	if source != "" {
 		parts = append(parts, source)
 	} else if authIndex != "" {
-		parts = append(parts, "凭证 #"+authIndex)
-	} else if apiKey != "" {
-		parts = append(parts, "密钥 "+fingerprint(apiKey))
+		parts = append(parts, authIndex)
 	}
 	if len(parts) == 0 {
 		return "未知接口"
@@ -1171,13 +1192,19 @@ func usageSource(record UsageRecord) string {
 	if authID := strings.TrimSpace(record.AuthID); authID != "" {
 		return authID
 	}
+	provider := strings.TrimSpace(record.Provider)
+	if provider != "" {
+		authIndex := strings.TrimSpace(record.AuthIndex)
+		if authIndex != "" {
+			// e.g. "opencode · auth-xyz" style
+			return provider + " · " + authIndex
+		}
+		return provider
+	}
 	if authIndex := strings.TrimSpace(record.AuthIndex); authIndex != "" {
-		return "凭证 #" + authIndex
+		return authIndex
 	}
-	if apiKey := strings.TrimSpace(record.APIKey); apiKey != "" {
-		return "密钥 " + fingerprint(apiKey)
-	}
-	return "未知凭证"
+	return "未知来源"
 }
 
 func usageThinking(record UsageRecord) UsageThinking {
