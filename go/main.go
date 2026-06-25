@@ -482,8 +482,10 @@ function savePrices(){localStorage.setItem(storeKey,JSON.stringify(modelPrices))
 function timestampMs(value){const ms=Date.parse(value);return Number.isFinite(ms)?ms:0}
 function totalTokens(detail){const t=detail.tokens||{};return num(t.total_tokens)||num(t.input_tokens)+num(t.output_tokens)+num(t.reasoning_tokens)+Math.max(num(t.cached_tokens),num(t.cache_tokens))}
 function detailCost(detail){const p=modelPrices[detail.model];if(!p)return 0;const t=detail.tokens||{};const cached=Math.max(num(t.cached_tokens),num(t.cache_tokens));const input=Math.max(num(t.input_tokens)-cached,0);const output=Math.max(num(t.output_tokens),0);return input/1e6*num(p.prompt)+output/1e6*num(p.completion)+cached/1e6*num(p.cache)}
-function sourceLabel(detail){return detail.source||detail.provider||detail.auth_id||detail.auth_index||'未知来源'}
+function looksLikeKey(v){return typeof v==='string'&&(v.startsWith('sk-')||v.startsWith('AIza')||v.startsWith('hf_')||v.length>=80)}
+function sourceLabel(detail){const s=detail.source||'';if(s&&!looksLikeKey(s))return s;const p=detail.provider||'';if(p&&!looksLikeKey(p))return p;const a=detail.auth_id||'';if(a&&!looksLikeKey(a))return a;return detail.auth_index||'未知来源'}
 function sourceKey(detail){return sourceLabel(detail)+'|'+(detail.auth_index||'')+'|'+(detail.auth_type||'')}
+function friendlyApiName(apiName){if(!apiName)return'未知接口';const parts=apiName.split(' · ').filter(function(p){return !looksLikeKey(p)});return parts.length?parts.join(' · '):apiName}
 function collectDetails(data){
   const rows=[];const apis=data?.apis||{};
   Object.entries(apis).forEach(([api,apiData])=>{
@@ -584,7 +586,7 @@ function renderCredentials(){
 }
 function renderApiStats(){
   const rows=Object.entries(usage?.apis||{}).map(([api,a])=>({api,requests:num(a.total_requests),success:num(a.success_count),failure:num(a.failure_count),tokens:num(a.total_tokens),models:a.models||{},cost:collectDetails({apis:{[api]:a}}).reduce((s,d)=>s+d.cost,0)})).sort((a,b)=>b.requests-a.requests);
-  $('apiStats').innerHTML=rows.length?'<table><thead><tr><th>接口</th><th>请求</th><th>token</th><th>花费</th><th>模型</th></tr></thead><tbody>'+rows.map((r)=>'<tr><td class="nameCell">'+esc(r.api)+'</td><td>'+fmt.format(r.requests)+' <span class="ok">('+fmt.format(r.success)+'</span> <span class="bad">'+fmt.format(r.failure)+')</span></td><td>'+compact(r.tokens)+'</td><td>'+money.format(r.cost)+'</td><td>'+Object.keys(r.models).slice(0,4).map(esc).join('、')+'</td></tr>').join('')+'</tbody></table>':'<div class="empty">暂无接口数据</div>';
+  $('apiStats').innerHTML=rows.length?'<table><thead><tr><th>接口</th><th>请求</th><th>token</th><th>花费</th><th>模型</th></tr></thead><tbody>'+rows.map((r)=>'<tr><td class="nameCell">'+esc(friendlyApiName(r.api))+'</td><td>'+fmt.format(r.requests)+' <span class="ok">('+fmt.format(r.success)+'</span> <span class="bad">'+fmt.format(r.failure)+')</span></td><td>'+compact(r.tokens)+'</td><td>'+money.format(r.cost)+'</td><td>'+Object.keys(r.models).slice(0,4).map(esc).join('、')+'</td></tr>').join('')+'</tbody></table>':'<div class="empty">暂无接口数据</div>';
 }
 function renderModelStats(){
   const map=new Map(); details.forEach((d)=>{const r=map.get(d.model)||{model:d.model,requests:0,success:0,failure:0,tokens:0,cost:0,latency:[]}; r.requests++; d.failed?r.failure++:r.success++; r.tokens+=d.total_tokens; r.cost+=d.cost; if(num(d.latency_ms)>0)r.latency.push(num(d.latency_ms)); map.set(d.model,r)});
@@ -1158,6 +1160,68 @@ func dedupKey(apiName, modelName string, detail RequestDetail) string {
 	)
 }
 
+// looksLikeSecretKey returns true when raw looks like an API key rather than
+// a human-readable identifier.  CPA may pass the actual key (or a masked/hashed
+// form) in the Source field for some provider types.
+func looksLikeSecretKey(raw string) bool {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return false
+	}
+	// Starts with common key prefixes.
+	if strings.HasPrefix(s, "sk-") || strings.HasPrefix(s, "AIza") ||
+		strings.HasPrefix(s, "hf_") || strings.HasPrefix(s, "pk_") ||
+		strings.HasPrefix(s, "rk_") {
+		return true
+	}
+	// Long hex strings without spaces are likely fingerprints / hashes.
+	if len(s) >= 40 && !strings.ContainsAny(s, " /.-_") {
+		return true
+	}
+	// Very long tokens (>80 chars) without spaces.
+	if len(s) >= 80 && !strings.Contains(s, " ") {
+		return true
+	}
+	return false
+}
+
+// friendlySourceName turns a raw source value into a human-readable label.
+// It never leaks API keys.
+func friendlySourceName(record UsageRecord) string {
+	provider := strings.TrimSpace(record.Provider)
+	executor := strings.TrimSpace(record.ExecutorType)
+	source := strings.TrimSpace(record.Source)
+	authType := strings.TrimSpace(record.AuthType)
+	authIndex := strings.TrimSpace(record.AuthIndex)
+	authID := strings.TrimSpace(record.AuthID)
+
+	// If source is a clean name (not a key), use it directly.
+	if source != "" && !looksLikeSecretKey(source) {
+		return source
+	}
+	// AuthID from OAuth / auth files is usually a clean identifier.
+	if authID != "" && !looksLikeSecretKey(authID) {
+		return authID
+	}
+	// Build from provider / executor + auth info.
+	name := provider
+	if name == "" {
+		name = executor
+	}
+	if name == "" {
+		name = "unknown"
+	}
+	// Append authType for disambiguation (e.g. "opencode · openai").
+	if authType != "" && authType != name {
+		name = name + " · " + authType
+	}
+	// Append authIndex if present (e.g. "opencode · openai · 3").
+	if authIndex != "" {
+		name = name + " · " + authIndex
+	}
+	return name
+}
+
 func usageGroupKey(record UsageRecord) string {
 	provider := strings.TrimSpace(record.Provider)
 	executor := strings.TrimSpace(record.ExecutorType)
@@ -1171,10 +1235,11 @@ func usageGroupKey(record UsageRecord) string {
 	} else if executor != "" {
 		parts = append(parts, executor)
 	}
-	if authType != "" {
+	if authType != "" && authType != provider && authType != executor {
 		parts = append(parts, authType)
 	}
-	if source != "" {
+	// Use friendly name for the source part — never leak keys.
+	if source != "" && !looksLikeSecretKey(source) {
 		parts = append(parts, source)
 	} else if authIndex != "" {
 		parts = append(parts, authIndex)
@@ -1186,25 +1251,7 @@ func usageGroupKey(record UsageRecord) string {
 }
 
 func usageSource(record UsageRecord) string {
-	if source := strings.TrimSpace(record.Source); source != "" {
-		return source
-	}
-	if authID := strings.TrimSpace(record.AuthID); authID != "" {
-		return authID
-	}
-	provider := strings.TrimSpace(record.Provider)
-	if provider != "" {
-		authIndex := strings.TrimSpace(record.AuthIndex)
-		if authIndex != "" {
-			// e.g. "opencode · auth-xyz" style
-			return provider + " · " + authIndex
-		}
-		return provider
-	}
-	if authIndex := strings.TrimSpace(record.AuthIndex); authIndex != "" {
-		return authIndex
-	}
-	return "未知来源"
+	return friendlySourceName(record)
 }
 
 func usageThinking(record UsageRecord) UsageThinking {
