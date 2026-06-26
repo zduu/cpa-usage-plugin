@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -91,6 +93,49 @@ func TestUsageRecordUnmarshalAcceptsSnakeCaseFields(t *testing.T) {
 	}
 }
 
+func TestHandleImportUsageAcceptsV120ExportFixture(t *testing.T) {
+	fixture := filepath.Join("..", "temp", "usage-export-2026-06-26T02-46-40-375Z.json")
+	body, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Skipf("fixture not available: %v", err)
+	}
+
+	previousStats := stats
+	stats = NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 10000, RetentionDays: 0, DedupWindowMinutes: 0})
+	t.Cleanup(func() { stats = previousStats })
+
+	raw, err := handleImportUsage(body)
+	if err != nil {
+		t.Fatalf("handleImportUsage() error = %v", err)
+	}
+	var env envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("failed to unmarshal envelope: %v", err)
+	}
+	if !env.OK {
+		if env.Error != nil {
+			t.Fatalf("import failed: %s: %s", env.Error.Code, env.Error.Message)
+		}
+		t.Fatal("import failed without error details")
+	}
+
+	var resp ManagementResponse
+	if err := json.Unmarshal(env.Result, &resp); err != nil {
+		t.Fatalf("failed to unmarshal management response: %v", err)
+	}
+	var result ImportResponse
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatalf("failed to unmarshal import response: %v", err)
+	}
+	if result.Added != 430 {
+		t.Fatalf("added = %d, want 430", result.Added)
+	}
+	if result.TotalRequests != 430 {
+		t.Fatalf("total_requests = %d, want 430", result.TotalRequests)
+	}
+}
+
 func TestRecordStoresMaskedClientAPIKeyAndCleanSource(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Record(UsageRecord{
@@ -133,12 +178,12 @@ func TestRecordStoresMaskedClientAPIKeyAndCleanSource(t *testing.T) {
 	hash1 := detail.APIKeyHash
 	// Record again, hash should be identical
 	stats.Record(UsageRecord{
-		Provider:  "openai-compatible-opencode",
-		AuthType:  "apikey",
-		AuthIndex: "5312415661d8a481",
-		Source:    "openai-compatible-opencode · apikey · 5312415661d8a481",
-		APIKey:    "sk-test-client-key-zy",
-		Model:     "deepseek-v3.1",
+		Provider:    "openai-compatible-opencode",
+		AuthType:    "apikey",
+		AuthIndex:   "5312415661d8a481",
+		Source:      "openai-compatible-opencode · apikey · 5312415661d8a481",
+		APIKey:      "sk-test-client-key-zy",
+		Model:       "deepseek-v3.1",
 		RequestedAt: time.Now().Add(time.Minute),
 		Detail: UsageDetail{
 			InputTokens:  1,
@@ -160,8 +205,8 @@ func TestStripCredentialSuffix(t *testing.T) {
 		"openai-compatibility:opencode:a4e4860e4fc0":             "openai-compatibility:opencode",
 		"deepseek": "deepseek",
 		// Separator compatibility (P1-15)
-		"opencode - sk-abc123":   "opencode",
-		"opencode | sk-abc123":   "opencode",
+		"opencode - sk-abc123": "opencode",
+		"opencode | sk-abc123": "opencode",
 	}
 	for input, want := range tests {
 		if got := stripCredentialSuffix(input); got != want {
@@ -335,16 +380,16 @@ func TestRegisterResponseExposesUpdateConfigFields(t *testing.T) {
 func TestDashboardMarkupContainsHealthRowsApiSelectorAndBackoff(t *testing.T) {
 	checks := map[string]string{
 		"health grid seven rows":       "grid-template-rows:repeat(7,12px)",
-		"health grid explicit columns": "grid-column:'+col+';grid-row:'+row",
-		"health grid column order":     "row=rows-(age%rows)",
+		"health grid column style":     "healthCellStyle",
+		"health grid column order":     "healthColor(rate)",
 		"upstream api selector":        `id="apiSelect"`,
 		"selector options are updated": "$('apiSelect').innerHTML",
 		"poll scheduler exists":        "function schedulePoll",
 		"failure backoff exists":       "function nextFailureDelay",
 	}
 	for name, needle := range checks {
-		if !strings.Contains(dashboardHTML, needle) {
-			t.Fatalf("%s: dashboardHTML missing %q", name, needle)
+		if !strings.Contains(completeDashboardHTML, needle) {
+			t.Fatalf("%s: completeDashboardHTML missing %q", name, needle)
 		}
 	}
 }
@@ -364,9 +409,9 @@ func TestResponseHeadersAreNotSavedByDefault(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0})
 	stats.Record(UsageRecord{
-		Provider:       "openai",
-		Model:          "gpt-4",
-		RequestedAt:    time.Now().Add(-1 * time.Minute),
+		Provider:    "openai",
+		Model:       "gpt-4",
+		RequestedAt: time.Now().Add(-1 * time.Minute),
 		ResponseHeaders: map[string][]string{
 			"X-Request-Id": {"abc123"},
 			"Set-Cookie":   {"secret"},
@@ -418,9 +463,9 @@ func TestResponseHeadersWhitelistSpecific(t *testing.T) {
 		Model:       "gpt-4",
 		RequestedAt: time.Now().Add(-3 * time.Minute),
 		ResponseHeaders: map[string][]string{
-			"X-Request-Id":   {"abc123"},
-			"X-Rate-Limit":   {"100"},
-			"Content-Type":   {"application/json"},
+			"X-Request-Id": {"abc123"},
+			"X-Rate-Limit": {"100"},
+			"Content-Type": {"application/json"},
 		},
 		Detail: UsageDetail{TotalTokens: 10},
 	})
@@ -555,6 +600,39 @@ func TestMergeSnapshot_RecentRecordsAdded(t *testing.T) {
 	}
 }
 
+func TestMergeSnapshot_NormalizesNegativeLatencyFields(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{RetentionDays: 30, DedupWindowMinutes: 0, MaxDetailsPerModel: 10000})
+
+	snapshot := StatisticsSnapshot{
+		APIs: map[string]APISnapshot{
+			"test-api": {
+				Models: map[string]ModelSnapshot{
+					"test-model": {
+						Details: []RequestDetail{
+							{
+								Timestamp: time.Now().Add(-time.Hour),
+								LatencyMs: -10,
+								TTFTMs:    -20,
+								Tokens:    TokenStats{TotalTokens: 100},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	result := stats.MergeSnapshot(snapshot)
+	if result.Added != 1 {
+		t.Fatalf("record should be added, got result=%#v", result)
+	}
+	detail := stats.Snapshot().APIs["test-api"].Models["test-model"].Details[0]
+	if detail.LatencyMs != 0 || detail.TTFTMs != 0 {
+		t.Fatalf("latency fields = %d/%d, want 0/0", detail.LatencyMs, detail.TTFTMs)
+	}
+}
+
 func TestMergeSnapshot_DuplicatesSkipped(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{RetentionDays: 30, DedupWindowMinutes: 0, MaxDetailsPerModel: 10000})
@@ -641,8 +719,8 @@ func TestRecordConcurrentSafety(t *testing.T) {
 					Provider: "deepseek",
 					Model:    "deepseek-v3.1",
 					Detail: UsageDetail{
-						InputTokens:  int64(i + 1),
-						TotalTokens:  int64(i + 1),
+						InputTokens: int64(i + 1),
+						TotalTokens: int64(i + 1),
 					},
 				})
 			}

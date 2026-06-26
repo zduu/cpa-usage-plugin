@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>用量统计</title>
+<!-- CSS injected at build time -->
+</head>
+<body>
+<main class="shell">
+  <div class="header">
+    <h1>使用统计</h1>
+    <div class="toolbar">
+      <label for="range">时间范围</label>
+      <select id="range" class="select">
+        <option value="7h">最近7小时</option>
+        <option value="24h" selected>最近24小时</option>
+        <option value="7d">最近7天</option>
+        <option value="all">全部</option>
+      </select>
+      <button id="exportBtn" class="btn">导出数据</button>
+      <button id="importBtn" class="btn">导入数据</button>
+      <button id="refreshBtn" class="btn primary">刷新</button>
+      <input id="importFile" type="file" accept="application/json,.json" class="hidden">
+      <span class="updated" id="updated">正在加载...</span>
+    </div>
+  </div>
+  <section class="cards">
+    <div class="stat"><div class="label">总请求数</div><div class="value" id="totalRequests">-</div><div class="meta"><span class="ok" id="successText">成功请求：-</span><span class="bad" id="failureText">失败请求：-</span><span id="avgLatency">平均延迟：-</span></div><svg id="requestSpark" class="spark"></svg></div>
+    <div class="stat purple"><div class="label">总 token 数</div><div class="value" id="totalTokens">-</div><div class="meta"><span id="cachedText">缓存 token：-</span><span id="reasoningText">思考 token：-</span></div><svg id="tokenSpark" class="spark"></svg></div>
+    <div class="stat green"><div class="label">每分钟请求</div><div class="value" id="rpm">-</div><div class="meta"><span id="rpmMeta">最近30分钟请求：-</span></div><svg id="rpmSpark" class="spark"></svg></div>
+    <div class="stat amber"><div class="label">总花费</div><div class="value" id="totalCost">-</div><div class="meta"><span id="costMeta">按本页模型价格估算</span></div><svg id="costSpark" class="spark"></svg></div>
+  </section>
+  <section class="panel full">
+    <div class="panelHead">
+      <div><h2>服务健康监测</h2><div class="subtle">最近7天，15分钟一个网格；绿色代表成功率高，红色代表失败较多。</div></div>
+      <div class="healthSummary"><span>成功率</span><span class="healthRate" id="healthRate">-</span><span class="ok" id="healthSuccess">成功 -</span><span class="bad" id="healthFailure">失败 -</span></div>
+    </div>
+    <div class="healthScroller"><div class="healthGrid" id="healthGrid"></div></div>
+    <div class="legend"><span>少</span><span class="legendDot" style="background:#ef4444"></span><span class="legendDot" style="background:#facc15"></span><span class="legendDot" style="background:#22c55e"></span><span>多</span><span>灰色为无请求</span></div>
+  </section>
+  <section class="layout">
+    <div class="panel">
+      <div class="panelHead"><h2>模型价格设置</h2><span class="subtle">单位：美元 / 百万 token，保存在当前浏览器</span></div>
+      <div class="priceGrid">
+        <div><label class="subtle">模型</label><select id="priceModel" class="select"></select></div>
+        <div><label class="subtle">输入价格</label><input id="pricePrompt" class="input" type="number" min="0" step="0.0001" placeholder="0.0000"></div>
+        <div><label class="subtle">输出价格</label><input id="priceCompletion" class="input" type="number" min="0" step="0.0001" placeholder="0.0000"></div>
+        <div><label class="subtle">缓存价格</label><input id="priceCache" class="input" type="number" min="0" step="0.0001" placeholder="默认同输入"></div>
+        <button id="savePrice" class="btn primary">保存</button>
+      </div>
+      <div class="priceList" id="priceList"></div>
+    </div>
+    <div class="panel">
+      <div class="panelHead"><h2>来源统计</h2><span class="subtle">按上游来源聚合成功率</span></div>
+      <div class="tableWrap" id="credentialStats"></div>
+    </div>
+    <div class="panel full">
+      <div class="panelHead">
+        <div><h2>API 详细统计</h2><div class="subtle">按调用 CPA 服务的 API key 聚合。</div></div>
+        <div class="segmented">
+          <button class="btn active" data-api-sort="requests">请求次数</button>
+          <button class="btn" data-api-sort="tokens">Token数量</button>
+          <button class="btn" data-api-sort="cost">总花费</button>
+        </div>
+      </div>
+      <div id="clientApiStats"></div>
+    </div>
+    <div class="panel">
+      <div class="panelHead"><h2>上游接口统计</h2><span class="subtle">按上游提供商和来源聚合</span></div>
+      <div class="tableWrap" id="apiStats"></div>
+    </div>
+    <div class="panel full">
+      <div class="panelHead">
+        <div><h2>上游接口详情</h2><div class="subtle" id="apiDetailTitle">选择一个上游接口查看模型、来源、错误和最近请求。</div></div>
+        <div class="toolbar"><label for="apiSelect">上游接口</label><select id="apiSelect" class="select"></select><button id="exportApiCsv" class="btn">导出当前接口表格</button><button id="exportApiJson" class="btn">导出当前接口明细</button></div>
+      </div>
+      <div id="apiDetail"></div>
+    </div>
+    <div class="panel">
+      <div class="panelHead"><h2>模型统计</h2><span class="subtle">请求数、token、平均延迟、成功率和估算花费</span></div>
+      <div class="tableWrap" id="modelStats"></div>
+    </div>
+    <div class="panel full">
+      <div class="panelHead">
+        <div><h2>请求事件明细</h2><div class="subtle">可按模型、来源、凭证筛选并导出。列表保持滚动查看。</div></div>
+        <div class="toolbar"><button id="clearFilters" class="btn">清除筛选</button><button id="exportRowsCsv" class="btn">导出表格</button><button id="exportRowsJson" class="btn">导出明细</button></div>
+      </div>
+      <div class="filters">
+        <select id="filterModel" class="select"></select>
+        <select id="filterSource" class="select"></select>
+        <select id="filterAuth" class="select"></select>
+      </div>
+      <div class="eventsMeta"><span id="eventsCount">-</span><span>延迟单位：毫秒</span></div>
+      <div class="tableWrap" id="events"></div>
+    </div>
+  </section>
+</main>
+<div id="tooltip" class="tooltip hidden"></div>
+<!-- JS injected at build time -->
+</body>
+</html>
