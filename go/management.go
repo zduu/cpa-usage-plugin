@@ -116,6 +116,14 @@ func handleManagementRegister() ([]byte, error) {
 				Description: "用量统计请求事件明细（分页）。",
 			},
 			{
+				Path:        "/usage/export",
+				Description: "用量统计导出数据。",
+			},
+			{
+				Path:        "/usage/import",
+				Description: "用量统计导入数据。",
+			},
+			{
 				Path:        "/health",
 				Description: "插件运行健康状态。",
 			},

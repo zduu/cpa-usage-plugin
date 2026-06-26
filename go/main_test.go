@@ -136,6 +136,59 @@ func TestHandleImportUsageAcceptsV120ExportFixture(t *testing.T) {
 	}
 }
 
+func TestManagementImportRouteAcceptsExportFixture(t *testing.T) {
+	fixture := filepath.Join("..", "temp", "usage-export-2026-06-26T02-46-40-375Z.json")
+	body, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Skipf("fixture not available: %v", err)
+	}
+
+	previousStats := stats
+	stats = NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 10000, RetentionDays: 0, DedupWindowMinutes: 0})
+	t.Cleanup(func() { stats = previousStats })
+
+	req := ManagementRequest{
+		Method: "POST",
+		Path:   "/v0/management/plugins/usage-statistics/usage/import",
+		Body:   body,
+	}
+	reqBody, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal management request: %v", err)
+	}
+
+	raw, err := handleManagement(reqBody)
+	if err != nil {
+		t.Fatalf("handleManagement() error = %v", err)
+	}
+	var env envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("failed to unmarshal envelope: %v", err)
+	}
+	if !env.OK {
+		if env.Error != nil {
+			t.Fatalf("management import failed: %s: %s", env.Error.Code, env.Error.Message)
+		}
+		t.Fatal("management import failed without error details")
+	}
+
+	var resp ManagementResponse
+	if err := json.Unmarshal(env.Result, &resp); err != nil {
+		t.Fatalf("failed to unmarshal management response: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var result ImportResponse
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatalf("failed to unmarshal import response: %v", err)
+	}
+	if result.Added != 430 || result.TotalRequests != 430 {
+		t.Fatalf("result = %#v, want added/total 430", result)
+	}
+}
+
 func TestRecordStoresMaskedClientAPIKeyAndCleanSource(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Record(UsageRecord{
@@ -374,6 +427,33 @@ func TestRegisterResponseExposesUpdateConfigFields(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"Name":"update_version"`) {
 		t.Fatalf("register response missing update_version: %s", raw)
+	}
+}
+
+func TestManagementRegisterIncludesImportExportResources(t *testing.T) {
+	raw, err := handleManagementRegister()
+	if err != nil {
+		t.Fatalf("handleManagementRegister() error = %v", err)
+	}
+	var env envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("failed to unmarshal envelope: %v", err)
+	}
+	if !env.OK {
+		t.Fatalf("management register envelope not ok: %#v", env.Error)
+	}
+	var result ManagementRegisterResponse
+	if err := json.Unmarshal(env.Result, &result); err != nil {
+		t.Fatalf("failed to unmarshal register result: %v", err)
+	}
+	resources := make(map[string]bool)
+	for _, resource := range result.Resources {
+		resources[resource.Path] = true
+	}
+	for _, path := range []string{"/usage/export", "/usage/import"} {
+		if !resources[path] {
+			t.Fatalf("management resources missing %s: %#v", path, result.Resources)
+		}
 	}
 }
 
