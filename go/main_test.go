@@ -799,9 +799,11 @@ func TestDashboardMarkupContainsHealthRowsApiSelectorAndBackoff(t *testing.T) {
 
 func TestDashboardUsesRootedPluginEndpointsForImportExport(t *testing.T) {
 	checks := map[string]string{
-		"endpoint helper": "function pluginEndpoint",
-		"import endpoint": "managementEndpoint('usage/import')",
-		"export endpoint": "pluginEndpoint('usage/export')",
+		"resource endpoint helper":   "function pluginEndpoint",
+		"management endpoint helper": "function fetchManagementJsonPayload",
+		"import endpoint":            "fetchManagementJsonPayload('usage/import'",
+		"price save endpoint":        "fetchManagementJsonPayload('model-prices'",
+		"export endpoint":            "pluginEndpoint('usage/export')",
 	}
 	for name, needle := range checks {
 		if !strings.Contains(completeDashboardHTML, needle) {

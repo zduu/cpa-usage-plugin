@@ -38,7 +38,7 @@ class FakeElement {
   }
 }
 
-function createDashboardHarness() {
+function createDashboardHarness(options = {}) {
   const elements = new Map();
   const sortButtons = ['requests', 'tokens', 'cost'].map((name) => {
     const el = new FakeElement('sort-' + name);
@@ -154,7 +154,7 @@ function createDashboardHarness() {
     URLSearchParams,
     document,
     localStorage,
-    location: { pathname: '/v0/management/plugins/usage-statistics/dashboard', host: 'test.local' },
+    location: { pathname: options.pathname || '/v0/management/plugins/usage-statistics/dashboard', host: 'test.local' },
     navigator: { userAgent: 'node-test' },
     window: { innerWidth: 1200, innerHeight: 800 },
     setTimeout() { return 1; },
@@ -190,6 +190,9 @@ function createDashboardHarness() {
       }
     },
   };
+  if (options.managementKey) {
+    localStorage.setItem('cli-proxy-auth', JSON.stringify({ state: { managementKey: options.managementKey } }));
+  }
   context.window.document = document;
   context.window.localStorage = localStorage;
   context.URL.createObjectURL = (blob) => {
@@ -237,7 +240,10 @@ test('dashboard loads summary and export button fetches all event pages', async 
 });
 
 test('model price settings are loaded and saved through backend API', async () => {
-  const { document, fetchRequests } = createDashboardHarness();
+  const { document, fetchRequests } = createDashboardHarness({
+    pathname: '/v0/resource/plugins/usage-statistics/dashboard',
+    managementKey: 'test-management-key',
+  });
 
   await waitFor(() => /gpt-4\.1/.test(document.getElementById('priceList').innerHTML));
   assert.match(document.getElementById('priceList').innerHTML, /gpt-4\.1/);
@@ -250,6 +256,9 @@ test('model price settings are loaded and saved through backend API', async () =
 
   const put = fetchRequests.find((req) => req.url.includes('model-prices') && req.options.method === 'PUT');
   assert.ok(put, 'expected PUT /model-prices');
+  assert.strictEqual(put.url, '/v0/management/plugins/usage-statistics/model-prices');
+  assert.strictEqual(put.options.headers.Authorization, 'Bearer test-management-key');
+  assert.strictEqual(put.options.headers['x-management-key'], 'test-management-key');
   assert.deepStrictEqual(JSON.parse(put.options.body), {
     model: 'gpt-5',
     price: { prompt: 1.25, completion: 10, cache: 1.25 },

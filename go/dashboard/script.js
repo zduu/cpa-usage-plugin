@@ -31,6 +31,22 @@ async function fetchJsonPayload(url, options) {
   return unwrapPluginPayload(payload);
 }
 
+function managementFetchOptions(options) {
+  const merged = Object.assign({}, options || {});
+  const headers = Object.assign({}, merged.headers || {});
+  const key = currentManagementKey();
+  if (key) {
+    headers.Authorization = headers.Authorization || ('Bearer ' + key);
+    headers['x-management-key'] = headers['x-management-key'] || key;
+  }
+  merged.headers = headers;
+  return merged;
+}
+
+function fetchManagementJsonPayload(path, options) {
+  return fetchJsonPayload(managementEndpoint(path), managementFetchOptions(options));
+}
+
 async function loadModelPrices() {
   const data = await fetchJsonPayload(pluginEndpoint('model-prices'), { cache: 'no-store' });
   modelPrices = (data && data.prices) || {};
@@ -38,7 +54,7 @@ async function loadModelPrices() {
 }
 
 async function saveModelPrice(model, price) {
-  const data = await fetchJsonPayload(pluginEndpoint('model-prices'), {
+  const data = await fetchManagementJsonPayload('model-prices', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ model, price })
@@ -50,7 +66,7 @@ async function saveModelPrice(model, price) {
 async function deleteModelPrice(model) {
   const params = new URLSearchParams();
   params.set('model', model);
-  const data = await fetchJsonPayload(pluginEndpoint('model-prices') + '?' + params.toString(), { method: 'DELETE' });
+  const data = await fetchManagementJsonPayload('model-prices?' + params.toString(), { method: 'DELETE' });
   modelPrices = (data && data.prices) || {};
   return modelPrices;
 }
@@ -504,9 +520,8 @@ $('importFile').onchange = async (e) => {
   const file = e.target.files && e.target.files[0]; if (!file) return;
   try {
     const text = await file.text();
-    const key = currentManagementKey();
-    if (!key) throw new Error('未读取到管理登录状态，请回到管理中心重新登录并勾选记住登录。');
-    const result = await fetchJsonPayload(managementEndpoint('usage/import'), { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key }, body: text });
+    if (!currentManagementKey()) throw new Error('未读取到管理登录状态，请回到管理中心重新登录并勾选记住登录。');
+    const result = await fetchManagementJsonPayload('usage/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: text });
     alert('导入完成：新增 ' + (result.added || 0) + '，跳过 ' + (result.skipped || 0) + '，过期忽略 ' + (result.ignored_by_retention || 0));
     await load();
   } catch (err) {
