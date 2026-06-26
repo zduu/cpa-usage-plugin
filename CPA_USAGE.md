@@ -117,6 +117,45 @@ pluginhost: plugin loaded plugin_id=usage-statistics path=plugins/usage-statisti
 pluginhost: plugin registered plugin_id=usage-statistics plugin_name=用量统计 version=1.2.13
 ```
 
+## 数据持久化（可选）
+
+默认 `storage_enabled: false`，统计只保存在插件进程内存中，重启 CPA/容器后会清零。需要重启或更新插件后保留数据时，开启 JSONL 持久化，并把 `storage_path` 放到宿主机挂载目录中。
+
+推荐单独挂载一个数据目录：
+
+```bash
+docker run -d \
+  --name cli-proxy-api \
+  -v /home/<用户>/docker/CLIProxyAPI/config.yaml:/CLIProxyAPI/config.yaml \
+  -v /home/<用户>/docker/CLIProxyAPI/auths:/root/.cli-proxy-api \
+  -v /home/<用户>/docker/CLIProxyAPI/logs:/CLIProxyAPI/logs \
+  -v /home/<用户>/docker/CLIProxyAPI/plugins:/CLIProxyAPI/plugins \
+  -v /home/<用户>/docker/CLIProxyAPI/data:/CLIProxyAPI/data \
+  -p 8317:8317 \
+  -e TZ=Asia/Shanghai \
+  eceasy/cli-proxy-api:latest
+```
+
+然后在 `config.yaml` 中开启：
+
+```yaml
+plugins:
+  configs:
+    usage-statistics:
+      enabled: true
+      storage_enabled: true
+      storage_path: data/usage-statistics.jsonl
+      storage_flush_interval_seconds: 5
+```
+
+说明：
+
+- 不配置或保持 `storage_enabled: false` 时，就是原来的内存模式，重启清零。
+- 开启后每条新请求会追加写入 `storage_path`，插件启动时会读取该文件并恢复保留窗口内的数据。
+- `storage_path` 是相对 CPA 工作目录的路径；Docker 中建议放到已挂载的 `/CLIProxyAPI/data` 或其他宿主机 volume。
+- `storage_flush_interval_seconds` 越小，异常退出时最多丢失的数据越少；默认 30 秒，想更稳可以设为 5 或 1。
+- 如果已经有内存数据，建议先导出；开启持久化并重启后，再把导出的 JSON 导入一次，后续数据才会继续写入持久化文件。
+
 ## 按配置更新插件文件
 
 如果希望在配置中控制是否更新、更新到最新版本还是指定版本，可以使用仓库中的更新脚本。下面的命令会把仓库脚本下载到 CPA 工作目录。脚本会读取同目录 `config.yaml` 中的 `update_enabled` 和 `update_version`，自动选择当前系统对应的 release 资产并安装到插件目录；默认不会重启 CPA，只有传入 `--restart` 或 `--auto-restart` 时才会重启 Docker 容器。
