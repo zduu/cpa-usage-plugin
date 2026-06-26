@@ -376,8 +376,8 @@ function buildSummaryFromFullUsage(data) {
         sourceRow.total_requests++; d.failed ? sourceRow.failure_count++ : sourceRow.success_count++; sourceRow.total_tokens += totalTokens(d);
         sourceAgg.set(src, sourceRow);
 
-        const clientKey = d.api_key_hash || d.api_key || '(unknown)';
-        const clientRow = clientAgg.get(clientKey) || { api_key: d.api_key || '未知 API', api_key_hash: d.api_key_hash || '', total_requests: 0, success_count: 0, failure_count: 0, total_tokens: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, reasoning_tokens: 0, modelMap: new Map() };
+        const clientKey = clientApiGroupKey(d);
+        const clientRow = clientAgg.get(clientKey) || { api_key: clientApiLabel(d), api_key_hash: d.api_key_hash || '', total_requests: 0, success_count: 0, failure_count: 0, total_tokens: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, reasoning_tokens: 0, modelMap: new Map() };
         clientRow.total_requests++; d.failed ? clientRow.failure_count++ : clientRow.success_count++; clientRow.total_tokens += totalTokens(d); clientRow.input_tokens += num(tokens.input_tokens); clientRow.output_tokens += num(tokens.output_tokens); clientRow.cached_tokens += cached; clientRow.reasoning_tokens += num(tokens.reasoning_tokens);
         const clientModel = clientRow.modelMap.get(d.model) || makeCounterRow(d.model);
         addDetailToCounter(clientModel, d);

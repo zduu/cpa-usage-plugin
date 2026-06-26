@@ -178,7 +178,7 @@ func TestDashboardSummaryAggregatesClientAPIKeyStats(t *testing.T) {
 	stats.Record(UsageRecord{
 		Provider:    "openai",
 		Model:       "gpt-4.1",
-		APIKey:      "sk-client-beta-123456",
+		APIKey:      "sk-client-beta-654321",
 		AuthIndex:   "upstream-credential-1",
 		RequestedAt: base.Add(2 * time.Minute),
 		Detail:      UsageDetail{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
@@ -204,6 +204,53 @@ func TestDashboardSummaryAggregatesClientAPIKeyStats(t *testing.T) {
 	}
 	if len(first.Models) != 1 || first.Models[0].Model != "gpt-4.1" {
 		t.Fatalf("client api model breakdown = %#v", first.Models)
+	}
+}
+
+func TestDashboardSummaryMergesImportedClientAPIStatsByMaskedKey(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0, RetentionDays: 0})
+	when := time.Now().Add(-time.Hour)
+	result := stats.MergeSnapshot(StatisticsSnapshot{
+		APIs: map[string]APISnapshot{
+			"openai": {
+				Models: map[string]ModelSnapshot{
+					"gpt-4.1": {
+						Details: []RequestDetail{
+							{
+								Model:      "gpt-4.1",
+								Timestamp:  when,
+								APIKey:     "sk******56",
+								APIKeyHash: "hash-from-first-export",
+								Tokens:     TokenStats{InputTokens: 100, OutputTokens: 20, TotalTokens: 120},
+							},
+							{
+								Model:      "gpt-4.1",
+								Timestamp:  when.Add(time.Minute),
+								APIKey:     "sk******56",
+								APIKeyHash: "hash-from-second-export",
+								Tokens:     TokenStats{InputTokens: 30, OutputTokens: 10, TotalTokens: 40},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	if result.Added != 2 {
+		t.Fatalf("merge result = %#v, want two added records", result)
+	}
+
+	summary := stats.SummaryWithoutDetails()
+	if len(summary.ClientAPIStats) != 1 {
+		t.Fatalf("client api stats len = %d, want 1: %#v", len(summary.ClientAPIStats), summary.ClientAPIStats)
+	}
+	got := summary.ClientAPIStats[0]
+	if got.APIKey != "sk******56" || got.TotalRequests != 2 || got.TotalTokens != 160 {
+		t.Fatalf("client api stat = %#v, want merged masked key totals", got)
+	}
+	if len(got.Models) != 1 || got.Models[0].TotalRequests != 2 {
+		t.Fatalf("client api model stats = %#v, want merged model totals", got.Models)
 	}
 }
 

@@ -127,7 +127,15 @@ test('friendlyApiName cleans API names', () => {
 
 test('clientApiLabel extracts API key label', () => {
   assert.strictEqual(helpers.clientApiLabel({ api_key: 'my-key' }), 'my-key');
+  assert.strictEqual(helpers.clientApiLabel({ api_key: '  my-key  ' }), 'my-key');
   assert.strictEqual(helpers.clientApiLabel({}), '未知 API');
+});
+
+test('clientApiGroupKey prefers masked API key over imported hash', () => {
+  assert.strictEqual(helpers.clientApiGroupKey({ api_key: 'sk******56', api_key_hash: 'hash-a' }), 'api_key:sk******56');
+  assert.strictEqual(helpers.clientApiGroupKey({ api_key: 'sk******56', api_key_hash: 'hash-b' }), 'api_key:sk******56');
+  assert.strictEqual(helpers.clientApiGroupKey({ api_key_hash: 'hash-only' }), 'api_key_hash:hash-only');
+  assert.strictEqual(helpers.clientApiGroupKey({}), '(unknown)');
 });
 
 test('avg computes average', () => {

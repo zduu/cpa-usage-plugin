@@ -24,7 +24,14 @@ function trimCredentialSuffix(value) {
 function sourceLabel(detail) { const s = trimCredentialSuffix(detail.source); if (s && !looksLikeKey(s)) return s; const p = trimCredentialSuffix(detail.provider); if (p && !looksLikeKey(p)) return p; return '未知来源' }
 function sourceKey(detail) { return sourceLabel(detail) }
 function friendlyApiName(apiName) { const clean = trimCredentialSuffix(apiName); if (!clean) return '未知接口'; const parts = clean.split(' · ').filter(function (p) { return !looksLikeKey(p) && !isCredentialMarker(p) && !looksLikeCredentialId(p) }); return parts.length ? parts.join(' · ') : clean }
-function clientApiLabel(detail) { return detail.api_key || '未知 API' }
+function clientApiLabel(detail) { const label = String((detail && detail.api_key) || '').trim(); return label || '未知 API' }
+function clientApiGroupKey(detail) {
+  const label = String((detail && detail.api_key) || '').trim();
+  if (label) return 'api_key:' + label;
+  const hash = String((detail && detail.api_key_hash) || '').trim();
+  if (hash) return 'api_key_hash:' + hash;
+  return '(unknown)';
+}
 function avg(values) { const xs = values.map(num).filter((v) => v > 0); return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0 }
 function bucketSeries(rows, metric, minutes, count) {
   const now = Date.now(); const step = minutes * 60e3; const start = now - step * count; const arr = new Array(count).fill(0);
@@ -144,5 +151,5 @@ async function fetchAllEventPages(fetchPage, baseParams, pageLimit) {
 
 // Export for Node.js test environment
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { esc, num, compact, pct, formatMs, totalTokens, tokenCost, detailCost, aggregateCost, looksLikeKey, looksLikeCredentialId, isCredentialMarker, trimCredentialSuffix, sourceLabel, sourceKey, friendlyApiName, clientApiLabel, avg, bucketSeries, healthColor, healthCellStyle, timestampMs, pluginEndpoint, managementEndpoint, decodeManagementStorage, parseManagementStorage, currentManagementKey, groupedRows, decodeManagementBody, unwrapPluginPayload, fetchAllEventPages };
+  module.exports = { esc, num, compact, pct, formatMs, totalTokens, tokenCost, detailCost, aggregateCost, looksLikeKey, looksLikeCredentialId, isCredentialMarker, trimCredentialSuffix, sourceLabel, sourceKey, friendlyApiName, clientApiLabel, clientApiGroupKey, avg, bucketSeries, healthColor, healthCellStyle, timestampMs, pluginEndpoint, managementEndpoint, decodeManagementStorage, parseManagementStorage, currentManagementKey, groupedRows, decodeManagementBody, unwrapPluginPayload, fetchAllEventPages };
 }

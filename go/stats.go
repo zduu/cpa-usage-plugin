@@ -1214,17 +1214,8 @@ func (s *RequestStatistics) SummaryWithoutDetails() DashboardSummary {
 				}
 				cr.TotalTokens += totalTokens
 
-				clientKey := d.APIKeyHash
-				if clientKey == "" {
-					clientKey = d.APIKey
-				}
-				if clientKey == "" {
-					clientKey = "(unknown)"
-				}
-				clientLabel := d.APIKey
-				if clientLabel == "" {
-					clientLabel = "未知 API"
-				}
+				clientKey := clientAPIGroupKey(d)
+				clientLabel := clientAPIGroupLabel(d)
 				clientAgg, ok := clientAPIs[clientKey]
 				if !ok {
 					clientAgg = &clientAPIAccumulator{
@@ -1395,6 +1386,26 @@ func (s *RequestStatistics) SummaryWithoutDetails() DashboardSummary {
 
 	summary.GeneratedAt = time.Now().UTC().Format(time.RFC3339)
 	return summary
+}
+
+func clientAPIGroupLabel(detail RequestDetail) string {
+	label := strings.TrimSpace(detail.APIKey)
+	if label == "" {
+		return "未知 API"
+	}
+	return label
+}
+
+func clientAPIGroupKey(detail RequestDetail) string {
+	label := strings.TrimSpace(detail.APIKey)
+	if label != "" {
+		return "api_key:" + label
+	}
+	hash := strings.TrimSpace(detail.APIKeyHash)
+	if hash != "" {
+		return "api_key_hash:" + hash
+	}
+	return "(unknown)"
 }
 
 // QueryEvents returns paginated, filtered event details.

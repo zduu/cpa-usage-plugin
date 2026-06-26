@@ -87,7 +87,7 @@ plugins:
       dedup_window_minutes: 1440
       # 可选：允许记录的响应头名称列表（逗号分隔），* 表示全部。留空不记录。
       log_response_headers: ""
-      # 可选：API key 分组哈希 salt。留空使用进程内随机 salt。
+      # 可选：API key 分组 hash salt。留空使用进程内随机 salt；固定后同一实例跨重启 hash 稳定。
       api_key_hash_salt: ""
       # 可选：启用 JSONL 事件持久化，避免重启丢失统计。默认 false。
       storage_enabled: false
@@ -99,7 +99,7 @@ plugins:
       price_storage_path: usage-statistics-prices.json
       # 可选：允许外部脚本更新插件文件。默认 false。
       update_enabled: false
-      # 可选：latest 或指定版本号，例如 v1.1.0。
+      # 可选：latest 或指定版本号，例如 v1.2.12。
       update_version: latest
 ```
 
@@ -114,12 +114,12 @@ docker restart cli-proxy-api
 
 ```text
 pluginhost: plugin loaded plugin_id=usage-statistics path=plugins/usage-statistics.so
-pluginhost: plugin registered plugin_id=usage-statistics plugin_name=用量统计 version=1.2.4
+pluginhost: plugin registered plugin_id=usage-statistics plugin_name=用量统计 version=1.2.12
 ```
 
 ## 按配置更新插件文件
 
-如果希望在配置中控制是否更新、更新到最新版本还是指定版本，可以使用仓库中的更新脚本。脚本只替换 `.so` 文件，不会自动重启 CPA。
+如果希望在配置中控制是否更新、更新到最新版本还是指定版本，可以使用仓库中的更新脚本。下面的命令会把仓库脚本下载到 CPA 工作目录。脚本会读取同目录 `config.yaml` 中的 `update_enabled` 和 `update_version`，自动选择当前系统对应的 release 资产并安装到插件目录；默认不会重启 CPA，只有传入 `--restart` 或 `--auto-restart` 时才会重启 Docker 容器。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zduu/cpa-usage-plugin/main/scripts/update-latest-release.sh \
@@ -135,23 +135,24 @@ plugins:
     usage-statistics:
       enabled: true
       update_enabled: true
-      update_version: latest   # 或 v1.1.0
+      update_version: latest   # 或 v1.2.12
 ```
 
 执行更新脚本：
 
 ```bash
 cd /home/<用户>/docker/CLIProxyAPI
-bash update-usage-statistics.sh        # 手动运行。或用 --restart 自动重启容器
+bash update-usage-statistics.sh        # 只安装新插件文件，不重启
+bash update-usage-statistics.sh --restart  # 安装后自动 docker restart cli-proxy-api
 ```
 
-# 脚本完成后手动重启 CPA 容器（如果没用 --restart）：
+脚本完成后如果没有使用 `--restart`，需要手动重启 CPA 容器：
 
 ```bash
 docker restart cli-proxy-api
 ```
 
-说明：插件 `.so` 被 CPA 进程加载后，直接覆盖文件不会让运行中的进程使用新代码；需要重启 CPA 后才会加载新版本。
+说明：插件文件被 CPA 进程加载后，直接覆盖文件不会让运行中的进程使用新代码；需要重启 CPA 后才会加载新版本。Linux 默认安装文件名为 `usage-statistics.so`，macOS 为 `usage-statistics.dylib`，Windows 为 `usage-statistics.dll`。
 
 ## 自动更新（crontab）
 
@@ -208,12 +209,13 @@ bash update-usage-statistics.sh --force --restart
 - **统计卡片**：总请求数、成功/失败、总 token、每分钟请求、估算花费，附带小时级折线图。
 - **服务健康监测**：7 天 × 15 分钟粒度的彩色网格，鼠标悬停显示窗口详情，灰色格表示无请求。
 - **来源统计**：按上游来源聚合请求数和成功率。
+- **API 详细统计**：按调用 CPA 服务的客户端 API key 聚合。页面显示脱敏 key；导入不同实例导出的同一脱敏 key 时会合并展示。
 - **上游接口统计**：按上游接口聚合，点击查看模型分布详情。
 - **模型统计**：跨接口的模型汇总，包含请求数、token、平均延迟、成功率和费用。
 - **模型价格设置**：在后端全局保存输入/输出/缓存 token 价格（US$/M token），跨设备访问看板可见同一份最新价格。
 - **请求事件明细**：按模型、来源、凭证筛选，滚动表格查看。默认最多显示 500 条。
 - **导出**：当前接口明细或全量事件的 CSV/JSON 导出。
-- **导入**：上传 JSON 文件导入统计数据，完成后显示新增/跳过/过期忽略的明细数。
+- **导入**：上传 JSON 文件导入统计数据，完成后显示新增/跳过/过期忽略的明细数；导入后摘要会重新聚合客户端 API、模型、来源和健康网格。
 
 ### 性能说明
 
@@ -234,7 +236,7 @@ curl http://127.0.0.1:8317/v0/management/plugins/usage-statistics/dashboard-summ
   -H 'x-management-key: <你的管理密钥>'
 ```
 
-响应包含 `usage`（无 details 聚合数据）、`health_grid`（672 个 15 分钟槽位）、`source_stats`、`model_stats` 和 `_meta` 元数据。
+响应包含 `usage`（无 details 聚合数据）、`health_grid`（672 个 15 分钟槽位）、`source_stats`、`credential_stats`、`client_api_stats`、`model_stats` 和 `_meta` 元数据。
 
 ### 查询事件
 
@@ -268,10 +270,12 @@ curl -X POST http://127.0.0.1:8317/v0/management/plugins/usage-statistics/usage/
 ```
 
 导入响应包含 `added`（新增条数）、`skipped`（去重跳过）、`ignored_by_retention`（超出保留窗口忽略）。
+同时包含 `input_records`（输入记录数）、`accepted_records`（被处理记录数）、`rejected_records`（校验拒绝数）、`total_requests` 和 `failed_requests`，便于核对导入结果。
 
 ## 注意
 
-- 当前统计存储在插件进程内存中，CPA 重启前请先导出数据。
+- 默认仅使用插件进程内存；如需 CPA 重启后自动恢复统计，请开启 `storage_enabled` 并将 `storage_path` 放在持久化目录。未开启持久化时，重启前请先导出数据。
 - 多实例部署时，每个实例独立统计。
 - token 是否完整取决于上游返回的 usage 信息；CPA 主程序需向插件传递 snake_case usage 字段。
 - 明细记录受 `max_details_per_model` 和 `retention_days` 限制，超出部分自动淘汰并更新计数器。
+- `api_key_hash_salt` 只影响新记录的 `api_key_hash`。客户端 API 统计优先按脱敏后的 `api_key` 展示值聚合，缺失时再使用 hash；hash 仅用于分组/排查，不能反推原始 key。

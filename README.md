@@ -2,15 +2,18 @@
 
 CPA 用量统计插件，用于在 CLIProxyAPI/CPA v7 插件系统中记录请求用量，并提供管理页面查看统计数据。
 
+当前代码版本：`1.2.12`。
+
 ## 功能
 
 - 记录请求数、成功/失败、延迟、TTFT。
 - 记录 input/output/reasoning/cache/total token。
-- 按接口、模型、凭证/来源聚合统计。
+- 按上游接口、模型、来源、CPA 凭证和调用 CPA 的客户端 API key 聚合统计。
 - 轻量级首屏摘要：看板数据不含请求明细，首包体积不随记录数增长。
 - 请求事件明细支持按模型、来源、凭证、时间范围筛选，页面以滚动表格展示。
 - 服务健康网格按 15 分钟展示最近 7 天状态，鼠标悬停显示窗口信息。
-- 支持导入/导出统计数据，导入后返回新增/跳过/过期忽略明细。
+- 支持导入/导出统计数据，导出包含版本、插件版本、明细数和配置摘要；导入返回输入/接收/拒绝/新增/跳过/过期忽略明细。
+- API key 只保存脱敏显示值和分组 hash；导入不同实例导出的同一脱敏 API key 时会合并到同一客户端 API 统计。
 - 支持后端全局模型价格表并估算成本，跨设备打开看板可见同一份最新价格。
 - 支持可选 JSONL 持久化，重启后恢复保留窗口内的统计。
 - 运行时元数据：页面可见当前保留策略、存储明细数、淘汰数、最近导入结果。
@@ -82,8 +85,12 @@ cpa-usage-plugin/
 GET  /v0/management/plugins/usage-statistics/usage
 GET  /v0/management/plugins/usage-statistics/usage/export
 POST /v0/management/plugins/usage-statistics/usage/import
+GET  /v0/management/plugins/usage-statistics/model-prices
+PUT  /v0/management/plugins/usage-statistics/model-prices
+DELETE /v0/management/plugins/usage-statistics/model-prices
 GET  /v0/management/plugins/usage-statistics/dashboard-summary
 GET  /v0/management/plugins/usage-statistics/dashboard-events
+GET  /v0/management/plugins/usage-statistics/dashboard-data
 GET  /v0/management/plugins/usage-statistics/health
 ```
 
@@ -92,10 +99,10 @@ GET  /v0/management/plugins/usage-statistics/health
 | 端点 | 方法 | 说明 |
 |------|------|------|
 | `/usage` | GET | 获取完整统计数据（含明细）。 |
-| `/usage/export` | GET | 导出全量统计数据（JSON）。 |
-| `/usage/import` | POST | 导入统计数据，返回 `added`/`skipped`/`ignored_by_retention`。 |
+| `/usage/export` | GET | 导出全量统计数据（JSON），包含 `version`、`plugin`、`detail_count`、`config` 和 `usage`。 |
+| `/usage/import` | POST | 导入统计数据，返回 `input_records`/`accepted_records`/`rejected_records`/`added`/`skipped`/`ignored_by_retention`。 |
 | `/model-prices` | GET/PUT/DELETE | 获取、新增/更新、删除全局模型价格表。 |
-| `/dashboard-summary` | GET | **推荐** — 轻量看板摘要，不含请求明细，含预计算健康网格/来源/模型聚合和 `_meta` 元数据。 |
+| `/dashboard-summary` | GET | **推荐** — 轻量看板摘要，不含请求明细，含预计算健康网格/来源/客户端 API/模型聚合和 `_meta` 元数据。 |
 | `/dashboard-events` | GET | 事件查询，支持 `?limit=50&offset=0&range=24h&model=gpt-4&source=xxx&auth=xxx&api=xxx`。 |
 | `/dashboard-data` | GET | 兼容旧版，返回含全部 `details` 数组的完整数据。 |
 | `/health` | GET | 运行健康状态：`detail_count`、`evicted_total`、`total_requests`。 |
