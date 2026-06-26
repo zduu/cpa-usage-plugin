@@ -164,6 +164,10 @@ test('pluginEndpoint builds management URLs from plugin resource paths', () => {
     '/v0/management/plugins/usage-statistics/dashboard-summary'
   );
   assert.strictEqual(
+    helpers.pluginEndpoint('usage/import', '/v0/resource/plugins/usage-statistics/dashboard'),
+    '/v0/management/plugins/usage-statistics/usage/import'
+  );
+  assert.strictEqual(
     helpers.pluginEndpoint('usage/export', '/standalone/dashboard.html'),
     './usage/export'
   );

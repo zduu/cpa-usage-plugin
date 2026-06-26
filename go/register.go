@@ -13,7 +13,7 @@ func handleRegister(requestBody []byte) ([]byte, error) {
 		SchemaVersion: 1,
 		Metadata: PluginMetadata{
 			Name:             "用量统计",
-			Version:          "1.2.6",
+			Version:          "1.2.7",
 			Author:           "本地维护",
 			GitHubRepository: "https://github.com/zduu/cpa-usage-plugin",
 			Logo:             "",

@@ -37,9 +37,12 @@ function timestampMs(value) { const ms = Date.parse(value); return Number.isFini
 function pluginEndpoint(path, pathname) {
   const clean = String(path || '').replace(/^\/+/, '');
   const current = String(pathname || (typeof location !== 'undefined' ? location.pathname : ''));
-  const marker = '/plugins/usage-statistics/';
-  const idx = current.indexOf(marker);
-  if (idx >= 0) return current.slice(0, idx + marker.length) + clean;
+  const managementMarker = '/management/plugins/usage-statistics/';
+  const managementIdx = current.indexOf(managementMarker);
+  if (managementIdx >= 0) return current.slice(0, managementIdx + managementMarker.length) + clean;
+  const resourceMarker = '/resource/plugins/usage-statistics/';
+  const resourceIdx = current.indexOf(resourceMarker);
+  if (resourceIdx >= 0) return current.slice(0, resourceIdx) + managementMarker + clean;
   return './' + clean;
 }
 function groupedRows(rows, keyFn, nameFn) {
