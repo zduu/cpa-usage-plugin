@@ -90,6 +90,10 @@ function createDashboardHarness(options = {}) {
           success_count: 1190,
           failure_count: 10,
           total_tokens: 24000,
+          input_tokens: 4000,
+          output_tokens: 5000,
+          cached_tokens: 100,
+          reasoning_tokens: 50,
           avg_latency_ms: 120,
           models: {
             'gpt-4.1': {
@@ -97,6 +101,10 @@ function createDashboardHarness(options = {}) {
               success_count: 1190,
               failure_count: 10,
               total_tokens: 24000,
+              input_tokens: 4000,
+              output_tokens: 5000,
+              cached_tokens: 100,
+              reasoning_tokens: 50,
               avg_latency_ms: 120,
             },
           },
@@ -224,6 +232,13 @@ test('dashboard loads summary and export button fetches all event pages', async 
   await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-events')));
   assert.strictEqual(document.getElementById('totalRequests').textContent, '1,200');
   assert.strictEqual(document.getElementById('totalCost').textContent, 'US$0.05');
+  const apiDetail = document.getElementById('apiDetail').innerHTML;
+  assert.match(apiDetail, /总花费/);
+  assert.match(apiDetail, /US\$0\.05/);
+  assert.match(apiDetail, /总 token 数：24k/);
+  assert.match(apiDetail, /缓存 token：100/);
+  assert.match(apiDetail, /思考 token：50/);
+  assert.doesNotMatch(apiDetail, /Token\/请求/);
 
   await document.getElementById('exportRowsJson').onclick();
   await waitFor(() => downloads.some((d) => d.text && d.text.startsWith('[')));

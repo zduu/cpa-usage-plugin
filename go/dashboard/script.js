@@ -249,15 +249,16 @@ function renderApiDetail() {
   setText('apiDetailTitle', friendlyApiName(selectedApi));
   const requests = apiData.total_requests, success = apiData.success_count, failure = apiData.failure_count;
   const rate = requests ? success / requests * 100 : 100;
-  const models = Object.entries(apiData.models || {}).map(([name, m]) => ({ name, requests: m.total_requests, success: m.success_count, failure: m.failure_count, tokens: m.total_tokens, avgLatency: m.avg_latency_ms })).sort((a, b) => b.requests - a.requests);
+  const models = Object.entries(apiData.models || {}).map(([name, m]) => ({ name, requests: m.total_requests, success: m.success_count, failure: m.failure_count, tokens: m.total_tokens, input_tokens: m.input_tokens, output_tokens: m.output_tokens, cached_tokens: m.cached_tokens, reasoning_tokens: m.reasoning_tokens, avgLatency: m.avg_latency_ms })).sort((a, b) => b.requests - a.requests);
+  const totalCost = models.reduce((s, m) => s + aggregateCost({ model: m.name, input_tokens: m.input_tokens, output_tokens: m.output_tokens, cached_tokens: m.cached_tokens, reasoning_tokens: m.reasoning_tokens }, modelPrices), 0);
   // Source stats for this API not available without details — show model distribution instead
   $('apiDetail').innerHTML = '<div class="detailGrid">' +
     '<div class="metric"><div class="metricLabel">请求数</div><div class="metricValue">' + fmt.format(requests) + '</div><div class="subtle" style="margin-top:6px"><span class="ok">成功 ' + fmt.format(success) + '</span> <span class="bad">失败 ' + fmt.format(failure) + '</span></div></div>' +
     '<div class="metric"><div class="metricLabel">成功率</div><div class="metricValue ' + (rate >= 95 ? 'ok' : rate >= 80 ? 'neutral' : 'bad') + '">' + pct(rate) + '</div></div>' +
-    '<div class="metric"><div class="metricLabel">总 token</div><div class="metricValue">' + compact(apiData.total_tokens) + '</div></div>' +
+    '<div class="metric"><div class="metricLabel">总 token</div><div class="metricValue">' + compact(apiData.total_tokens) + '</div><div class="subtle metricMeta"><span>缓存 token：' + compact(apiData.cached_tokens) + '</span><span>思考 token：' + compact(apiData.reasoning_tokens) + '</span></div></div>' +
     '<div class="metric"><div class="metricLabel">平均延迟</div><div class="metricValue">' + formatMs(apiData.avg_latency_ms) + '</div></div>' +
     '<div class="metric"><div class="metricLabel">模型数</div><div class="metricValue">' + fmt.format(models.length) + '</div></div>' +
-    '<div class="metric"><div class="metricLabel">Token/请求</div><div class="metricValue">' + compact(requests ? Math.round(apiData.total_tokens / requests) : 0) + '</div></div>' +
+    '<div class="metric"><div class="metricLabel">总花费</div><div class="metricValue">' + money.format(totalCost) + '</div><div class="subtle metricMeta"><span>总 token 数：' + compact(apiData.total_tokens) + '</span></div></div>' +
     '</div>' +
     '<div><div class="subtle" style="margin-bottom:8px">模型分布</div>' +
     (models.length ? '<div class="barList">' + models.slice(0, 8).map((r) => { const width = requests ? Math.max(4, Math.round(r.requests / requests * 100)) : 0; return '<div class="barItem"><div class="nameCell">' + esc(r.name) + '</div><div class="barTrack"><div class="barFill" style="width:' + width + '%"></div></div><div>' + fmt.format(r.requests) + ' 次</div></div>' }).join('') + '</div>' : '<div class="empty">暂无模型数据</div>') +

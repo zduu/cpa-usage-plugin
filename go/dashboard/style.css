@@ -44,6 +44,7 @@ tr:last-child td{border-bottom:0}
 .metric{border:1px solid #e5e5e5;border-radius:8px;padding:10px;background:#fafafa;min-height:74px}
 .metricLabel{font-size:11px;color:#8b8680;font-weight:800;margin-bottom:8px}
 .metricValue{font-size:20px;font-weight:800;font-variant-numeric:tabular-nums;line-height:1.1}
+.metricMeta{margin-top:8px;display:flex;gap:8px;flex-wrap:wrap}
 .splitGrid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
 .barList{display:grid;gap:8px}
 .barItem{display:grid;grid-template-columns:minmax(120px,1fr) minmax(160px,2fr) auto;gap:10px;align-items:center;font-size:12px}
