@@ -9,7 +9,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const pluginVersion = "1.2.9"
+const pluginVersion = "1.2.10"
 
 func handleRegister(requestBody []byte) ([]byte, error) {
 	applyRuntimeConfig(requestBody)
