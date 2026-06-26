@@ -280,3 +280,28 @@ test('model price settings are loaded and saved through backend API', async () =
   });
   assert.match(document.getElementById('priceList').innerHTML, /gpt-5/);
 });
+
+test('event list is not implicitly filtered by selected upstream API', async () => {
+  const { document, fetchCalls } = createDashboardHarness();
+
+  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-events')));
+  const firstEventsCall = fetchCalls.find((url) => url.includes('dashboard-events'));
+  assert.strictEqual(new URL(firstEventsCall, 'http://test.local').searchParams.get('api'), null);
+
+  const before = fetchCalls.filter((url) => url.includes('dashboard-events')).length;
+  document.getElementById('apiSelect').onchange();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.strictEqual(
+    fetchCalls.filter((url) => url.includes('dashboard-events')).length,
+    before,
+    'changing upstream API detail selection should not reload event list'
+  );
+
+  document.getElementById('filterModel').value = 'gpt-4.1';
+  await document.getElementById('filterModel').onchange();
+  await waitFor(() => fetchCalls.filter((url) => url.includes('dashboard-events')).length > before);
+  const latestEventsCall = fetchCalls.filter((url) => url.includes('dashboard-events')).at(-1);
+  const params = new URL(latestEventsCall, 'http://test.local').searchParams;
+  assert.strictEqual(params.get('model'), 'gpt-4.1');
+  assert.strictEqual(params.get('api'), null);
+});

@@ -237,9 +237,9 @@ function renderApiStats() {
   $('apiSelect').innerHTML = rows.length ? rows.map((r) => '<option value="' + esc(r.api) + '">' + esc(friendlyApiName(r.api)) + '</option>').join('') : '<option value="">暂无上游接口</option>';
   $('apiSelect').value = selectedApi;
   $('apiSelect').disabled = !rows.length;
-  $('apiSelect').onchange = () => { selectedApi = $('apiSelect').value; renderApiStats(); renderApiDetail(); renderEvents() };
+  $('apiSelect').onchange = () => { selectedApi = $('apiSelect').value; renderApiStats(); renderApiDetail() };
   $('apiStats').innerHTML = rows.length ? '<table><thead><tr><th>接口</th><th>请求</th><th>成功率</th><th>token</th><th>平均延迟</th><th>模型</th></tr></thead><tbody>' + rows.map((r) => '<tr class="clickableRow ' + (r.api === selectedApi ? 'selectedRow' : '') + '" data-api="' + esc(r.api) + '"><td class="nameCell">' + esc(friendlyApiName(r.api)) + '</td><td>' + fmt.format(r.requests) + ' <span class="ok">(' + fmt.format(r.success) + '</span> <span class="bad">' + fmt.format(r.failure) + ')</span></td><td class="' + (r.successRate >= 95 ? 'ok' : r.successRate >= 80 ? 'neutral' : 'bad') + '">' + pct(r.successRate) + '</td><td>' + compact(r.tokens) + '</td><td>' + formatMs(r.avgLatency) + '</td><td>' + r.modelCount + ' 个</td></tr>').join('') + '</tbody></table>' : '<div class="empty">暂无接口数据</div>';
-  document.querySelectorAll('[data-api]').forEach((row) => row.onclick = () => { selectedApi = row.getAttribute('data-api') || ''; renderApiStats(); renderApiDetail(); renderEvents() });
+  document.querySelectorAll('[data-api]').forEach((row) => row.onclick = () => { selectedApi = row.getAttribute('data-api') || ''; renderApiStats(); renderApiDetail() });
 }
 
 function renderApiDetail() {
@@ -295,7 +295,6 @@ async function renderEvents() {
   const fm = $('filterModel').value; if (fm) params.set('model', fm);
   const fs = $('filterSource').value; if (fs) params.set('source', fs);
   const fa = $('filterAuth').value; if (fa) params.set('auth', fa);
-  if (selectedApi) params.set('api', selectedApi);
   try {
     eventsData = await fetchJsonPayload(pluginEndpoint('dashboard-events') + '?' + params.toString(), { cache: 'no-store' });
   } catch (e) {
@@ -408,7 +407,6 @@ async function exportRows(kind) {
   const fm = $('filterModel').value; if (fm) params.set('model', fm);
   const fs = $('filterSource').value; if (fs) params.set('source', fs);
   const fa = $('filterAuth').value; if (fa) params.set('auth', fa);
-  if (selectedApi) params.set('api', selectedApi);
   try {
     const data = await fetchAllEventPages(
       (pageParams) => fetchJsonPayload(pluginEndpoint('dashboard-events') + '?' + pageParams.toString(), { cache: 'no-store' }),
