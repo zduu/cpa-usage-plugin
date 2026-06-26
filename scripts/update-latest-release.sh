@@ -6,14 +6,78 @@ DOCKER_CONTAINER="${DOCKER_CONTAINER:-cli-proxy-api}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG_FILE="${CONFIG_FILE:-$SCRIPT_DIR/config.yaml}"
 PLUGIN_DIR="${PLUGIN_DIR:-$SCRIPT_DIR/plugins}"
-PLUGIN_FILE="${PLUGIN_FILE:-usage-statistics.so}"
+PLUGIN_FILE="${PLUGIN_FILE:-}"
 STATE_DIR="${STATE_DIR:-$PLUGIN_DIR}"
+PLUGIN_PLATFORM="${PLUGIN_PLATFORM:-}"
+PLUGIN_ASSET="${PLUGIN_ASSET:-}"
 
 LATEST_API="https://api.github.com/repos/$REPO/releases/latest"
 LOG_PREFIX="[usage-statistics-updater]"
 
 log() {
   printf '%s %s\n' "$LOG_PREFIX" "$*"
+}
+
+detect_platform() {
+  os="$(uname -s 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+  arch="$(uname -m 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+  case "$os" in
+    linux) os="linux" ;;
+    darwin) os="darwin" ;;
+    mingw*|msys*|cygwin*) os="windows" ;;
+    *) log "unsupported OS '$os'; set PLUGIN_PLATFORM manually"; exit 1 ;;
+  esac
+  case "$arch" in
+    x86_64|amd64) arch="amd64" ;;
+    aarch64|arm64) arch="arm64" ;;
+    *) log "unsupported architecture '$arch'; set PLUGIN_PLATFORM manually"; exit 1 ;;
+  esac
+  printf '%s-%s' "$os" "$arch"
+}
+
+asset_for_platform() {
+  platform="$1"
+  case "$platform" in
+    linux-amd64|linux-arm64) printf 'usage-statistics-%s.so' "$platform" ;;
+    darwin-amd64|darwin-arm64) printf 'usage-statistics-%s.dylib' "$platform" ;;
+    windows-amd64) printf 'usage-statistics-%s.dll' "$platform" ;;
+    *) log "unsupported plugin platform '$platform'"; exit 1 ;;
+  esac
+}
+
+plugin_file_for_platform() {
+  platform="$1"
+  case "$platform" in
+    linux-*) printf 'usage-statistics.so' ;;
+    darwin-*) printf 'usage-statistics.dylib' ;;
+    windows-*) printf 'usage-statistics.dll' ;;
+    *) log "unsupported plugin platform '$platform'"; exit 1 ;;
+  esac
+}
+
+file_pattern_for_platform() {
+  platform="$1"
+  case "$platform" in
+    linux-amd64) printf 'ELF 64-bit.*x86-64' ;;
+    linux-arm64) printf 'ELF 64-bit.*\(ARM aarch64\|aarch64\)' ;;
+    darwin-amd64) printf 'Mach-O 64-bit.*x86_64' ;;
+    darwin-arm64) printf 'Mach-O 64-bit.*arm64' ;;
+    windows-amd64) printf 'PE32+.*x86-64' ;;
+    *) log "unsupported plugin platform '$platform'"; exit 1 ;;
+  esac
+}
+
+file_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+    return
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+    return
+  fi
+  log "sha256sum or shasum is required"
+  exit 1
 }
 
 # --- flag parsing ---
@@ -80,16 +144,33 @@ if [ -z "$target_tag" ]; then
   exit 1
 fi
 
+if [ -z "$PLUGIN_PLATFORM" ]; then
+  PLUGIN_PLATFORM="$(detect_platform)"
+fi
+if [ -z "$PLUGIN_FILE" ]; then
+  PLUGIN_FILE="$(plugin_file_for_platform "$PLUGIN_PLATFORM")"
+fi
+asset_auto=
+if [ -z "$PLUGIN_ASSET" ]; then
+  PLUGIN_ASSET="$(asset_for_platform "$PLUGIN_PLATFORM")"
+  asset_auto=1
+fi
+
 # --- skip if already on this version ---
-state_file="$STATE_DIR/.usage-statistics.release"
+state_file="$STATE_DIR/.usage-statistics.release.$PLUGIN_PLATFORM"
+legacy_state_file="$STATE_DIR/.usage-statistics.release"
+mkdir -p "$STATE_DIR"
 current_tag=""
 if [ -f "$state_file" ]; then
-  current_tag="$(cat "$state_file")"
+	current_tag="$(cat "$state_file")"
+elif [ "$PLUGIN_PLATFORM" = "linux-amd64" ] && [ -f "$legacy_state_file" ]; then
+	current_tag="$(cat "$legacy_state_file")"
 fi
 
 if [ -z "$FORCE" ] && [ "$current_tag" = "$target_tag" ] && [ -f "$PLUGIN_DIR/$PLUGIN_FILE" ]; then
-  log "already on $target_tag"
-  exit 0
+	printf '%s' "$target_tag" > "$state_file"
+	log "already on $target_tag"
+	exit 0
 fi
 
 # --- download ---
@@ -99,22 +180,31 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-asset_url="https://github.com/$REPO/releases/download/$target_tag/$PLUGIN_FILE"
-tmp_file="$tmp_dir/$PLUGIN_FILE"
+asset_url="https://github.com/$REPO/releases/download/$target_tag/$PLUGIN_ASSET"
+tmp_file="$tmp_dir/$PLUGIN_ASSET"
 
-log "downloading $asset_url"
-curl -fL --retry 3 --retry-delay 2 -o "$tmp_file" "$asset_url"
+log "downloading $asset_url for $PLUGIN_PLATFORM"
+if ! curl -fL --retry 3 --retry-delay 2 -o "$tmp_file" "$asset_url"; then
+  if [ -n "$asset_auto" ] && [ "$PLUGIN_PLATFORM" = "linux-amd64" ]; then
+    legacy_url="https://github.com/$REPO/releases/download/$target_tag/usage-statistics.so"
+    tmp_file="$tmp_dir/usage-statistics.so"
+    log "platform asset not found, falling back to legacy amd64 asset $legacy_url"
+    curl -fL --retry 3 --retry-delay 2 -o "$tmp_file" "$legacy_url"
+  else
+    exit 1
+  fi
+fi
 
-if ! file "$tmp_file" | grep -q 'ELF 64-bit.*x86-64'; then
-  log "downloaded file is not a Linux x86_64 shared object"
+if ! file "$tmp_file" | grep -q "$(file_pattern_for_platform "$PLUGIN_PLATFORM")"; then
+  log "downloaded file does not match $PLUGIN_PLATFORM"
   exit 1
 fi
 
 # --- skip if binary identical ---
-new_sha="$(sha256sum "$tmp_file" | awk '{print $1}')"
+new_sha="$(file_sha256 "$tmp_file")"
 old_sha=""
 if [ -f "$PLUGIN_DIR/$PLUGIN_FILE" ]; then
-  old_sha="$(sha256sum "$PLUGIN_DIR/$PLUGIN_FILE" | awk '{print $1}')"
+  old_sha="$(file_sha256 "$PLUGIN_DIR/$PLUGIN_FILE")"
 fi
 
 if [ -z "$FORCE" ] && [ -n "$old_sha" ] && [ "$old_sha" = "$new_sha" ]; then

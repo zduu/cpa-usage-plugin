@@ -2,9 +2,18 @@
 
 ## 1. 下载插件
 
-从 [GitHub Releases](https://github.com/zduu/cpa-usage-plugin/releases) 下载最新版本的 `usage-statistics.so`。
+从 [GitHub Releases](https://github.com/zduu/cpa-usage-plugin/releases) 下载最新版本的插件：
 
-> 也可以从 GitHub Actions 的 `Build Plugin` workflow 下载 `usage-statistics-plugin` artifact 自行构建。
+- Linux x86_64 / amd64：`usage-statistics-linux-amd64.so`
+- Linux arm64 / aarch64：`usage-statistics-linux-arm64.so`
+- macOS Intel：`usage-statistics-darwin-amd64.dylib`
+- macOS Apple Silicon：`usage-statistics-darwin-arm64.dylib`
+- Windows x86_64 / amd64：`usage-statistics-windows-amd64.dll`
+- `usage-statistics.so` 保留为 amd64 兼容别名。
+
+Linux 下载后将文件重命名为 `usage-statistics.so` 放入 CPA 插件目录；macOS/Windows 通常应分别保留或重命名为 `.dylib`/`.dll`，并确保 CPA 配置引用对应文件名。
+
+> 也可以从 GitHub Actions 的 `Build Plugin` workflow 下载对应架构的 `usage-statistics-plugin-*` artifact 自行构建。
 
 ## 2. 放入插件目录
 
@@ -17,6 +26,7 @@ CPA（CLIProxyAPI）通常以 Docker 方式运行，镜像为 `eceasy/cli-proxy-
 将下载的 `.so` 文件复制到运行中的容器内：
 
 ```bash
+cp usage-statistics-linux-amd64.so usage-statistics.so
 docker cp usage-statistics.so cli-proxy-api:/CLIProxyAPI/plugins/
 docker exec cli-proxy-api chmod 755 /CLIProxyAPI/plugins/usage-statistics.so
 ```
@@ -30,7 +40,7 @@ docker exec cli-proxy-api chmod 755 /CLIProxyAPI/plugins/usage-statistics.so
 ```bash
 # 先在宿主创建插件目录并放入 .so 文件
 mkdir -p /home/<用户>/docker/CLIProxyAPI/plugins
-cp usage-statistics.so /home/<用户>/docker/CLIProxyAPI/plugins/
+cp usage-statistics-linux-amd64.so /home/<用户>/docker/CLIProxyAPI/plugins/usage-statistics.so
 ```
 
 然后更新 `docker run` 命令，添加插件目录挂载：
@@ -54,7 +64,7 @@ docker run -d \
 如果 CPA 直接运行在宿主机上，将 `usage-statistics.so` 放到 CPA 工作目录下的 `plugins` 子目录：
 
 ```bash
-cp usage-statistics.so /path/to/CLIProxyAPI/plugins/
+cp usage-statistics-linux-amd64.so /path/to/CLIProxyAPI/plugins/usage-statistics.so
 chmod 755 /path/to/CLIProxyAPI/plugins/usage-statistics.so
 ```
 
@@ -170,6 +180,15 @@ crontab -e
 ```bash
 bash update-usage-statistics.sh --force --restart
 ```
+
+更新脚本会根据当前系统自动选择 release 资产：
+
+- `x86_64` / `amd64` 下载 `usage-statistics-linux-amd64.so`
+- `aarch64` / `arm64` 下载 `usage-statistics-linux-arm64.so`
+- macOS 会下载对应的 `usage-statistics-darwin-*.dylib`
+- Windows amd64 会下载 `usage-statistics-windows-amd64.dll`
+
+安装到插件目录时，Linux 默认保存为 `usage-statistics.so`，macOS 默认保存为 `usage-statistics.dylib`，Windows 默认保存为 `usage-statistics.dll`。如果需要手动指定目标平台，可设置 `PLUGIN_PLATFORM=linux-amd64`、`PLUGIN_PLATFORM=linux-arm64`、`PLUGIN_PLATFORM=darwin-amd64`、`PLUGIN_PLATFORM=darwin-arm64` 或 `PLUGIN_PLATFORM=windows-amd64`；如果使用自定义资产名或安装文件名，可设置 `PLUGIN_ASSET` / `PLUGIN_FILE`。
 
 脚本支持的参数：
 

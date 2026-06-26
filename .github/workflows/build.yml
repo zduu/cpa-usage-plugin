@@ -54,13 +54,63 @@ jobs:
         run: node --test go/dashboard/*.test.js
 
   build:
-    name: Build Linux x86_64 Plugin
-    runs-on: ubuntu-latest
+    name: Build ${{ matrix.platform }} Plugin
+    runs-on: ${{ matrix.runner }}
     needs: [test-go, test-js]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-amd64
+            runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            ext: so
+            cc: gcc
+            apt: ''
+            file_pattern: 'ELF 64-bit.*x86-64'
+          - platform: linux-arm64
+            runner: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            ext: so
+            cc: aarch64-linux-gnu-gcc
+            apt: gcc-aarch64-linux-gnu
+            file_pattern: 'ELF 64-bit.*(ARM aarch64|aarch64)'
+          - platform: darwin-amd64
+            runner: macos-latest
+            goos: darwin
+            goarch: amd64
+            ext: dylib
+            cc: clang -arch x86_64
+            apt: ''
+            file_pattern: 'Mach-O 64-bit.*x86_64'
+          - platform: darwin-arm64
+            runner: macos-latest
+            goos: darwin
+            goarch: arm64
+            ext: dylib
+            cc: clang -arch arm64
+            apt: ''
+            file_pattern: 'Mach-O 64-bit.*arm64'
+          - platform: windows-amd64
+            runner: ubuntu-latest
+            goos: windows
+            goarch: amd64
+            ext: dll
+            cc: x86_64-w64-mingw32-gcc
+            apt: gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64
+            file_pattern: 'PE32\+.*x86-64'
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Install cross compiler
+        if: matrix.apt != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.apt }}
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -82,29 +132,29 @@ jobs:
       - name: Build plugin
         run: |
           cd go
-          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildmode=c-shared -buildvcs=false -o ../usage-statistics.so .
+          output="../usage-statistics-${{ matrix.platform }}.${{ matrix.ext }}"
+          export CC="${{ matrix.cc }}"
+          export CGO_ENABLED=1
+          export GOOS="${{ matrix.goos }}"
+          export GOARCH="${{ matrix.goarch }}"
+          go build -buildmode=c-shared -buildvcs=false -o "$output" .
           cd ..
-          rm -f usage-statistics.h
-          ls -lh usage-statistics.so
-          file usage-statistics.so
-          nm -D usage-statistics.so | grep ' cliproxy_plugin_init$'
+          rm -f usage-statistics*.h
+          asset="usage-statistics-${{ matrix.platform }}.${{ matrix.ext }}"
+          ls -lh "$asset"
+          file "$asset" | grep -Eq '${{ matrix.file_pattern }}'
+          case "${{ matrix.goos }}" in
+            linux) readelf -Ws "$asset" | grep ' cliproxy_plugin_init$' ;;
+            darwin) nm -gU "$asset" | grep ' _cliproxy_plugin_init$' ;;
+            windows) x86_64-w64-mingw32-nm -g "$asset" | grep ' cliproxy_plugin_init$' ;;
+          esac
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: usage-statistics-plugin
-          path: usage-statistics.so
+          name: usage-statistics-plugin-${{ matrix.platform }}
+          path: usage-statistics-${{ matrix.platform }}.${{ matrix.ext }}
           retention-days: 90
-
-      - name: Create Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v3
-        with:
-          files: usage-statistics.so
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   verify:
     name: Verify Build
@@ -112,23 +162,72 @@ jobs:
     needs: build
 
     steps:
-      - name: Download artifact
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          name: usage-statistics-plugin
+          pattern: usage-statistics-plugin-*
+          path: dist
+          merge-multiple: true
 
-      - name: Verify plugin file
+      - name: Verify plugin files
         run: |
-          ls -lh usage-statistics.so
-          file usage-statistics.so
-          if [ ! -f "usage-statistics.so" ]; then
-            echo "Plugin file not found!"
+          set -eu
+          found=0
+          for asset in dist/usage-statistics-*.*; do
+            [ -e "$asset" ] || continue
+            found=1
+            echo "Verifying $asset"
+            ls -lh "$asset"
+            file "$asset"
+            case "$asset" in
+              *linux-amd64.so) pattern='ELF 64-bit.*x86-64' ;;
+              *linux-arm64.so) pattern='ELF 64-bit.*(ARM aarch64|aarch64)' ;;
+              *darwin-amd64.dylib) pattern='Mach-O 64-bit.*x86_64' ;;
+              *darwin-arm64.dylib) pattern='Mach-O 64-bit.*arm64' ;;
+              *windows-amd64.dll) pattern='PE32\+.*x86-64' ;;
+              *) echo "Unexpected asset: $asset"; exit 1 ;;
+            esac
+            file "$asset" | grep -Eq "$pattern"
+            SIZE=$(stat -f%z "$asset" 2>/dev/null || stat -c%s "$asset")
+            if [ "$SIZE" -lt 1000000 ]; then
+              echo "Plugin file too small (< 1MB), probably incomplete"
+              exit 1
+            fi
+          done
+          if [ "$found" -ne 1 ]; then
+            echo "No plugin artifacts found"
             exit 1
           fi
-          SIZE=$(stat -f%z usage-statistics.so 2>/dev/null || stat -c%s usage-statistics.so)
-          if [ "$SIZE" -lt 1000000 ]; then
-            echo "Plugin file too small (< 1MB), probably incomplete"
-            exit 1
-          fi
-          nm -D usage-statistics.so | grep ' cliproxy_plugin_init$'
-          echo "✓ Plugin file verified"
+          echo "✓ Plugin files verified"
+
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: verify
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: usage-statistics-plugin-*
+          path: dist
+          merge-multiple: true
+
+      - name: Add legacy amd64 asset alias
+        run: cp dist/usage-statistics-linux-amd64.so dist/usage-statistics.so
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/usage-statistics.so
+            dist/usage-statistics-linux-amd64.so
+            dist/usage-statistics-linux-arm64.so
+            dist/usage-statistics-darwin-amd64.dylib
+            dist/usage-statistics-darwin-arm64.dylib
+            dist/usage-statistics-windows-amd64.dll
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
