@@ -474,6 +474,24 @@ func TestDashboardMarkupContainsHealthRowsApiSelectorAndBackoff(t *testing.T) {
 	}
 }
 
+func TestDashboardUsesRootedPluginEndpointsForImportExport(t *testing.T) {
+	checks := map[string]string{
+		"endpoint helper": "function pluginEndpoint",
+		"import endpoint": "pluginEndpoint('usage/import')",
+		"export endpoint": "pluginEndpoint('usage/export')",
+	}
+	for name, needle := range checks {
+		if !strings.Contains(completeDashboardHTML, needle) {
+			t.Fatalf("%s: completeDashboardHTML missing %q", name, needle)
+		}
+	}
+	for _, bad := range []string{"'./usage/import'", "\"./usage/import\"", "'./usage/export'", "\"./usage/export\""} {
+		if strings.Contains(completeDashboardHTML, bad) {
+			t.Fatalf("completeDashboardHTML still contains fragile relative endpoint %q", bad)
+		}
+	}
+}
+
 func TestEmptyLogResponseHeadersDefaultsToNil(t *testing.T) {
 	cfg := defaultRuntimeConfig()
 	if cfg.LogResponseHeaders != "" {

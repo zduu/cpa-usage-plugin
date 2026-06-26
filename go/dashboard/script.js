@@ -231,7 +231,7 @@ async function renderEvents() {
   const fa = $('filterAuth').value; if (fa) params.set('auth', fa);
   if (selectedApi) params.set('api', selectedApi);
   try {
-    eventsData = await fetchJsonPayload('./dashboard-events?' + params.toString(), { cache: 'no-store' });
+    eventsData = await fetchJsonPayload(pluginEndpoint('dashboard-events') + '?' + params.toString(), { cache: 'no-store' });
   } catch (e) {
     eventsData = { events: [], total: 0, limit: eventsLimit, offset: 0 };
   }
@@ -341,7 +341,7 @@ async function exportRows(kind) {
   const params = new URLSearchParams();
   params.set('limit', '500'); params.set('offset', '0'); params.set('range', 'all');
   try {
-    const data = await fetchJsonPayload('./dashboard-events?' + params.toString());
+    const data = await fetchJsonPayload(pluginEndpoint('dashboard-events') + '?' + params.toString());
     const rows = data.events || [];
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     if (kind === 'json') { download('usage-events-' + stamp + '.json', JSON.stringify(rows, null, 2), 'application/json;charset=utf-8'); return }
@@ -355,7 +355,7 @@ async function exportApiRows(kind) {
   params.set('limit', '500'); params.set('offset', '0'); params.set('range', 'all');
   params.set('api', selectedApi);
   try {
-    const data = await fetchJsonPayload('./dashboard-events?' + params.toString());
+    const data = await fetchJsonPayload(pluginEndpoint('dashboard-events') + '?' + params.toString());
     const rows = data.events || [];
     if (!rows.length) return;
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -383,7 +383,7 @@ function nextFailureDelay() { return Math.min(300000, [5000, 15000, 45000, 90000
 async function load() {
   try {
     // Try new summary endpoint first
-    const data = await fetchJsonPayload('./dashboard-summary', { cache: 'no-store' });
+    const data = await fetchJsonPayload(pluginEndpoint('dashboard-summary'), { cache: 'no-store' });
     summaryData = data;
     setText('updated', '更新于 ' + new Date(data.generated_at || Date.now()).toLocaleTimeString());
     await rerender();
@@ -391,7 +391,7 @@ async function load() {
   } catch (error) {
     // Fallback: try old dashboard-data endpoint
     try {
-      const data = await fetchJsonPayload('./dashboard-data', { cache: 'no-store' });
+      const data = await fetchJsonPayload(pluginEndpoint('dashboard-data'), { cache: 'no-store' });
       summaryData = buildSummaryFromFullUsage(data);
       setText('updated', '更新于 ' + new Date(data.generated_at || Date.now()).toLocaleTimeString() + '（兼容模式）');
       await rerender();
@@ -421,7 +421,7 @@ $('exportRowsCsv').onclick = () => exportRows('csv'); $('exportRowsJson').onclic
 $('exportApiCsv').onclick = () => exportApiRows('csv'); $('exportApiJson').onclick = () => exportApiRows('json');
 $('exportBtn').onclick = async () => {
   try {
-    const data = await fetchJsonPayload('./usage/export', { cache: 'no-store' });
+    const data = await fetchJsonPayload(pluginEndpoint('usage/export'), { cache: 'no-store' });
     download('usage-export-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json', JSON.stringify(data, null, 2), 'application/json;charset=utf-8');
   } catch (e) { alert('导出失败：' + (e && e.message ? e.message : '未知错误')) }
 };
@@ -430,7 +430,7 @@ $('importFile').onchange = async (e) => {
   const file = e.target.files && e.target.files[0]; if (!file) return;
   try {
     const text = await file.text();
-    const result = await fetchJsonPayload('./usage/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: text });
+    const result = await fetchJsonPayload(pluginEndpoint('usage/import'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: text });
     alert('导入完成：新增 ' + (result.added || 0) + '，跳过 ' + (result.skipped || 0) + '，过期忽略 ' + (result.ignored_by_retention || 0));
     await load();
   } catch (err) {

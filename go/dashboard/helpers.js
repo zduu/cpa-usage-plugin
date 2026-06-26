@@ -34,6 +34,14 @@ function bucketSeries(rows, metric, minutes, count) {
 function healthColor(rate) { if (rate < 0) return ''; const stops = [[239, 68, 68], [250, 204, 21], [34, 197, 94]]; const seg = rate < .5 ? 0 : 1; const t = seg === 0 ? rate * 2 : (rate - .5) * 2; const a = stops[seg], b = stops[seg + 1]; return 'rgb(' + a.map((v, i) => Math.round(v + (b[i] - v) * t)).join(',') + ')' }
 function healthCellStyle(i, count, total, rate) { const rows = 7, cols = Math.ceil(count / rows), age = count - 1 - i, col = cols - Math.floor(age / rows), row = rows - (age % rows); return 'grid-column:' + col + ';grid-row:' + row + ';' + (total ? 'background:' + healthColor(rate) : '') }
 function timestampMs(value) { const ms = Date.parse(value); return Number.isFinite(ms) ? ms : 0 }
+function pluginEndpoint(path, pathname) {
+  const clean = String(path || '').replace(/^\/+/, '');
+  const current = String(pathname || (typeof location !== 'undefined' ? location.pathname : ''));
+  const marker = '/plugins/usage-statistics/';
+  const idx = current.indexOf(marker);
+  if (idx >= 0) return current.slice(0, idx + marker.length) + clean;
+  return './' + clean;
+}
 function groupedRows(rows, keyFn, nameFn) {
   const map = new Map();
   rows.forEach((d) => { const key = keyFn(d); const r = map.get(key) || { name: nameFn(d), requests: 0, success: 0, failure: 0, tokens: 0, cached: 0, reasoning: 0, cost: 0, latency: [], ttft: [] }; r.requests++; d.failed ? r.failure++ : r.success++; r.tokens += d.total_tokens; r.cached += d.cached_tokens; r.reasoning += d.reasoning_tokens; r.cost += d.cost; if (num(d.latency_ms) > 0) r.latency.push(num(d.latency_ms)); if (num(d.ttft_ms) > 0) r.ttft.push(num(d.ttft_ms)); map.set(key, r) });
@@ -74,5 +82,5 @@ function unwrapPluginPayload(payload) {
 
 // Export for Node.js test environment
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { esc, num, compact, pct, formatMs, totalTokens, tokenCost, detailCost, aggregateCost, looksLikeKey, looksLikeCredentialId, isCredentialMarker, trimCredentialSuffix, sourceLabel, sourceKey, friendlyApiName, clientApiLabel, avg, bucketSeries, healthColor, healthCellStyle, timestampMs, groupedRows, decodeManagementBody, unwrapPluginPayload };
+  module.exports = { esc, num, compact, pct, formatMs, totalTokens, tokenCost, detailCost, aggregateCost, looksLikeKey, looksLikeCredentialId, isCredentialMarker, trimCredentialSuffix, sourceLabel, sourceKey, friendlyApiName, clientApiLabel, avg, bucketSeries, healthColor, healthCellStyle, timestampMs, pluginEndpoint, groupedRows, decodeManagementBody, unwrapPluginPayload };
 }

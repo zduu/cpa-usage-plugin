@@ -154,6 +154,21 @@ test('timestampMs parses timestamps', () => {
   assert.strictEqual(helpers.timestampMs('invalid'), 0);
 });
 
+test('pluginEndpoint builds management URLs from plugin resource paths', () => {
+  assert.strictEqual(
+    helpers.pluginEndpoint('usage/import', '/v0/management/plugins/usage-statistics/dashboard'),
+    '/v0/management/plugins/usage-statistics/usage/import'
+  );
+  assert.strictEqual(
+    helpers.pluginEndpoint('/dashboard-summary', '/v0/management/plugins/usage-statistics/dashboard/'),
+    '/v0/management/plugins/usage-statistics/dashboard-summary'
+  );
+  assert.strictEqual(
+    helpers.pluginEndpoint('usage/export', '/standalone/dashboard.html'),
+    './usage/export'
+  );
+});
+
 test('groupedRows groups by key', () => {
   const rows = [
     { model: 'gpt-4', total_tokens: 100, cached_tokens: 0, reasoning_tokens: 0, cost: 0.5, failed: false, latency_ms: 200, ttft_ms: 50 },
