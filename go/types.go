@@ -6,10 +6,12 @@ import (
 )
 
 const (
-	abiVersion                uint32 = 1
-	defaultMaxDetailsPerModel        = 5000
-	defaultRetentionDays             = 30
-	defaultDedupWindowMinutes        = 24 * 60
+	abiVersion                 uint32 = 1
+	defaultMaxDetailsPerModel         = 5000
+	defaultRetentionDays              = 30
+	defaultDedupWindowMinutes         = 24 * 60
+	defaultStorageFlushSeconds        = 30
+	defaultPriceStoragePath           = "usage-statistics-prices.json"
 )
 
 type envelope struct {
@@ -24,22 +26,46 @@ type envelopeError struct {
 }
 
 type runtimeConfig struct {
-	MaxDetailsPerModel int
-	RetentionDays      int
-	DedupWindowMinutes int
-	LogResponseHeaders string
-	UpdateEnabled      bool
-	UpdateVersion      string
+	MaxDetailsPerModel  int
+	RetentionDays       int
+	DedupWindowMinutes  int
+	LogResponseHeaders  string
+	APIKeyHashSalt      string
+	StorageEnabled      bool
+	StoragePath         string
+	StorageFlushSeconds int
+	PriceStoragePath    string
+	UpdateEnabled       bool
+	UpdateVersion       string
+}
+
+type runtimeConfigPatch struct {
+	MaxDetailsPerModel  *int
+	RetentionDays       *int
+	DedupWindowMinutes  *int
+	LogResponseHeaders  *string
+	APIKeyHashSalt      *string
+	StorageEnabled      *bool
+	StoragePath         *string
+	StorageFlushSeconds *int
+	PriceStoragePath    *string
+	UpdateEnabled       *bool
+	UpdateVersion       *string
 }
 
 func defaultRuntimeConfig() runtimeConfig {
 	return runtimeConfig{
-		MaxDetailsPerModel: defaultMaxDetailsPerModel,
-		RetentionDays:      defaultRetentionDays,
-		DedupWindowMinutes: defaultDedupWindowMinutes,
-		LogResponseHeaders: "",
-		UpdateEnabled:      false,
-		UpdateVersion:      "latest",
+		MaxDetailsPerModel:  defaultMaxDetailsPerModel,
+		RetentionDays:       defaultRetentionDays,
+		DedupWindowMinutes:  defaultDedupWindowMinutes,
+		LogResponseHeaders:  "",
+		APIKeyHashSalt:      "",
+		StorageEnabled:      false,
+		StoragePath:         "usage-statistics.jsonl",
+		StorageFlushSeconds: defaultStorageFlushSeconds,
+		PriceStoragePath:    defaultPriceStoragePath,
+		UpdateEnabled:       false,
+		UpdateVersion:       "latest",
 	}
 }
 
@@ -302,12 +328,61 @@ type ManagementResource struct {
 }
 
 type ExportPayload struct {
-	Version    int                `json:"version"`
-	ExportedAt string             `json:"exported_at"`
-	Usage      StatisticsSnapshot `json:"usage"`
+	Version     int                `json:"version"`
+	ExportedAt  string             `json:"exported_at"`
+	Plugin      string             `json:"plugin,omitempty"`
+	DetailCount int64              `json:"detail_count,omitempty"`
+	Config      ExportConfig       `json:"config,omitempty"`
+	Usage       StatisticsSnapshot `json:"usage"`
+}
+
+type ExportConfig struct {
+	RetentionDays      int    `json:"retention_days"`
+	MaxDetailsPerModel int    `json:"max_details_per_model"`
+	DedupWindowMinutes int    `json:"dedup_window_minutes"`
+	LogResponseHeaders string `json:"log_response_headers,omitempty"`
+	StorageEnabled     bool   `json:"storage_enabled"`
+	StoragePath        string `json:"storage_path,omitempty"`
+	PriceStoragePath   string `json:"price_storage_path,omitempty"`
+}
+
+type StorageStatus struct {
+	Enabled     bool   `json:"enabled"`
+	Path        string `json:"path,omitempty"`
+	LoadedPath  string `json:"loaded_path,omitempty"`
+	LastFlushAt string `json:"last_flush_at,omitempty"`
+	LastError   string `json:"last_error,omitempty"`
+}
+
+type ModelPrice struct {
+	Prompt     float64 `json:"prompt"`
+	Completion float64 `json:"completion"`
+	Cache      float64 `json:"cache"`
+}
+
+type ModelPricesResponse struct {
+	Prices    map[string]ModelPrice   `json:"prices"`
+	UpdatedAt string                  `json:"updated_at,omitempty"`
+	Storage   ModelPriceStorageStatus `json:"storage"`
+}
+
+type ModelPriceStorageStatus struct {
+	Path       string `json:"path,omitempty"`
+	LoadedPath string `json:"loaded_path,omitempty"`
+	LastError  string `json:"last_error,omitempty"`
+}
+
+type RuntimeStatus struct {
+	StartedAt      string         `json:"started_at,omitempty"`
+	LastRecordedAt string         `json:"last_recorded_at,omitempty"`
+	SeenCount      int            `json:"seen_count"`
+	LastImport     *ImportSummary `json:"last_import,omitempty"`
 }
 
 type ImportResponse struct {
+	InputRecords       int64 `json:"input_records"`
+	AcceptedRecords    int64 `json:"accepted_records"`
+	RejectedRecords    int64 `json:"rejected_records"`
 	Added              int64 `json:"added"`
 	Skipped            int64 `json:"skipped"`
 	IgnoredByRetention int64 `json:"ignored_by_retention"`

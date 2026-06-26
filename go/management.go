@@ -38,6 +38,12 @@ func handleManagement(requestBody []byte) ([]byte, error) {
 		return handleDashboardEvents(req.Query)
 	case req.Method == "GET" && tail == "dashboard-data":
 		return handleDashboardData()
+	case req.Method == "GET" && tail == "model-prices":
+		return handleGetModelPrices()
+	case req.Method == "PUT" && tail == "model-prices":
+		return handlePutModelPrice(req.Body)
+	case req.Method == "DELETE" && tail == "model-prices":
+		return handleDeleteModelPrice(req.Query)
 	case req.Method == "GET" && tail == "export" && strings.Contains(req.Path, "/usage/"):
 		return handleExportUsage()
 	case req.Method == "POST" && tail == "import" && strings.Contains(req.Path, "/usage/"):
@@ -93,6 +99,21 @@ func handleManagementRegister() ([]byte, error) {
 			},
 			{
 				Method:      "GET",
+				Path:        "/plugins/usage-statistics/model-prices",
+				Description: "获取全局模型价格表。",
+			},
+			{
+				Method:      "PUT",
+				Path:        "/plugins/usage-statistics/model-prices",
+				Description: "新增或更新全局模型价格。",
+			},
+			{
+				Method:      "DELETE",
+				Path:        "/plugins/usage-statistics/model-prices",
+				Description: "删除全局模型价格。",
+			},
+			{
+				Method:      "GET",
 				Path:        "/plugins/usage-statistics/health",
 				Description: "获取插件运行健康状态。",
 			},
@@ -114,6 +135,10 @@ func handleManagementRegister() ([]byte, error) {
 			{
 				Path:        "/dashboard-events",
 				Description: "用量统计请求事件明细（分页）。",
+			},
+			{
+				Path:        "/model-prices",
+				Description: "全局模型价格表。",
 			},
 			{
 				Path:        "/usage/export",
@@ -196,13 +221,63 @@ func handleGetUsage() ([]byte, error) {
 	return okEnvelopeJSON(string(mustMarshal(resp)))
 }
 
+func handleGetModelPrices() ([]byte, error) {
+	return modelPricesManagementResponse(stats.ModelPrices())
+}
+
+func handlePutModelPrice(body []byte) ([]byte, error) {
+	var payload struct {
+		Model string     `json:"model"`
+		Price ModelPrice `json:"price"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return errorEnvelope("invalid_json", "failed to parse model price payload"), nil
+	}
+	response, err := stats.UpsertModelPrice(payload.Model, payload.Price)
+	if err != nil {
+		return errorEnvelope("invalid_price", err.Error()), nil
+	}
+	return modelPricesManagementResponse(response)
+}
+
+func handleDeleteModelPrice(query map[string][]string) ([]byte, error) {
+	model := ""
+	if values, ok := query["model"]; ok && len(values) > 0 {
+		model = values[0]
+	}
+	response, err := stats.DeleteModelPrice(model)
+	if err != nil {
+		return errorEnvelope("invalid_price", err.Error()), nil
+	}
+	return modelPricesManagementResponse(response)
+}
+
+func modelPricesManagementResponse(data ModelPricesResponse) ([]byte, error) {
+	responseJSON, err := json.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
+	resp := ManagementResponse{
+		StatusCode: http.StatusOK,
+		Headers: map[string][]string{
+			"Content-Type":  {"application/json; charset=utf-8"},
+			"Cache-Control": {"no-store"},
+		},
+		Body: responseJSON,
+	}
+	return okEnvelopeJSON(string(mustMarshal(resp)))
+}
+
 func handleExportUsage() ([]byte, error) {
 	snapshot := stats.Snapshot()
 
 	exportPayload := ExportPayload{
-		Version:    1,
-		ExportedAt: time.Now().UTC().Format(time.RFC3339),
-		Usage:      snapshot,
+		Version:     1,
+		ExportedAt:  time.Now().UTC().Format(time.RFC3339),
+		Plugin:      pluginVersion,
+		DetailCount: stats.DetailCount(),
+		Config:      stats.ConfigSnapshot(),
+		Usage:       snapshot,
 	}
 
 	exportJSON, err := json.Marshal(exportPayload)
@@ -243,10 +318,10 @@ func handleImportUsage(body []byte) ([]byte, error) {
 		return errorEnvelope("unsupported_version", "unsupported version"), nil
 	}
 
-	recordCount := 0
+	var recordCount int64
 	for _, apiSnapshot := range importPayload.Usage.APIs {
 		for _, modelSnapshot := range apiSnapshot.Models {
-			recordCount += len(modelSnapshot.Details)
+			recordCount += int64(len(modelSnapshot.Details))
 		}
 	}
 	if recordCount > maxRecordCount {
@@ -254,14 +329,15 @@ func handleImportUsage(body []byte) ([]byte, error) {
 			fmt.Sprintf("import payload contains %d records, max allowed is %d", recordCount, maxRecordCount)), nil
 	}
 
-	for _, apiSnapshot := range importPayload.Usage.APIs {
-		for _, modelSnapshot := range apiSnapshot.Models {
-			for _, detail := range modelSnapshot.Details {
+	for apiName, apiSnapshot := range importPayload.Usage.APIs {
+		for modelName, modelSnapshot := range apiSnapshot.Models {
+			for detailIndex, detail := range modelSnapshot.Details {
 				t := detail.Tokens
 				if t.TotalTokens < 0 || t.InputTokens < 0 || t.OutputTokens < 0 ||
 					t.ReasoningTokens < 0 || t.CachedTokens < 0 || t.CacheTokens < 0 {
 					return errorEnvelope("invalid_record",
-						"negative token count found in import payload"), nil
+						fmt.Sprintf("negative token count found at api=%q model=%q detail_index=%d",
+							apiName, modelName, detailIndex)), nil
 				}
 			}
 		}
@@ -271,6 +347,9 @@ func handleImportUsage(body []byte) ([]byte, error) {
 	snapshot := stats.Snapshot()
 
 	responseData := ImportResponse{
+		InputRecords:       recordCount,
+		AcceptedRecords:    result.Added + result.Skipped + result.IgnoredByRetention,
+		RejectedRecords:    recordCount - result.Added - result.Skipped - result.IgnoredByRetention,
 		Added:              result.Added,
 		Skipped:            result.Skipped,
 		IgnoredByRetention: result.IgnoredByRetention,

@@ -3,12 +3,50 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func decodeManagementResponse(t *testing.T, raw []byte, target interface{}) ManagementResponse {
+	t.Helper()
+	var env envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("failed to unmarshal envelope: %v", err)
+	}
+	if !env.OK {
+		if env.Error != nil {
+			t.Fatalf("management response failed: %s: %s", env.Error.Code, env.Error.Message)
+		}
+		t.Fatal("management response failed without error details")
+	}
+	var resp ManagementResponse
+	if err := json.Unmarshal(env.Result, &resp); err != nil {
+		t.Fatalf("failed to unmarshal management response: %v", err)
+	}
+	if target != nil {
+		if err := json.Unmarshal(resp.Body, target); err != nil {
+			t.Fatalf("failed to unmarshal management body: %v", err)
+		}
+	}
+	return resp
+}
+
+func invokeManagement(t *testing.T, req ManagementRequest) []byte {
+	t.Helper()
+	reqBody, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal management request: %v", err)
+	}
+	raw, err := handleManagement(reqBody)
+	if err != nil {
+		t.Fatalf("handleManagement() error = %v", err)
+	}
+	return raw
+}
 
 func TestUsageRecordUnmarshalAcceptsLegacyPascalCaseFields(t *testing.T) {
 	raw := []byte(`{
@@ -94,10 +132,10 @@ func TestUsageRecordUnmarshalAcceptsSnakeCaseFields(t *testing.T) {
 }
 
 func TestHandleImportUsageAcceptsV120ExportFixture(t *testing.T) {
-	fixture := filepath.Join("..", "temp", "usage-export-2026-06-26T02-46-40-375Z.json")
+	fixture := filepath.Join("testdata", "usage-export-v1.2.0.json")
 	body, err := os.ReadFile(fixture)
 	if err != nil {
-		t.Skipf("fixture not available: %v", err)
+		t.Fatalf("fixture not available: %v", err)
 	}
 
 	previousStats := stats
@@ -131,16 +169,20 @@ func TestHandleImportUsageAcceptsV120ExportFixture(t *testing.T) {
 	if result.Added != 430 {
 		t.Fatalf("added = %d, want 430", result.Added)
 	}
+	if result.InputRecords != 430 || result.AcceptedRecords != 430 || result.RejectedRecords != 0 {
+		t.Fatalf("import counts = input %d accepted %d rejected %d, want 430/430/0",
+			result.InputRecords, result.AcceptedRecords, result.RejectedRecords)
+	}
 	if result.TotalRequests != 430 {
 		t.Fatalf("total_requests = %d, want 430", result.TotalRequests)
 	}
 }
 
 func TestManagementImportRouteAcceptsExportFixture(t *testing.T) {
-	fixture := filepath.Join("..", "temp", "usage-export-2026-06-26T02-46-40-375Z.json")
+	fixture := filepath.Join("testdata", "usage-export-v1.2.0.json")
 	body, err := os.ReadFile(fixture)
 	if err != nil {
-		t.Skipf("fixture not available: %v", err)
+		t.Fatalf("fixture not available: %v", err)
 	}
 
 	previousStats := stats
@@ -186,6 +228,47 @@ func TestManagementImportRouteAcceptsExportFixture(t *testing.T) {
 	}
 	if result.Added != 430 || result.TotalRequests != 430 {
 		t.Fatalf("result = %#v, want added/total 430", result)
+	}
+	if result.InputRecords != 430 || result.AcceptedRecords != 430 || result.RejectedRecords != 0 {
+		t.Fatalf("management import counts = %#v, want input/accepted/rejected 430/430/0", result)
+	}
+}
+
+func TestExportUsageIncludesMetadata(t *testing.T) {
+	previousStats := stats
+	stats = NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 10, RetentionDays: 7, DedupWindowMinutes: 5, LogResponseHeaders: "x-request-id"})
+	t.Cleanup(func() { stats = previousStats })
+	stats.Record(UsageRecord{
+		Provider: "openai",
+		Model:    "gpt-4",
+		Detail:   UsageDetail{TotalTokens: 10},
+	})
+
+	raw, err := handleExportUsage()
+	if err != nil {
+		t.Fatalf("handleExportUsage() error = %v", err)
+	}
+	var env envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	var resp ManagementResponse
+	if err := json.Unmarshal(env.Result, &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	var payload ExportPayload
+	if err := json.Unmarshal(resp.Body, &payload); err != nil {
+		t.Fatalf("unmarshal export payload: %v", err)
+	}
+	if payload.Plugin != pluginVersion || payload.DetailCount != 1 {
+		t.Fatalf("export metadata = plugin %q detail_count %d, want %q/1",
+			payload.Plugin, payload.DetailCount, pluginVersion)
+	}
+	if payload.Config.RetentionDays != 7 || payload.Config.MaxDetailsPerModel != 10 ||
+		payload.Config.DedupWindowMinutes != 5 || payload.Config.LogResponseHeaders != "x-request-id" ||
+		payload.Config.PriceStoragePath != defaultPriceStoragePath {
+		t.Fatalf("export config = %#v", payload.Config)
 	}
 }
 
@@ -249,6 +332,70 @@ func TestRecordStoresMaskedClientAPIKeyAndCleanSource(t *testing.T) {
 	hash2 := details2[len(details2)-1].APIKeyHash
 	if hash1 != hash2 {
 		t.Fatalf("APIKeyHash not stable across records: %q != %q", hash1, hash2)
+	}
+}
+
+func TestConfiguredAPIKeyHashSaltIsStable(t *testing.T) {
+	previousSalt := apiKeySalt
+	t.Cleanup(func() { apiKeySalt = previousSalt })
+
+	s1 := NewRequestStatistics()
+	s1.ConfigurePatch(runtimeConfigPatch{
+		MaxDetailsPerModel: intPtr(10),
+		DedupWindowMinutes: intPtr(0),
+		APIKeyHashSalt:     stringPtr("stable-salt"),
+	})
+	s1.Record(UsageRecord{Provider: "openai", Model: "gpt-4", APIKey: "sk-client-key-123456", Detail: UsageDetail{TotalTokens: 1}})
+	hash1 := s1.Snapshot().APIs["openai"].Models["gpt-4"].Details[0].APIKeyHash
+
+	apiKeySalt = previousSalt
+	s2 := NewRequestStatistics()
+	s2.ConfigurePatch(runtimeConfigPatch{
+		MaxDetailsPerModel: intPtr(10),
+		DedupWindowMinutes: intPtr(0),
+		APIKeyHashSalt:     stringPtr("stable-salt"),
+	})
+	s2.Record(UsageRecord{Provider: "openai", Model: "gpt-4", APIKey: "sk-client-key-123456", Detail: UsageDetail{TotalTokens: 1}})
+	hash2 := s2.Snapshot().APIs["openai"].Models["gpt-4"].Details[0].APIKeyHash
+
+	if hash1 == "" || hash1 != hash2 {
+		t.Fatalf("configured salt should produce stable hash, got %q and %q", hash1, hash2)
+	}
+}
+
+func TestStorageReplayRestoresRecords(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage-statistics.jsonl")
+	cfg := runtimeConfig{
+		MaxDetailsPerModel:  100,
+		RetentionDays:       0,
+		DedupWindowMinutes:  0,
+		StorageEnabled:      true,
+		StoragePath:         path,
+		StorageFlushSeconds: 1,
+	}
+
+	first := NewRequestStatistics()
+	first.Configure(cfg)
+	first.Record(UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-4",
+		APIKey:      "sk-client-storage-test",
+		RequestedAt: time.Now().Add(-time.Minute),
+		Detail:      UsageDetail{InputTokens: 10, OutputTokens: 5},
+	})
+	first.Close()
+
+	second := NewRequestStatistics()
+	second.Configure(cfg)
+	second.Configure(cfg)
+	defer second.Close()
+
+	snapshot := second.Snapshot()
+	if snapshot.TotalRequests != 1 || snapshot.TotalTokens != 15 {
+		t.Fatalf("replayed snapshot = requests %d tokens %d, want 1/15", snapshot.TotalRequests, snapshot.TotalTokens)
+	}
+	if status := second.StorageStatus(); !status.Enabled || status.LoadedPath == "" || status.LastError != "" {
+		t.Fatalf("storage status after replay = %#v", status)
 	}
 }
 
@@ -384,6 +531,27 @@ configs:
 	}
 }
 
+func TestYAMLConfigParsingIgnoresOtherPluginKeys(t *testing.T) {
+	yaml := []byte(`
+plugins:
+  configs:
+    other-plugin:
+      max_details_per_model: 999
+      retention_days: 1
+    usage-statistics:
+      retention_days: 14
+`)
+	raw := []byte(`{"config_yaml":"` + base64.StdEncoding.EncodeToString(yaml) + `"}`)
+
+	cfg := parseRuntimeConfig(raw)
+	if cfg.MaxDetailsPerModel != defaultMaxDetailsPerModel {
+		t.Fatalf("max_details_per_model = %d, want default %d", cfg.MaxDetailsPerModel, defaultMaxDetailsPerModel)
+	}
+	if cfg.RetentionDays != 14 {
+		t.Fatalf("retention_days = %d, want 14", cfg.RetentionDays)
+	}
+}
+
 func TestLogResponseHeadersConfig(t *testing.T) {
 	// P1-17: log_response_headers config parsing
 	yaml := []byte(`
@@ -396,6 +564,46 @@ configs:
 	cfg := parseRuntimeConfig(raw)
 	if cfg.LogResponseHeaders != "x-request-id,x-ratelimit-*" {
 		t.Fatalf("log_response_headers = %q", cfg.LogResponseHeaders)
+	}
+}
+
+func TestAPIKeyHashSaltConfig(t *testing.T) {
+	yaml := []byte(`
+configs:
+  usage-statistics:
+    api_key_hash_salt: "stable-test-salt"
+`)
+	raw := []byte(`{"config_yaml":"` + base64.StdEncoding.EncodeToString(yaml) + `"}`)
+
+	cfg := parseRuntimeConfig(raw)
+	if cfg.APIKeyHashSalt != "stable-test-salt" {
+		t.Fatalf("api_key_hash_salt = %q, want stable-test-salt", cfg.APIKeyHashSalt)
+	}
+}
+
+func TestStorageConfigParsing(t *testing.T) {
+	yaml := []byte(`
+configs:
+  usage-statistics:
+    storage_enabled: true
+    storage_path: "/tmp/usage-statistics.jsonl"
+    storage_flush_interval_seconds: 3
+    price_storage_path: "/tmp/usage-statistics-prices.json"
+`)
+	raw := []byte(`{"config_yaml":"` + base64.StdEncoding.EncodeToString(yaml) + `"}`)
+
+	cfg := parseRuntimeConfig(raw)
+	if !cfg.StorageEnabled {
+		t.Fatal("storage_enabled should be true")
+	}
+	if cfg.StoragePath != "/tmp/usage-statistics.jsonl" {
+		t.Fatalf("storage_path = %q", cfg.StoragePath)
+	}
+	if cfg.StorageFlushSeconds != 3 {
+		t.Fatalf("storage_flush_interval_seconds = %d, want 3", cfg.StorageFlushSeconds)
+	}
+	if cfg.PriceStoragePath != "/tmp/usage-statistics-prices.json" {
+		t.Fatalf("price_storage_path = %q", cfg.PriceStoragePath)
 	}
 }
 
@@ -421,6 +629,15 @@ func TestRegisterResponseExposesUpdateConfigFields(t *testing.T) {
 	raw, err := handleRegister(nil)
 	if err != nil {
 		t.Fatalf("handleRegister() error = %v", err)
+	}
+	if !strings.Contains(string(raw), `"Name":"api_key_hash_salt"`) {
+		t.Fatalf("register response missing api_key_hash_salt: %s", raw)
+	}
+	if !strings.Contains(string(raw), `"Name":"storage_enabled"`) {
+		t.Fatalf("register response missing storage_enabled: %s", raw)
+	}
+	if !strings.Contains(string(raw), `"Name":"price_storage_path"`) {
+		t.Fatalf("register response missing price_storage_path: %s", raw)
 	}
 	if !strings.Contains(string(raw), `"Name":"update_enabled"`) {
 		t.Fatalf("register response missing update_enabled: %s", raw)
@@ -454,6 +671,112 @@ func TestManagementRegisterIncludesImportExportResources(t *testing.T) {
 		if !resources[path] {
 			t.Fatalf("management resources missing %s: %#v", path, result.Resources)
 		}
+	}
+}
+
+func TestManagementModelPricesCRUDAndPersistence(t *testing.T) {
+	previousStats := stats
+	pricePath := filepath.Join(t.TempDir(), "prices.json")
+	stats = NewRequestStatistics()
+	stats.Configure(runtimeConfig{PriceStoragePath: pricePath})
+	t.Cleanup(func() { stats = previousStats })
+
+	var initial ModelPricesResponse
+	decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "GET",
+		Path:   "/v0/management/plugins/usage-statistics/model-prices",
+	}), &initial)
+	if len(initial.Prices) != 0 {
+		t.Fatalf("initial prices = %#v, want empty", initial.Prices)
+	}
+
+	body, err := json.Marshal(map[string]interface{}{
+		"model": "gpt-4.1",
+		"price": ModelPrice{
+			Prompt:     2,
+			Completion: 8,
+			Cache:      0.5,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal price payload: %v", err)
+	}
+	var saved ModelPricesResponse
+	decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "PUT",
+		Path:   "/v0/management/plugins/usage-statistics/model-prices",
+		Body:   body,
+	}), &saved)
+	if got := saved.Prices["gpt-4.1"]; got.Prompt != 2 || got.Completion != 8 || got.Cache != 0.5 {
+		t.Fatalf("saved price = %#v", got)
+	}
+
+	body, err = json.Marshal(map[string]interface{}{
+		"model": "gpt-4.1",
+		"price": ModelPrice{
+			Prompt:     3,
+			Completion: 9,
+			Cache:      1,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal updated price payload: %v", err)
+	}
+	var updated ModelPricesResponse
+	decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "PUT",
+		Path:   "/v0/management/plugins/usage-statistics/model-prices",
+		Body:   body,
+	}), &updated)
+	if got := updated.Prices["gpt-4.1"]; got.Prompt != 3 || got.Completion != 9 || got.Cache != 1 {
+		t.Fatalf("updated price = %#v", got)
+	}
+
+	reloaded := NewRequestStatistics()
+	reloaded.Configure(runtimeConfig{PriceStoragePath: pricePath})
+	if got := reloaded.ModelPrices().Prices["gpt-4.1"]; got.Prompt != 3 || got.Completion != 9 || got.Cache != 1 {
+		t.Fatalf("reloaded price = %#v", got)
+	}
+
+	var deleted ModelPricesResponse
+	decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "DELETE",
+		Path:   "/v0/management/plugins/usage-statistics/model-prices",
+		Query:  map[string][]string{"model": {"gpt-4.1"}},
+	}), &deleted)
+	if _, ok := deleted.Prices["gpt-4.1"]; ok {
+		t.Fatalf("deleted price still present: %#v", deleted.Prices)
+	}
+}
+
+func TestManagementModelPricesRejectInvalidPrice(t *testing.T) {
+	previousStats := stats
+	stats = NewRequestStatistics()
+	stats.Configure(runtimeConfig{PriceStoragePath: filepath.Join(t.TempDir(), "prices.json")})
+	t.Cleanup(func() { stats = previousStats })
+
+	body, err := json.Marshal(map[string]interface{}{
+		"model": "gpt-4.1",
+		"price": ModelPrice{
+			Prompt:     -1,
+			Completion: 8,
+			Cache:      0,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal price payload: %v", err)
+	}
+	raw := invokeManagement(t, ManagementRequest{
+		Method: "PUT",
+		Path:   "/v0/management/plugins/usage-statistics/model-prices",
+		Body:   body,
+	})
+	var env envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.OK || env.Error == nil || env.Error.Code != "invalid_price" {
+		t.Fatalf("invalid price response = %#v", env)
 	}
 }
 
@@ -550,6 +873,53 @@ func TestResponseHeadersWhitelistWildcard(t *testing.T) {
 	}
 	if got := details[0].Headers["X-Request-Id"]; len(got) != 1 || got[0] != "abc123" {
 		t.Fatalf("unexpected headers: %v", details[0].Headers)
+	}
+}
+
+func TestResponseHeadersWildcardExcludesSensitiveHeaders(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{LogResponseHeaders: "*", DedupWindowMinutes: 0, MaxDetailsPerModel: 100})
+	stats.Record(UsageRecord{
+		Provider:    "openai-sensitive",
+		Model:       "gpt-4",
+		RequestedAt: time.Now().Add(-2 * time.Minute),
+		ResponseHeaders: map[string][]string{
+			"X-Request-Id":  {"abc123"},
+			"Set-Cookie":    {"session=secret"},
+			"Authorization": {"Bearer secret"},
+		},
+		Detail: UsageDetail{TotalTokens: 10},
+	})
+
+	h := stats.Snapshot().APIs["openai-sensitive"].Models["gpt-4"].Details[0].Headers
+	if h["X-Request-Id"] == nil {
+		t.Fatalf("x-request-id should be retained, got %v", h)
+	}
+	if h["Set-Cookie"] != nil || h["Authorization"] != nil {
+		t.Fatalf("sensitive response headers should be dropped, got %v", h)
+	}
+}
+
+func TestResponseHeadersWhitelistPrefixWildcard(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{LogResponseHeaders: "x-ratelimit-*", DedupWindowMinutes: 0, MaxDetailsPerModel: 100})
+	stats.Record(UsageRecord{
+		Provider:    "openai-ratelimit",
+		Model:       "gpt-4",
+		RequestedAt: time.Now().Add(-2 * time.Minute),
+		ResponseHeaders: map[string][]string{
+			"X-RateLimit-Remaining": {"42"},
+			"X-Request-Id":          {"abc123"},
+		},
+		Detail: UsageDetail{TotalTokens: 10},
+	})
+
+	h := stats.Snapshot().APIs["openai-ratelimit"].Models["gpt-4"].Details[0].Headers
+	if got := h["X-RateLimit-Remaining"]; len(got) != 1 || got[0] != "42" {
+		t.Fatalf("x-ratelimit-* should retain ratelimit header, got %v", h)
+	}
+	if h["X-Request-Id"] != nil {
+		t.Fatalf("x-request-id should be filtered out, got %v", h)
 	}
 }
 
@@ -889,6 +1259,27 @@ func TestConfigure_ShrinkingMaxCleansUpCounters(t *testing.T) {
 	}
 }
 
+func TestConfigureSingleFieldDoesNotResetMaxDetails(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 3, RetentionDays: 0, DedupWindowMinutes: 0})
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < 3; i++ {
+		stats.Record(UsageRecord{
+			Provider:    "deepseek",
+			Model:       "deepseek-v3",
+			RequestedAt: base.Add(time.Duration(i) * time.Minute),
+			Detail:      UsageDetail{TotalTokens: int64(i + 1)},
+		})
+	}
+
+	stats.Configure(runtimeConfig{RetentionDays: 0})
+
+	snap := stats.Snapshot()
+	if snap.TotalRequests != 3 {
+		t.Fatalf("single-field Configure reset max details: total_requests = %d, want 3", snap.TotalRequests)
+	}
+}
+
 func TestHourKeysPrecomputed(t *testing.T) {
 	// Verify hourKeys array has 24 elements matching "00".."23"
 	for i := 0; i < 24; i++ {
@@ -978,5 +1369,93 @@ func BenchmarkSnapshot(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = stats.Snapshot()
+	}
+}
+
+func buildBenchmarkStats(recordCount int) *RequestStatistics {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: recordCount, RetentionDays: 30, DedupWindowMinutes: 0})
+	base := time.Now().Add(-7 * 24 * time.Hour)
+	providers := []string{"openai", "deepseek", "claude", "gemini"}
+	models := []string{"gpt-4.1", "deepseek-v3", "claude-sonnet", "gemini-pro"}
+	stats.mu.Lock()
+	defer stats.mu.Unlock()
+	for i := 0; i < recordCount; i++ {
+		provider := providers[i%len(providers)]
+		model := models[i%len(models)]
+		detail := RequestDetail{
+			Model:      model,
+			Timestamp:  base.Add(time.Duration(i) * time.Second),
+			LatencyMs:  int64(100 + i%3000),
+			APIKey:     maskAPIKey(fmt.Sprintf("sk-client-%04d", i%100)),
+			APIKeyHash: hashAPIKey(fmt.Sprintf("sk-client-%04d", i%100)),
+			Source:     provider + "-prod",
+			Provider:   provider,
+			AuthIndex:  fmt.Sprintf("auth-%02d", i%20),
+			Tokens: TokenStats{
+				InputTokens:     int64(100 + i%1000),
+				OutputTokens:    int64(10 + i%200),
+				ReasoningTokens: int64(i % 50),
+				CachedTokens:    int64(i % 100),
+			},
+			Failed: i%17 == 0,
+		}
+		detail.Tokens.TotalTokens = detailTotalTokens(detail.Tokens)
+		apiName := provider + " · " + provider + "-prod"
+		if existing, ok := stats.apis[apiName]; !ok || existing == nil {
+			stats.apis[apiName] = &apiStats{Models: make(map[string]*modelStats)}
+		}
+		stats.apis[apiName].Models[model] = ensureBenchmarkModel(stats.apis[apiName].Models[model])
+		stats.apis[apiName].Models[model].Details = append(stats.apis[apiName].Models[model].Details, detail)
+	}
+	stats.rebuildAggregatesLocked()
+	stats.rebuildSeenLocked(time.Now())
+	return stats
+}
+
+func ensureBenchmarkModel(model *modelStats) *modelStats {
+	if model != nil {
+		return model
+	}
+	return &modelStats{}
+}
+
+func buildBenchmarkSnapshot(recordCount int) StatisticsSnapshot {
+	return buildBenchmarkStats(recordCount).Snapshot()
+}
+
+func BenchmarkSummaryWithoutDetails100k(b *testing.B) {
+	stats := buildBenchmarkStats(100000)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = stats.SummaryWithoutDetails()
+	}
+}
+
+func BenchmarkQueryEvents100k(b *testing.B) {
+	stats := buildBenchmarkStats(100000)
+	params := EventsQuery{Limit: 500, Offset: 0, Range: "7d", Model: "gpt-4.1"}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = stats.QueryEvents(params)
+	}
+}
+
+func BenchmarkMergeSnapshot100k(b *testing.B) {
+	snapshot := buildBenchmarkSnapshot(100000)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		stats := NewRequestStatistics()
+		stats.Configure(runtimeConfig{MaxDetailsPerModel: 100000, RetentionDays: 30, DedupWindowMinutes: 0})
+		_ = stats.MergeSnapshot(snapshot)
+	}
+}
+
+func BenchmarkConfigurePrune200k(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		stats := buildBenchmarkStats(200000)
+		b.StartTimer()
+		stats.Configure(runtimeConfig{MaxDetailsPerModel: 100000, RetentionDays: 30, DedupWindowMinutes: 0})
+		b.StopTimer()
 	}
 }

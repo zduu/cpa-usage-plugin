@@ -62,6 +62,7 @@ tr:last-child td{border-bottom:0}
 .priceList{display:grid;gap:6px;margin-top:12px}
 .priceItem{display:flex;justify-content:space-between;gap:10px;align-items:center;border:1px solid #e5e5e5;border-radius:8px;padding:8px 10px}
 .priceMeta{display:flex;gap:10px;color:#6f6963;font-size:12px;flex-wrap:wrap}
+.priceActions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
 .healthSummary{display:flex;gap:14px;align-items:baseline;flex-wrap:wrap}
 .healthRate{font-size:18px;font-weight:800}
 .healthScroller{overflow-x:auto;overflow-y:hidden;padding-bottom:8px;scrollbar-width:thin;scrollbar-color:#c0c0c0 transparent}
@@ -80,5 +81,5 @@ tr:last-child td{border-bottom:0}
 .tooltip .ok{color:#10b981}.tooltip .bad{color:#c65746}
 .hidden{display:none!important}
 @media(max-width:1120px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.layout{grid-template-columns:1fr}.detailGrid{grid-template-columns:repeat(3,minmax(0,1fr))}.splitGrid{grid-template-columns:1fr}}
-@media(max-width:640px){.shell{padding:14px}h1{font-size:20px}.cards{grid-template-columns:1fr}.value{font-size:24px}.priceGrid{grid-template-columns:1fr}.detailGrid{grid-template-columns:1fr}.barItem{grid-template-columns:1fr}.apiCard{grid-template-columns:1fr}.btn,.select,.input{width:100%}.toolbar{width:100%}.toolbar>*{flex:1 1 150px}}
+@media(max-width:640px){.shell{padding:14px}h1{font-size:20px}.cards{grid-template-columns:1fr}.value{font-size:24px}.priceGrid{grid-template-columns:1fr}.priceItem{align-items:stretch;flex-direction:column}.priceActions{justify-content:stretch}.priceActions .btn{flex:1 1 120px}.detailGrid{grid-template-columns:1fr}.barItem{grid-template-columns:1fr}.apiCard{grid-template-columns:1fr}.btn,.select,.input{width:100%}.toolbar{width:100%}.toolbar>*{flex:1 1 150px}}
 @media(prefers-color-scheme:dark){:root{background:#111315;color:#f2f2f2}body{background:#111315;color:#f2f2f2}.panel,.stat,th,.btn,.select,.input,.apiCard{background:#181b1f;border-color:#30343a;color:#f2f2f2}.spark,.empty,.metric,.chip{background:#121417;border-color:#30343a}.clickableRow:hover td,.selectedRow td{background:#20242a}.barTrack{background:#2a2f35}.label,th,.subtle,.updated,.neutral,.meta,.legend,.metricLabel,.chip{color:#a8a29b}td{border-color:#30343a}.nameCell,.apiName{color:#f2f2f2}.pill{background:#20242a;border-color:#3a3f46;color:#c9c3bc}.healthCell{background:#2a2f35}.tooltip{background:#f2f2f2;color:#1b1b1b}}

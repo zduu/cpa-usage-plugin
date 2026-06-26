@@ -100,11 +100,14 @@ func handleDashboardEvents(query map[string][]string) ([]byte, error) {
 // handleHealthCheck returns a lightweight health/status endpoint.
 func handleHealthCheck() ([]byte, error) {
 	type HealthResponse struct {
-		Status        string `json:"status"`
-		DetailCount   int64  `json:"detail_count"`
-		TotalRequests int64  `json:"total_requests"`
-		EvictedTotal  int64  `json:"evicted_total"`
-		GeneratedAt   string `json:"generated_at"`
+		Status        string        `json:"status"`
+		DetailCount   int64         `json:"detail_count"`
+		TotalRequests int64         `json:"total_requests"`
+		EvictedTotal  int64         `json:"evicted_total"`
+		Config        ExportConfig  `json:"config"`
+		Storage       StorageStatus `json:"storage"`
+		Runtime       RuntimeStatus `json:"runtime"`
+		GeneratedAt   string        `json:"generated_at"`
 	}
 
 	detailCount := stats.DetailCount()
@@ -116,6 +119,9 @@ func handleHealthCheck() ([]byte, error) {
 		DetailCount:   detailCount,
 		TotalRequests: summary.Usage.TotalRequests,
 		EvictedTotal:  evicted,
+		Config:        stats.ConfigSnapshot(),
+		Storage:       stats.StorageStatus(),
+		Runtime:       stats.RuntimeStatus(),
 		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
 	}
 	responseJSON, err := json.Marshal(health)

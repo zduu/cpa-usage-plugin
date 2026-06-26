@@ -1,6 +1,7 @@
 package main
 
 import (
+	"sort"
 	"strings"
 )
 
@@ -192,37 +193,46 @@ func maxInt64(a, b int64) int64 {
 // Response Header Filtering
 // ============================================================================
 
-func parseHeaderWhitelist(raw string) map[string]bool {
-	set := make(map[string]bool)
+type headerWhitelist struct {
+	all      bool
+	exact    map[string]bool
+	prefixes []string
+}
+
+func parseHeaderWhitelist(raw string) headerWhitelist {
+	set := headerWhitelist{exact: make(map[string]bool)}
 	for _, name := range strings.Split(raw, ",") {
 		name = strings.TrimSpace(name)
 		if name == "" {
 			continue
 		}
-		set[strings.ToLower(name)] = true
+		name = strings.ToLower(name)
+		if name == "*" {
+			set.all = true
+			continue
+		}
+		if strings.HasSuffix(name, "*") {
+			prefix := strings.TrimSpace(strings.TrimSuffix(name, "*"))
+			if prefix != "" {
+				set.prefixes = append(set.prefixes, prefix)
+			}
+			continue
+		}
+		set.exact[name] = true
 	}
 	return set
 }
 
-func filterHeaders(headers map[string][]string, whitelist map[string]bool) map[string][]string {
+func filterHeaders(headers map[string][]string, whitelist headerWhitelist) map[string][]string {
 	if len(headers) == 0 {
 		return nil
 	}
-	if len(whitelist) == 0 {
+	if !whitelist.all && len(whitelist.exact) == 0 && len(whitelist.prefixes) == 0 {
 		return nil
-	}
-	if whitelist["*"] {
-		out := make(map[string][]string, len(headers))
-		for k, v := range headers {
-			vv := make([]string, len(v))
-			copy(vv, v)
-			out[k] = vv
-		}
-		return out
 	}
 	out := make(map[string][]string)
 	for k, v := range headers {
-		if whitelist[strings.ToLower(k)] {
+		if whitelist.matches(k) {
 			vv := make([]string, len(v))
 			copy(vv, v)
 			out[k] = vv
@@ -232,6 +242,47 @@ func filterHeaders(headers map[string][]string, whitelist map[string]bool) map[s
 		return nil
 	}
 	return out
+}
+
+func (w headerWhitelist) matches(name string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	if normalized == "" || isSensitiveHeader(normalized) {
+		return false
+	}
+	if w.all || w.exact[normalized] {
+		return true
+	}
+	for _, prefix := range w.prefixes {
+		if strings.HasPrefix(normalized, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func (w headerWhitelist) String() string {
+	parts := make([]string, 0, len(w.exact)+len(w.prefixes)+1)
+	if w.all {
+		parts = append(parts, "*")
+	}
+	for name := range w.exact {
+		parts = append(parts, name)
+	}
+	for _, prefix := range w.prefixes {
+		parts = append(parts, prefix+"*")
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
+}
+
+func isSensitiveHeader(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "authorization", "proxy-authorization", "cookie", "set-cookie",
+		"x-api-key", "x-auth-token", "x-access-token", "api-key":
+		return true
+	default:
+		return false
+	}
 }
 
 // ============================================================================

@@ -122,8 +122,27 @@ function unwrapPluginPayload(payload) {
   }
   return unwrapResponse(result);
 }
+async function fetchAllEventPages(fetchPage, baseParams, pageLimit) {
+  const limit = Math.max(1, num(pageLimit) || 500);
+  const params = new URLSearchParams(baseParams || '');
+  const events = [];
+  let offset = num(params.get('offset'));
+  let total = null;
+  for (;;) {
+    params.set('limit', String(limit));
+    params.set('offset', String(offset));
+    const page = await fetchPage(new URLSearchParams(params));
+    const rows = page && Array.isArray(page.events) ? page.events : [];
+    events.push(...rows);
+    const pageTotal = num(page && page.total);
+    if (pageTotal > 0 || rows.length === 0) total = pageTotal;
+    if (rows.length === 0 || (total !== null && events.length >= total) || rows.length < limit) break;
+    offset += limit;
+  }
+  return { events, total: total === null ? events.length : total };
+}
 
 // Export for Node.js test environment
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { esc, num, compact, pct, formatMs, totalTokens, tokenCost, detailCost, aggregateCost, looksLikeKey, looksLikeCredentialId, isCredentialMarker, trimCredentialSuffix, sourceLabel, sourceKey, friendlyApiName, clientApiLabel, avg, bucketSeries, healthColor, healthCellStyle, timestampMs, pluginEndpoint, managementEndpoint, decodeManagementStorage, parseManagementStorage, currentManagementKey, groupedRows, decodeManagementBody, unwrapPluginPayload };
+  module.exports = { esc, num, compact, pct, formatMs, totalTokens, tokenCost, detailCost, aggregateCost, looksLikeKey, looksLikeCredentialId, isCredentialMarker, trimCredentialSuffix, sourceLabel, sourceKey, friendlyApiName, clientApiLabel, avg, bucketSeries, healthColor, healthCellStyle, timestampMs, pluginEndpoint, managementEndpoint, decodeManagementStorage, parseManagementStorage, currentManagementKey, groupedRows, decodeManagementBody, unwrapPluginPayload, fetchAllEventPages };
 }

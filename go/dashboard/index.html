@@ -41,9 +41,9 @@
   </section>
   <section class="layout">
     <div class="panel">
-      <div class="panelHead"><h2>模型价格设置</h2><span class="subtle">单位：美元 / 百万 token，保存在当前浏览器</span></div>
+      <div class="panelHead"><h2>模型价格设置</h2><span class="subtle">单位：US$/M token</span></div>
       <div class="priceGrid">
-        <div><label class="subtle">模型</label><select id="priceModel" class="select"></select></div>
+        <div><label class="subtle">模型</label><input id="priceModel" class="input" list="priceModelOptions" placeholder="输入或选择模型"><datalist id="priceModelOptions"></datalist></div>
         <div><label class="subtle">输入价格</label><input id="pricePrompt" class="input" type="number" min="0" step="0.0001" placeholder="0.0000"></div>
         <div><label class="subtle">输出价格</label><input id="priceCompletion" class="input" type="number" min="0" step="0.0001" placeholder="0.0000"></div>
         <div><label class="subtle">缓存价格</label><input id="priceCache" class="input" type="number" min="0" step="0.0001" placeholder="默认同输入"></div>

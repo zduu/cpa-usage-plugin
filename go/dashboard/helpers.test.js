@@ -1,4 +1,4 @@
-// Unit tests for dashboard helpers — run with: node --test go/dashboard/helpers.test.js
+// Unit tests for dashboard helpers - run with: node --test go/dashboard/*.test.js
 const { test } = require('node:test');
 const assert = require('node:assert');
 
@@ -243,4 +243,36 @@ test('unwrapPluginPayload decodes top-level management response body', () => {
     helpers.unwrapPluginPayload({ status_code: 200, body }),
     { version: 1, usage: { total_requests: 430 } }
   );
+});
+
+test('fetchAllEventPages fetches every page and preserves filters', async () => {
+  const calls = [];
+  const base = new URLSearchParams({ range: '24h', model: 'gpt-4.1', api: 'openai' });
+  const result = await helpers.fetchAllEventPages(async (params) => {
+    calls.push(Object.fromEntries(params.entries()));
+    const offset = Number(params.get('offset'));
+    const remaining = Math.max(1200 - offset, 0);
+    const count = Math.min(Number(params.get('limit')), remaining);
+    return {
+      total: 1200,
+      events: Array.from({ length: count }, (_, i) => ({ id: offset + i })),
+    };
+  }, base, 500);
+
+  assert.strictEqual(result.events.length, 1200);
+  assert.deepStrictEqual(result.events[0], { id: 0 });
+  assert.deepStrictEqual(result.events[1199], { id: 1199 });
+  assert.deepStrictEqual(calls.map((c) => c.offset), ['0', '500', '1000']);
+  assert.ok(calls.every((c) => c.range === '24h' && c.model === 'gpt-4.1' && c.api === 'openai'));
+});
+
+test('fetchAllEventPages stops when a short page is returned without total', async () => {
+  const calls = [];
+  const result = await helpers.fetchAllEventPages(async (params) => {
+    calls.push(Number(params.get('offset')));
+    return { events: calls.length === 1 ? [{ id: 1 }, { id: 2 }] : [] };
+  }, new URLSearchParams(), 500);
+
+  assert.deepStrictEqual(calls, [0]);
+  assert.deepStrictEqual(result, { events: [{ id: 1 }, { id: 2 }], total: 2 });
 });

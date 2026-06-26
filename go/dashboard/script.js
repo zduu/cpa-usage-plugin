@@ -1,11 +1,10 @@
 // cpausage dashboard — main logic. Uses helpers from helpers.js.
-const storeKey = 'cpa-usage-model-prices-v1';
 const rangeKey = 'cpa-usage-range-v1';
 const fmt = new Intl.NumberFormat('zh-CN');
 const money = new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 });
 let summaryData = null;         // DashboardSummary from /dashboard-summary
 let eventsData = null;          // EventsResult from /dashboard-events
-let modelPrices = loadPrices();
+let modelPrices = {};
 let selectedApi = '';
 let clientApiSort = 'requests';
 let pollTimer = null, pollFailures = 0;
@@ -14,9 +13,6 @@ const eventsLimit = 500;
 // Dom helpers
 const $ = (id) => document.getElementById(id);
 const setText = (id, value) => { $(id).textContent = value };
-
-function loadPrices() { try { return JSON.parse(localStorage.getItem(storeKey) || '{}') || {} } catch { return {} } }
-function savePrices() { localStorage.setItem(storeKey, JSON.stringify(modelPrices)) }
 
 async function fetchJsonPayload(url, options) {
   const response = await fetch(url, options);
@@ -33,6 +29,30 @@ async function fetchJsonPayload(url, options) {
     throw new Error(message);
   }
   return unwrapPluginPayload(payload);
+}
+
+async function loadModelPrices() {
+  const data = await fetchJsonPayload(pluginEndpoint('model-prices'), { cache: 'no-store' });
+  modelPrices = (data && data.prices) || {};
+  return modelPrices;
+}
+
+async function saveModelPrice(model, price) {
+  const data = await fetchJsonPayload(pluginEndpoint('model-prices'), {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, price })
+  });
+  modelPrices = (data && data.prices) || {};
+  return modelPrices;
+}
+
+async function deleteModelPrice(model) {
+  const params = new URLSearchParams();
+  params.set('model', model);
+  const data = await fetchJsonPayload(pluginEndpoint('model-prices') + '?' + params.toString(), { method: 'DELETE' });
+  modelPrices = (data && data.prices) || {};
+  return modelPrices;
 }
 
 function drawSpark(id, values, color) {
@@ -118,13 +138,42 @@ function modelNames() {
   return [];
 }
 
+function priceModelOptions() {
+  return [...new Set([...modelNames(), ...Object.keys(modelPrices || {})])].filter(Boolean).sort((a, b) => a.localeCompare(b));
+}
+
+function fillPriceForm(model) {
+  $('priceModel').value = model || '';
+  const p = modelPrices[$('priceModel').value] || {};
+  $('pricePrompt').value = p.prompt ?? '';
+  $('priceCompletion').value = p.completion ?? '';
+  $('priceCache').value = p.cache ?? '';
+}
+
+function syncPriceFormForModel(model) {
+  if (!model) {
+    fillPriceForm('');
+    return;
+  }
+  if (modelPrices[model]) fillPriceForm(model);
+}
+
 function renderPrices() {
   const selected = $('priceModel').value;
-  $('priceModel').innerHTML = '<option value="">选择模型</option>' + modelNames().map((m) => '<option value="' + esc(m) + '">' + esc(m) + '</option>').join('');
+  $('priceModelOptions').innerHTML = priceModelOptions().map((m) => '<option value="' + esc(m) + '"></option>').join('');
   $('priceModel').value = selected;
-  const entries = Object.entries(modelPrices);
-  $('priceList').innerHTML = entries.length ? entries.map(([m, p]) => '<div class="priceItem"><div><strong>' + esc(m) + '</strong><div class="priceMeta"><span>输入 ' + num(p.prompt).toFixed(4) + '</span><span>输出 ' + num(p.completion).toFixed(4) + '</span><span>缓存 ' + num(p.cache).toFixed(4) + '</span></div></div><button class="btn danger" data-del-price="' + esc(m) + '">删除</button></div>').join('') : '<div class="empty">暂无价格设置，设置后会显示估算花费。</div>';
-  document.querySelectorAll('[data-del-price]').forEach((btn) => btn.onclick = () => { delete modelPrices[btn.dataset.delPrice]; savePrices(); rerender() });
+  const entries = Object.entries(modelPrices).sort(([a], [b]) => a.localeCompare(b));
+  $('priceList').innerHTML = entries.length ? entries.map(([m, p]) => '<div class="priceItem"><div><strong>' + esc(m) + '</strong><div class="priceMeta"><span>输入 ' + num(p.prompt).toFixed(4) + '</span><span>输出 ' + num(p.completion).toFixed(4) + '</span><span>缓存 ' + num(p.cache).toFixed(4) + '</span></div></div><div class="priceActions"><button class="btn" data-edit-price="' + esc(m) + '">编辑</button><button class="btn danger" data-del-price="' + esc(m) + '">删除</button></div></div>').join('') : '<div class="empty">暂无价格设置，设置后会显示估算花费。</div>';
+  document.querySelectorAll('[data-edit-price]').forEach((btn) => btn.onclick = () => fillPriceForm(btn.dataset.editPrice));
+  document.querySelectorAll('[data-del-price]').forEach((btn) => btn.onclick = async () => {
+    try {
+      await deleteModelPrice(btn.dataset.delPrice);
+      if ($('priceModel').value === btn.dataset.delPrice) fillPriceForm('');
+      await rerender();
+    } catch (e) {
+      alert('删除价格失败：' + (e && e.message ? e.message : '未知错误'));
+    }
+  });
 }
 
 function renderCredentials() {
@@ -337,11 +386,18 @@ function buildSummaryFromFullUsage(data) {
 }
 
 async function exportRows(kind) {
-  // Fetch all events for export
   const params = new URLSearchParams();
-  params.set('limit', '500'); params.set('offset', '0'); params.set('range', 'all');
+  params.set('range', $('range').value);
+  const fm = $('filterModel').value; if (fm) params.set('model', fm);
+  const fs = $('filterSource').value; if (fs) params.set('source', fs);
+  const fa = $('filterAuth').value; if (fa) params.set('auth', fa);
+  if (selectedApi) params.set('api', selectedApi);
   try {
-    const data = await fetchJsonPayload(pluginEndpoint('dashboard-events') + '?' + params.toString());
+    const data = await fetchAllEventPages(
+      (pageParams) => fetchJsonPayload(pluginEndpoint('dashboard-events') + '?' + pageParams.toString(), { cache: 'no-store' }),
+      params,
+      eventsLimit
+    );
     const rows = data.events || [];
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     if (kind === 'json') { download('usage-events-' + stamp + '.json', JSON.stringify(rows, null, 2), 'application/json;charset=utf-8'); return }
@@ -352,10 +408,17 @@ async function exportRows(kind) {
 async function exportApiRows(kind) {
   if (!selectedApi) return;
   const params = new URLSearchParams();
-  params.set('limit', '500'); params.set('offset', '0'); params.set('range', 'all');
+  params.set('range', $('range').value);
+  const fm = $('filterModel').value; if (fm) params.set('model', fm);
+  const fs = $('filterSource').value; if (fs) params.set('source', fs);
+  const fa = $('filterAuth').value; if (fa) params.set('auth', fa);
   params.set('api', selectedApi);
   try {
-    const data = await fetchJsonPayload(pluginEndpoint('dashboard-events') + '?' + params.toString());
+    const data = await fetchAllEventPages(
+      (pageParams) => fetchJsonPayload(pluginEndpoint('dashboard-events') + '?' + pageParams.toString(), { cache: 'no-store' }),
+      params,
+      eventsLimit
+    );
     const rows = data.events || [];
     if (!rows.length) return;
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -383,7 +446,10 @@ function nextFailureDelay() { return Math.min(300000, [5000, 15000, 45000, 90000
 async function load() {
   try {
     // Try new summary endpoint first
-    const data = await fetchJsonPayload(pluginEndpoint('dashboard-summary'), { cache: 'no-store' });
+    const [data] = await Promise.all([
+      fetchJsonPayload(pluginEndpoint('dashboard-summary'), { cache: 'no-store' }),
+      loadModelPrices()
+    ]);
     summaryData = data;
     setText('updated', '更新于 ' + new Date(data.generated_at || Date.now()).toLocaleTimeString());
     await rerender();
@@ -391,7 +457,10 @@ async function load() {
   } catch (error) {
     // Fallback: try old dashboard-data endpoint
     try {
-      const data = await fetchJsonPayload(pluginEndpoint('dashboard-data'), { cache: 'no-store' });
+      const [data] = await Promise.all([
+        fetchJsonPayload(pluginEndpoint('dashboard-data'), { cache: 'no-store' }),
+        loadModelPrices()
+      ]);
       summaryData = buildSummaryFromFullUsage(data);
       setText('updated', '更新于 ' + new Date(data.generated_at || Date.now()).toLocaleTimeString() + '（兼容模式）');
       await rerender();
@@ -407,13 +476,18 @@ async function load() {
 $('range').value = localStorage.getItem(rangeKey) || '24h';
 $('range').onchange = () => { localStorage.setItem(rangeKey, $('range').value); load() };
 $('refreshBtn').onclick = load;
-$('savePrice').onclick = () => {
-  const m = $('priceModel').value; if (!m) return;
+$('savePrice').onclick = async () => {
+  const m = $('priceModel').value.trim(); if (!m) return;
   const prompt = num($('pricePrompt').value), completion = num($('priceCompletion').value), cache = $('priceCache').value === '' ? prompt : num($('priceCache').value);
-  modelPrices[m] = { prompt, completion, cache }; savePrices();
-  $('pricePrompt').value = ''; $('priceCompletion').value = ''; $('priceCache').value = ''; rerender();
+  try {
+    await saveModelPrice(m, { prompt, completion, cache });
+    fillPriceForm('');
+    await rerender();
+  } catch (e) {
+    alert('保存价格失败：' + (e && e.message ? e.message : '未知错误'));
+  }
 };
-$('priceModel').onchange = () => { const p = modelPrices[$('priceModel').value] || {}; $('pricePrompt').value = p.prompt ?? ''; $('priceCompletion').value = p.completion ?? ''; $('priceCache').value = p.cache ?? '' };
+$('priceModel').onchange = () => syncPriceFormForModel($('priceModel').value);
 document.querySelectorAll('[data-api-sort]').forEach((btn) => btn.onclick = () => { clientApiSort = btn.dataset.apiSort || 'requests'; renderClientApiStats() });
 ['filterModel', 'filterSource', 'filterAuth'].forEach((id) => $(id).onchange = renderEvents);
 $('clearFilters').onclick = () => { ['filterModel', 'filterSource', 'filterAuth'].forEach((id) => $(id).value = ''); renderEvents() };

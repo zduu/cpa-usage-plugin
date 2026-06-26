@@ -110,7 +110,9 @@ func cliproxyPluginFree(ptr unsafe.Pointer, len C.size_t) {
 
 //export cliproxyPluginShutdown
 func cliproxyPluginShutdown() {
-	// Cleanup if needed
+	if stats != nil {
+		stats.Close()
+	}
 }
 
 func handleMethod(method string, requestBody []byte) ([]byte, error) {

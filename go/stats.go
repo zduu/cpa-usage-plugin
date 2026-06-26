@@ -1,10 +1,16 @@
 package main
 
 import (
+	"bufio"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -23,10 +29,12 @@ type RequestStatistics struct {
 	dedupWindow        time.Duration
 	seen               map[string]time.Time
 
-	totalRequests int64
-	successCount  int64
-	failureCount  int64
-	totalTokens   int64
+	totalRequests  int64
+	successCount   int64
+	failureCount   int64
+	totalTokens    int64
+	startedAt      time.Time
+	lastRecordedAt time.Time
 
 	apis map[string]*apiStats
 
@@ -35,7 +43,21 @@ type RequestStatistics struct {
 	tokensByDay    map[string]int64
 	tokensByHour   map[int]int64
 
-	logResponseHeaders map[string]bool
+	logResponseHeaders headerWhitelist
+	storageEnabled     bool
+	storagePath        string
+	storageFlush       time.Duration
+	storageFile        *os.File
+	storageWriter      *bufio.Writer
+	storageLoadedPath  string
+	storageLastFlush   time.Time
+	storageLastError   string
+
+	priceStoragePath       string
+	priceStorageLoadedPath string
+	priceStorageLastError  string
+	modelPrices            map[string]ModelPrice
+	modelPricesUpdatedAt   time.Time
 
 	lastImportResult *ImportResponse
 	evictedTotal     int64
@@ -99,28 +121,87 @@ func NewRequestStatistics() *RequestStatistics {
 		requestsByHour:     make(map[int]int64),
 		tokensByDay:        make(map[string]int64),
 		tokensByHour:       make(map[int]int64),
+		storagePath:        defaultRuntimeConfig().StoragePath,
+		storageFlush:       time.Duration(defaultStorageFlushSeconds) * time.Second,
+		priceStoragePath:   defaultRuntimeConfig().PriceStoragePath,
+		modelPrices:        make(map[string]ModelPrice),
+		startedAt:          time.Now(),
 	}
 }
 
 func (s *RequestStatistics) Configure(cfg runtimeConfig) {
+	s.ConfigurePatch(runtimeConfigPatch{
+		MaxDetailsPerModel:  positiveIntPtr(cfg.MaxDetailsPerModel),
+		RetentionDays:       intPtr(cfg.RetentionDays),
+		DedupWindowMinutes:  intPtr(cfg.DedupWindowMinutes),
+		LogResponseHeaders:  stringPtr(cfg.LogResponseHeaders),
+		APIKeyHashSalt:      stringPtr(cfg.APIKeyHashSalt),
+		StorageEnabled:      boolPtr(cfg.StorageEnabled),
+		StoragePath:         stringPtr(cfg.StoragePath),
+		StorageFlushSeconds: positiveIntPtr(cfg.StorageFlushSeconds),
+		PriceStoragePath:    stringPtr(cfg.PriceStoragePath),
+		UpdateEnabled:       boolPtr(cfg.UpdateEnabled),
+		UpdateVersion:       stringPtr(cfg.UpdateVersion),
+	})
+}
+
+func (s *RequestStatistics) ConfigurePatch(cfg runtimeConfigPatch) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if cfg.MaxDetailsPerModel >= 0 {
-		s.maxDetailsPerModel = cfg.MaxDetailsPerModel
+	if cfg.MaxDetailsPerModel != nil && *cfg.MaxDetailsPerModel >= 0 {
+		s.maxDetailsPerModel = *cfg.MaxDetailsPerModel
 	}
-	if cfg.RetentionDays >= 0 {
-		s.retention = time.Duration(cfg.RetentionDays) * 24 * time.Hour
+	if cfg.RetentionDays != nil && *cfg.RetentionDays >= 0 {
+		s.retention = time.Duration(*cfg.RetentionDays) * 24 * time.Hour
 	}
-	if cfg.DedupWindowMinutes >= 0 {
-		s.dedupWindow = time.Duration(cfg.DedupWindowMinutes) * time.Minute
+	if cfg.DedupWindowMinutes != nil && *cfg.DedupWindowMinutes >= 0 {
+		s.dedupWindow = time.Duration(*cfg.DedupWindowMinutes) * time.Minute
 	}
-	s.logResponseHeaders = parseHeaderWhitelist(cfg.LogResponseHeaders)
+	if cfg.LogResponseHeaders != nil {
+		s.logResponseHeaders = parseHeaderWhitelist(*cfg.LogResponseHeaders)
+	}
+	if cfg.APIKeyHashSalt != nil && strings.TrimSpace(*cfg.APIKeyHashSalt) != "" {
+		apiKeySalt = strings.TrimSpace(*cfg.APIKeyHashSalt)
+	}
+	if cfg.StoragePath != nil && strings.TrimSpace(*cfg.StoragePath) != "" {
+		s.storagePath = strings.TrimSpace(*cfg.StoragePath)
+	}
+	if cfg.StorageFlushSeconds != nil && *cfg.StorageFlushSeconds > 0 {
+		s.storageFlush = time.Duration(*cfg.StorageFlushSeconds) * time.Second
+	}
+	if cfg.PriceStoragePath != nil && strings.TrimSpace(*cfg.PriceStoragePath) != "" {
+		s.priceStoragePath = strings.TrimSpace(*cfg.PriceStoragePath)
+	}
+	if cfg.StorageEnabled != nil {
+		s.storageEnabled = *cfg.StorageEnabled
+	}
+	s.configureStorageLocked()
+	s.loadModelPricesLocked()
 	s.pruneLocked(time.Now(), true)
 	s.rebuildAggregatesLocked()
 	s.rebuildSeenLocked(time.Now())
+}
+
+func intPtr(value int) *int {
+	return &value
+}
+
+func positiveIntPtr(value int) *int {
+	if value <= 0 {
+		return nil
+	}
+	return &value
+}
+
+func stringPtr(value string) *string {
+	return &value
+}
+
+func boolPtr(value bool) *bool {
+	return &value
 }
 
 func (s *RequestStatistics) Record(record UsageRecord) {
@@ -174,25 +255,43 @@ func (s *RequestStatistics) Record(record UsageRecord) {
 	defer s.mu.Unlock()
 
 	now := time.Now()
+	if s.recordDetailLocked(statsKey, modelName, detail, dedup, now, true) {
+		s.appendDetailLocked(persistedDetail{API: statsKey, Model: modelName, Detail: detail})
+		s.pruneLocked(now, false)
+		s.pruneSeenLocked(now)
+	}
+}
+
+type persistedDetail struct {
+	API    string        `json:"api"`
+	Model  string        `json:"model"`
+	Detail RequestDetail `json:"detail"`
+}
+
+func (s *RequestStatistics) recordDetailLocked(apiName, modelName string, detail RequestDetail, dedup string, now time.Time, useDedupWindow bool) bool {
+	if s == nil {
+		return false
+	}
+	if dedup == "" {
+		dedup = dedupKey(apiName, modelName, detail)
+	}
 	s.pruneSeenLocked(now)
-	if s.dedupWindow > 0 {
+	if useDedupWindow && s.dedupWindow > 0 {
 		if _, exists := s.seen[dedup]; exists {
-			return
+			return false
 		}
 		s.seen[dedup] = now
 	}
 
-	apiSt, ok := s.apis[statsKey]
+	apiSt, ok := s.apis[apiName]
 	if !ok {
 		apiSt = &apiStats{Models: make(map[string]*modelStats)}
-		s.apis[statsKey] = apiSt
+		s.apis[apiName] = apiSt
 	}
 
 	s.updateAPIStats(apiSt, modelName, detail)
 
-	if totalTokens < 0 {
-		totalTokens = 0
-	}
+	totalTokens := detailTotalTokens(detail.Tokens)
 	s.totalRequests++
 	if detail.Failed {
 		s.failureCount++
@@ -200,15 +299,363 @@ func (s *RequestStatistics) Record(record UsageRecord) {
 		s.successCount++
 	}
 	s.totalTokens += totalTokens
-	dayKey := timestamp.Format("2006-01-02")
-	hourKey := timestamp.Hour()
+	dayKey := detail.Timestamp.Format("2006-01-02")
+	hourKey := detail.Timestamp.Hour()
 	s.requestsByDay[dayKey]++
 	s.requestsByHour[hourKey]++
 	s.tokensByDay[dayKey] += totalTokens
 	s.tokensByHour[hourKey] += totalTokens
+	if detail.Timestamp.After(s.lastRecordedAt) {
+		s.lastRecordedAt = detail.Timestamp
+	}
+	return true
+}
 
-	s.pruneLocked(now, false)
-	s.pruneSeenLocked(now)
+func (s *RequestStatistics) configureStorageLocked() {
+	if s == nil {
+		return
+	}
+	if !s.storageEnabled {
+		s.closeStorageLocked()
+		return
+	}
+	path := strings.TrimSpace(s.storagePath)
+	if path == "" {
+		path = defaultRuntimeConfig().StoragePath
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		s.storageLastError = err.Error()
+		return
+	}
+	if s.storageFile != nil && s.storageLoadedPath == abs {
+		return
+	}
+	s.closeStorageLocked()
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		s.storageLastError = err.Error()
+		return
+	}
+	if err := s.replayStorageLocked(abs); err != nil {
+		s.storageLastError = err.Error()
+	}
+	file, err := os.OpenFile(abs, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		s.storageLastError = err.Error()
+		return
+	}
+	s.storagePath = path
+	s.storageLoadedPath = abs
+	s.storageFile = file
+	s.storageWriter = bufio.NewWriter(file)
+	s.storageLastError = ""
+}
+
+func (s *RequestStatistics) replayStorageLocked(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	buf := make([]byte, 0, 1024*1024)
+	scanner.Buffer(buf, 10*1024*1024)
+	now := time.Now()
+	existing := s.detailKeysLocked()
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var persisted persistedDetail
+		if err := json.Unmarshal([]byte(line), &persisted); err != nil {
+			return fmt.Errorf("replay storage: %w", err)
+		}
+		apiName := strings.TrimSpace(persisted.API)
+		if apiName == "" {
+			continue
+		}
+		modelName := normalizeModelName(persisted.Model)
+		detail := persisted.Detail
+		if detail.Model == "" {
+			detail.Model = modelName
+		}
+		if detail.Timestamp.IsZero() {
+			detail.Timestamp = now
+		}
+		detail.Tokens.TotalTokens = detailTotalTokens(detail.Tokens)
+		key := dedupKey(apiName, modelName, detail)
+		if _, ok := existing[key]; ok {
+			continue
+		}
+		if s.recordDetailLocked(apiName, modelName, detail, key, now, true) {
+			existing[key] = struct{}{}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("scan storage: %w", err)
+	}
+	return nil
+}
+
+func (s *RequestStatistics) detailKeysLocked() map[string]struct{} {
+	keys := make(map[string]struct{})
+	for apiName, apiSt := range s.apis {
+		if apiSt == nil {
+			continue
+		}
+		for modelName, modelSt := range apiSt.Models {
+			if modelSt == nil {
+				continue
+			}
+			for _, detail := range modelSt.Details {
+				keys[dedupKey(apiName, modelName, detail)] = struct{}{}
+			}
+		}
+	}
+	return keys
+}
+
+func (s *RequestStatistics) appendDetailLocked(detail persistedDetail) {
+	if s == nil || !s.storageEnabled || s.storageWriter == nil {
+		return
+	}
+	raw, err := json.Marshal(detail)
+	if err != nil {
+		s.storageLastError = err.Error()
+		return
+	}
+	if _, err := s.storageWriter.Write(raw); err != nil {
+		s.storageLastError = err.Error()
+		return
+	}
+	if err := s.storageWriter.WriteByte('\n'); err != nil {
+		s.storageLastError = err.Error()
+		return
+	}
+	if s.storageFlush <= 0 || time.Since(s.storageLastFlush) >= s.storageFlush {
+		if err := s.storageWriter.Flush(); err != nil {
+			s.storageLastError = err.Error()
+			return
+		}
+		s.storageLastFlush = time.Now()
+	}
+}
+
+func (s *RequestStatistics) closeStorageLocked() {
+	if s == nil {
+		return
+	}
+	if s.storageWriter != nil {
+		if err := s.storageWriter.Flush(); err != nil {
+			s.storageLastError = err.Error()
+		}
+		s.storageWriter = nil
+	}
+	if s.storageFile != nil {
+		if err := s.storageFile.Close(); err != nil {
+			s.storageLastError = err.Error()
+		}
+		s.storageFile = nil
+	}
+	s.storageLoadedPath = ""
+}
+
+func (s *RequestStatistics) loadModelPricesLocked() {
+	if s == nil {
+		return
+	}
+	path := strings.TrimSpace(s.priceStoragePath)
+	if path == "" {
+		path = defaultRuntimeConfig().PriceStoragePath
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		s.priceStorageLastError = err.Error()
+		return
+	}
+	if s.priceStorageLoadedPath == abs {
+		return
+	}
+	raw, err := os.ReadFile(abs)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			s.priceStoragePath = path
+			s.priceStorageLoadedPath = abs
+			s.modelPrices = make(map[string]ModelPrice)
+			s.modelPricesUpdatedAt = time.Time{}
+			s.priceStorageLastError = ""
+			return
+		}
+		s.priceStorageLastError = err.Error()
+		return
+	}
+	var persisted struct {
+		UpdatedAt string                `json:"updated_at"`
+		Prices    map[string]ModelPrice `json:"prices"`
+	}
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		s.priceStorageLastError = err.Error()
+		return
+	}
+	prices := make(map[string]ModelPrice, len(persisted.Prices))
+	for model, price := range persisted.Prices {
+		name := strings.TrimSpace(model)
+		if name == "" || !validModelPrice(price) {
+			continue
+		}
+		prices[name] = price
+	}
+	s.priceStoragePath = path
+	s.priceStorageLoadedPath = abs
+	s.modelPrices = prices
+	s.modelPricesUpdatedAt = parseRFC3339OrZero(persisted.UpdatedAt)
+	s.priceStorageLastError = ""
+}
+
+func (s *RequestStatistics) saveModelPricesLocked() error {
+	if s == nil {
+		return nil
+	}
+	path := strings.TrimSpace(s.priceStoragePath)
+	if path == "" {
+		path = defaultRuntimeConfig().PriceStoragePath
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		s.priceStorageLastError = err.Error()
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		s.priceStorageLastError = err.Error()
+		return err
+	}
+	updatedAt := time.Now().UTC()
+	payload := struct {
+		UpdatedAt string                `json:"updated_at"`
+		Prices    map[string]ModelPrice `json:"prices"`
+	}{
+		UpdatedAt: updatedAt.Format(time.RFC3339),
+		Prices:    copyModelPrices(s.modelPrices),
+	}
+	raw, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		s.priceStorageLastError = err.Error()
+		return err
+	}
+	tmp := abs + ".tmp"
+	if err := os.WriteFile(tmp, append(raw, '\n'), 0o600); err != nil {
+		s.priceStorageLastError = err.Error()
+		return err
+	}
+	if err := os.Rename(tmp, abs); err != nil {
+		_ = os.Remove(tmp)
+		s.priceStorageLastError = err.Error()
+		return err
+	}
+	s.priceStoragePath = path
+	s.priceStorageLoadedPath = abs
+	s.modelPricesUpdatedAt = updatedAt
+	s.priceStorageLastError = ""
+	return nil
+}
+
+func parseRFC3339OrZero(value string) time.Time {
+	t, err := time.Parse(time.RFC3339, strings.TrimSpace(value))
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+func validModelPrice(price ModelPrice) bool {
+	return validPriceNumber(price.Prompt) && validPriceNumber(price.Completion) && validPriceNumber(price.Cache)
+}
+
+func validPriceNumber(value float64) bool {
+	return value >= 0 && !math.IsNaN(value) && !math.IsInf(value, 0)
+}
+
+func copyModelPrices(source map[string]ModelPrice) map[string]ModelPrice {
+	copy := make(map[string]ModelPrice, len(source))
+	for model, price := range source {
+		copy[model] = price
+	}
+	return copy
+}
+
+func (s *RequestStatistics) ModelPrices() ModelPricesResponse {
+	if s == nil {
+		return ModelPricesResponse{Prices: map[string]ModelPrice{}}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loadModelPricesLocked()
+	return s.modelPricesResponseLocked()
+}
+
+func (s *RequestStatistics) UpsertModelPrice(model string, price ModelPrice) (ModelPricesResponse, error) {
+	if s == nil {
+		return ModelPricesResponse{Prices: map[string]ModelPrice{}}, nil
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return ModelPricesResponse{}, errors.New("model is required")
+	}
+	if !validModelPrice(price) {
+		return ModelPricesResponse{}, errors.New("price values must be non-negative finite numbers")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loadModelPricesLocked()
+	if s.modelPrices == nil {
+		s.modelPrices = make(map[string]ModelPrice)
+	}
+	s.modelPrices[model] = price
+	if err := s.saveModelPricesLocked(); err != nil {
+		return ModelPricesResponse{}, err
+	}
+	return s.modelPricesResponseLocked(), nil
+}
+
+func (s *RequestStatistics) DeleteModelPrice(model string) (ModelPricesResponse, error) {
+	if s == nil {
+		return ModelPricesResponse{Prices: map[string]ModelPrice{}}, nil
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return ModelPricesResponse{}, errors.New("model is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loadModelPricesLocked()
+	if s.modelPrices == nil {
+		s.modelPrices = make(map[string]ModelPrice)
+	}
+	delete(s.modelPrices, model)
+	if err := s.saveModelPricesLocked(); err != nil {
+		return ModelPricesResponse{}, err
+	}
+	return s.modelPricesResponseLocked(), nil
+}
+
+func (s *RequestStatistics) modelPricesResponseLocked() ModelPricesResponse {
+	response := ModelPricesResponse{
+		Prices: copyModelPrices(s.modelPrices),
+		Storage: ModelPriceStorageStatus{
+			Path:       s.priceStoragePath,
+			LoadedPath: s.priceStorageLoadedPath,
+			LastError:  s.priceStorageLastError,
+		},
+	}
+	if !s.modelPricesUpdatedAt.IsZero() {
+		response.UpdatedAt = s.modelPricesUpdatedAt.UTC().Format(time.RFC3339)
+	}
+	return response
 }
 
 func (s *RequestStatistics) updateAPIStats(apiSt *apiStats, model string, detail RequestDetail) {
@@ -477,12 +924,11 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 			continue
 		}
 
-		apiSt, ok := s.apis[apiName]
-		if !ok || apiSt == nil {
-			apiSt = &apiStats{Models: make(map[string]*modelStats)}
-			s.apis[apiName] = apiSt
-		} else if apiSt.Models == nil {
-			apiSt.Models = make(map[string]*modelStats)
+		existingAPI, ok := s.apis[apiName]
+		if !ok || existingAPI == nil {
+			s.apis[apiName] = &apiStats{Models: make(map[string]*modelStats)}
+		} else if existingAPI.Models == nil {
+			existingAPI.Models = make(map[string]*modelStats)
 		}
 
 		for modelName, modelSnapshot := range apiSnapshot.Models {
@@ -517,7 +963,7 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 				}
 				seen[key] = struct{}{}
 
-				s.recordImported(apiName, importModelName, apiSt, detail)
+				s.recordImported(apiName, importModelName, detail)
 				result.Added++
 			}
 		}
@@ -529,26 +975,10 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 	return result
 }
 
-func (s *RequestStatistics) recordImported(apiName, modelName string, apiSt *apiStats, detail RequestDetail) {
-	totalTokens := detailTotalTokens(detail.Tokens)
-
-	s.totalRequests++
-	if detail.Failed {
-		s.failureCount++
-	} else {
-		s.successCount++
+func (s *RequestStatistics) recordImported(apiName, modelName string, detail RequestDetail) {
+	if s.recordDetailLocked(apiName, modelName, detail, dedupKey(apiName, modelName, detail), time.Now(), false) {
+		s.appendDetailLocked(persistedDetail{API: apiName, Model: modelName, Detail: detail})
 	}
-	s.totalTokens += totalTokens
-
-	s.updateAPIStats(apiSt, modelName, detail)
-
-	dayKey := detail.Timestamp.Format("2006-01-02")
-	hourKey := detail.Timestamp.Hour()
-
-	s.requestsByDay[dayKey]++
-	s.requestsByHour[hourKey]++
-	s.tokensByDay[dayKey] += totalTokens
-	s.tokensByHour[hourKey] += totalTokens
 }
 
 func usageDetailTotalTokens(detail UsageDetail) int64 {
@@ -1091,4 +1521,73 @@ func (s *RequestStatistics) EvictedTotal() int64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.evictedTotal
+}
+
+func (s *RequestStatistics) Close() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closeStorageLocked()
+}
+
+func (s *RequestStatistics) ConfigSnapshot() ExportConfig {
+	if s == nil {
+		return ExportConfig{}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return ExportConfig{
+		RetentionDays:      int(s.retention.Hours() / 24),
+		MaxDetailsPerModel: s.maxDetailsPerModel,
+		DedupWindowMinutes: int(s.dedupWindow.Minutes()),
+		LogResponseHeaders: s.logResponseHeaders.String(),
+		StorageEnabled:     s.storageEnabled,
+		StoragePath:        s.storagePath,
+		PriceStoragePath:   s.priceStoragePath,
+	}
+}
+
+func (s *RequestStatistics) StorageStatus() StorageStatus {
+	if s == nil {
+		return StorageStatus{}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	status := StorageStatus{
+		Enabled:    s.storageEnabled,
+		Path:       s.storagePath,
+		LoadedPath: s.storageLoadedPath,
+		LastError:  s.storageLastError,
+	}
+	if !s.storageLastFlush.IsZero() {
+		status.LastFlushAt = s.storageLastFlush.UTC().Format(time.RFC3339)
+	}
+	return status
+}
+
+func (s *RequestStatistics) RuntimeStatus() RuntimeStatus {
+	if s == nil {
+		return RuntimeStatus{}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	status := RuntimeStatus{
+		SeenCount: len(s.seen),
+	}
+	if !s.startedAt.IsZero() {
+		status.StartedAt = s.startedAt.UTC().Format(time.RFC3339)
+	}
+	if !s.lastRecordedAt.IsZero() {
+		status.LastRecordedAt = s.lastRecordedAt.UTC().Format(time.RFC3339)
+	}
+	if s.lastImportResult != nil {
+		status.LastImport = &ImportSummary{
+			Added:              s.lastImportResult.Added,
+			Skipped:            s.lastImportResult.Skipped,
+			IgnoredByRetention: s.lastImportResult.IgnoredByRetention,
+		}
+	}
+	return status
 }

@@ -77,6 +77,16 @@ plugins:
       dedup_window_minutes: 1440
       # 可选：允许记录的响应头名称列表（逗号分隔），* 表示全部。留空不记录。
       log_response_headers: ""
+      # 可选：API key 分组哈希 salt。留空使用进程内随机 salt。
+      api_key_hash_salt: ""
+      # 可选：启用 JSONL 事件持久化，避免重启丢失统计。默认 false。
+      storage_enabled: false
+      # 可选：JSONL 持久化文件路径。相对路径基于 CPA 工作目录。
+      storage_path: usage-statistics.jsonl
+      # 可选：持久化 flush 间隔秒数。默认 30。
+      storage_flush_interval_seconds: 30
+      # 可选：模型价格表 JSON 文件路径。相对路径基于 CPA 工作目录。
+      price_storage_path: usage-statistics-prices.json
       # 可选：允许外部脚本更新插件文件。默认 false。
       update_enabled: false
       # 可选：latest 或指定版本号，例如 v1.1.0。
@@ -181,7 +191,7 @@ bash update-usage-statistics.sh --force --restart
 - **来源统计**：按上游来源聚合请求数和成功率。
 - **上游接口统计**：按上游接口聚合，点击查看模型分布详情。
 - **模型统计**：跨接口的模型汇总，包含请求数、token、平均延迟、成功率和费用。
-- **模型价格设置**：本地配置输入/输出/缓存 token 价格（美元/百万token），浏览器存储。
+- **模型价格设置**：在后端全局保存输入/输出/缓存 token 价格（US$/M token），跨设备访问看板可见同一份最新价格。
 - **请求事件明细**：按模型、来源、凭证筛选，滚动表格查看。默认最多显示 500 条。
 - **导出**：当前接口明细或全量事件的 CSV/JSON 导出。
 - **导入**：上传 JSON 文件导入统计数据，完成后显示新增/跳过/过期忽略的明细数。
@@ -191,6 +201,7 @@ bash update-usage-statistics.sh --force --restart
 - 看板首页使用 `/dashboard-summary` 端点，**不传输请求明细**，首包体积极小，即使存储数十万条记录也能快速打开。
 - 事件明细表格通过 `/dashboard-events` 加载，页面以滚动表格展示，单次最多 500 条。
 - 保留策略（`retention_days` + `max_details_per_model`）自动淘汰过期和超量记录。
+- 可选 JSONL 持久化通过 `storage_enabled` 开启，重启后会 replay 持久化事件并继续应用保留策略。
 - 页面底部 `_meta` 区域可见当前保留配置、已存储明细数和累积淘汰数。
 
 ## 5. 管理 API 使用

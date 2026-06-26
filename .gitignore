@@ -3,9 +3,6 @@
 *.dylib
 *.dll
 
-# Go
-go.sum
-
 # 临时文件
 *.backup.*
 .DS_Store
