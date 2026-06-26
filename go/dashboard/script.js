@@ -430,7 +430,9 @@ $('importFile').onchange = async (e) => {
   const file = e.target.files && e.target.files[0]; if (!file) return;
   try {
     const text = await file.text();
-    const result = await fetchJsonPayload(pluginEndpoint('usage/import'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: text });
+    const key = currentManagementKey();
+    if (!key) throw new Error('未读取到管理登录状态，请回到管理中心重新登录并勾选记住登录。');
+    const result = await fetchJsonPayload(managementEndpoint('usage/import'), { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key }, body: text });
     alert('导入完成：新增 ' + (result.added || 0) + '，跳过 ' + (result.skipped || 0) + '，过期忽略 ' + (result.ignored_by_retention || 0));
     await load();
   } catch (err) {

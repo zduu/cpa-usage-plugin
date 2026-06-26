@@ -37,13 +37,53 @@ function timestampMs(value) { const ms = Date.parse(value); return Number.isFini
 function pluginEndpoint(path, pathname) {
   const clean = String(path || '').replace(/^\/+/, '');
   const current = String(pathname || (typeof location !== 'undefined' ? location.pathname : ''));
+  const resourceMarker = '/resource/plugins/usage-statistics/';
+  const resourceIdx = current.indexOf(resourceMarker);
+  if (resourceIdx >= 0) return current.slice(0, resourceIdx + resourceMarker.length) + clean;
   const managementMarker = '/management/plugins/usage-statistics/';
   const managementIdx = current.indexOf(managementMarker);
   if (managementIdx >= 0) return current.slice(0, managementIdx + managementMarker.length) + clean;
+  return './' + clean;
+}
+function managementEndpoint(path, pathname) {
+  const clean = String(path || '').replace(/^\/+/, '');
+  const current = String(pathname || (typeof location !== 'undefined' ? location.pathname : ''));
   const resourceMarker = '/resource/plugins/usage-statistics/';
   const resourceIdx = current.indexOf(resourceMarker);
-  if (resourceIdx >= 0) return current.slice(0, resourceIdx) + managementMarker + clean;
+  if (resourceIdx >= 0) return current.slice(0, resourceIdx) + '/management/plugins/usage-statistics/' + clean;
+  const managementMarker = '/management/plugins/usage-statistics/';
+  const managementIdx = current.indexOf(managementMarker);
+  if (managementIdx >= 0) return current.slice(0, managementIdx + managementMarker.length) + clean;
   return './' + clean;
+}
+function decodeManagementStorage(value, host, userAgent) {
+  const raw = String(value || '');
+  const prefix = 'enc::v1::';
+  if (!raw.startsWith(prefix)) return raw;
+  const keyText = 'cli-proxy-api-webui::secure-storage|' + String(host || '') + '|' + String(userAgent || '');
+  const key = new TextEncoder().encode(keyText);
+  const binary = atob(raw.slice(prefix.length));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i) ^ key[i % key.length];
+  return new TextDecoder().decode(bytes);
+}
+function parseManagementStorage(value, host, userAgent) {
+  if (!value) return null;
+  const decoded = decodeManagementStorage(value, host, userAgent);
+  try { return JSON.parse(decoded) } catch { return decoded }
+}
+function currentManagementKey(storage, host, userAgent) {
+  const store = storage || (typeof localStorage !== 'undefined' ? localStorage : null);
+  if (!store || typeof store.getItem !== 'function') return '';
+  const currentHost = host || (typeof location !== 'undefined' ? location.host : '');
+  const currentUA = userAgent || (typeof navigator !== 'undefined' ? navigator.userAgent : '');
+  const auth = parseManagementStorage(store.getItem('cli-proxy-auth'), currentHost, currentUA);
+  const key = auth && typeof auth === 'object' ? ((auth.state && auth.state.managementKey) || auth.managementKey || '') : '';
+  if (typeof key === 'string' && key.trim()) return key.trim();
+  const legacy = parseManagementStorage(store.getItem('managementKey'), currentHost, currentUA);
+  if (typeof legacy === 'string') return legacy.trim();
+  if (legacy && typeof legacy === 'object') return String((legacy.state && legacy.state.managementKey) || legacy.managementKey || '').trim();
+  return '';
 }
 function groupedRows(rows, keyFn, nameFn) {
   const map = new Map();
@@ -85,5 +125,5 @@ function unwrapPluginPayload(payload) {
 
 // Export for Node.js test environment
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { esc, num, compact, pct, formatMs, totalTokens, tokenCost, detailCost, aggregateCost, looksLikeKey, looksLikeCredentialId, isCredentialMarker, trimCredentialSuffix, sourceLabel, sourceKey, friendlyApiName, clientApiLabel, avg, bucketSeries, healthColor, healthCellStyle, timestampMs, pluginEndpoint, groupedRows, decodeManagementBody, unwrapPluginPayload };
+  module.exports = { esc, num, compact, pct, formatMs, totalTokens, tokenCost, detailCost, aggregateCost, looksLikeKey, looksLikeCredentialId, isCredentialMarker, trimCredentialSuffix, sourceLabel, sourceKey, friendlyApiName, clientApiLabel, avg, bucketSeries, healthColor, healthCellStyle, timestampMs, pluginEndpoint, managementEndpoint, decodeManagementStorage, parseManagementStorage, currentManagementKey, groupedRows, decodeManagementBody, unwrapPluginPayload };
 }

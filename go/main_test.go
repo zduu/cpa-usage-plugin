@@ -477,7 +477,7 @@ func TestDashboardMarkupContainsHealthRowsApiSelectorAndBackoff(t *testing.T) {
 func TestDashboardUsesRootedPluginEndpointsForImportExport(t *testing.T) {
 	checks := map[string]string{
 		"endpoint helper": "function pluginEndpoint",
-		"import endpoint": "pluginEndpoint('usage/import')",
+		"import endpoint": "managementEndpoint('usage/import')",
 		"export endpoint": "pluginEndpoint('usage/export')",
 	}
 	for name, needle := range checks {

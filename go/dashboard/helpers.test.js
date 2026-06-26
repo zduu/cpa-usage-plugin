@@ -165,12 +165,42 @@ test('pluginEndpoint builds management URLs from plugin resource paths', () => {
   );
   assert.strictEqual(
     helpers.pluginEndpoint('usage/import', '/v0/resource/plugins/usage-statistics/dashboard'),
+    '/v0/resource/plugins/usage-statistics/usage/import'
+  );
+  assert.strictEqual(
+    helpers.managementEndpoint('usage/import', '/v0/resource/plugins/usage-statistics/dashboard'),
     '/v0/management/plugins/usage-statistics/usage/import'
   );
   assert.strictEqual(
     helpers.pluginEndpoint('usage/export', '/standalone/dashboard.html'),
     './usage/export'
   );
+});
+
+test('currentManagementKey reads management center storage', () => {
+  const storage = {
+    values: new Map([[
+      'cli-proxy-auth',
+      JSON.stringify({ state: { managementKey: 'sk-login-state' } })
+    ]]),
+    getItem(key) { return this.values.get(key) || null; }
+  };
+  assert.strictEqual(helpers.currentManagementKey(storage), 'sk-login-state');
+});
+
+test('currentManagementKey decodes obfuscated management center storage', () => {
+  const host = 'cpa.example.test';
+  const ua = 'node-test-agent';
+  const keyText = 'cli-proxy-api-webui::secure-storage|' + host + '|' + ua;
+  const key = new TextEncoder().encode(keyText);
+  const plain = JSON.stringify({ state: { managementKey: 'sk-obfuscated' } });
+  const bytes = new TextEncoder().encode(plain);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i] ^ key[i % key.length]);
+  const storage = {
+    getItem(key) { return key === 'cli-proxy-auth' ? 'enc::v1::' + btoa(binary) : null; }
+  };
+  assert.strictEqual(helpers.currentManagementKey(storage, host, ua), 'sk-obfuscated');
 });
 
 test('groupedRows groups by key', () => {
