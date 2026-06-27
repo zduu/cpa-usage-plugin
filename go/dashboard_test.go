@@ -800,9 +800,19 @@ func TestSummaryWithoutDetailsIncrementalAggregatesAfterTrimAndRebuild(t *testin
 	stats.Configure(runtimeConfig{MaxDetailsPerModel: 2, RetentionDays: 0, DedupWindowMinutes: 0})
 	base := time.Now().Add(-time.Hour)
 	for i := 0; i < 3; i++ {
+		source := "source-shared"
+		authIndex := "auth-live"
+		apiKey := "sk-client-live-123456"
+		if i == 0 {
+			authIndex = "auth-old"
+			apiKey = "sk-client-old-123456"
+		}
 		stats.Record(UsageRecord{
 			Provider:    "openai",
 			Model:       "gpt-4.1",
+			APIKey:      apiKey,
+			AuthIndex:   authIndex,
+			Source:      source,
 			RequestedAt: base.Add(time.Duration(i) * time.Minute),
 			Latency:     time.Duration((i+1)*10) * time.Millisecond,
 			Detail: UsageDetail{
@@ -825,7 +835,13 @@ func TestSummaryWithoutDetailsIncrementalAggregatesAfterTrimAndRebuild(t *testin
 		if summary.Usage.AvgLatencyMs != 25 {
 			t.Fatalf("%s usage avg latency = %v, want 25", label, summary.Usage.AvgLatencyMs)
 		}
-		api := summary.Usage.APIs["openai"]
+		if len(summary.Usage.APIs) != 1 {
+			t.Fatalf("%s api count = %d, want 1: %#v", label, len(summary.Usage.APIs), summary.Usage.APIs)
+		}
+		var api APISnapshotWithoutDetails
+		for _, candidate := range summary.Usage.APIs {
+			api = candidate
+		}
 		if api.InputTokens != 5 || api.OutputTokens != 50 || api.ReasoningTokens != 500 ||
 			api.CachedTokens != 13 || api.AvgLatencyMs != 25 {
 			t.Fatalf("%s api aggregate = %#v", label, api)
@@ -838,6 +854,19 @@ func TestSummaryWithoutDetailsIncrementalAggregatesAfterTrimAndRebuild(t *testin
 		if len(summary.ModelStats) != 1 || summary.ModelStats[0].InputTokens != 5 ||
 			summary.ModelStats[0].AvgLatencyMs != 25 {
 			t.Fatalf("%s model stats = %#v", label, summary.ModelStats)
+		}
+		if len(summary.SourceStats) != 1 || summary.SourceStats[0].Source != "source-shared" ||
+			summary.SourceStats[0].TotalRequests != 2 || summary.SourceStats[0].TotalTokens != 555 {
+			t.Fatalf("%s source stats = %#v", label, summary.SourceStats)
+		}
+		if len(summary.CredentialStats) != 1 || summary.CredentialStats[0].AuthIndex != "auth-live" ||
+			summary.CredentialStats[0].TotalRequests != 2 || summary.CredentialStats[0].TotalTokens != 555 {
+			t.Fatalf("%s credential stats = %#v", label, summary.CredentialStats)
+		}
+		if len(summary.ClientAPIStats) != 1 || summary.ClientAPIStats[0].TotalRequests != 2 ||
+			summary.ClientAPIStats[0].TotalTokens != 555 || len(summary.ClientAPIStats[0].Models) != 1 ||
+			summary.ClientAPIStats[0].Models[0].TotalRequests != 2 {
+			t.Fatalf("%s client api stats = %#v", label, summary.ClientAPIStats)
 		}
 	}
 

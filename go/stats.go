@@ -50,6 +50,10 @@ type RequestStatistics struct {
 	tokensByDay    map[string]int64
 	tokensByHour   map[int]int64
 
+	sourceStats     map[string]*sourceStatAccumulator
+	credentialStats map[string]*CredentialStat
+	clientAPIStats  map[string]*clientAPIStatAccumulator
+
 	logResponseHeaders headerWhitelist
 	storageEnabled     bool
 	storagePath        string
@@ -118,6 +122,16 @@ type detailTotals struct {
 	latencyN        int64
 }
 
+type sourceStatAccumulator struct {
+	stat      SourceStat
+	providers map[string]int64
+}
+
+type clientAPIStatAccumulator struct {
+	stat   ClientAPIStat
+	models map[string]*ClientAPIModelStat
+}
+
 // apiKeySalt is a per-process random salt used to produce stable grouping IDs.
 var apiKeySalt string
 
@@ -160,6 +174,9 @@ func NewRequestStatistics() *RequestStatistics {
 		requestsByHour:     make(map[int]int64),
 		tokensByDay:        make(map[string]int64),
 		tokensByHour:       make(map[int]int64),
+		sourceStats:        make(map[string]*sourceStatAccumulator),
+		credentialStats:    make(map[string]*CredentialStat),
+		clientAPIStats:     make(map[string]*clientAPIStatAccumulator),
 		storagePath:        defaultRuntimeConfig().StoragePath,
 		storageFlush:       time.Duration(defaultStorageFlushSeconds) * time.Second,
 		priceStoragePath:   defaultRuntimeConfig().PriceStoragePath,
@@ -367,6 +384,7 @@ func (s *RequestStatistics) recordDetailLocked(apiName, modelName string, detail
 	s.requestsByHour[hourKey]++
 	s.tokensByDay[dayKey] += totals.totalTokens
 	s.tokensByHour[hourKey] += totals.totalTokens
+	s.incrementSummaryDimensionStatsLocked(modelName, detail, totals)
 	if detail.Timestamp.After(s.lastRecordedAt) {
 		s.lastRecordedAt = detail.Timestamp
 	}
@@ -1031,6 +1049,170 @@ func (s *RequestStatistics) updateAPIStats(apiSt *apiStats, model string, detail
 	return totals
 }
 
+func (s *RequestStatistics) incrementSummaryDimensionStatsLocked(modelName string, detail RequestDetail, totals detailTotals) {
+	if s.sourceStats == nil {
+		s.sourceStats = make(map[string]*sourceStatAccumulator)
+	}
+	if s.credentialStats == nil {
+		s.credentialStats = make(map[string]*CredentialStat)
+	}
+	if s.clientAPIStats == nil {
+		s.clientAPIStats = make(map[string]*clientAPIStatAccumulator)
+	}
+
+	source := summarySourceKey(detail)
+	sourceAgg, ok := s.sourceStats[source]
+	if !ok {
+		sourceAgg = &sourceStatAccumulator{
+			stat:      SourceStat{Source: source, Provider: detail.Provider},
+			providers: make(map[string]int64),
+		}
+		s.sourceStats[source] = sourceAgg
+	}
+	if sourceAgg.stat.Provider == "" {
+		sourceAgg.stat.Provider = detail.Provider
+	}
+	sourceAgg.providers[detail.Provider]++
+	sourceAgg.stat.TotalRequests++
+	if detail.Failed {
+		sourceAgg.stat.FailureCount++
+	} else {
+		sourceAgg.stat.SuccessCount++
+	}
+	sourceAgg.stat.TotalTokens += totals.totalTokens
+
+	credential := summaryCredentialKey(detail)
+	credentialStat, ok := s.credentialStats[credential]
+	if !ok {
+		credentialStat = &CredentialStat{AuthIndex: credential}
+		s.credentialStats[credential] = credentialStat
+	}
+	credentialStat.TotalRequests++
+	if detail.Failed {
+		credentialStat.FailureCount++
+	} else {
+		credentialStat.SuccessCount++
+	}
+	credentialStat.TotalTokens += totals.totalTokens
+
+	clientKey := clientAPIGroupKey(detail)
+	clientAgg, ok := s.clientAPIStats[clientKey]
+	if !ok {
+		clientAgg = &clientAPIStatAccumulator{
+			stat: ClientAPIStat{
+				APIKey:     clientAPIGroupLabel(detail),
+				APIKeyHash: detail.APIKeyHash,
+			},
+			models: make(map[string]*ClientAPIModelStat),
+		}
+		s.clientAPIStats[clientKey] = clientAgg
+	}
+	clientAgg.stat.TotalRequests++
+	if detail.Failed {
+		clientAgg.stat.FailureCount++
+	} else {
+		clientAgg.stat.SuccessCount++
+	}
+	clientAgg.stat.TotalTokens += totals.totalTokens
+	clientAgg.stat.InputTokens += totals.inputTokens
+	clientAgg.stat.OutputTokens += totals.outputTokens
+	clientAgg.stat.CachedTokens += totals.cachedTokens
+	clientAgg.stat.ReasoningTokens += totals.reasoningTokens
+
+	clientModel, ok := clientAgg.models[modelName]
+	if !ok {
+		clientModel = &ClientAPIModelStat{Model: modelName}
+		clientAgg.models[modelName] = clientModel
+	}
+	clientModel.TotalRequests++
+	if detail.Failed {
+		clientModel.FailureCount++
+	} else {
+		clientModel.SuccessCount++
+	}
+	clientModel.TotalTokens += totals.totalTokens
+	clientModel.InputTokens += totals.inputTokens
+	clientModel.OutputTokens += totals.outputTokens
+	clientModel.CachedTokens += totals.cachedTokens
+	clientModel.ReasoningTokens += totals.reasoningTokens
+}
+
+func (s *RequestStatistics) decrementSummaryDimensionStatsLocked(modelName string, detail RequestDetail, totals detailTotals) {
+	if sourceAgg, ok := s.sourceStats[summarySourceKey(detail)]; ok {
+		sourceAgg.stat.TotalRequests--
+		if detail.Failed {
+			sourceAgg.stat.FailureCount--
+		} else {
+			sourceAgg.stat.SuccessCount--
+		}
+		sourceAgg.stat.TotalTokens -= totals.totalTokens
+		if sourceAgg.providers != nil {
+			sourceAgg.providers[detail.Provider]--
+			if sourceAgg.providers[detail.Provider] <= 0 {
+				delete(sourceAgg.providers, detail.Provider)
+			}
+			if sourceAgg.stat.Provider == detail.Provider {
+				sourceAgg.stat.Provider = ""
+				for provider := range sourceAgg.providers {
+					sourceAgg.stat.Provider = provider
+					break
+				}
+			}
+		}
+		if sourceAgg.stat.TotalRequests <= 0 {
+			delete(s.sourceStats, summarySourceKey(detail))
+		}
+	}
+
+	if credentialStat, ok := s.credentialStats[summaryCredentialKey(detail)]; ok {
+		credentialStat.TotalRequests--
+		if detail.Failed {
+			credentialStat.FailureCount--
+		} else {
+			credentialStat.SuccessCount--
+		}
+		credentialStat.TotalTokens -= totals.totalTokens
+		if credentialStat.TotalRequests <= 0 {
+			delete(s.credentialStats, summaryCredentialKey(detail))
+		}
+	}
+
+	clientKey := clientAPIGroupKey(detail)
+	if clientAgg, ok := s.clientAPIStats[clientKey]; ok {
+		clientAgg.stat.TotalRequests--
+		if detail.Failed {
+			clientAgg.stat.FailureCount--
+		} else {
+			clientAgg.stat.SuccessCount--
+		}
+		clientAgg.stat.TotalTokens -= totals.totalTokens
+		clientAgg.stat.InputTokens -= totals.inputTokens
+		clientAgg.stat.OutputTokens -= totals.outputTokens
+		clientAgg.stat.CachedTokens -= totals.cachedTokens
+		clientAgg.stat.ReasoningTokens -= totals.reasoningTokens
+
+		if clientModel, ok := clientAgg.models[modelName]; ok {
+			clientModel.TotalRequests--
+			if detail.Failed {
+				clientModel.FailureCount--
+			} else {
+				clientModel.SuccessCount--
+			}
+			clientModel.TotalTokens -= totals.totalTokens
+			clientModel.InputTokens -= totals.inputTokens
+			clientModel.OutputTokens -= totals.outputTokens
+			clientModel.CachedTokens -= totals.cachedTokens
+			clientModel.ReasoningTokens -= totals.reasoningTokens
+			if clientModel.TotalRequests <= 0 {
+				delete(clientAgg.models, modelName)
+			}
+		}
+		if clientAgg.stat.TotalRequests <= 0 {
+			delete(s.clientAPIStats, clientKey)
+		}
+	}
+}
+
 func (s *RequestStatistics) pruneLocked(now time.Time, sortNeeded bool) {
 	if s == nil {
 		return
@@ -1057,7 +1239,7 @@ func (s *RequestStatistics) pruneLocked(now time.Time, sortNeeded bool) {
 					if d.Timestamp.IsZero() || !d.Timestamp.Before(cutoff) {
 						kept = append(kept, d)
 					} else {
-						s.decrementCounters(d, apiSt, modelSt)
+						s.decrementCounters(d, apiSt, modelSt, modelName)
 						s.evictedTotal++
 						changed = true
 					}
@@ -1073,7 +1255,7 @@ func (s *RequestStatistics) pruneLocked(now time.Time, sortNeeded bool) {
 				keep := s.maxDetailsPerModel
 				removed := details[:len(details)-keep]
 				for _, d := range removed {
-					s.decrementCounters(d, apiSt, modelSt)
+					s.decrementCounters(d, apiSt, modelSt, modelName)
 					s.evictedTotal++
 					changed = true
 				}
@@ -1093,7 +1275,7 @@ func (s *RequestStatistics) pruneLocked(now time.Time, sortNeeded bool) {
 	}
 }
 
-func (s *RequestStatistics) decrementCounters(d RequestDetail, apiSt *apiStats, modelSt *modelStats) {
+func (s *RequestStatistics) decrementCounters(d RequestDetail, apiSt *apiStats, modelSt *modelStats, modelName string) {
 	totals := detailTotalsFromRequest(d)
 	s.totalRequests--
 	if d.Failed {
@@ -1143,6 +1325,7 @@ func (s *RequestStatistics) decrementCounters(d RequestDetail, apiSt *apiStats, 
 	s.requestsByHour[hourKey]--
 	s.tokensByDay[dayKey] -= totals.totalTokens
 	s.tokensByHour[hourKey] -= totals.totalTokens
+	s.decrementSummaryDimensionStatsLocked(modelName, d, totals)
 }
 
 func (s *RequestStatistics) rebuildAggregatesLocked() {
@@ -1163,6 +1346,9 @@ func (s *RequestStatistics) rebuildAggregatesLocked() {
 	s.requestsByHour = make(map[int]int64)
 	s.tokensByDay = make(map[string]int64)
 	s.tokensByHour = make(map[int]int64)
+	s.sourceStats = make(map[string]*sourceStatAccumulator)
+	s.credentialStats = make(map[string]*CredentialStat)
+	s.clientAPIStats = make(map[string]*clientAPIStatAccumulator)
 	for _, apiSt := range s.apis {
 		apiSt.TotalRequests = 0
 		apiSt.SuccessCount = 0
@@ -1174,7 +1360,7 @@ func (s *RequestStatistics) rebuildAggregatesLocked() {
 		apiSt.ReasoningTokens = 0
 		apiSt.latencySum = 0
 		apiSt.latencyN = 0
-		for _, modelSt := range apiSt.Models {
+		for modelName, modelSt := range apiSt.Models {
 			modelSt.TotalRequests = 0
 			modelSt.SuccessCount = 0
 			modelSt.FailureCount = 0
@@ -1226,6 +1412,7 @@ func (s *RequestStatistics) rebuildAggregatesLocked() {
 				s.requestsByHour[hourKey]++
 				s.tokensByDay[dayKey] += totals.totalTokens
 				s.tokensByHour[hourKey] += totals.totalTokens
+				s.incrementSummaryDimensionStatsLocked(modelName, detail, totals)
 			}
 		}
 	}
@@ -1423,6 +1610,21 @@ func detailTotalsFromRequest(detail RequestDetail) detailTotals {
 	return totals
 }
 
+func summarySourceKey(detail RequestDetail) string {
+	source := detail.Source
+	if source == "" {
+		return "未知来源"
+	}
+	return source
+}
+
+func summaryCredentialKey(detail RequestDetail) string {
+	if detail.AuthIndex == "" {
+		return "(空)"
+	}
+	return detail.AuthIndex
+}
+
 func normalizedCacheTokens(tokens TokenStats) int64 {
 	return maxInt64(nonNegativeInt64(tokens.CachedTokens), nonNegativeInt64(tokens.CacheTokens))
 }
@@ -1604,13 +1806,6 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsLocked(now time.Time, heal
 	summary.Usage.APIs = make(map[string]APISnapshotWithoutDetails, len(s.apis))
 
 	modelAgg := make(map[string]*ModelStat)
-	sourceAgg := make(map[string]*SourceStat)
-	credentialAgg := make(map[string]*CredentialStat)
-	type clientAPIAccumulator struct {
-		stat   ClientAPIStat
-		models map[string]*ClientAPIModelStat
-	}
-	clientAPIs := make(map[string]*clientAPIAccumulator)
 
 	healthSlots := make([]struct{ s, f int64 }, 672)
 	healthStep := 15 * time.Minute
@@ -1663,87 +1858,6 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsLocked(now time.Time, heal
 			m.latencySum += modelSt.latencySum
 			m.latencyN += modelSt.latencyN
 			for _, d := range modelSt.Details {
-				totals := detailTotalsFromRequest(d)
-
-				// Source aggregation
-				src := d.Source
-				if src == "" {
-					src = "未知来源"
-				}
-				sr, ok := sourceAgg[src]
-				if !ok {
-					sr = &SourceStat{Source: src, Provider: d.Provider}
-					sourceAgg[src] = sr
-				}
-				sr.TotalRequests++
-				if d.Failed {
-					sr.FailureCount++
-				} else {
-					sr.SuccessCount++
-				}
-				sr.TotalTokens += totals.totalTokens
-
-				// Credential aggregation (by CPA credential)
-				credIdx := d.AuthIndex
-				if credIdx == "" {
-					credIdx = "(空)"
-				}
-				cr, ok := credentialAgg[credIdx]
-				if !ok {
-					cr = &CredentialStat{AuthIndex: credIdx}
-					credentialAgg[credIdx] = cr
-				}
-				cr.TotalRequests++
-				if d.Failed {
-					cr.FailureCount++
-				} else {
-					cr.SuccessCount++
-				}
-				cr.TotalTokens += totals.totalTokens
-
-				clientKey := clientAPIGroupKey(d)
-				clientLabel := clientAPIGroupLabel(d)
-				clientAgg, ok := clientAPIs[clientKey]
-				if !ok {
-					clientAgg = &clientAPIAccumulator{
-						stat: ClientAPIStat{
-							APIKey:     clientLabel,
-							APIKeyHash: d.APIKeyHash,
-						},
-						models: make(map[string]*ClientAPIModelStat),
-					}
-					clientAPIs[clientKey] = clientAgg
-				}
-				clientAgg.stat.TotalRequests++
-				if d.Failed {
-					clientAgg.stat.FailureCount++
-				} else {
-					clientAgg.stat.SuccessCount++
-				}
-				clientAgg.stat.TotalTokens += totals.totalTokens
-				clientAgg.stat.InputTokens += totals.inputTokens
-				clientAgg.stat.OutputTokens += totals.outputTokens
-				clientAgg.stat.CachedTokens += totals.cachedTokens
-				clientAgg.stat.ReasoningTokens += totals.reasoningTokens
-
-				clientModel, ok := clientAgg.models[modelName]
-				if !ok {
-					clientModel = &ClientAPIModelStat{Model: modelName}
-					clientAgg.models[modelName] = clientModel
-				}
-				clientModel.TotalRequests++
-				if d.Failed {
-					clientModel.FailureCount++
-				} else {
-					clientModel.SuccessCount++
-				}
-				clientModel.TotalTokens += totals.totalTokens
-				clientModel.InputTokens += totals.inputTokens
-				clientModel.OutputTokens += totals.outputTokens
-				clientModel.CachedTokens += totals.cachedTokens
-				clientModel.ReasoningTokens += totals.reasoningTokens
-
-				// Health grid
 				if !d.Timestamp.IsZero() {
 					idx := int(d.Timestamp.UTC().Sub(healthStart) / healthStep)
 					if idx >= 0 && idx < 672 {
@@ -1775,33 +1889,34 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsLocked(now time.Time, heal
 	})
 
 	// Build source stats sorted by requests
-	summary.SourceStats = make([]SourceStat, 0, len(sourceAgg))
-	for _, sr := range sourceAgg {
-		summary.SourceStats = append(summary.SourceStats, *sr)
+	summary.SourceStats = make([]SourceStat, 0, len(s.sourceStats))
+	for _, sr := range s.sourceStats {
+		summary.SourceStats = append(summary.SourceStats, sr.stat)
 	}
 	sort.SliceStable(summary.SourceStats, func(i, j int) bool {
 		return summary.SourceStats[i].TotalRequests > summary.SourceStats[j].TotalRequests
 	})
 
 	// Build credential stats sorted by requests
-	summary.CredentialStats = make([]CredentialStat, 0, len(credentialAgg))
-	for _, cr := range credentialAgg {
+	summary.CredentialStats = make([]CredentialStat, 0, len(s.credentialStats))
+	for _, cr := range s.credentialStats {
 		summary.CredentialStats = append(summary.CredentialStats, *cr)
 	}
 	sort.SliceStable(summary.CredentialStats, func(i, j int) bool {
 		return summary.CredentialStats[i].TotalRequests > summary.CredentialStats[j].TotalRequests
 	})
 
-	summary.ClientAPIStats = make([]ClientAPIStat, 0, len(clientAPIs))
-	for _, agg := range clientAPIs {
-		agg.stat.Models = make([]ClientAPIModelStat, 0, len(agg.models))
+	summary.ClientAPIStats = make([]ClientAPIStat, 0, len(s.clientAPIStats))
+	for _, agg := range s.clientAPIStats {
+		stat := agg.stat
+		stat.Models = make([]ClientAPIModelStat, 0, len(agg.models))
 		for _, model := range agg.models {
-			agg.stat.Models = append(agg.stat.Models, *model)
+			stat.Models = append(stat.Models, *model)
 		}
-		sort.SliceStable(agg.stat.Models, func(i, j int) bool {
-			return agg.stat.Models[i].TotalRequests > agg.stat.Models[j].TotalRequests
+		sort.SliceStable(stat.Models, func(i, j int) bool {
+			return stat.Models[i].TotalRequests > stat.Models[j].TotalRequests
 		})
-		summary.ClientAPIStats = append(summary.ClientAPIStats, agg.stat)
+		summary.ClientAPIStats = append(summary.ClientAPIStats, stat)
 	}
 	sort.SliceStable(summary.ClientAPIStats, func(i, j int) bool {
 		return summary.ClientAPIStats[i].TotalRequests > summary.ClientAPIStats[j].TotalRequests
