@@ -490,6 +490,39 @@ func TestDashboardEventsNegativeOffsetUsesFirstPage(t *testing.T) {
 	}
 }
 
+func TestDashboardEventsExportReturnsAllFilteredRows(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0})
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < 7; i++ {
+		stats.Record(UsageRecord{
+			Provider:    "openai",
+			Model:       "gpt-4",
+			RequestedAt: base.Add(time.Duration(i) * time.Minute),
+			Detail:      UsageDetail{TotalTokens: int64(10 + i)},
+		})
+	}
+	for i := 0; i < 3; i++ {
+		stats.Record(UsageRecord{
+			Provider:    "deepseek",
+			Model:       "deepseek-chat",
+			RequestedAt: base.Add(time.Duration(i+10) * time.Minute),
+			Detail:      UsageDetail{TotalTokens: int64(100 + i)},
+		})
+	}
+
+	result := stats.QueryAllEvents(EventsQuery{Limit: 2, Offset: 5, API: "openai"})
+	if result.Total != 7 || len(result.Events) != 7 {
+		t.Fatalf("export result total/len = %d/%d, want 7/7", result.Total, len(result.Events))
+	}
+	if result.Limit != 7 || result.Offset != 0 {
+		t.Fatalf("export limit/offset = %d/%d, want 7/0", result.Limit, result.Offset)
+	}
+	if result.Events[0].Tokens.TotalTokens != 16 || result.Events[6].Tokens.TotalTokens != 10 {
+		t.Fatalf("export events not sorted newest first or not filtered: %#v", result.Events)
+	}
+}
+
 func TestDashboardEventsRangeFilter(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{MaxDetailsPerModel: 200, DedupWindowMinutes: 0, RetentionDays: 30})

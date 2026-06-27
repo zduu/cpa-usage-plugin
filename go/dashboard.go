@@ -49,8 +49,7 @@ func handleDashboardSummary() ([]byte, error) {
 	return okEnvelopeJSON(string(mustMarshal(resp)))
 }
 
-// handleDashboardEvents returns paginated, filtered event details.
-func handleDashboardEvents(query map[string][]string) ([]byte, error) {
+func dashboardEventsQuery(query map[string][]string) EventsQuery {
 	params := EventsQuery{
 		Limit:  50,
 		Offset: 0,
@@ -80,8 +79,32 @@ func handleDashboardEvents(query map[string][]string) ([]byte, error) {
 	if v, ok := query["api"]; ok && len(v) > 0 {
 		params.API = v[0]
 	}
+	return params
+}
 
+// handleDashboardEvents returns paginated, filtered event details.
+func handleDashboardEvents(query map[string][]string) ([]byte, error) {
+	params := dashboardEventsQuery(query)
 	result := stats.QueryEvents(params)
+	responseJSON, err := json.Marshal(result)
+	if err != nil {
+		return nil, err
+	}
+	resp := ManagementResponse{
+		StatusCode: http.StatusOK,
+		Headers: map[string][]string{
+			"Content-Type":  {"application/json; charset=utf-8"},
+			"Cache-Control": {"no-store"},
+		},
+		Body: responseJSON,
+	}
+	return okEnvelopeJSON(string(mustMarshal(resp)))
+}
+
+// handleDashboardEventsExport returns all filtered event details for one export.
+func handleDashboardEventsExport(query map[string][]string) ([]byte, error) {
+	params := dashboardEventsQuery(query)
+	result := stats.QueryAllEvents(params)
 	responseJSON, err := json.Marshal(result)
 	if err != nil {
 		return nil, err

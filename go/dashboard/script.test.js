@@ -161,6 +161,19 @@ function createDashboardHarness(options = {}) {
     };
   }
 
+  function eventsExport(url) {
+    const parsed = new URL(url, 'http://test.local/v0/management/plugins/usage-statistics/dashboard');
+    const api = parsed.searchParams.get('api');
+    const totalRows = api ? 8 : 1200;
+    return {
+      total: totalRows,
+      limit: totalRows,
+      offset: 0,
+      generated_at: new Date().toISOString(),
+      events: eventsPage('http://test.local/dashboard-events?limit=' + totalRows + '&offset=0').events.slice(0, totalRows),
+    };
+  }
+
   function apiDetailPayload() {
     return {
       api: 'openai',
@@ -241,6 +254,7 @@ function createDashboardHarness(options = {}) {
         payload = summary;
       }
       else if (String(url).includes('dashboard-api-detail')) payload = apiDetailPayload(String(url));
+      else if (String(url).includes('dashboard-events-export')) payload = eventsExport(String(url));
       else if (String(url).includes('dashboard-events')) payload = eventsPage(String(url));
       else if (String(url).includes('usage/export')) payload = { version: 1, usage: {} };
       else payload = {};
@@ -293,7 +307,7 @@ async function waitFor(fn) {
   throw new Error('condition not met');
 }
 
-test('dashboard loads summary and export button fetches all event pages', async () => {
+test('dashboard loads summary and export button uses backend event export', async () => {
   const { document, fetchCalls, downloads } = createDashboardHarness();
 
   await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-events')));
@@ -313,17 +327,15 @@ test('dashboard loads summary and export button fetches all event pages', async 
   assert.match(document.getElementById('apiDetail').innerHTML, /401/);
   assert.match(document.getElementById('apiDetail').innerHTML, /deepseek-v4-flash-free/);
 
-  const beforeExportCallCount = fetchCalls.length;
+  const pagedEventsCount = () => fetchCalls.filter((url) => url.includes('dashboard-events?')).length;
+  const exportEventsCount = () => fetchCalls.filter((url) => url.includes('dashboard-events-export')).length;
+  const beforePagedEvents = pagedEventsCount();
+  const beforeExportEvents = exportEventsCount();
   await document.getElementById('exportRowsJson').onclick();
   await waitFor(() => downloads.some((d) => d.text && d.text.startsWith('[')));
 
-  const exportCalls = fetchCalls
-    .filter((url) => url.includes('dashboard-events'))
-    .slice(fetchCalls.filter((url, idx) => idx < beforeExportCallCount && url.includes('dashboard-events')).length);
-  assert.deepStrictEqual(
-    exportCalls.map((url) => new URL(url, 'http://test.local').searchParams.get('offset')),
-    ['0', '500', '1000']
-  );
+  assert.strictEqual(pagedEventsCount(), beforePagedEvents);
+  assert.strictEqual(exportEventsCount(), beforeExportEvents + 1);
   const exported = JSON.parse(downloads.find((d) => d.text && d.text.startsWith('[')).text);
   assert.strictEqual(exported.length, 1200);
 });

@@ -475,11 +475,7 @@ async function exportRows(kind) {
   const fs = $('filterSource').value; if (fs) params.set('source', fs);
   const fa = $('filterAuth').value; if (fa) params.set('auth', fa);
   try {
-    const data = await fetchAllEventPages(
-      (pageParams) => fetchJsonPayload(pluginEndpoint('dashboard-events') + '?' + pageParams.toString(), { cache: 'no-store' }),
-      params,
-      eventsLimit
-    );
+    const data = await fetchJsonPayload(pluginEndpoint('dashboard-events-export') + '?' + params.toString(), { cache: 'no-store' });
     const rows = data.events || [];
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     if (kind === 'json') { download('usage-events-' + stamp + '.json', JSON.stringify(rows, null, 2), 'application/json;charset=utf-8'); return }
@@ -496,11 +492,7 @@ async function exportApiRows(kind) {
   const fa = $('filterAuth').value; if (fa) params.set('auth', fa);
   params.set('api', selectedApi);
   try {
-    const data = await fetchAllEventPages(
-      (pageParams) => fetchJsonPayload(pluginEndpoint('dashboard-events') + '?' + pageParams.toString(), { cache: 'no-store' }),
-      params,
-      eventsLimit
-    );
+    const data = await fetchJsonPayload(pluginEndpoint('dashboard-events-export') + '?' + params.toString(), { cache: 'no-store' });
     const rows = data.events || [];
     if (!rows.length) return;
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');

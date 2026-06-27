@@ -1503,6 +1503,15 @@ func dashboardEventMatches(d RequestDetail, params EventsQuery, cutoff time.Time
 
 // QueryEvents returns paginated, filtered event details.
 func (s *RequestStatistics) QueryEvents(params EventsQuery) EventsResult {
+	return s.queryEvents(params, true)
+}
+
+// QueryAllEvents returns every matching event for backend-generated exports.
+func (s *RequestStatistics) QueryAllEvents(params EventsQuery) EventsResult {
+	return s.queryEvents(params, false)
+}
+
+func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool) EventsResult {
 	if s == nil {
 		return EventsResult{}
 	}
@@ -1510,10 +1519,15 @@ func (s *RequestStatistics) QueryEvents(params EventsQuery) EventsResult {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if params.Limit <= 0 || params.Limit > 500 {
-		params.Limit = 50
-	}
-	if params.Offset < 0 {
+	if paginate {
+		if params.Limit <= 0 || params.Limit > 500 {
+			params.Limit = 50
+		}
+		if params.Offset < 0 {
+			params.Offset = 0
+		}
+	} else {
+		params.Limit = 0
 		params.Offset = 0
 	}
 
@@ -1525,7 +1539,7 @@ func (s *RequestStatistics) QueryEvents(params EventsQuery) EventsResult {
 	total := 0
 	sequence := int64(0)
 	firstPageLimit := 0
-	if params.Offset == 0 {
+	if paginate && params.Offset == 0 {
 		firstPageLimit = params.Limit
 		heap.Init(&firstPage)
 	}
@@ -1573,6 +1587,20 @@ func (s *RequestStatistics) QueryEvents(params EventsQuery) EventsResult {
 	sort.Slice(all, func(i, j int) bool {
 		return dashboardEventBefore(all[i], all[j])
 	})
+
+	if !paginate {
+		events := make([]RequestDetail, len(all))
+		for i, dm := range all {
+			events[i] = dm.RequestDetail
+		}
+		return EventsResult{
+			Events:      events,
+			Total:       total,
+			Limit:       total,
+			Offset:      0,
+			GeneratedAt: now.UTC().Format(time.RFC3339),
+		}
+	}
 
 	if params.Offset >= total {
 		return EventsResult{
