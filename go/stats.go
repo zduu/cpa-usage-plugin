@@ -1393,6 +1393,9 @@ func (s *RequestStatistics) SummaryWithoutDetails() DashboardSummary {
 	summary.Meta.MaxDetailsPerModel = s.maxDetailsPerModel
 	summary.Meta.CurrentDetailCount = s.countDetailsLocked()
 	summary.Meta.EvictedTotal = s.evictedTotal
+	if !s.lastRecordedAt.IsZero() {
+		summary.Meta.LastRecordedAt = s.lastRecordedAt.UTC().Format(time.RFC3339)
+	}
 	if s.lastImportResult != nil {
 		summary.Meta.LastImport = &ImportSummary{
 			Added:              s.lastImportResult.Added,

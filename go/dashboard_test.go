@@ -339,6 +339,12 @@ func TestDashboardSummaryHasMetadata(t *testing.T) {
 	if summary.Meta.CurrentDetailCount != 1 {
 		t.Fatalf("detail_count = %d, want 1", summary.Meta.CurrentDetailCount)
 	}
+	if summary.Meta.LastRecordedAt == "" {
+		t.Fatal("last_recorded_at should not be empty after recording a request")
+	}
+	if _, err := time.Parse(time.RFC3339, summary.Meta.LastRecordedAt); err != nil {
+		t.Fatalf("last_recorded_at is not RFC3339: %q", summary.Meta.LastRecordedAt)
+	}
 	if summary.Meta.LastImport != nil {
 		t.Fatal("last_import should be nil when no import has occurred")
 	}

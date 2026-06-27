@@ -51,6 +51,7 @@ function createDashboardHarness(options = {}) {
   const fetchCalls = [];
   const fetchRequests = [];
   const timeoutDelays = [];
+  let summaryLastRecordedAt = options.lastRecordedAt || '2023-11-15T06:13:20Z';
   let prices = { 'gpt-4.1': { prompt: 2, completion: 8, cache: 0.5 } };
 
   const document = {
@@ -131,7 +132,7 @@ function createDashboardHarness(options = {}) {
     credential_stats: [],
     client_api_stats: [],
     model_stats: [{ model: 'gpt-4.1', total_requests: 1200, success_count: 1190, failure_count: 10, total_tokens: 24000, input_tokens: 4000, output_tokens: 5000, cached_tokens: 0, reasoning_tokens: 0 }],
-    _meta: {},
+    _meta: { last_recorded_at: summaryLastRecordedAt },
   };
 
   function eventsPage(url) {
@@ -235,7 +236,10 @@ function createDashboardHarness(options = {}) {
           delete prices[parsed.searchParams.get('model')];
         }
         payload = { prices, updated_at: new Date().toISOString(), storage: {} };
-      } else if (String(url).includes('dashboard-summary')) payload = summary;
+      } else if (String(url).includes('dashboard-summary')) {
+        summary._meta.last_recorded_at = summaryLastRecordedAt;
+        payload = summary;
+      }
       else if (String(url).includes('dashboard-api-detail')) payload = apiDetailPayload(String(url));
       else if (String(url).includes('dashboard-events')) payload = eventsPage(String(url));
       else if (String(url).includes('usage/export')) payload = { version: 1, usage: {} };
@@ -274,8 +278,11 @@ function createDashboardHarness(options = {}) {
     visibilityState = state;
     (listeners.get('visibilitychange') || []).forEach((handler) => handler());
   };
+  const setSummaryLastRecordedAt = (value) => {
+    summaryLastRecordedAt = value;
+  };
 
-  return { context, document, fetchCalls, fetchRequests, downloads, timeoutDelays, setVisibility };
+  return { context, document, fetchCalls, fetchRequests, downloads, timeoutDelays, setVisibility, setSummaryLastRecordedAt };
 }
 
 async function waitFor(fn) {
@@ -332,6 +339,33 @@ test('dashboard uses a slower polling interval while hidden', async () => {
   setVisibility('visible');
   await waitFor(() => fetchCalls.length > beforeVisibleFetches);
   await waitFor(() => timeoutDelays.includes(30000));
+});
+
+test('dashboard polling skips detail requests when no new records arrive', async () => {
+  const { document, fetchCalls, setVisibility, setSummaryLastRecordedAt } = createDashboardHarness();
+  const countCalls = (part) => fetchCalls.filter((url) => url.includes(part)).length;
+
+  await waitFor(() => countCalls('dashboard-events') > 0 && countCalls('dashboard-api-detail') > 0);
+  const beforeSummary = countCalls('dashboard-summary');
+  const beforeEvents = countCalls('dashboard-events');
+  const beforeApiDetail = countCalls('dashboard-api-detail');
+
+  setVisibility('visible');
+  await waitFor(() => countCalls('dashboard-summary') > beforeSummary);
+  assert.strictEqual(countCalls('dashboard-events'), beforeEvents);
+  assert.strictEqual(countCalls('dashboard-api-detail'), beforeApiDetail);
+
+  setSummaryLastRecordedAt('2023-11-15T06:14:20Z');
+  const beforeChangedEvents = countCalls('dashboard-events');
+  const beforeChangedApiDetail = countCalls('dashboard-api-detail');
+  setVisibility('visible');
+  await waitFor(() => countCalls('dashboard-events') > beforeChangedEvents && countCalls('dashboard-api-detail') > beforeChangedApiDetail);
+
+  const beforeManualEvents = countCalls('dashboard-events');
+  const beforeManualApiDetail = countCalls('dashboard-api-detail');
+  await document.getElementById('refreshBtn').onclick();
+  assert.ok(countCalls('dashboard-events') > beforeManualEvents);
+  assert.ok(countCalls('dashboard-api-detail') > beforeManualApiDetail);
 });
 
 test('model price settings are loaded and saved through backend API', async () => {

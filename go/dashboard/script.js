@@ -189,7 +189,7 @@ function renderPrices() {
     try {
       await deleteModelPrice(btn.dataset.delPrice);
       if ($('priceModel').value === btn.dataset.delPrice) fillPriceForm('');
-      await rerender();
+      await rerender({ refreshEvents: false, refreshApiDetail: true });
     } catch (e) {
       alert('删除价格失败：' + (e && e.message ? e.message : '未知错误'));
     }
@@ -510,23 +510,39 @@ async function exportApiRows(kind) {
   } catch (e) { alert('导出失败'); }
 }
 
-async function rerender() {
+function summaryRecordKey(data) {
+  return (data && data._meta && data._meta.last_recorded_at) || '';
+}
+
+function shouldRefreshDetails(previousSummary, nextSummary, forceDetails) {
+  if (forceDetails || !eventsData) return true;
+  const nextKey = summaryRecordKey(nextSummary);
+  if (!nextKey) return true;
+  return nextKey !== summaryRecordKey(previousSummary);
+}
+
+async function rerender(options) {
+  const opts = Object.assign({ refreshEvents: true, refreshApiDetail: true }, options || {});
+  const previousApi = selectedApi;
   renderStats();
   renderHealth();
   renderPrices();
   renderClientApiStats();
   renderApiStats();
   renderModelStats();
-  await renderEvents();
-  await renderApiDetail();
+  if (opts.refreshEvents) await renderEvents();
+  else renderFilters();
+  if (opts.refreshApiDetail || previousApi !== selectedApi) await renderApiDetail();
 }
 
 function pollDelay() { return document.visibilityState === 'hidden' ? hiddenPollDelayMs : visiblePollDelayMs }
 function schedulePoll(delayMs) { if (pollTimer) clearTimeout(pollTimer); pollTimer = setTimeout(load, delayMs) }
 function nextFailureDelay() { return Math.min(300000, [5000, 15000, 45000, 90000, 180000][Math.min(pollFailures - 1, 4)] || 300000) }
 
-async function load() {
+async function load(options) {
+  const forceDetails = options && options.forceDetails;
   try {
+    const previousSummary = summaryData;
     // Try new summary endpoint first
     const [data] = await Promise.all([
       fetchJsonPayload(pluginEndpoint('dashboard-summary'), { cache: 'no-store' }),
@@ -534,18 +550,21 @@ async function load() {
     ]);
     summaryData = data;
     setText('updated', '更新于 ' + new Date(data.generated_at || Date.now()).toLocaleTimeString());
-    await rerender();
+    const refreshDetails = shouldRefreshDetails(previousSummary, summaryData, forceDetails);
+    await rerender({ refreshEvents: refreshDetails, refreshApiDetail: refreshDetails });
     pollFailures = 0; schedulePoll(pollDelay());
   } catch (error) {
     // Fallback: try old dashboard-data endpoint
     try {
+      const previousSummary = summaryData;
       const [data] = await Promise.all([
         fetchJsonPayload(pluginEndpoint('dashboard-data'), { cache: 'no-store' }),
         loadModelPrices()
       ]);
       summaryData = buildSummaryFromFullUsage(data);
       setText('updated', '更新于 ' + new Date(data.generated_at || Date.now()).toLocaleTimeString() + '（兼容模式）');
-      await rerender();
+      const refreshDetails = shouldRefreshDetails(previousSummary, summaryData, forceDetails);
+      await rerender({ refreshEvents: refreshDetails, refreshApiDetail: refreshDetails });
       pollFailures = 0; schedulePoll(pollDelay());
     } catch (fallbackError) {
       setText('updated', (error && error.message) || '加载用量统计失败');
@@ -564,15 +583,15 @@ function handleVisibilityChange() {
 
 // Event bindings
 $('range').value = localStorage.getItem(rangeKey) || '24h';
-$('range').onchange = () => { localStorage.setItem(rangeKey, $('range').value); load() };
-$('refreshBtn').onclick = load;
+$('range').onchange = () => { localStorage.setItem(rangeKey, $('range').value); load({ forceDetails: true }) };
+$('refreshBtn').onclick = () => load({ forceDetails: true });
 $('savePrice').onclick = async () => {
   const m = $('priceModel').value.trim(); if (!m) return;
   const prompt = num($('pricePrompt').value), completion = num($('priceCompletion').value), cache = $('priceCache').value === '' ? prompt : num($('priceCache').value);
   try {
     await saveModelPrice(m, { prompt, completion, cache });
     fillPriceForm('');
-    await rerender();
+    await rerender({ refreshEvents: false, refreshApiDetail: true });
   } catch (e) {
     alert('保存价格失败：' + (e && e.message ? e.message : '未知错误'));
   }
@@ -597,7 +616,7 @@ $('importFile').onchange = async (e) => {
     if (!currentManagementKey()) throw new Error('未读取到管理登录状态，请回到管理中心重新登录并勾选记住登录。');
     const result = await fetchManagementJsonPayload('usage/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: text });
     alert('导入完成：新增 ' + (result.added || 0) + '，跳过 ' + (result.skipped || 0) + '，过期忽略 ' + (result.ignored_by_retention || 0));
-    await load();
+    await load({ forceDetails: true });
   } catch (err) {
     alert('导入失败：' + (err && err.message ? err.message : '未知错误'));
   } finally {
