@@ -616,6 +616,35 @@ func TestDashboardAPIDetailAggregatesErrorsAndRecentEvents(t *testing.T) {
 	}
 }
 
+func TestDashboardAPIDetailRecentEventsTieBreaksByModel(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 200, DedupWindowMinutes: 0, RetentionDays: 30})
+	ts := time.Now().Add(-5 * time.Minute)
+
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Source:      "openai",
+		Model:       "z-model",
+		RequestedAt: ts,
+		Detail:      UsageDetail{TotalTokens: 10},
+	})
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Source:      "openai",
+		Model:       "a-model",
+		RequestedAt: ts,
+		Detail:      UsageDetail{TotalTokens: 20},
+	})
+
+	result := stats.QueryAPIDetail("openai", "24h", 2, 10)
+	if len(result.RecentEvents) != 2 {
+		t.Fatalf("recent events = %d, want 2", len(result.RecentEvents))
+	}
+	if result.RecentEvents[0].Model != "a-model" || result.RecentEvents[1].Model != "z-model" {
+		t.Fatalf("recent events = %#v, want same timestamp sorted by model", result.RecentEvents)
+	}
+}
+
 // ============================================================================
 // P1 Tests: Import tracking + backward compatibility
 // ============================================================================

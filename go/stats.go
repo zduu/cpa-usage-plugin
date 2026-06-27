@@ -1809,7 +1809,7 @@ func dashboardRangeCutoff(rangeKey string, now time.Time) time.Time {
 
 type dashboardEventDetail struct {
 	RequestDetail
-	apiName  string
+	sortKey  string
 	sequence int64
 }
 
@@ -1817,8 +1817,8 @@ func dashboardEventBefore(a, b dashboardEventDetail) bool {
 	if !a.Timestamp.Equal(b.Timestamp) {
 		return a.Timestamp.After(b.Timestamp)
 	}
-	if a.apiName != b.apiName {
-		return a.apiName < b.apiName
+	if a.sortKey != b.sortKey {
+		return a.sortKey < b.sortKey
 	}
 	return a.sequence < b.sequence
 }
@@ -1843,6 +1843,20 @@ func (h *dashboardEventHeap) Pop() any {
 	item := old[n-1]
 	*h = old[:n-1]
 	return item
+}
+
+func appendBoundedDashboardEventHeap(events *dashboardEventHeap, candidate dashboardEventDetail, limit int) {
+	if events == nil || limit <= 0 {
+		return
+	}
+	if events.Len() < limit {
+		heap.Push(events, candidate)
+		return
+	}
+	if dashboardEventBefore(candidate, (*events)[0]) {
+		(*events)[0] = candidate
+		heap.Fix(events, 0)
+	}
 }
 
 func dashboardEventMatches(d RequestDetail, params EventsQuery, cutoff time.Time) bool {
@@ -1921,16 +1935,11 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool) Event
 				if !dashboardEventMatches(d, params, cutoff) {
 					continue
 				}
-				candidate := dashboardEventDetail{RequestDetail: d, apiName: apiName, sequence: sequence}
+				candidate := dashboardEventDetail{RequestDetail: d, sortKey: apiName, sequence: sequence}
 				sequence++
 				total++
 				if firstPageLimit > 0 {
-					if firstPage.Len() < firstPageLimit {
-						heap.Push(&firstPage, candidate)
-					} else if dashboardEventBefore(candidate, firstPage[0]) {
-						firstPage[0] = candidate
-						heap.Fix(&firstPage, 0)
-					}
+					appendBoundedDashboardEventHeap(&firstPage, candidate, firstPageLimit)
 				} else {
 					all = append(all, candidate)
 				}
@@ -2029,8 +2038,11 @@ func (s *RequestStatistics) QueryAPIDetail(api string, rangeKey string, recentLi
 	modelAgg := make(map[string]*ModelStat)
 	sourceAgg := make(map[string]*SourceStat)
 	errorAgg := make(map[string]*APIDetailErrorStat)
+	recentEvents := dashboardEventHeap{}
+	heap.Init(&recentEvents)
 	var latencySum int64
 	var latencyN int64
+	sequence := int64(0)
 
 	for modelName, modelSt := range apiSt.Models {
 		if modelSt == nil {
@@ -2119,7 +2131,8 @@ func (s *RequestStatistics) QueryAPIDetail(api string, rangeKey string, recentLi
 				es.Count++
 			}
 
-			result.RecentEvents = append(result.RecentEvents, d)
+			appendBoundedDashboardEventHeap(&recentEvents, dashboardEventDetail{RequestDetail: d, sortKey: d.Model, sequence: sequence}, recentLimit)
+			sequence++
 		}
 	}
 
@@ -2158,14 +2171,12 @@ func (s *RequestStatistics) QueryAPIDetail(api string, rangeKey string, recentLi
 		result.ErrorStats = result.ErrorStats[:errorLimit]
 	}
 
-	sort.SliceStable(result.RecentEvents, func(i, j int) bool {
-		if result.RecentEvents[i].Timestamp.Equal(result.RecentEvents[j].Timestamp) {
-			return result.RecentEvents[i].Model < result.RecentEvents[j].Model
-		}
-		return result.RecentEvents[i].Timestamp.After(result.RecentEvents[j].Timestamp)
+	sort.Slice(recentEvents, func(i, j int) bool {
+		return dashboardEventBefore(recentEvents[i], recentEvents[j])
 	})
-	if len(result.RecentEvents) > recentLimit {
-		result.RecentEvents = result.RecentEvents[:recentLimit]
+	result.RecentEvents = make([]RequestDetail, len(recentEvents))
+	for i, dm := range recentEvents {
+		result.RecentEvents[i] = dm.RequestDetail
 	}
 	result.GeneratedAt = now.UTC().Format(time.RFC3339)
 	return result

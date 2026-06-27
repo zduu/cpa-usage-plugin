@@ -1833,6 +1833,14 @@ func BenchmarkQueryEvents100k(b *testing.B) {
 	}
 }
 
+func BenchmarkQueryAPIDetail100k(b *testing.B) {
+	stats := buildBenchmarkStats(100000)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = stats.QueryAPIDetail("openai · openai-prod", "7d", 120, 20)
+	}
+}
+
 func BenchmarkMergeSnapshot100k(b *testing.B) {
 	snapshot := buildBenchmarkSnapshot(100000)
 	b.ResetTimer()
