@@ -49,6 +49,7 @@ type RequestStatistics struct {
 	requestsByHour map[int]int64
 	tokensByDay    map[string]int64
 	tokensByHour   map[int]int64
+	healthBuckets  map[int64]healthBucket
 
 	sourceStats     map[string]*sourceStatAccumulator
 	credentialStats map[string]*CredentialStat
@@ -122,6 +123,11 @@ type detailTotals struct {
 	latencyN        int64
 }
 
+type healthBucket struct {
+	success int64
+	failure int64
+}
+
 type sourceStatAccumulator struct {
 	stat      SourceStat
 	providers map[string]int64
@@ -141,6 +147,11 @@ var hourKeys = [24]string{
 	"08", "09", "10", "11", "12", "13", "14", "15",
 	"16", "17", "18", "19", "20", "21", "22", "23",
 }
+
+const (
+	dashboardHealthSlotCount = 672
+	dashboardHealthStep      = 15 * time.Minute
+)
 
 func init() {
 	var b [16]byte
@@ -174,6 +185,7 @@ func NewRequestStatistics() *RequestStatistics {
 		requestsByHour:     make(map[int]int64),
 		tokensByDay:        make(map[string]int64),
 		tokensByHour:       make(map[int]int64),
+		healthBuckets:      make(map[int64]healthBucket),
 		sourceStats:        make(map[string]*sourceStatAccumulator),
 		credentialStats:    make(map[string]*CredentialStat),
 		clientAPIStats:     make(map[string]*clientAPIStatAccumulator),
@@ -385,6 +397,7 @@ func (s *RequestStatistics) recordDetailLocked(apiName, modelName string, detail
 	s.tokensByDay[dayKey] += totals.totalTokens
 	s.tokensByHour[hourKey] += totals.totalTokens
 	s.incrementSummaryDimensionStatsLocked(modelName, detail, totals)
+	s.incrementHealthBucketLocked(detail)
 	if detail.Timestamp.After(s.lastRecordedAt) {
 		s.lastRecordedAt = detail.Timestamp
 	}
@@ -1213,6 +1226,44 @@ func (s *RequestStatistics) decrementSummaryDimensionStatsLocked(modelName strin
 	}
 }
 
+func (s *RequestStatistics) incrementHealthBucketLocked(detail RequestDetail) {
+	key, ok := healthBucketKey(detail.Timestamp)
+	if !ok {
+		return
+	}
+	if s.healthBuckets == nil {
+		s.healthBuckets = make(map[int64]healthBucket)
+	}
+	bucket := s.healthBuckets[key]
+	if detail.Failed {
+		bucket.failure++
+	} else {
+		bucket.success++
+	}
+	s.healthBuckets[key] = bucket
+}
+
+func (s *RequestStatistics) decrementHealthBucketLocked(detail RequestDetail) {
+	key, ok := healthBucketKey(detail.Timestamp)
+	if !ok || s.healthBuckets == nil {
+		return
+	}
+	bucket, ok := s.healthBuckets[key]
+	if !ok {
+		return
+	}
+	if detail.Failed {
+		bucket.failure--
+	} else {
+		bucket.success--
+	}
+	if bucket.success <= 0 && bucket.failure <= 0 {
+		delete(s.healthBuckets, key)
+		return
+	}
+	s.healthBuckets[key] = bucket
+}
+
 func (s *RequestStatistics) pruneLocked(now time.Time, sortNeeded bool) {
 	if s == nil {
 		return
@@ -1326,6 +1377,7 @@ func (s *RequestStatistics) decrementCounters(d RequestDetail, apiSt *apiStats, 
 	s.tokensByDay[dayKey] -= totals.totalTokens
 	s.tokensByHour[hourKey] -= totals.totalTokens
 	s.decrementSummaryDimensionStatsLocked(modelName, d, totals)
+	s.decrementHealthBucketLocked(d)
 }
 
 func (s *RequestStatistics) rebuildAggregatesLocked() {
@@ -1346,6 +1398,7 @@ func (s *RequestStatistics) rebuildAggregatesLocked() {
 	s.requestsByHour = make(map[int]int64)
 	s.tokensByDay = make(map[string]int64)
 	s.tokensByHour = make(map[int]int64)
+	s.healthBuckets = make(map[int64]healthBucket)
 	s.sourceStats = make(map[string]*sourceStatAccumulator)
 	s.credentialStats = make(map[string]*CredentialStat)
 	s.clientAPIStats = make(map[string]*clientAPIStatAccumulator)
@@ -1413,6 +1466,7 @@ func (s *RequestStatistics) rebuildAggregatesLocked() {
 				s.tokensByDay[dayKey] += totals.totalTokens
 				s.tokensByHour[hourKey] += totals.totalTokens
 				s.incrementSummaryDimensionStatsLocked(modelName, detail, totals)
+				s.incrementHealthBucketLocked(detail)
 			}
 		}
 	}
@@ -1625,6 +1679,13 @@ func summaryCredentialKey(detail RequestDetail) string {
 	return detail.AuthIndex
 }
 
+func healthBucketKey(t time.Time) (int64, bool) {
+	if t.IsZero() {
+		return 0, false
+	}
+	return t.UTC().Truncate(dashboardHealthStep).Unix(), true
+}
+
 func normalizedCacheTokens(tokens TokenStats) int64 {
 	return maxInt64(nonNegativeInt64(tokens.CachedTokens), nonNegativeInt64(tokens.CacheTokens))
 }
@@ -1731,8 +1792,7 @@ func (s *RequestStatistics) SummaryWithoutDetails() DashboardSummary {
 }
 
 func summaryHealthWindow(now time.Time) time.Time {
-	healthStep := 15 * time.Minute
-	return now.UTC().Truncate(healthStep).Add(healthStep)
+	return now.UTC().Truncate(dashboardHealthStep).Add(dashboardHealthStep)
 }
 
 func cloneDashboardSummaryWithGeneratedAt(summary DashboardSummary, now time.Time) DashboardSummary {
@@ -1807,9 +1867,7 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsLocked(now time.Time, heal
 
 	modelAgg := make(map[string]*ModelStat)
 
-	healthSlots := make([]struct{ s, f int64 }, 672)
-	healthStep := 15 * time.Minute
-	healthStart := healthWindow.Add(-672 * healthStep)
+	healthStart := healthWindow.Add(-dashboardHealthSlotCount * dashboardHealthStep)
 
 	for apiName, apiSt := range s.apis {
 		apiSnap := APISnapshotWithoutDetails{
@@ -1857,18 +1915,6 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsLocked(now time.Time, heal
 			m.ReasoningTokens += modelSt.ReasoningTokens
 			m.latencySum += modelSt.latencySum
 			m.latencyN += modelSt.latencyN
-			for _, d := range modelSt.Details {
-				if !d.Timestamp.IsZero() {
-					idx := int(d.Timestamp.UTC().Sub(healthStart) / healthStep)
-					if idx >= 0 && idx < 672 {
-						if d.Failed {
-							healthSlots[idx].f++
-						} else {
-							healthSlots[idx].s++
-						}
-					}
-				}
-			}
 			apiSnap.Models[modelName] = modelSnap
 		}
 		summary.Usage.APIs[apiName] = apiSnap
@@ -1923,17 +1969,17 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsLocked(now time.Time, heal
 	})
 
 	// Build health grid
-	summary.HealthGrid = make([]HealthGridSlot, 672)
-	for i := 0; i < 672; i++ {
-		slot := &healthSlots[i]
-		t := healthStart.Add(time.Duration(i) * healthStep)
+	summary.HealthGrid = make([]HealthGridSlot, dashboardHealthSlotCount)
+	for i := 0; i < dashboardHealthSlotCount; i++ {
+		t := healthStart.Add(time.Duration(i) * dashboardHealthStep)
+		slot := s.healthBuckets[t.Unix()]
 		summary.HealthGrid[i] = HealthGridSlot{
 			Slot:    i,
-			Total:   slot.s + slot.f,
-			Success: slot.s,
-			Failure: slot.f,
+			Total:   slot.success + slot.failure,
+			Success: slot.success,
+			Failure: slot.failure,
 			Start:   t.Format(time.RFC3339),
-			End:     t.Add(healthStep).Format(time.RFC3339),
+			End:     t.Add(dashboardHealthStep).Format(time.RFC3339),
 		}
 	}
 

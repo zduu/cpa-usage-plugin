@@ -868,6 +868,17 @@ func TestSummaryWithoutDetailsIncrementalAggregatesAfterTrimAndRebuild(t *testin
 			summary.ClientAPIStats[0].Models[0].TotalRequests != 2 {
 			t.Fatalf("%s client api stats = %#v", label, summary.ClientAPIStats)
 		}
+		var healthTotal int64
+		var healthSuccess int64
+		var healthFailure int64
+		for _, slot := range summary.HealthGrid {
+			healthTotal += slot.Total
+			healthSuccess += slot.Success
+			healthFailure += slot.Failure
+		}
+		if healthTotal != 2 || healthSuccess != 2 || healthFailure != 0 {
+			t.Fatalf("%s health totals = total %d success %d failure %d, want 2/2/0", label, healthTotal, healthSuccess, healthFailure)
+		}
 	}
 
 	assertSummary("incremental", stats.SummaryWithoutDetails())
