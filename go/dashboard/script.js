@@ -116,6 +116,33 @@ function renderStats() {
   drawSpark('costSpark', reqByHour.length ? reqByHour.map(v => (cost > 0 ? v / Math.max(u.total_requests || 1, 1) * cost : 0)) : [0], '#f59e0b');
 }
 
+function renderStorageStatus() {
+  const el = $('storageStatus');
+  if (!el) return;
+  const storage = summaryData && summaryData._meta && summaryData._meta.storage;
+  el.className = 'storageStatus';
+  el.title = '';
+  if (!storage) {
+    el.textContent = '';
+    return;
+  }
+  if (!storage.enabled) {
+    el.textContent = '未开启持久化';
+    el.classList.add('warn');
+    el.title = storage.path || '';
+    return;
+  }
+  if (storage.last_error) {
+    el.textContent = '持久化异常';
+    el.classList.add('bad');
+    el.title = storage.last_error;
+    return;
+  }
+  el.textContent = storage.last_flush_at ? '持久化已同步' : '持久化已开启';
+  el.classList.add('ok');
+  el.title = storage.loaded_path || storage.path || '';
+}
+
 function renderHealth() {
   if (!summaryData || !summaryData.health_grid) return;
   const grid = summaryData.health_grid;
@@ -517,6 +544,7 @@ async function rerender(options) {
   const opts = Object.assign({ refreshEvents: true, refreshApiDetail: true }, options || {});
   const previousApi = selectedApi;
   renderStats();
+  renderStorageStatus();
   renderHealth();
   renderPrices();
   renderClientApiStats();

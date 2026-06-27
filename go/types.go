@@ -631,6 +631,7 @@ type DashboardMeta struct {
 	MaxDetailsPerModel int            `json:"max_details_per_model"`
 	CurrentDetailCount int64          `json:"current_detail_count"`
 	LastRecordedAt     string         `json:"last_recorded_at,omitempty"`
+	Storage            StorageStatus  `json:"storage"`
 	LastImport         *ImportSummary `json:"last_import,omitempty"`
 	EvictedTotal       int64          `json:"evicted_total"`
 }

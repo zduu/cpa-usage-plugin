@@ -132,7 +132,10 @@ function createDashboardHarness(options = {}) {
     credential_stats: [],
     client_api_stats: [],
     model_stats: [{ model: 'gpt-4.1', total_requests: 1200, success_count: 1190, failure_count: 10, total_tokens: 24000, input_tokens: 4000, output_tokens: 5000, cached_tokens: 0, reasoning_tokens: 0 }],
-    _meta: { last_recorded_at: summaryLastRecordedAt },
+    _meta: {
+      last_recorded_at: summaryLastRecordedAt,
+      storage: { enabled: false, path: 'usage-statistics.jsonl' },
+    },
   };
 
   function eventsPage(url) {
@@ -313,6 +316,7 @@ test('dashboard loads summary and export button uses backend event export', asyn
   await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-events')));
   assert.strictEqual(document.getElementById('totalRequests').textContent, '1,200');
   assert.strictEqual(document.getElementById('totalCost').textContent, 'US$0.05');
+  assert.strictEqual(document.getElementById('storageStatus').textContent, '未开启持久化');
   const apiDetail = document.getElementById('apiDetail').innerHTML;
   assert.match(apiDetail, /总花费/);
   assert.doesNotMatch(apiDetail, /Token\/请求/);

@@ -1393,6 +1393,7 @@ func (s *RequestStatistics) SummaryWithoutDetails() DashboardSummary {
 	summary.Meta.MaxDetailsPerModel = s.maxDetailsPerModel
 	summary.Meta.CurrentDetailCount = s.countDetailsLocked()
 	summary.Meta.EvictedTotal = s.evictedTotal
+	summary.Meta.Storage = s.storageStatusLocked()
 	if !s.lastRecordedAt.IsZero() {
 		summary.Meta.LastRecordedAt = s.lastRecordedAt.UTC().Format(time.RFC3339)
 	}
@@ -1865,6 +1866,10 @@ func (s *RequestStatistics) StorageStatus() StorageStatus {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.storageStatusLocked()
+}
+
+func (s *RequestStatistics) storageStatusLocked() StorageStatus {
 	status := StorageStatus{
 		Enabled:    s.storageEnabled,
 		Path:       s.storagePath,
