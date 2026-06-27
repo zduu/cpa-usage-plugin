@@ -309,7 +309,7 @@ func TestRecordStoresMaskedClientAPIKeyAndCleanSource(t *testing.T) {
 	})
 
 	snapshot := stats.Snapshot()
-	wantAPI := "openai-compatible-opencode · 凭证 5312415661d8a481"
+	wantAPI := "openai-compatible-opencode"
 	api, ok := snapshot.APIs[wantAPI]
 	if !ok {
 		t.Fatalf("snapshot APIs = %#v, want upstream key %q", snapshot.APIs, wantAPI)
