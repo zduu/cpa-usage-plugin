@@ -273,9 +273,11 @@ func (s *RequestStatistics) recordDetailLocked(apiName, modelName string, detail
 	if s == nil {
 		return false
 	}
-	if dedup == "" {
-		dedup = dedupKey(apiName, modelName, detail)
+	apiName = usageGroupKeyFromDetail(apiName, detail)
+	if strings.TrimSpace(apiName) == "" {
+		apiName = "未知接口"
 	}
+	dedup = dedupKey(apiName, modelName, detail)
 	s.pruneSeenLocked(now)
 	if useDedupWindow && s.dedupWindow > 0 {
 		if _, exists := s.seen[dedup]; exists {

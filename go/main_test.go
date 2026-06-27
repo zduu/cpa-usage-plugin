@@ -1208,11 +1208,22 @@ func TestUsageGroupKey_DifferentiatesSameProviderChannels(t *testing.T) {
 	if k1 == k2 {
 		t.Fatalf("codex channel keys should differ: %q vs %q", k1, k2)
 	}
-	if k1 != "codex" {
-		t.Fatalf("first key = %q, want codex without credential label", k1)
+	if k1 != "codex · 上游 channel-a" {
+		t.Fatalf("first key = %q, want codex upstream channel label", k1)
 	}
 	if k2 != "codex · xpspwc9mfb@privaterelay.appleid.com" {
 		t.Fatalf("second key = %q, want source without credential label", k2)
+	}
+}
+
+func TestUsageGroupKey_UsesAuthIndexWhenSourceIsSecret(t *testing.T) {
+	got := usageGroupKey(UsageRecord{
+		Provider:  "codex",
+		Source:    "sk-test-codex-key-123456",
+		AuthIndex: "channel-a",
+	})
+	if got != "codex · 上游 channel-a" {
+		t.Fatalf("key = %q, want codex upstream channel label", got)
 	}
 }
 
@@ -1228,6 +1239,18 @@ func TestUsageGroupKey_UsesBaseURLForCodexAPI(t *testing.T) {
 	}
 }
 
+func TestUsageGroupKey_UsesBaseURLForNonOpenAICompatibleProvider(t *testing.T) {
+	got := usageGroupKey(UsageRecord{
+		Provider:  "gemini",
+		Source:    "gemini",
+		AuthIndex: "3fa2611823b6fefc",
+		BaseURL:   "https://cpa.xkkx.de/v1",
+	})
+	if got != "gemini · https://cpa.xkkx.de/v1" {
+		t.Fatalf("key = %q, want non-openai-compatible base-url label", got)
+	}
+}
+
 func TestUsageGroupKey_OpenAICompatibleDoesNotShowCredential(t *testing.T) {
 	got := usageGroupKey(UsageRecord{
 		Provider:  "openai-compatible-opencode-free",
@@ -1238,6 +1261,29 @@ func TestUsageGroupKey_OpenAICompatibleDoesNotShowCredential(t *testing.T) {
 	})
 	if got != "openai-compatible-opencode-free · public" {
 		t.Fatalf("key = %q, want provider and source without credential", got)
+	}
+}
+
+func TestRecordRekeysCodexAPIKeyChannelFromDetail(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{DedupWindowMinutes: 0})
+	stats.Record(UsageRecord{
+		Provider:  "codex",
+		Source:    "codex",
+		AuthIndex: "b374b8e7c98ca23c",
+		AuthType:  "apikey",
+		Model:     "gpt-5.5",
+		Failed:    true,
+		Failure:   UsageFailure{StatusCode: 500},
+		Detail:    UsageDetail{TotalTokens: 1},
+	})
+
+	snapshot := stats.Snapshot()
+	if _, ok := snapshot.APIs["codex"]; ok {
+		t.Fatalf("snapshot APIs = %#v, want codex API-key records keyed by upstream channel", snapshot.APIs)
+	}
+	if api := snapshot.APIs["codex · 上游 b374b8e7c98ca23c"]; api.TotalRequests != 1 {
+		t.Fatalf("codex upstream API = %#v, want one request; all APIs=%#v", api, snapshot.APIs)
 	}
 }
 
@@ -1286,9 +1332,14 @@ func TestStorageReplayRekeysUpstreamChannelsFromDetail(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{StorageEnabled: true, StoragePath: path, RetentionDays: 0, DedupWindowMinutes: 0})
 	snapshot := stats.Snapshot()
-	api := snapshot.APIs["codex"]
-	if api.TotalRequests != 2 {
-		t.Fatalf("snapshot APIs = %#v, want merged codex key without credential labels", snapshot.APIs)
+	if _, ok := snapshot.APIs["codex"]; ok {
+		t.Fatalf("snapshot APIs = %#v, want codex records split by upstream channel", snapshot.APIs)
+	}
+	if api := snapshot.APIs["codex · 上游 channel-a"]; api.TotalRequests != 1 {
+		t.Fatalf("channel-a API = %#v, want one request; all APIs=%#v", api, snapshot.APIs)
+	}
+	if api := snapshot.APIs["codex · 上游 channel-b"]; api.TotalRequests != 1 {
+		t.Fatalf("channel-b API = %#v, want one request; all APIs=%#v", api, snapshot.APIs)
 	}
 }
 

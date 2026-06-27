@@ -134,16 +134,19 @@ func usageGroupKey(record UsageRecord) string {
 	executor := strings.TrimSpace(record.ExecutorType)
 	source := stripCredentialSuffix(record.Source)
 	baseURL := strings.TrimSpace(record.BaseURL)
+	primary := provider
+	if primary == "" {
+		primary = executor
+	}
 
 	parts := make([]string, 0, 4)
-	if provider != "" {
-		parts = append(parts, provider)
-	} else if executor != "" {
-		parts = append(parts, executor)
+	if primary != "" {
+		parts = append(parts, primary)
 	}
-	if strings.EqualFold(provider, "codex") && baseURL != "" {
-		return joinNameParts(provider, baseURL)
+	if baseURL != "" && !isOpenAICompatibleProvider(primary) {
+		return joinNameParts(primary, baseURL)
 	}
+	sourceAdded := false
 	if source != "" && !looksLikeSecretKey(source) {
 		dup := false
 		for _, p := range parts {
@@ -154,9 +157,10 @@ func usageGroupKey(record UsageRecord) string {
 		}
 		if !dup {
 			parts = append(parts, source)
+			sourceAdded = true
 		}
 	}
-	if channel := usageChannelLabel(record); shouldAppendChannel(record, source) && channel != "" && !containsString(parts, channel) {
+	if channel := usageChannelLabel(record); shouldAppendChannel(primary, sourceAdded) && channel != "" && !containsString(parts, channel) {
 		parts = append(parts, channel)
 	}
 	if len(parts) == 0 {
@@ -184,18 +188,16 @@ func usageGroupKeyFromDetail(fallback string, detail RequestDetail) string {
 	return key
 }
 
-func shouldAppendChannel(record UsageRecord, source string) bool {
-	provider := strings.TrimSpace(record.Provider)
-	if source != "" && !strings.EqualFold(source, provider) {
+func shouldAppendChannel(primary string, sourceAdded bool) bool {
+	if isOpenAICompatibleProvider(primary) {
 		return false
 	}
-	if strings.EqualFold(provider, "codex") {
-		return false
-	}
-	if strings.HasPrefix(strings.ToLower(provider), "openai-compatible") {
-		return false
-	}
-	return true
+	return !sourceAdded
+}
+
+func isOpenAICompatibleProvider(provider string) bool {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	return strings.HasPrefix(provider, "openai-compatible") || strings.HasPrefix(provider, "openai-compatibility")
 }
 
 func joinNameParts(parts ...string) string {
@@ -220,7 +222,7 @@ func usageChannelLabel(record UsageRecord) string {
 		record.AuthID,
 	} {
 		if id := safeCredentialIdentity(raw); id != "" {
-			return "凭证 " + id
+			return "上游 " + id
 		}
 	}
 	return ""

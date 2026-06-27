@@ -139,6 +139,10 @@ test('friendlyApiName cleans API names', () => {
     helpers.friendlyApiName('openai-compatible-opencode-free · public · 凭证 02bffe66b8460c3e'),
     'openai-compatible-opencode-free · public'
   );
+  assert.strictEqual(
+    helpers.friendlyApiName('codex · 上游 b374b8e7c98ca23c'),
+    'codex · 上游 b374b8e7c98ca23c'
+  );
   assert.strictEqual(helpers.friendlyApiName(''), '未知接口');
 });
 
