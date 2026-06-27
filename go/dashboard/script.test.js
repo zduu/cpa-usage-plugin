@@ -127,22 +127,30 @@ function createDashboardHarness(options = {}) {
     const parsed = new URL(url, 'http://test.local/v0/management/plugins/usage-statistics/dashboard');
     const offset = Number(parsed.searchParams.get('offset') || 0);
     const limit = Number(parsed.searchParams.get('limit') || 500);
-    const count = Math.min(limit, Math.max(1200 - offset, 0));
+    const api = parsed.searchParams.get('api');
+    const totalRows = api ? 8 : 1200;
+    const count = Math.min(limit, Math.max(totalRows - offset, 0));
     return {
-      total: 1200,
+      total: totalRows,
       limit,
       offset,
       generated_at: new Date().toISOString(),
-      events: Array.from({ length: count }, (_, i) => ({
-        timestamp: new Date(1700000000000 + offset + i).toISOString(),
-        model: 'gpt-4.1',
-        source: 'openai-prod',
-        provider: 'openai',
-        auth_index: 'auth-1',
-        failed: false,
-        latency_ms: 120,
-        tokens: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
-      })),
+      events: Array.from({ length: count }, (_, i) => {
+        const idx = offset + i;
+        const failed = Boolean(api) && idx === 1;
+        return {
+          timestamp: new Date(1700000000000 + idx).toISOString(),
+          model: failed ? 'deepseek-v4-flash-free' : 'gpt-4.1',
+          source: 'openai-prod',
+          provider: 'openai',
+          auth_index: 'auth-1',
+          failed,
+          status_code: failed ? 401 : 200,
+          failure: failed ? '{"type":"error","error":{"type":"ModelError","message":"Model deepseek-v4-flash-free is not supported"}}' : '',
+          latency_ms: failed ? 64 : 120,
+          tokens: failed ? { total_tokens: 0 } : { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+        };
+      }),
     };
   }
 
@@ -239,13 +247,20 @@ test('dashboard loads summary and export button fetches all event pages', async 
   assert.match(apiDetail, /缓存 token：100/);
   assert.match(apiDetail, /思考 token：50/);
   assert.doesNotMatch(apiDetail, /Token\/请求/);
+  await waitFor(() => /ModelError/.test(document.getElementById('apiDetail').innerHTML));
+  assert.match(document.getElementById('apiDetail').innerHTML, /错误统计/);
+  assert.match(document.getElementById('apiDetail').innerHTML, /最近请求/);
+  assert.match(document.getElementById('apiDetail').innerHTML, /401/);
+  assert.match(document.getElementById('apiDetail').innerHTML, /deepseek-v4-flash-free/);
 
+  const beforeExportCallCount = fetchCalls.length;
   await document.getElementById('exportRowsJson').onclick();
   await waitFor(() => downloads.some((d) => d.text && d.text.startsWith('[')));
 
   const exportCalls = fetchCalls
     .filter((url) => url.includes('dashboard-events'))
-    .slice(1);
+    .slice(fetchCalls.filter((url, idx) => idx < beforeExportCallCount && url.includes('dashboard-events')).length)
+    .filter((url) => !new URL(url, 'http://test.local').searchParams.has('api'));
   assert.deepStrictEqual(
     exportCalls.map((url) => new URL(url, 'http://test.local').searchParams.get('offset')),
     ['0', '500', '1000']
@@ -285,22 +300,28 @@ test('event list is not implicitly filtered by selected upstream API', async () 
   const { document, fetchCalls } = createDashboardHarness();
 
   await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-events')));
-  const firstEventsCall = fetchCalls.find((url) => url.includes('dashboard-events'));
+  const isEventsCall = (url) => url.includes('dashboard-events');
+  const hasApiFilter = (url) => new URL(url, 'http://test.local').searchParams.has('api');
+  const globalEventsCount = () => fetchCalls.filter((url) => isEventsCall(url) && !hasApiFilter(url)).length;
+  const apiDetailEventsCount = () => fetchCalls.filter((url) => isEventsCall(url) && hasApiFilter(url)).length;
+  const firstEventsCall = fetchCalls.find((url) => isEventsCall(url) && !hasApiFilter(url));
   assert.strictEqual(new URL(firstEventsCall, 'http://test.local').searchParams.get('api'), null);
+  await waitFor(() => apiDetailEventsCount() > 0);
 
-  const before = fetchCalls.filter((url) => url.includes('dashboard-events')).length;
+  const beforeGlobal = globalEventsCount();
+  const beforeApiDetail = apiDetailEventsCount();
   document.getElementById('apiSelect').onchange();
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await waitFor(() => apiDetailEventsCount() > beforeApiDetail);
   assert.strictEqual(
-    fetchCalls.filter((url) => url.includes('dashboard-events')).length,
-    before,
+    globalEventsCount(),
+    beforeGlobal,
     'changing upstream API detail selection should not reload event list'
   );
 
   document.getElementById('filterModel').value = 'gpt-4.1';
   await document.getElementById('filterModel').onchange();
-  await waitFor(() => fetchCalls.filter((url) => url.includes('dashboard-events')).length > before);
-  const latestEventsCall = fetchCalls.filter((url) => url.includes('dashboard-events')).at(-1);
+  await waitFor(() => globalEventsCount() > beforeGlobal);
+  const latestEventsCall = fetchCalls.filter((url) => isEventsCall(url) && !hasApiFilter(url)).at(-1);
   const params = new URL(latestEventsCall, 'http://test.local').searchParams;
   assert.strictEqual(params.get('model'), 'gpt-4.1');
   assert.strictEqual(params.get('api'), null);

@@ -9,6 +9,8 @@ let selectedApi = '';
 let clientApiSort = 'requests';
 let pollTimer = null, pollFailures = 0;
 const eventsLimit = 500;
+const apiDetailRecentLimit = 120;
+let apiDetailSeq = 0;
 
 // Dom helpers
 const $ = (id) => document.getElementById(id);
@@ -233,27 +235,114 @@ function renderApiStats() {
   document.querySelectorAll('[data-api]').forEach((row) => row.onclick = () => { selectedApi = row.getAttribute('data-api') || ''; renderApiStats(); renderApiDetail() });
 }
 
-function renderApiDetail() {
+function metricHtml(label, value, extra) {
+  return '<div class="metric"><div class="metricLabel">' + esc(label) + '</div><div class="metricValue">' + value + '</div>' + (extra ? '<div class="subtle metricMeta">' + extra + '</div>' : '') + '</div>';
+}
+
+function barsHtml(title, rows, total, emptyText) {
+  if (!rows.length) return '<div><div class="subtle" style="margin-bottom:8px">' + esc(title) + '</div><div class="empty">' + esc(emptyText) + '</div></div>';
+  return '<div><div class="subtle" style="margin-bottom:8px">' + esc(title) + '</div><div class="barList">' + rows.slice(0, 8).map((r) => {
+    const width = total ? Math.max(4, Math.round(r.requests / total * 100)) : 0;
+    return '<div class="barItem"><div class="nameCell">' + esc(r.name) + '</div><div class="barTrack"><div class="barFill" style="width:' + width + '%"></div></div><div>' + fmt.format(r.requests) + ' 次</div></div>';
+  }).join('') + '</div></div>';
+}
+
+function normalizeApiDetailEvent(d) {
+  const tokens = d.tokens || {};
+  return Object.assign({}, d, {
+    timestamp_ms: timestampMs(d.timestamp),
+    total_tokens: totalTokens(d),
+    cached_tokens: Math.max(num(tokens.cached_tokens), num(tokens.cache_tokens)),
+    reasoning_tokens: num(tokens.reasoning_tokens),
+    cost: detailCost(d, modelPrices)
+  });
+}
+
+async function fetchApiDetailEvents(api) {
+  const params = new URLSearchParams();
+  params.set('range', $('range').value);
+  params.set('api', api);
+  const data = await fetchAllEventPages(
+    (pageParams) => fetchJsonPayload(pluginEndpoint('dashboard-events') + '?' + pageParams.toString(), { cache: 'no-store' }),
+    params,
+    eventsLimit
+  );
+  return {
+    rows: (data.events || []).map(normalizeApiDetailEvent),
+    total: data.total || 0
+  };
+}
+
+function apiDetailErrorRows(rows) {
+  const errors = rows.filter((d) => d.failed).reduce((map, d) => {
+    const status = d.status_code || '-';
+    const failure = d.failure || '未返回错误内容';
+    const key = status + '|' + failure;
+    const row = map.get(key) || { status, failure, count: 0 };
+    row.count++;
+    map.set(key, row);
+    return map;
+  }, new Map());
+  return [...errors.values()].sort((a, b) => b.count - a.count);
+}
+
+function apiDetailErrorHtml(rows, loading, error) {
+  if (loading) return '<div><div class="subtle" style="margin-bottom:8px">错误统计</div><div class="empty">正在加载接口请求明细...</div></div>';
+  if (error) return '<div><div class="subtle" style="margin-bottom:8px">错误统计</div><div class="empty">请求明细加载失败：' + esc(error.message || '未知错误') + '</div></div>';
+  const errorRows = apiDetailErrorRows(rows);
+  return '<div><div class="subtle" style="margin-bottom:8px">错误统计</div>' +
+    (errorRows.length ? '<div class="tableWrap"><table><thead><tr><th>状态码</th><th>次数</th><th>错误</th></tr></thead><tbody>' + errorRows.slice(0, 10).map((r) => '<tr><td class="bad">' + esc(r.status) + '</td><td>' + fmt.format(r.count) + '</td><td class="errorText">' + esc(r.failure) + '</td></tr>').join('') + '</tbody></table></div>' : '<div class="empty">暂无失败请求</div>') +
+    '</div>';
+}
+
+function apiDetailRecentHtml(rows, loading, error) {
+  if (loading) return '<div><div class="subtle" style="margin-bottom:8px">最近请求</div><div class="empty">正在加载接口请求明细...</div></div>';
+  if (error) return '<div><div class="subtle" style="margin-bottom:8px">最近请求</div><div class="empty">请求明细加载失败</div></div>';
+  return '<div><div class="subtle" style="margin-bottom:8px">最近请求</div>' +
+    (rows.length ? '<div class="tableWrap"><table><thead><tr><th>时间</th><th>模型</th><th>结果</th><th>延迟</th><th>token</th><th>来源</th></tr></thead><tbody>' + rows.slice(0, apiDetailRecentLimit).map((d) => '<tr><td>' + new Date(d.timestamp_ms).toLocaleString() + '</td><td class="nameCell">' + esc(d.model) + '</td><td class="' + (d.failed ? 'bad' : 'ok') + '">' + (d.failed ? '失败' : '成功') + '</td><td>' + formatMs(num(d.latency_ms)) + '</td><td>' + fmt.format(d.total_tokens) + '</td><td>' + esc(sourceLabel(d)) + '</td></tr>').join('') + '</tbody></table></div>' : '<div class="empty">暂无请求明细</div>') +
+    '</div>';
+}
+
+function renderApiDetailContent(apiData, detailState) {
+  const rows = (detailState && detailState.rows) || [];
+  const loading = detailState && detailState.loading;
+  const error = detailState && detailState.error;
+  const requests = num(apiData.total_requests), success = num(apiData.success_count), failure = num(apiData.failure_count);
+  const rate = requests ? success / requests * 100 : 100;
+  const models = Object.entries(apiData.models || {}).map(([name, m]) => ({ name, requests: num(m.total_requests), success: num(m.success_count), failure: num(m.failure_count), tokens: num(m.total_tokens), input_tokens: num(m.input_tokens), output_tokens: num(m.output_tokens), cached_tokens: num(m.cached_tokens), reasoning_tokens: num(m.reasoning_tokens), avgLatency: num(m.avg_latency_ms) })).sort((a, b) => b.requests - a.requests);
+  const sources = rows.length ? groupedRows(rows, sourceKey, sourceLabel) : [];
+  const totalCost = models.reduce((s, m) => s + aggregateCost({ model: m.name, input_tokens: m.input_tokens, output_tokens: m.output_tokens, cached_tokens: m.cached_tokens, reasoning_tokens: m.reasoning_tokens }, modelPrices), 0);
+  $('apiDetail').innerHTML = '<div class="detailGrid">' +
+    metricHtml('请求数', fmt.format(requests), '<span class="ok">成功 ' + fmt.format(success) + '</span><span class="bad">失败 ' + fmt.format(failure) + '</span>') +
+    metricHtml('成功率', '<span class="' + (rate >= 95 ? 'ok' : rate >= 80 ? 'neutral' : 'bad') + '">' + pct(rate) + '</span>') +
+    metricHtml('总 token', compact(apiData.total_tokens), '<span>缓存 token：' + compact(apiData.cached_tokens) + '</span><span>思考 token：' + compact(apiData.reasoning_tokens) + '</span>') +
+    metricHtml('平均延迟', formatMs(apiData.avg_latency_ms)) +
+    metricHtml('模型数', fmt.format(models.length), rows.length ? '<span>来源 ' + fmt.format(sources.length) + '</span>' : '') +
+    metricHtml('总花费', money.format(totalCost), '<span>总 token 数：' + compact(apiData.total_tokens) + '</span>') +
+    '</div>' +
+    '<div class="splitGrid">' +
+    barsHtml('模型分布', models, requests, '暂无模型数据') +
+    barsHtml('来源分布', sources, rows.length, loading ? '正在加载来源数据...' : '暂无来源数据') +
+    '</div>' +
+    '<div class="splitGrid">' + apiDetailErrorHtml(rows, loading, error) + apiDetailRecentHtml(rows, loading, error) + '</div>';
+}
+
+async function renderApiDetail() {
   const usage = summaryData && summaryData.usage;
   const apiData = usage && usage.apis && usage.apis[selectedApi];
-  if (!apiData) { setText('apiDetailTitle', '选择一个上游接口查看模型、来源、错误和最近请求。'); $('apiDetail').innerHTML = '<div class="empty">暂无接口详情</div>'; return }
-  setText('apiDetailTitle', friendlyApiName(selectedApi));
-  const requests = apiData.total_requests, success = apiData.success_count, failure = apiData.failure_count;
-  const rate = requests ? success / requests * 100 : 100;
-  const models = Object.entries(apiData.models || {}).map(([name, m]) => ({ name, requests: m.total_requests, success: m.success_count, failure: m.failure_count, tokens: m.total_tokens, input_tokens: m.input_tokens, output_tokens: m.output_tokens, cached_tokens: m.cached_tokens, reasoning_tokens: m.reasoning_tokens, avgLatency: m.avg_latency_ms })).sort((a, b) => b.requests - a.requests);
-  const totalCost = models.reduce((s, m) => s + aggregateCost({ model: m.name, input_tokens: m.input_tokens, output_tokens: m.output_tokens, cached_tokens: m.cached_tokens, reasoning_tokens: m.reasoning_tokens }, modelPrices), 0);
-  // Source stats for this API not available without details — show model distribution instead
-  $('apiDetail').innerHTML = '<div class="detailGrid">' +
-    '<div class="metric"><div class="metricLabel">请求数</div><div class="metricValue">' + fmt.format(requests) + '</div><div class="subtle" style="margin-top:6px"><span class="ok">成功 ' + fmt.format(success) + '</span> <span class="bad">失败 ' + fmt.format(failure) + '</span></div></div>' +
-    '<div class="metric"><div class="metricLabel">成功率</div><div class="metricValue ' + (rate >= 95 ? 'ok' : rate >= 80 ? 'neutral' : 'bad') + '">' + pct(rate) + '</div></div>' +
-    '<div class="metric"><div class="metricLabel">总 token</div><div class="metricValue">' + compact(apiData.total_tokens) + '</div><div class="subtle metricMeta"><span>缓存 token：' + compact(apiData.cached_tokens) + '</span><span>思考 token：' + compact(apiData.reasoning_tokens) + '</span></div></div>' +
-    '<div class="metric"><div class="metricLabel">平均延迟</div><div class="metricValue">' + formatMs(apiData.avg_latency_ms) + '</div></div>' +
-    '<div class="metric"><div class="metricLabel">模型数</div><div class="metricValue">' + fmt.format(models.length) + '</div></div>' +
-    '<div class="metric"><div class="metricLabel">总花费</div><div class="metricValue">' + money.format(totalCost) + '</div><div class="subtle metricMeta"><span>总 token 数：' + compact(apiData.total_tokens) + '</span></div></div>' +
-    '</div>' +
-    '<div><div class="subtle" style="margin-bottom:8px">模型分布</div>' +
-    (models.length ? '<div class="barList">' + models.slice(0, 8).map((r) => { const width = requests ? Math.max(4, Math.round(r.requests / requests * 100)) : 0; return '<div class="barItem"><div class="nameCell">' + esc(r.name) + '</div><div class="barTrack"><div class="barFill" style="width:' + width + '%"></div></div><div>' + fmt.format(r.requests) + ' 次</div></div>' }).join('') + '</div>' : '<div class="empty">暂无模型数据</div>') +
-    '</div>';
+  if (!apiData) { apiDetailSeq++; setText('apiDetailTitle', '选择一个上游接口查看模型、来源、错误和最近请求。'); $('apiDetail').innerHTML = '<div class="empty">暂无接口详情</div>'; return }
+  const api = selectedApi;
+  const seq = ++apiDetailSeq;
+  setText('apiDetailTitle', friendlyApiName(api));
+  renderApiDetailContent(apiData, { loading: true });
+  try {
+    const result = await fetchApiDetailEvents(api);
+    if (seq !== apiDetailSeq || api !== selectedApi) return;
+    renderApiDetailContent(apiData, result);
+  } catch (e) {
+    if (seq !== apiDetailSeq || api !== selectedApi) return;
+    renderApiDetailContent(apiData, { error: e });
+  }
 }
 
 function renderModelStats() {
@@ -440,9 +529,9 @@ async function rerender() {
   renderPrices();
   renderClientApiStats();
   renderApiStats();
-  renderApiDetail();
   renderModelStats();
   await renderEvents();
+  await renderApiDetail();
 }
 
 function schedulePoll(delayMs) { if (pollTimer) clearTimeout(pollTimer); pollTimer = setTimeout(load, delayMs) }
