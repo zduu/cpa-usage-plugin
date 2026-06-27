@@ -273,6 +273,12 @@ type persistedDetail struct {
 	Detail RequestDetail `json:"detail"`
 }
 
+type persistedStorageSnapshot struct {
+	Version     int                `json:"version"`
+	GeneratedAt string             `json:"generated_at"`
+	Usage       StatisticsSnapshot `json:"usage"`
+}
+
 func (s *RequestStatistics) recordDetailLocked(apiName, modelName string, detail RequestDetail, dedup string, now time.Time, useDedupWindow bool) bool {
 	if s == nil {
 		return false
@@ -347,21 +353,30 @@ func (s *RequestStatistics) configureStorageLocked() {
 		s.storageLastError = err.Error()
 		return
 	}
-	replayLastError := ""
-	if err := s.replayStorageFilesLocked(dir, legacyPath, time.Now()); err != nil {
-		replayLastError = err.Error()
+	now := time.Now()
+	var warnings []string
+	snapshotAt, err := s.loadStorageSnapshotLocked(dir, now)
+	if err != nil {
+		warnings = append(warnings, err.Error())
+	}
+	if err := s.replayStorageFilesLocked(dir, legacyPath, now, snapshotAt); err != nil {
+		warnings = append(warnings, err.Error())
 	}
 	s.storagePath = path
 	s.storageDir = dir
 	s.storageLegacyPath = legacyPath
-	if err := s.openStorageFileLocked(time.Now()); err != nil {
+	if err := s.openStorageFileLocked(now); err != nil {
 		s.storageLastError = err.Error()
 		return
 	}
-	if err := s.cleanupStorageFilesLocked(time.Now()); err != nil && replayLastError == "" {
-		replayLastError = err.Error()
+	if err := s.cleanupStorageFilesLocked(now); err != nil {
+		warnings = append(warnings, err.Error())
 	}
-	s.storageLastError = replayLastError
+	if err := combineStorageWarnings(warnings); err != nil {
+		s.storageLastError = err.Error()
+	} else {
+		s.storageLastError = ""
+	}
 }
 
 func storageLayout(absPath string) (string, string) {
@@ -380,6 +395,10 @@ func storageDate(t time.Time) string {
 
 func storageFileName(date string) string {
 	return "usage-" + date + ".jsonl"
+}
+
+func storageSnapshotPath(dir string) string {
+	return filepath.Join(dir, "snapshot.json")
 }
 
 func parseStorageFileDate(name string) (time.Time, bool) {
@@ -421,10 +440,83 @@ func (s *RequestStatistics) openStorageFileLocked(now time.Time) error {
 	return nil
 }
 
-func (s *RequestStatistics) replayStorageFilesLocked(dir string, legacyPath string, now time.Time) error {
+func (s *RequestStatistics) loadStorageSnapshotLocked(dir string, now time.Time) (time.Time, error) {
+	raw, err := os.ReadFile(storageSnapshotPath(dir))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return time.Time{}, nil
+		}
+		return time.Time{}, err
+	}
+	var persisted persistedStorageSnapshot
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		return time.Time{}, fmt.Errorf("load storage snapshot: %w", err)
+	}
+	s.mergeSnapshotLocked(persisted.Usage, false, now)
+	generatedAt, err := time.Parse(time.RFC3339, persisted.GeneratedAt)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse storage snapshot time: %w", err)
+	}
+	return generatedAt, nil
+}
+
+func (s *RequestStatistics) writeStorageSnapshotLocked(now time.Time) error {
+	if s == nil || strings.TrimSpace(s.storageDir) == "" {
+		return nil
+	}
+	if err := os.MkdirAll(s.storageDir, 0o755); err != nil {
+		return err
+	}
+	payload := persistedStorageSnapshot{
+		Version:     1,
+		GeneratedAt: now.UTC().Format(time.RFC3339),
+		Usage:       s.snapshotLocked(),
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	target := storageSnapshotPath(s.storageDir)
+	tmp := target + ".tmp"
+	file, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(raw); err != nil {
+		_ = file.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, target); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	_ = syncDir(s.storageDir)
+	return nil
+}
+
+func syncDir(dir string) error {
+	file, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return file.Sync()
+}
+
+func (s *RequestStatistics) replayStorageFilesLocked(dir string, legacyPath string, now time.Time, snapshotAt time.Time) error {
 	var warnings []string
 	seenFiles := make(map[string]struct{})
-	if strings.TrimSpace(legacyPath) != "" {
+	if strings.TrimSpace(legacyPath) != "" && snapshotAt.IsZero() {
 		if err := s.replayStorageLocked(legacyPath); err != nil {
 			warnings = append(warnings, err.Error())
 		}
@@ -442,6 +534,10 @@ func (s *RequestStatistics) replayStorageFilesLocked(dir string, legacyPath stri
 	if s.retention > 0 {
 		cutoff = now.Add(-s.retention).UTC().Truncate(24 * time.Hour)
 	}
+	snapshotDay := time.Time{}
+	if !snapshotAt.IsZero() {
+		snapshotDay = snapshotAt.UTC().Truncate(24 * time.Hour)
+	}
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -451,6 +547,9 @@ func (s *RequestStatistics) replayStorageFilesLocked(dir string, legacyPath stri
 			continue
 		}
 		if !cutoff.IsZero() && fileDate.Before(cutoff) {
+			continue
+		}
+		if !snapshotDay.IsZero() && fileDate.Before(snapshotDay) {
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
@@ -640,6 +739,11 @@ func (s *RequestStatistics) closeStorageLocked() {
 	s.storageActiveDate = ""
 	if flushed && synced {
 		s.storageLastFlush = time.Now()
+	}
+	if s.storageEnabled && strings.TrimSpace(s.storageDir) != "" {
+		if err := s.writeStorageSnapshotLocked(time.Now()); err != nil {
+			s.storageLastError = err.Error()
+		}
 	}
 }
 
@@ -1010,7 +1114,11 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.snapshotLocked()
+}
 
+func (s *RequestStatistics) snapshotLocked() StatisticsSnapshot {
+	result := StatisticsSnapshot{}
 	result.TotalRequests = s.totalRequests
 	result.SuccessCount = s.successCount
 	result.FailureCount = s.failureCount
@@ -1075,8 +1183,11 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.mergeSnapshotLocked(snapshot, true, time.Now())
+}
 
-	now := time.Now()
+func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, persist bool, now time.Time) MergeResult {
+	result := MergeResult{}
 	var cutoff time.Time
 	if s.retention > 0 {
 		cutoff = now.Add(-s.retention)
@@ -1135,7 +1246,7 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 				}
 				seen[key] = struct{}{}
 
-				s.recordImported(importAPIName, importModelName, detail)
+				s.recordImported(importAPIName, importModelName, detail, persist, now)
 				result.Added++
 			}
 		}
@@ -1147,9 +1258,11 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 	return result
 }
 
-func (s *RequestStatistics) recordImported(apiName, modelName string, detail RequestDetail) {
-	if s.recordDetailLocked(apiName, modelName, detail, dedupKey(apiName, modelName, detail), time.Now(), false) {
-		s.appendDetailLocked(persistedDetail{API: apiName, Model: modelName, Detail: detail})
+func (s *RequestStatistics) recordImported(apiName, modelName string, detail RequestDetail, persist bool, now time.Time) {
+	if s.recordDetailLocked(apiName, modelName, detail, dedupKey(apiName, modelName, detail), now, false) {
+		if persist {
+			s.appendDetailLocked(persistedDetail{API: apiName, Model: modelName, Detail: detail})
+		}
 	}
 }
 

@@ -153,6 +153,7 @@ plugins:
 - 不配置或保持 `storage_enabled: false` 时，就是原来的内存模式，重启清零。
 - 开启后每条新请求会追加写入日期分片，例如 `data/usage-statistics/usage-2026-06-28.jsonl`；插件启动时只 replay 保留窗口内的日期分片。
 - 如果 `storage_path` 配置为历史单文件路径（如 `data/usage-statistics.jsonl`），插件会继续读取该旧文件作为兼容输入，新数据会写入同名目录 `data/usage-statistics/` 下的日期分片。
+- 插件正常关闭或日期分片切换时会写入 `snapshot.json`；下次启动会先加载 snapshot，再 replay snapshot 当天及之后的分片增量。
 - `storage_path` 是相对 CPA 工作目录的路径；Docker 中建议放到已挂载的 `/CLIProxyAPI/data` 或其他宿主机 volume。
 - 当 `retention_days` 大于 0 时，保留窗口外的日期分片会被清理；旧单文件不会自动删除。
 - `storage_flush_interval_seconds` 越小，异常退出时最多丢失的数据越少；默认 30 秒，想更稳可以设为 5 或 1。

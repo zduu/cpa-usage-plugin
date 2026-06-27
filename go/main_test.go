@@ -449,6 +449,10 @@ func TestStorageWritesDateShards(t *testing.T) {
 	if _, err := os.Stat(shardPath); err != nil {
 		t.Fatalf("date shard %q was not written: %v", shardPath, err)
 	}
+	snapshotPath := storageSnapshotPath(filepath.Dir(shardPath))
+	if _, err := os.Stat(snapshotPath); err != nil {
+		t.Fatalf("snapshot %q was not written on close: %v", snapshotPath, err)
+	}
 
 	reloaded := NewRequestStatistics()
 	reloaded.Configure(cfg)
@@ -506,6 +510,78 @@ func TestStorageReplaySkipsInvalidLines(t *testing.T) {
 	}
 	if status := stats.StorageStatus(); !strings.Contains(status.LastError, "skipped 1 invalid line") {
 		t.Fatalf("storage last error = %q, want invalid line warning", status.LastError)
+	}
+}
+
+func TestStorageSnapshotSkipsOlderShardsAndReplaysSameDayDelta(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "usage-statistics")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir storage dir: %v", err)
+	}
+	snapshotAt := time.Now().UTC().Truncate(24 * time.Hour).Add(12 * time.Hour)
+	snapshotDetail := RequestDetail{
+		Model:     "gpt-4",
+		Timestamp: snapshotAt.Add(-time.Minute),
+		Source:    "openai-prod",
+		Provider:  "openai",
+		Tokens:    TokenStats{TotalTokens: 10},
+	}
+	newDetail := RequestDetail{
+		Model:     "gpt-4",
+		Timestamp: snapshotAt.Add(time.Minute),
+		Source:    "openai-prod",
+		Provider:  "openai",
+		Tokens:    TokenStats{TotalTokens: 7},
+	}
+	snapshotPayload := persistedStorageSnapshot{
+		Version:     1,
+		GeneratedAt: snapshotAt.Format(time.RFC3339),
+		Usage: StatisticsSnapshot{
+			APIs: map[string]APISnapshot{
+				"openai": {
+					Models: map[string]ModelSnapshot{
+						"gpt-4": {Details: []RequestDetail{snapshotDetail}},
+					},
+				},
+			},
+		},
+	}
+	if err := os.WriteFile(storageSnapshotPath(dir), mustMarshal(snapshotPayload), 0o600); err != nil {
+		t.Fatalf("write storage snapshot: %v", err)
+	}
+	writePersisted := func(path string, details ...RequestDetail) {
+		t.Helper()
+		var lines []string
+		for _, detail := range details {
+			lines = append(lines, string(mustMarshal(persistedDetail{API: "openai", Model: "gpt-4", Detail: detail})))
+		}
+		if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+			t.Fatalf("write storage shard: %v", err)
+		}
+	}
+	oldDetail := RequestDetail{
+		Model:     "gpt-4",
+		Timestamp: snapshotAt.Add(-24 * time.Hour),
+		Source:    "openai-prod",
+		Provider:  "openai",
+		Tokens:    TokenStats{TotalTokens: 99},
+	}
+	writePersisted(filepath.Join(dir, storageFileName(storageDate(oldDetail.Timestamp))), oldDetail)
+	writePersisted(filepath.Join(dir, storageFileName(storageDate(snapshotAt))), snapshotDetail, newDetail)
+
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		MaxDetailsPerModel: 100,
+		RetentionDays:      30,
+		DedupWindowMinutes: 0,
+		StorageEnabled:     true,
+		StoragePath:        dir,
+	})
+	defer stats.Close()
+
+	snapshot := stats.Snapshot()
+	if snapshot.TotalRequests != 2 || snapshot.TotalTokens != 17 {
+		t.Fatalf("snapshot restore = requests %d tokens %d, want 2/17", snapshot.TotalRequests, snapshot.TotalTokens)
 	}
 }
 
