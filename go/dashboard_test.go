@@ -430,6 +430,9 @@ func TestDashboardEventsCacheReturnsCopyAndInvalidates(t *testing.T) {
 	if len(stats.eventQueryCache) != 1 {
 		t.Fatalf("event cache len = %d, want 1", len(stats.eventQueryCache))
 	}
+	if len(stats.eventIndex) != 3 || stats.eventIndexVersion != stats.summaryVersion {
+		t.Fatalf("event index len/version = %d/%d, want 3/%d", len(stats.eventIndex), stats.eventIndexVersion, stats.summaryVersion)
+	}
 
 	first.Events[0].Model = "mutated"
 	second := stats.QueryEvents(params)
@@ -445,6 +448,9 @@ func TestDashboardEventsCacheReturnsCopyAndInvalidates(t *testing.T) {
 	})
 	if len(stats.eventQueryCache) != 0 {
 		t.Fatalf("event cache len after record = %d, want 0", len(stats.eventQueryCache))
+	}
+	if stats.eventIndex != nil || stats.eventIndexVersion != 0 {
+		t.Fatalf("event index after record = len %d version %d, want cleared", len(stats.eventIndex), stats.eventIndexVersion)
 	}
 	updated := stats.QueryEvents(params)
 	if len(updated.Events) != 2 || updated.Events[0].Tokens.TotalTokens != 99 {

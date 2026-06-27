@@ -87,6 +87,9 @@ type RequestStatistics struct {
 
 	eventQueryCache      map[dashboardEventCacheKey]EventsResult
 	eventQueryCacheOrder []dashboardEventCacheKey
+	eventIndexVersion    uint64
+	eventIndex           []dashboardEventDetail
+	eventAPIIndex        map[string][]dashboardEventDetail
 }
 
 type apiStats struct {
@@ -298,6 +301,9 @@ func (s *RequestStatistics) invalidateSummaryLocked() {
 	s.summaryCacheValid = false
 	s.eventQueryCache = nil
 	s.eventQueryCacheOrder = nil
+	s.eventIndexVersion = 0
+	s.eventIndex = nil
+	s.eventAPIIndex = nil
 }
 
 func (s *RequestStatistics) Record(record UsageRecord) {
@@ -2165,14 +2171,6 @@ func appendBoundedDashboardEventHeap(events *dashboardEventHeap, candidate dashb
 	}
 }
 
-func dashboardEventWindowLimit(offset, limit int) int {
-	maxInt := int(^uint(0) >> 1)
-	if offset > maxInt-limit {
-		return maxInt
-	}
-	return offset + limit
-}
-
 func dashboardEventCacheKeyFor(params EventsQuery, now time.Time) dashboardEventCacheKey {
 	var timeBucket int64
 	if params.Range != "" && params.Range != "all" {
@@ -2242,6 +2240,79 @@ func (s *RequestStatistics) cacheDashboardEventsLocked(key dashboardEventCacheKe
 	}
 }
 
+func (s *RequestStatistics) dashboardEventIndexLocked(api string) []dashboardEventDetail {
+	if s == nil {
+		return nil
+	}
+	if s.eventIndexVersion != s.summaryVersion {
+		s.eventIndexVersion = s.summaryVersion
+		s.eventIndex = nil
+		s.eventAPIIndex = nil
+	}
+	if api != "" {
+		if s.eventAPIIndex == nil {
+			s.eventAPIIndex = make(map[string][]dashboardEventDetail)
+		}
+		if events, ok := s.eventAPIIndex[api]; ok {
+			return events
+		}
+		events := buildDashboardEventIndexForAPI(api, s.apis[api])
+		s.eventAPIIndex[api] = events
+		return events
+	}
+	if s.eventIndex == nil {
+		var events []dashboardEventDetail
+		for apiName, apiSt := range s.apis {
+			events = appendDashboardEventIndexForAPI(events, apiName, apiSt)
+		}
+		sort.Slice(events, func(i, j int) bool {
+			return dashboardEventBefore(events[i], events[j])
+		})
+		s.eventIndex = events
+	}
+	return s.eventIndex
+}
+
+func buildDashboardEventIndexForAPI(apiName string, apiSt *apiStats) []dashboardEventDetail {
+	events := appendDashboardEventIndexForAPI(nil, apiName, apiSt)
+	sort.Slice(events, func(i, j int) bool {
+		return dashboardEventBefore(events[i], events[j])
+	})
+	return events
+}
+
+func appendDashboardEventIndexForAPI(events []dashboardEventDetail, apiName string, apiSt *apiStats) []dashboardEventDetail {
+	if apiSt == nil {
+		return events
+	}
+	sequence := int64(len(events))
+	for _, modelSt := range apiSt.Models {
+		if modelSt == nil {
+			continue
+		}
+		for _, d := range modelSt.Details {
+			events = append(events, dashboardEventDetail{RequestDetail: d, sortKey: apiName, sequence: sequence})
+			sequence++
+		}
+	}
+	return events
+}
+
+func requestDetailsFromDashboardEvents(events []dashboardEventDetail) []RequestDetail {
+	details := make([]RequestDetail, len(events))
+	for i, event := range events {
+		details[i] = event.RequestDetail
+	}
+	return details
+}
+
+func dashboardEventQueryHasFilters(params EventsQuery) bool {
+	return params.Range != "" && params.Range != "all" ||
+		params.Model != "" ||
+		params.Source != "" ||
+		params.AuthIndex != ""
+}
+
 func dashboardEventMatches(d RequestDetail, params EventsQuery, cutoff time.Time) bool {
 	if !cutoff.IsZero() && !d.Timestamp.IsZero() && d.Timestamp.Before(cutoff) {
 		return false
@@ -2291,13 +2362,8 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool) Event
 		params.Offset = 0
 	}
 
-	if paginate {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-	} else {
-		s.mu.RLock()
-		defer s.mu.RUnlock()
-	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	now := time.Now()
 	cutoff := dashboardRangeCutoff(params.Range, now)
@@ -2309,59 +2375,60 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool) Event
 		}
 	}
 
-	var all []dashboardEventDetail
-	var pageWindow dashboardEventHeap
+	index := s.dashboardEventIndexLocked(params.API)
+	if !dashboardEventQueryHasFilters(params) {
+		total := len(index)
+		if !paginate {
+			return EventsResult{
+				Events:      requestDetailsFromDashboardEvents(index),
+				Total:       total,
+				Limit:       total,
+				Offset:      0,
+				GeneratedAt: now.UTC().Format(time.RFC3339),
+			}
+		}
+		if params.Offset >= total {
+			result := EventsResult{
+				Events:      []RequestDetail{},
+				Total:       total,
+				Limit:       params.Limit,
+				Offset:      params.Offset,
+				GeneratedAt: now.UTC().Format(time.RFC3339),
+			}
+			s.cacheDashboardEventsLocked(cacheKey, result)
+			return result
+		}
+		end := params.Offset + params.Limit
+		if end > total {
+			end = total
+		}
+		result := EventsResult{
+			Events:      requestDetailsFromDashboardEvents(index[params.Offset:end]),
+			Total:       total,
+			Limit:       params.Limit,
+			Offset:      params.Offset,
+			GeneratedAt: now.UTC().Format(time.RFC3339),
+		}
+		s.cacheDashboardEventsLocked(cacheKey, result)
+		return result
+	}
+
+	var events []RequestDetail
 	total := 0
-	sequence := int64(0)
-	pageWindowLimit := 0
-	if paginate {
-		pageWindowLimit = dashboardEventWindowLimit(params.Offset, params.Limit)
-		heap.Init(&pageWindow)
-	}
-	collect := func(apiName string, apiSt *apiStats) {
-		if apiSt == nil {
-			return
+	for _, dm := range index {
+		d := dm.RequestDetail
+		if !dashboardEventMatches(d, params, cutoff) {
+			continue
 		}
-		for _, modelSt := range apiSt.Models {
-			if modelSt == nil {
-				continue
-			}
-			for _, d := range modelSt.Details {
-				if !dashboardEventMatches(d, params, cutoff) {
-					continue
-				}
-				candidate := dashboardEventDetail{RequestDetail: d, sortKey: apiName, sequence: sequence}
-				sequence++
-				total++
-				if pageWindowLimit > 0 {
-					appendBoundedDashboardEventHeap(&pageWindow, candidate, pageWindowLimit)
-				} else {
-					all = append(all, candidate)
-				}
-			}
+		if !paginate || (total >= params.Offset && len(events) < params.Limit) {
+			events = append(events, d)
 		}
+		total++
 	}
-
-	if params.API != "" {
-		collect(params.API, s.apis[params.API])
-	} else {
-		for apiName, apiSt := range s.apis {
-			collect(apiName, apiSt)
-		}
-	}
-	if pageWindowLimit > 0 {
-		all = []dashboardEventDetail(pageWindow)
-	}
-
-	// Sort by timestamp descending, then by api name for stability
-	sort.Slice(all, func(i, j int) bool {
-		return dashboardEventBefore(all[i], all[j])
-	})
 
 	if !paginate {
-		events := make([]RequestDetail, len(all))
-		for i, dm := range all {
-			events[i] = dm.RequestDetail
+		if events == nil {
+			events = []RequestDetail{}
 		}
 		return EventsResult{
 			Events:      events,
@@ -2382,16 +2449,6 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool) Event
 		}
 		s.cacheDashboardEventsLocked(cacheKey, result)
 		return result
-	}
-
-	end := params.Offset + params.Limit
-	if end > total {
-		end = total
-	}
-
-	events := make([]RequestDetail, end-params.Offset)
-	for i, dm := range all[params.Offset:end] {
-		events[i] = dm.RequestDetail
 	}
 
 	result := EventsResult{
