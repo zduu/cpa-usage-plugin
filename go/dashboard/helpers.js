@@ -11,11 +11,13 @@ function aggregateCost(row, prices) { return tokenCost(row.model, row.input_toke
 function looksLikeKey(v) { return typeof v === 'string' && (v.startsWith('sk-') || v.startsWith('AIza') || v.startsWith('hf_') || v.startsWith('pk_') || v.startsWith('rk_') || v.length >= 80) }
 function looksLikeCredentialId(v) { const s = String(v || '').trim(); return /^[a-f0-9]{8,}$/i.test(s) || (s.length >= 32 && !/[ ./_-]/.test(s)) }
 function isCredentialMarker(v) { return /^(api[-_ ]?key|apikey|key|credential|auth)$/i.test(String(v || '').trim()) }
+function isCredentialLabel(v) { return /^(凭证|credential|auth)\s+\S+$/i.test(String(v || '').trim()) }
 function trimCredentialSuffix(value) {
   let s = String(value ?? '').trim(); if (!s) return '';
   const dot = s.split(' · ').map((p) => p.trim()).filter(Boolean);
   const marker = dot.findIndex(isCredentialMarker);
   if (marker > 0) return dot.slice(0, marker).join(' · ');
+  if (dot.length > 1 && isCredentialLabel(dot[dot.length - 1])) return dot.slice(0, -1).join(' · ');
   if (dot.length > 1 && looksLikeCredentialId(dot[dot.length - 1])) return dot.slice(0, -1).join(' · ');
   const colon = s.split(':').map((p) => p.trim()).filter(Boolean);
   if (colon.length >= 3 && looksLikeCredentialId(colon[colon.length - 1])) return colon.slice(0, -1).join(':');
@@ -23,7 +25,7 @@ function trimCredentialSuffix(value) {
 }
 function sourceLabel(detail) { const s = trimCredentialSuffix(detail.source); if (s && !looksLikeKey(s)) return s; const p = trimCredentialSuffix(detail.provider); if (p && !looksLikeKey(p)) return p; return '未知来源' }
 function sourceKey(detail) { return sourceLabel(detail) }
-function friendlyApiName(apiName) { const clean = trimCredentialSuffix(apiName); if (!clean) return '未知接口'; const parts = clean.split(' · ').filter(function (p) { return !looksLikeKey(p) && !isCredentialMarker(p) && !looksLikeCredentialId(p) }); return parts.length ? parts.join(' · ') : clean }
+function friendlyApiName(apiName) { const clean = trimCredentialSuffix(apiName); if (!clean) return '未知接口'; const parts = clean.split(' · ').filter(function (p) { return !looksLikeKey(p) && !isCredentialMarker(p) && !isCredentialLabel(p) && !looksLikeCredentialId(p) }); return parts.length ? parts.join(' · ') : clean }
 function clientApiLabel(detail) { const label = String((detail && detail.api_key) || '').trim(); return label || '未知 API' }
 function clientApiGroupKey(detail) {
   const label = String((detail && detail.api_key) || '').trim();
@@ -151,5 +153,5 @@ async function fetchAllEventPages(fetchPage, baseParams, pageLimit) {
 
 // Export for Node.js test environment
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { esc, num, compact, pct, formatMs, totalTokens, tokenCost, detailCost, aggregateCost, looksLikeKey, looksLikeCredentialId, isCredentialMarker, trimCredentialSuffix, sourceLabel, sourceKey, friendlyApiName, clientApiLabel, clientApiGroupKey, avg, bucketSeries, healthColor, healthCellStyle, timestampMs, pluginEndpoint, managementEndpoint, decodeManagementStorage, parseManagementStorage, currentManagementKey, groupedRows, decodeManagementBody, unwrapPluginPayload, fetchAllEventPages };
+  module.exports = { esc, num, compact, pct, formatMs, totalTokens, tokenCost, detailCost, aggregateCost, looksLikeKey, looksLikeCredentialId, isCredentialMarker, isCredentialLabel, trimCredentialSuffix, sourceLabel, sourceKey, friendlyApiName, clientApiLabel, clientApiGroupKey, avg, bucketSeries, healthColor, healthCellStyle, timestampMs, pluginEndpoint, managementEndpoint, decodeManagementStorage, parseManagementStorage, currentManagementKey, groupedRows, decodeManagementBody, unwrapPluginPayload, fetchAllEventPages };
 }

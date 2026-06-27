@@ -131,6 +131,26 @@ func TestUsageRecordUnmarshalAcceptsSnakeCaseFields(t *testing.T) {
 	}
 }
 
+func TestUsageRecordUnmarshalAcceptsBaseURLAliases(t *testing.T) {
+	tests := map[string]string{
+		"base_url": `"base_url":"https://snake.example/v1"`,
+		"baseURL":  `"baseURL":"https://camel-upper.example/v1"`,
+		"baseUrl":  `"baseUrl":"https://camel-lower.example/v1"`,
+		"BaseURL":  `"BaseURL":"https://legacy.example/v1"`,
+	}
+	for name, field := range tests {
+		t.Run(name, func(t *testing.T) {
+			var record UsageRecord
+			if err := json.Unmarshal([]byte(`{"provider":"codex",`+field+`}`), &record); err != nil {
+				t.Fatalf("Unmarshal() error = %v", err)
+			}
+			if record.BaseURL == "" {
+				t.Fatalf("BaseURL not decoded from %s", field)
+			}
+		})
+	}
+}
+
 func TestHandleImportUsageAcceptsV120ExportFixture(t *testing.T) {
 	fixture := filepath.Join("testdata", "usage-export-v1.2.0.json")
 	body, err := os.ReadFile(fixture)
@@ -1179,7 +1199,7 @@ func TestUsageGroupKey_DifferentiatesSameProviderChannels(t *testing.T) {
 	}
 	r2 := UsageRecord{
 		Provider:  "codex",
-		Source:    "xpspwc9mfb@privaterelay.appleid.comcodex",
+		Source:    "xpspwc9mfb@privaterelay.appleid.com",
 		AuthIndex: "channel-b",
 	}
 
@@ -1188,11 +1208,36 @@ func TestUsageGroupKey_DifferentiatesSameProviderChannels(t *testing.T) {
 	if k1 == k2 {
 		t.Fatalf("codex channel keys should differ: %q vs %q", k1, k2)
 	}
-	if k1 != "codex · 凭证 channel-a" {
-		t.Fatalf("first key = %q, want codex channel label", k1)
+	if k1 != "codex" {
+		t.Fatalf("first key = %q, want codex without credential label", k1)
 	}
-	if k2 != "codex · xpspwc9mfb@privaterelay.appleid.comcodex · 凭证 channel-b" {
-		t.Fatalf("second key = %q, want source and channel label", k2)
+	if k2 != "codex · xpspwc9mfb@privaterelay.appleid.com" {
+		t.Fatalf("second key = %q, want source without credential label", k2)
+	}
+}
+
+func TestUsageGroupKey_UsesBaseURLForCodexAPI(t *testing.T) {
+	got := usageGroupKey(UsageRecord{
+		Provider:  "codex",
+		Source:    "codex",
+		AuthIndex: "b374b8e7c98ca23c",
+		BaseURL:   "https://api.example.com/v1",
+	})
+	if got != "codex · https://api.example.com/v1" {
+		t.Fatalf("key = %q, want codex base-url label", got)
+	}
+}
+
+func TestUsageGroupKey_OpenAICompatibleDoesNotShowCredential(t *testing.T) {
+	got := usageGroupKey(UsageRecord{
+		Provider:  "openai-compatible-opencode-free",
+		Source:    "public",
+		AuthID:    "openai-compatibility:opencode-free:8623731db2f2",
+		AuthIndex: "02bffe66b8460c3e",
+		AuthType:  "apikey",
+	})
+	if got != "openai-compatible-opencode-free · public" {
+		t.Fatalf("key = %q, want provider and source without credential", got)
 	}
 }
 
@@ -1241,14 +1286,9 @@ func TestStorageReplayRekeysUpstreamChannelsFromDetail(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{StorageEnabled: true, StoragePath: path, RetentionDays: 0, DedupWindowMinutes: 0})
 	snapshot := stats.Snapshot()
-	if _, ok := snapshot.APIs["codex · 凭证 channel-a"]; !ok {
-		t.Fatalf("snapshot APIs = %#v, want channel-a key", snapshot.APIs)
-	}
-	if _, ok := snapshot.APIs["codex · 凭证 channel-b"]; !ok {
-		t.Fatalf("snapshot APIs = %#v, want channel-b key", snapshot.APIs)
-	}
-	if _, ok := snapshot.APIs["codex"]; ok {
-		t.Fatalf("legacy merged key should not remain after replay: %#v", snapshot.APIs)
+	api := snapshot.APIs["codex"]
+	if api.TotalRequests != 2 {
+		t.Fatalf("snapshot APIs = %#v, want merged codex key without credential labels", snapshot.APIs)
 	}
 }
 

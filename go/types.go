@@ -82,6 +82,7 @@ type UsageRecord struct {
 	AuthID          string              `json:"auth_id"`
 	AuthIndex       string              `json:"auth_index"`
 	AuthType        string              `json:"auth_type"`
+	BaseURL         string              `json:"base_url"`
 	Source          string              `json:"source"`
 	ReasoningEffort string              `json:"reasoning_effort"`
 	ServiceTier     string              `json:"service_tier"`
@@ -110,6 +111,8 @@ func (r *UsageRecord) UnmarshalJSON(data []byte) error {
 		AuthID          string              `json:"AuthID"`
 		AuthIndex       string              `json:"AuthIndex"`
 		AuthType        string              `json:"AuthType"`
+		BaseURL         string              `json:"BaseURL"`
+		BaseUrl         string              `json:"BaseUrl"`
 		Source          string              `json:"Source"`
 		ReasoningEffort string              `json:"ReasoningEffort"`
 		ServiceTier     string              `json:"ServiceTier"`
@@ -122,6 +125,13 @@ func (r *UsageRecord) UnmarshalJSON(data []byte) error {
 		ResponseHeaders map[string][]string `json:"ResponseHeaders"`
 	}
 	if err := json.Unmarshal(data, &legacy); err != nil {
+		return err
+	}
+	var aliases struct {
+		BaseURLCamel string `json:"baseURL"`
+		BaseUrlCamel string `json:"baseUrl"`
+	}
+	if err := json.Unmarshal(data, &aliases); err != nil {
 		return err
 	}
 
@@ -148,6 +158,18 @@ func (r *UsageRecord) UnmarshalJSON(data []byte) error {
 	}
 	if current.AuthType == "" {
 		current.AuthType = legacy.AuthType
+	}
+	if current.BaseURL == "" {
+		current.BaseURL = aliases.BaseURLCamel
+	}
+	if current.BaseURL == "" {
+		current.BaseURL = aliases.BaseUrlCamel
+	}
+	if current.BaseURL == "" {
+		current.BaseURL = legacy.BaseURL
+	}
+	if current.BaseURL == "" {
+		current.BaseURL = legacy.BaseUrl
 	}
 	if current.Source == "" {
 		current.Source = legacy.Source
@@ -406,6 +428,7 @@ type RequestDetail struct {
 	AuthID     string              `json:"auth_id,omitempty"`
 	AuthIndex  string              `json:"auth_index"`
 	AuthType   string              `json:"auth_type,omitempty"`
+	BaseURL    string              `json:"base_url,omitempty"`
 	Thinking   UsageThinking       `json:"thinking,omitempty"`
 	Tokens     TokenStats          `json:"tokens"`
 	Failed     bool                `json:"failed"`

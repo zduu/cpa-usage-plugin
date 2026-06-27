@@ -235,6 +235,7 @@ func (s *RequestStatistics) Record(record UsageRecord) {
 		AuthID:     strings.TrimSpace(record.AuthID),
 		AuthIndex:  strings.TrimSpace(record.AuthIndex),
 		AuthType:   strings.TrimSpace(record.AuthType),
+		BaseURL:    strings.TrimSpace(record.BaseURL),
 		Thinking:   usageThinking(record),
 		Tokens: TokenStats{
 			InputTokens:     record.Detail.InputTokens,

@@ -133,12 +133,16 @@ func usageGroupKey(record UsageRecord) string {
 	provider := strings.TrimSpace(record.Provider)
 	executor := strings.TrimSpace(record.ExecutorType)
 	source := stripCredentialSuffix(record.Source)
+	baseURL := strings.TrimSpace(record.BaseURL)
 
 	parts := make([]string, 0, 4)
 	if provider != "" {
 		parts = append(parts, provider)
 	} else if executor != "" {
 		parts = append(parts, executor)
+	}
+	if strings.EqualFold(provider, "codex") && baseURL != "" {
+		return joinNameParts(provider, baseURL)
 	}
 	if source != "" && !looksLikeSecretKey(source) {
 		dup := false
@@ -152,13 +156,13 @@ func usageGroupKey(record UsageRecord) string {
 			parts = append(parts, source)
 		}
 	}
-	if channel := usageChannelLabel(record); channel != "" && !containsString(parts, channel) {
+	if channel := usageChannelLabel(record); shouldAppendChannel(record, source) && channel != "" && !containsString(parts, channel) {
 		parts = append(parts, channel)
 	}
 	if len(parts) == 0 {
 		return "未知接口"
 	}
-	return strings.Join(parts, " · ")
+	return joinNameParts(parts...)
 }
 
 func usageGroupKeyFromDetail(fallback string, detail RequestDetail) string {
@@ -168,6 +172,7 @@ func usageGroupKeyFromDetail(fallback string, detail RequestDetail) string {
 		AuthID:       detail.AuthID,
 		AuthIndex:    detail.AuthIndex,
 		AuthType:     detail.AuthType,
+		BaseURL:      detail.BaseURL,
 		ExecutorType: strings.TrimSpace(fallback),
 	})
 	if strings.TrimSpace(key) != "" && key != "未知接口" {
@@ -177,6 +182,34 @@ func usageGroupKeyFromDetail(fallback string, detail RequestDetail) string {
 		return fallback
 	}
 	return key
+}
+
+func shouldAppendChannel(record UsageRecord, source string) bool {
+	provider := strings.TrimSpace(record.Provider)
+	if source != "" && !strings.EqualFold(source, provider) {
+		return false
+	}
+	if strings.EqualFold(provider, "codex") {
+		return false
+	}
+	if strings.HasPrefix(strings.ToLower(provider), "openai-compatible") {
+		return false
+	}
+	return true
+}
+
+func joinNameParts(parts ...string) string {
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" && !containsString(out, part) {
+			out = append(out, part)
+		}
+	}
+	if len(out) == 0 {
+		return ""
+	}
+	return strings.Join(out, " · ")
 }
 
 func usageChannelLabel(record UsageRecord) string {

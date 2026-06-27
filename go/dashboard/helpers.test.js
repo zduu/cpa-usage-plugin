@@ -108,8 +108,16 @@ test('isCredentialMarker detects credential keywords', () => {
   assert.strictEqual(helpers.isCredentialMarker('source'), false);
 });
 
+test('isCredentialLabel detects rendered credential labels', () => {
+  assert.strictEqual(helpers.isCredentialLabel('凭证 a2f9cd186fd7dee9'), true);
+  assert.strictEqual(helpers.isCredentialLabel('credential 02bffe66b8460c3e'), true);
+  assert.strictEqual(helpers.isCredentialLabel('public'), false);
+});
+
 test('trimCredentialSuffix removes credential suffixes', () => {
   assert.strictEqual(helpers.trimCredentialSuffix('openai · apikey · abc123'), 'openai');
+  assert.strictEqual(helpers.trimCredentialSuffix('codex · xpspwc9mfb@privaterelay.appleid.com · 凭证 a2f9cd186fd7dee9'), 'codex · xpspwc9mfb@privaterelay.appleid.com');
+  assert.strictEqual(helpers.trimCredentialSuffix('openai-compatible-opencode-free · public · 凭证 02bffe66b8460c3e'), 'openai-compatible-opencode-free · public');
   assert.strictEqual(helpers.trimCredentialSuffix('deepseek'), 'deepseek');
   assert.strictEqual(helpers.trimCredentialSuffix(''), '');
   assert.strictEqual(helpers.trimCredentialSuffix(null), '');
@@ -124,8 +132,12 @@ test('sourceLabel returns clean source name', () => {
 test('friendlyApiName cleans API names', () => {
   assert.strictEqual(helpers.friendlyApiName('openai · apikey · abc123'), 'openai');
   assert.strictEqual(
-    helpers.friendlyApiName('codex · xpspwc9mfb@privaterelay.appleid.comcodex'),
-    'codex · xpspwc9mfb@privaterelay.appleid.comcodex'
+    helpers.friendlyApiName('codex · xpspwc9mfb@privaterelay.appleid.com · 凭证 a2f9cd186fd7dee9'),
+    'codex · xpspwc9mfb@privaterelay.appleid.com'
+  );
+  assert.strictEqual(
+    helpers.friendlyApiName('openai-compatible-opencode-free · public · 凭证 02bffe66b8460c3e'),
+    'openai-compatible-opencode-free · public'
   );
   assert.strictEqual(helpers.friendlyApiName(''), '未知接口');
 });
