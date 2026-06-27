@@ -56,6 +56,7 @@ type RequestStatistics struct {
 	storageActiveDate  string
 	storageLastFlush   time.Time
 	storageLastError   string
+	storageBuffered    int64
 
 	priceStoragePath       string
 	priceStorageLoadedPath string
@@ -718,11 +719,13 @@ func (s *RequestStatistics) appendDetailLocked(detail persistedDetail) {
 		s.storageLastError = err.Error()
 		return
 	}
+	s.storageBuffered++
 	if s.storageFlush <= 0 || time.Since(s.storageLastFlush) >= s.storageFlush {
 		if err := s.storageWriter.Flush(); err != nil {
 			s.storageLastError = err.Error()
 			return
 		}
+		s.storageBuffered = 0
 		s.storageLastFlush = time.Now()
 	}
 }
@@ -738,6 +741,7 @@ func (s *RequestStatistics) closeStorageLocked() {
 			s.storageLastError = err.Error()
 		} else {
 			flushed = true
+			s.storageBuffered = 0
 		}
 		s.storageWriter = nil
 	}
@@ -2255,10 +2259,11 @@ func (s *RequestStatistics) StorageStatus() StorageStatus {
 
 func (s *RequestStatistics) storageStatusLocked() StorageStatus {
 	status := StorageStatus{
-		Enabled:    s.storageEnabled,
-		Path:       s.storagePath,
-		LoadedPath: s.storageLoadedPath,
-		LastError:  s.storageLastError,
+		Enabled:                s.storageEnabled,
+		Path:                   s.storagePath,
+		LoadedPath:             s.storageLoadedPath,
+		LastError:              s.storageLastError,
+		PendingBufferedRecords: s.storageBuffered,
 	}
 	if !s.storageLastFlush.IsZero() {
 		status.LastFlushAt = s.storageLastFlush.UTC().Format(time.RFC3339)

@@ -462,6 +462,38 @@ func TestStorageWritesDateShards(t *testing.T) {
 	}
 }
 
+func TestStorageStatusReportsPendingBufferedRecords(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage-statistics.jsonl")
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		MaxDetailsPerModel:  100,
+		RetentionDays:       0,
+		DedupWindowMinutes:  0,
+		StorageEnabled:      true,
+		StoragePath:         path,
+		StorageFlushSeconds: 3600,
+	})
+
+	stats.Record(UsageRecord{
+		Provider: "openai",
+		Model:    "gpt-4",
+		Detail:   UsageDetail{TotalTokens: 1},
+	})
+	stats.Record(UsageRecord{
+		Provider: "openai",
+		Model:    "gpt-4",
+		Detail:   UsageDetail{TotalTokens: 2},
+	})
+
+	if status := stats.StorageStatus(); status.PendingBufferedRecords != 1 {
+		t.Fatalf("pending buffered records = %d, want 1", status.PendingBufferedRecords)
+	}
+	stats.Close()
+	if status := stats.StorageStatus(); status.PendingBufferedRecords != 0 {
+		t.Fatalf("pending buffered records after close = %d, want 0", status.PendingBufferedRecords)
+	}
+}
+
 func TestStorageReplaySkipsInvalidLines(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "usage-statistics.jsonl")
 	when := time.Now().Add(-time.Minute).UTC()

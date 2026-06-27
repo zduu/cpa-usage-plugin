@@ -137,6 +137,7 @@ function createDashboardHarness(options = {}) {
       storage: { enabled: false, path: 'usage-statistics.jsonl' },
     },
   };
+  if (options.storage) summary._meta.storage = options.storage;
 
   function eventsPage(url) {
     const parsed = new URL(url, 'http://test.local/v0/management/plugins/usage-statistics/dashboard');
@@ -342,6 +343,22 @@ test('dashboard loads summary and export button uses backend event export', asyn
   assert.strictEqual(exportEventsCount(), beforeExportEvents + 1);
   const exported = JSON.parse(downloads.find((d) => d.text && d.text.startsWith('[')).text);
   assert.strictEqual(exported.length, 1200);
+});
+
+test('dashboard shows pending storage buffer status', async () => {
+  const { document, fetchCalls } = createDashboardHarness({
+    storage: {
+      enabled: true,
+      path: 'usage-statistics.jsonl',
+      loaded_path: 'usage-statistics/usage-2026-06-28.jsonl',
+      pending_buffered_records: 2,
+    },
+  });
+
+  const el = document.getElementById('storageStatus');
+  await waitFor(() => el.textContent === '持久化待同步');
+  assert.strictEqual(el.textContent, '持久化待同步');
+  assert.match(el.title, /2 条记录/);
 });
 
 test('dashboard uses a slower polling interval while hidden', async () => {

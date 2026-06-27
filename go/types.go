@@ -369,11 +369,12 @@ type ExportConfig struct {
 }
 
 type StorageStatus struct {
-	Enabled     bool   `json:"enabled"`
-	Path        string `json:"path,omitempty"`
-	LoadedPath  string `json:"loaded_path,omitempty"`
-	LastFlushAt string `json:"last_flush_at,omitempty"`
-	LastError   string `json:"last_error,omitempty"`
+	Enabled                bool   `json:"enabled"`
+	Path                   string `json:"path,omitempty"`
+	LoadedPath             string `json:"loaded_path,omitempty"`
+	LastFlushAt            string `json:"last_flush_at,omitempty"`
+	LastError              string `json:"last_error,omitempty"`
+	PendingBufferedRecords int64  `json:"pending_buffered_records,omitempty"`
 }
 
 type ModelPrice struct {

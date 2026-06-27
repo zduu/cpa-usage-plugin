@@ -138,6 +138,13 @@ function renderStorageStatus() {
     el.title = storage.last_error;
     return;
   }
+  const pending = num(storage.pending_buffered_records);
+  if (pending > 0) {
+    el.textContent = '持久化待同步';
+    el.classList.add('warn');
+    el.title = pending.toLocaleString() + ' 条记录待刷新到文件';
+    return;
+  }
   el.textContent = storage.last_flush_at ? '持久化已同步' : '持久化已开启';
   el.classList.add('ok');
   el.title = storage.loaded_path || storage.path || '';
