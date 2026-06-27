@@ -192,15 +192,6 @@ function renderPrices() {
   });
 }
 
-function renderCredentials() {
-  if (!summaryData || !summaryData.source_stats) { $('credentialStats').innerHTML = '<div class="empty">暂无来源数据</div>'; return }
-  const rows = summaryData.source_stats;
-  $('credentialStats').innerHTML = rows.length ? '<table><thead><tr><th>来源</th><th>请求次数</th><th>成功率</th></tr></thead><tbody>' + rows.map((r) => {
-    const rate = r.total_requests ? r.success_count / r.total_requests * 100 : 100;
-    return '<tr><td class="nameCell">' + esc(r.source) + (r.provider && r.provider !== r.source ? '<span class="pill">' + esc(r.provider) + '</span>' : '') + '</td><td>' + fmt.format(r.total_requests) + ' <span class="ok">(' + fmt.format(r.success_count) + '</span> <span class="bad">' + fmt.format(r.failure_count) + ')</span></td><td class="' + (rate >= 95 ? 'ok' : rate >= 80 ? 'neutral' : 'bad') + '">' + pct(rate) + '</td></tr>'
-  }).join('') + '</tbody></table>' : '<div class="empty">暂无来源数据</div>';
-}
-
 function renderClientApiStats() {
   const stats = summaryData && summaryData.client_api_stats;
   if (!stats || !stats.length) { $('clientApiStats').innerHTML = '<div class="empty">暂无 API key 请求数据</div>'; return }
@@ -447,7 +438,6 @@ async function rerender() {
   renderStats();
   renderHealth();
   renderPrices();
-  renderCredentials();
   renderClientApiStats();
   renderApiStats();
   renderApiDetail();

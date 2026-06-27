@@ -289,9 +289,10 @@ func TestRecordStoresMaskedClientAPIKeyAndCleanSource(t *testing.T) {
 	})
 
 	snapshot := stats.Snapshot()
-	api, ok := snapshot.APIs["openai-compatible-opencode"]
+	wantAPI := "openai-compatible-opencode · 凭证 5312415661d8a481"
+	api, ok := snapshot.APIs[wantAPI]
 	if !ok {
-		t.Fatalf("snapshot APIs = %#v, want clean upstream key", snapshot.APIs)
+		t.Fatalf("snapshot APIs = %#v, want upstream key %q", snapshot.APIs, wantAPI)
 	}
 	details := api.Models["deepseek-v3.1"].Details
 	if len(details) != 1 {
@@ -328,7 +329,7 @@ func TestRecordStoresMaskedClientAPIKeyAndCleanSource(t *testing.T) {
 		},
 	})
 	snapshot2 := stats.Snapshot()
-	details2 := snapshot2.APIs["openai-compatible-opencode"].Models["deepseek-v3.1"].Details
+	details2 := snapshot2.APIs[wantAPI].Models["deepseek-v3.1"].Details
 	hash2 := details2[len(details2)-1].APIKeyHash
 	if hash1 != hash2 {
 		t.Fatalf("APIKeyHash not stable across records: %q != %q", hash1, hash2)
@@ -1167,6 +1168,87 @@ func TestUsageGroupKey_DifferentiatesSource(t *testing.T) {
 	k2 := usageGroupKey(r2)
 	if k1 == k2 {
 		t.Fatalf("group keys should differ: %q vs %q", k1, k2)
+	}
+}
+
+func TestUsageGroupKey_DifferentiatesSameProviderChannels(t *testing.T) {
+	r1 := UsageRecord{
+		Provider:  "codex",
+		Source:    "codex",
+		AuthIndex: "channel-a",
+	}
+	r2 := UsageRecord{
+		Provider:  "codex",
+		Source:    "xpspwc9mfb@privaterelay.appleid.comcodex",
+		AuthIndex: "channel-b",
+	}
+
+	k1 := usageGroupKey(r1)
+	k2 := usageGroupKey(r2)
+	if k1 == k2 {
+		t.Fatalf("codex channel keys should differ: %q vs %q", k1, k2)
+	}
+	if k1 != "codex · 凭证 channel-a" {
+		t.Fatalf("first key = %q, want codex channel label", k1)
+	}
+	if k2 != "codex · xpspwc9mfb@privaterelay.appleid.comcodex · 凭证 channel-b" {
+		t.Fatalf("second key = %q, want source and channel label", k2)
+	}
+}
+
+func TestStorageReplayRekeysUpstreamChannelsFromDetail(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage-statistics.jsonl")
+	when := time.Now().Add(-time.Hour)
+	lines := []persistedDetail{
+		{
+			API:   "codex",
+			Model: "gpt-5",
+			Detail: RequestDetail{
+				Model:     "gpt-5",
+				Timestamp: when,
+				Source:    "codex",
+				Provider:  "codex",
+				AuthIndex: "channel-a",
+				Tokens:    TokenStats{TotalTokens: 1},
+			},
+		},
+		{
+			API:   "codex",
+			Model: "gpt-5",
+			Detail: RequestDetail{
+				Model:     "gpt-5",
+				Timestamp: when.Add(time.Minute),
+				Source:    "codex",
+				Provider:  "codex",
+				AuthIndex: "channel-b",
+				Tokens:    TokenStats{TotalTokens: 2},
+			},
+		},
+	}
+	var raw strings.Builder
+	for _, line := range lines {
+		b, err := json.Marshal(line)
+		if err != nil {
+			t.Fatalf("marshal persisted detail: %v", err)
+		}
+		raw.Write(b)
+		raw.WriteByte('\n')
+	}
+	if err := os.WriteFile(path, []byte(raw.String()), 0o600); err != nil {
+		t.Fatalf("write storage fixture: %v", err)
+	}
+
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{StorageEnabled: true, StoragePath: path, RetentionDays: 0, DedupWindowMinutes: 0})
+	snapshot := stats.Snapshot()
+	if _, ok := snapshot.APIs["codex · 凭证 channel-a"]; !ok {
+		t.Fatalf("snapshot APIs = %#v, want channel-a key", snapshot.APIs)
+	}
+	if _, ok := snapshot.APIs["codex · 凭证 channel-b"]; !ok {
+		t.Fatalf("snapshot APIs = %#v, want channel-b key", snapshot.APIs)
+	}
+	if _, ok := snapshot.APIs["codex"]; ok {
+		t.Fatalf("legacy merged key should not remain after replay: %#v", snapshot.APIs)
 	}
 }
 

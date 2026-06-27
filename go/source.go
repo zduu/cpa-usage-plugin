@@ -134,7 +134,7 @@ func usageGroupKey(record UsageRecord) string {
 	executor := strings.TrimSpace(record.ExecutorType)
 	source := stripCredentialSuffix(record.Source)
 
-	parts := make([]string, 0, 3)
+	parts := make([]string, 0, 4)
 	if provider != "" {
 		parts = append(parts, provider)
 	} else if executor != "" {
@@ -152,10 +152,103 @@ func usageGroupKey(record UsageRecord) string {
 			parts = append(parts, source)
 		}
 	}
+	if channel := usageChannelLabel(record); channel != "" && !containsString(parts, channel) {
+		parts = append(parts, channel)
+	}
 	if len(parts) == 0 {
 		return "未知接口"
 	}
 	return strings.Join(parts, " · ")
+}
+
+func usageGroupKeyFromDetail(fallback string, detail RequestDetail) string {
+	key := usageGroupKey(UsageRecord{
+		Provider:     detail.Provider,
+		Source:       detail.Source,
+		AuthID:       detail.AuthID,
+		AuthIndex:    detail.AuthIndex,
+		AuthType:     detail.AuthType,
+		ExecutorType: strings.TrimSpace(fallback),
+	})
+	if strings.TrimSpace(key) != "" && key != "未知接口" {
+		return key
+	}
+	if fallback = strings.TrimSpace(fallback); fallback != "" {
+		return fallback
+	}
+	return key
+}
+
+func usageChannelLabel(record UsageRecord) string {
+	for _, raw := range []string{
+		record.AuthIndex,
+		credentialIdentity(record.Source),
+		credentialIdentity(record.AuthID),
+		record.AuthID,
+	} {
+		if id := safeCredentialIdentity(raw); id != "" {
+			return "凭证 " + id
+		}
+	}
+	return ""
+}
+
+func credentialIdentity(raw string) string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return ""
+	}
+	parts := splitBySeparators(value)
+	for i, part := range parts {
+		if isCredentialMarker(part) && i+1 < len(parts) {
+			return strings.Join(parts[i+1:], " · ")
+		}
+	}
+	if len(parts) > 1 && (looksLikeCredentialID(parts[len(parts)-1]) || looksLikeSecretKey(parts[len(parts)-1])) {
+		return parts[len(parts)-1]
+	}
+	colonParts := strings.Split(value, ":")
+	for i, part := range colonParts {
+		if isCredentialMarker(part) && i+1 < len(colonParts) {
+			return strings.Join(colonParts[i+1:], ":")
+		}
+	}
+	if len(colonParts) >= 3 && looksLikeCredentialID(colonParts[len(colonParts)-1]) {
+		return colonParts[len(colonParts)-1]
+	}
+	return ""
+}
+
+func safeCredentialIdentity(raw string) string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return ""
+	}
+	if nested := credentialIdentity(value); nested != "" && nested != value {
+		value = nested
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if looksLikeSecretKey(value) {
+		return maskToken(value)
+	}
+	return value
+}
+
+func isCredentialMarker(raw string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(raw, "-", ""), "_", "")))
+	return normalized == "apikey" || normalized == "key" || normalized == "credential" || normalized == "auth"
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func usageSource(record UsageRecord) string {

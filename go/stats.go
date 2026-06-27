@@ -388,6 +388,7 @@ func (s *RequestStatistics) replayStorageLocked(path string) error {
 			detail.Timestamp = now
 		}
 		detail.Tokens.TotalTokens = detailTotalTokens(detail.Tokens)
+		apiName = usageGroupKeyFromDetail(apiName, detail)
 		key := dedupKey(apiName, modelName, detail)
 		if _, ok := existing[key]; ok {
 			continue
@@ -924,13 +925,6 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 			continue
 		}
 
-		existingAPI, ok := s.apis[apiName]
-		if !ok || existingAPI == nil {
-			s.apis[apiName] = &apiStats{Models: make(map[string]*modelStats)}
-		} else if existingAPI.Models == nil {
-			existingAPI.Models = make(map[string]*modelStats)
-		}
-
 		for modelName, modelSnapshot := range apiSnapshot.Models {
 			modelName = normalizeModelName(modelName)
 
@@ -956,14 +950,15 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 					continue
 				}
 
-				key := dedupKey(apiName, importModelName, detail)
+				importAPIName := usageGroupKeyFromDetail(apiName, detail)
+				key := dedupKey(importAPIName, importModelName, detail)
 				if _, exists := seen[key]; exists {
 					result.Skipped++
 					continue
 				}
 				seen[key] = struct{}{}
 
-				s.recordImported(apiName, importModelName, detail)
+				s.recordImported(importAPIName, importModelName, detail)
 				result.Added++
 			}
 		}

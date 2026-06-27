@@ -94,6 +94,7 @@ test('looksLikeCredentialId detects hex IDs', () => {
   assert.strictEqual(helpers.looksLikeCredentialId('a4e4860e4fc0'), true);
   assert.strictEqual(helpers.looksLikeCredentialId('5312415661d8a481'), true);
   assert.strictEqual(helpers.looksLikeCredentialId('not-hex-id'), false);
+  assert.strictEqual(helpers.looksLikeCredentialId('xpspwc9mfb@privaterelay.appleid.comcodex'), false);
   assert.strictEqual(helpers.looksLikeCredentialId('abc'), false);
 });
 
@@ -122,6 +123,10 @@ test('sourceLabel returns clean source name', () => {
 
 test('friendlyApiName cleans API names', () => {
   assert.strictEqual(helpers.friendlyApiName('openai · apikey · abc123'), 'openai');
+  assert.strictEqual(
+    helpers.friendlyApiName('codex · xpspwc9mfb@privaterelay.appleid.comcodex'),
+    'codex · xpspwc9mfb@privaterelay.appleid.comcodex'
+  );
   assert.strictEqual(helpers.friendlyApiName(''), '未知接口');
 });
 

@@ -247,7 +247,6 @@ bash update-usage-statistics.sh --force --restart
 
 - **统计卡片**：总请求数、成功/失败、总 token、每分钟请求、估算花费，附带小时级折线图。
 - **服务健康监测**：7 天 × 15 分钟粒度的彩色网格，鼠标悬停显示窗口详情，灰色格表示无请求。
-- **来源统计**：按上游来源聚合请求数和成功率。
 - **API 详细统计**：按调用 CPA 服务的客户端 API key 聚合。页面显示脱敏 key；导入不同实例导出的同一脱敏 key 时会合并展示。
 - **上游接口统计**：按上游接口聚合，点击查看模型分布详情。
 - **模型统计**：跨接口的模型汇总，包含请求数、token、平均延迟、成功率和费用。
@@ -275,7 +274,7 @@ curl http://127.0.0.1:8317/v0/management/plugins/usage-statistics/dashboard-summ
   -H 'x-management-key: <你的管理密钥>'
 ```
 
-响应包含 `usage`（无 details 聚合数据）、`health_grid`（672 个 15 分钟槽位）、`source_stats`、`credential_stats`、`client_api_stats`、`model_stats` 和 `_meta` 元数据。
+响应包含 `usage`（无 details 聚合数据）、`health_grid`（672 个 15 分钟槽位）、`source_stats`（用于事件来源筛选）、`credential_stats`、`client_api_stats`、`model_stats` 和 `_meta` 元数据。
 
 ### 查询事件
 

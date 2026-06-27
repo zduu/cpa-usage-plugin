@@ -9,7 +9,7 @@ function tokenCost(model, inputTokens, outputTokens, cachedTokens, reasoningToke
 function detailCost(detail, prices) { const t = detail.tokens || {}; return tokenCost(detail.model, t.input_tokens, t.output_tokens, Math.max(num(t.cached_tokens), num(t.cache_tokens)), t.reasoning_tokens, prices) }
 function aggregateCost(row, prices) { return tokenCost(row.model, row.input_tokens, row.output_tokens, row.cached_tokens, row.reasoning_tokens, prices) }
 function looksLikeKey(v) { return typeof v === 'string' && (v.startsWith('sk-') || v.startsWith('AIza') || v.startsWith('hf_') || v.startsWith('pk_') || v.startsWith('rk_') || v.length >= 80) }
-function looksLikeCredentialId(v) { const s = String(v || '').trim(); return /^[a-f0-9]{8,}$/i.test(s) || /^[0-9a-f]{12,}$/i.test(s) || s.length >= 32 }
+function looksLikeCredentialId(v) { const s = String(v || '').trim(); return /^[a-f0-9]{8,}$/i.test(s) || (s.length >= 32 && !/[ ./_-]/.test(s)) }
 function isCredentialMarker(v) { return /^(api[-_ ]?key|apikey|key|credential|auth)$/i.test(String(v || '').trim()) }
 function trimCredentialSuffix(value) {
   let s = String(value ?? '').trim(); if (!s) return '';
