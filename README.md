@@ -90,6 +90,8 @@ PUT  /v0/management/plugins/usage-statistics/model-prices
 DELETE /v0/management/plugins/usage-statistics/model-prices
 GET  /v0/management/plugins/usage-statistics/dashboard-summary
 GET  /v0/management/plugins/usage-statistics/dashboard-events
+GET  /v0/management/plugins/usage-statistics/dashboard-events-export
+GET  /v0/management/plugins/usage-statistics/dashboard-api-detail
 GET  /v0/management/plugins/usage-statistics/dashboard-data
 GET  /v0/management/plugins/usage-statistics/health
 ```

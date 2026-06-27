@@ -63,7 +63,7 @@ func handleRegister(requestBody []byte) ([]byte, error) {
 					Name:        "storage_path",
 					Type:        "string",
 					Default:     "usage-statistics.jsonl",
-					Description: "JSONL 持久化文件路径。相对路径基于 CPA 工作目录。",
+					Description: "JSONL 持久化路径。*.jsonl 旧单文件会兼容读取，新数据写入同名目录的日期分片。",
 				},
 				{
 					Name:        "storage_flush_interval_seconds",

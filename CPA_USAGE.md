@@ -91,7 +91,7 @@ plugins:
       api_key_hash_salt: ""
       # 可选：启用 JSONL 事件持久化，避免重启丢失统计。默认 false。
       storage_enabled: false
-      # 可选：JSONL 持久化文件路径。相对路径基于 CPA 工作目录。
+      # 可选：JSONL 持久化路径。相对路径基于 CPA 工作目录；*.jsonl 旧单文件会兼容读取。
       storage_path: usage-statistics.jsonl
       # 可选：持久化 flush 间隔秒数。默认 30。
       storage_flush_interval_seconds: 30
@@ -151,8 +151,10 @@ plugins:
 说明：
 
 - 不配置或保持 `storage_enabled: false` 时，就是原来的内存模式，重启清零。
-- 开启后每条新请求会追加写入 `storage_path`，插件启动时会读取该文件并恢复保留窗口内的数据。
+- 开启后每条新请求会追加写入日期分片，例如 `data/usage-statistics/usage-2026-06-28.jsonl`；插件启动时只 replay 保留窗口内的日期分片。
+- 如果 `storage_path` 配置为历史单文件路径（如 `data/usage-statistics.jsonl`），插件会继续读取该旧文件作为兼容输入，新数据会写入同名目录 `data/usage-statistics/` 下的日期分片。
 - `storage_path` 是相对 CPA 工作目录的路径；Docker 中建议放到已挂载的 `/CLIProxyAPI/data` 或其他宿主机 volume。
+- 当 `retention_days` 大于 0 时，保留窗口外的日期分片会被清理；旧单文件不会自动删除。
 - `storage_flush_interval_seconds` 越小，异常退出时最多丢失的数据越少；默认 30 秒，想更稳可以设为 5 或 1。
 - 如果已经有内存数据，建议先导出；开启持久化并重启后，再把导出的 JSON 导入一次，后续数据才会继续写入持久化文件。
 

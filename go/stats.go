@@ -50,7 +50,10 @@ type RequestStatistics struct {
 	storageFlush       time.Duration
 	storageFile        *os.File
 	storageWriter      *bufio.Writer
+	storageDir         string
+	storageLegacyPath  string
 	storageLoadedPath  string
+	storageActiveDate  string
 	storageLastFlush   time.Time
 	storageLastError   string
 
@@ -332,28 +335,175 @@ func (s *RequestStatistics) configureStorageLocked() {
 		s.storageLastError = err.Error()
 		return
 	}
-	if s.storageFile != nil && s.storageLoadedPath == abs {
+	dir, legacyPath := storageLayout(abs)
+	if s.storageFile != nil && s.storageDir == dir && s.storageLegacyPath == legacyPath {
+		if err := s.cleanupStorageFilesLocked(time.Now()); err != nil {
+			s.storageLastError = err.Error()
+		}
 		return
 	}
 	s.closeStorageLocked()
-	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		s.storageLastError = err.Error()
 		return
 	}
 	replayLastError := ""
-	if err := s.replayStorageLocked(abs); err != nil {
+	if err := s.replayStorageFilesLocked(dir, legacyPath, time.Now()); err != nil {
 		replayLastError = err.Error()
 	}
-	file, err := os.OpenFile(abs, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
+	s.storagePath = path
+	s.storageDir = dir
+	s.storageLegacyPath = legacyPath
+	if err := s.openStorageFileLocked(time.Now()); err != nil {
 		s.storageLastError = err.Error()
 		return
 	}
-	s.storagePath = path
-	s.storageLoadedPath = abs
+	if err := s.cleanupStorageFilesLocked(time.Now()); err != nil && replayLastError == "" {
+		replayLastError = err.Error()
+	}
+	s.storageLastError = replayLastError
+}
+
+func storageLayout(absPath string) (string, string) {
+	if strings.EqualFold(filepath.Ext(absPath), ".jsonl") {
+		return strings.TrimSuffix(absPath, filepath.Ext(absPath)), absPath
+	}
+	return absPath, ""
+}
+
+func storageDate(t time.Time) string {
+	if t.IsZero() {
+		t = time.Now()
+	}
+	return t.UTC().Format("2006-01-02")
+}
+
+func storageFileName(date string) string {
+	return "usage-" + date + ".jsonl"
+}
+
+func parseStorageFileDate(name string) (time.Time, bool) {
+	if !strings.HasPrefix(name, "usage-") || !strings.HasSuffix(name, ".jsonl") {
+		return time.Time{}, false
+	}
+	dateText := strings.TrimSuffix(strings.TrimPrefix(name, "usage-"), ".jsonl")
+	t, err := time.Parse("2006-01-02", dateText)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+func (s *RequestStatistics) openStorageFileLocked(now time.Time) error {
+	if s == nil {
+		return nil
+	}
+	if strings.TrimSpace(s.storageDir) == "" {
+		return errors.New("storage directory is not configured")
+	}
+	date := storageDate(now)
+	path := filepath.Join(s.storageDir, storageFileName(date))
+	if s.storageFile != nil && s.storageLoadedPath == path {
+		return nil
+	}
+	s.closeStorageLocked()
+	if err := os.MkdirAll(s.storageDir, 0o755); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
 	s.storageFile = file
 	s.storageWriter = bufio.NewWriter(file)
-	s.storageLastError = replayLastError
+	s.storageLoadedPath = path
+	s.storageActiveDate = date
+	return nil
+}
+
+func (s *RequestStatistics) replayStorageFilesLocked(dir string, legacyPath string, now time.Time) error {
+	var warnings []string
+	seenFiles := make(map[string]struct{})
+	if strings.TrimSpace(legacyPath) != "" {
+		if err := s.replayStorageLocked(legacyPath); err != nil {
+			warnings = append(warnings, err.Error())
+		}
+		seenFiles[legacyPath] = struct{}{}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return combineStorageWarnings(warnings)
+		}
+		return err
+	}
+	var files []string
+	cutoff := time.Time{}
+	if s.retention > 0 {
+		cutoff = now.Add(-s.retention).UTC().Truncate(24 * time.Hour)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		fileDate, ok := parseStorageFileDate(entry.Name())
+		if !ok {
+			continue
+		}
+		if !cutoff.IsZero() && fileDate.Before(cutoff) {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		if _, ok := seenFiles[path]; ok {
+			continue
+		}
+		files = append(files, path)
+	}
+	sort.Strings(files)
+	for _, path := range files {
+		if err := s.replayStorageLocked(path); err != nil {
+			warnings = append(warnings, err.Error())
+		}
+	}
+	return combineStorageWarnings(warnings)
+}
+
+func combineStorageWarnings(warnings []string) error {
+	if len(warnings) == 0 {
+		return nil
+	}
+	return errors.New(strings.Join(warnings, "; "))
+}
+
+func (s *RequestStatistics) cleanupStorageFilesLocked(now time.Time) error {
+	if s == nil || s.retention <= 0 || strings.TrimSpace(s.storageDir) == "" {
+		return nil
+	}
+	cutoff := now.Add(-s.retention).UTC().Truncate(24 * time.Hour)
+	entries, err := os.ReadDir(s.storageDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		fileDate, ok := parseStorageFileDate(entry.Name())
+		if !ok || !fileDate.Before(cutoff) {
+			continue
+		}
+		path := filepath.Join(s.storageDir, entry.Name())
+		if path == s.storageLoadedPath {
+			continue
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *RequestStatistics) replayStorageLocked(path string) error {
@@ -433,7 +583,11 @@ func (s *RequestStatistics) detailKeysLocked() map[string]struct{} {
 }
 
 func (s *RequestStatistics) appendDetailLocked(detail persistedDetail) {
-	if s == nil || !s.storageEnabled || s.storageWriter == nil {
+	if s == nil || !s.storageEnabled {
+		return
+	}
+	if err := s.openStorageFileLocked(time.Now()); err != nil {
+		s.storageLastError = err.Error()
 		return
 	}
 	raw, err := json.Marshal(detail)
@@ -483,6 +637,7 @@ func (s *RequestStatistics) closeStorageLocked() {
 		s.storageFile = nil
 	}
 	s.storageLoadedPath = ""
+	s.storageActiveDate = ""
 	if flushed && synced {
 		s.storageLastFlush = time.Now()
 	}

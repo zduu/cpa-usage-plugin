@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -420,6 +421,43 @@ func TestStorageReplayRestoresRecords(t *testing.T) {
 	}
 }
 
+func TestStorageWritesDateShards(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage-statistics.jsonl")
+	cfg := runtimeConfig{
+		MaxDetailsPerModel:  100,
+		RetentionDays:       0,
+		DedupWindowMinutes:  0,
+		StorageEnabled:      true,
+		StoragePath:         path,
+		StorageFlushSeconds: 1,
+	}
+
+	stats := NewRequestStatistics()
+	stats.Configure(cfg)
+	stats.Record(UsageRecord{
+		Provider: "openai",
+		Model:    "gpt-4",
+		Detail:   UsageDetail{TotalTokens: 11},
+	})
+	status := stats.StorageStatus()
+	stats.Close()
+
+	shardPath := status.LoadedPath
+	if !strings.Contains(shardPath, string(filepath.Separator)+"usage-statistics"+string(filepath.Separator)+"usage-") {
+		t.Fatalf("loaded storage path %q does not look like a date shard", shardPath)
+	}
+	if _, err := os.Stat(shardPath); err != nil {
+		t.Fatalf("date shard %q was not written: %v", shardPath, err)
+	}
+
+	reloaded := NewRequestStatistics()
+	reloaded.Configure(cfg)
+	defer reloaded.Close()
+	if got := reloaded.Snapshot().TotalRequests; got != 1 {
+		t.Fatalf("replayed date shard requests = %d, want 1", got)
+	}
+}
+
 func TestStorageReplaySkipsInvalidLines(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "usage-statistics.jsonl")
 	when := time.Now().Add(-time.Minute).UTC()
@@ -468,6 +506,58 @@ func TestStorageReplaySkipsInvalidLines(t *testing.T) {
 	}
 	if status := stats.StorageStatus(); !strings.Contains(status.LastError, "skipped 1 invalid line") {
 		t.Fatalf("storage last error = %q, want invalid line warning", status.LastError)
+	}
+}
+
+func TestStorageReplaySkipsAndCleansExpiredDateShards(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "usage-statistics")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir storage dir: %v", err)
+	}
+	now := time.Now().UTC()
+	oldTime := now.Add(-10 * 24 * time.Hour)
+	recentTime := now.Add(-time.Hour)
+	writePersisted := func(path string, detailTime time.Time, tokens int64) {
+		t.Helper()
+		raw := mustMarshal(persistedDetail{
+			API:   "openai",
+			Model: "gpt-4",
+			Detail: RequestDetail{
+				Model:     "gpt-4",
+				Timestamp: detailTime,
+				Source:    "openai-prod",
+				Provider:  "openai",
+				Tokens:    TokenStats{TotalTokens: tokens},
+			},
+		})
+		if err := os.WriteFile(path, append(raw, '\n'), 0o600); err != nil {
+			t.Fatalf("write storage shard: %v", err)
+		}
+	}
+	oldPath := filepath.Join(dir, storageFileName(storageDate(oldTime)))
+	recentPath := filepath.Join(dir, storageFileName(storageDate(recentTime)))
+	writePersisted(oldPath, oldTime, 99)
+	writePersisted(recentPath, recentTime, 7)
+
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		MaxDetailsPerModel: 100,
+		RetentionDays:      7,
+		DedupWindowMinutes: 0,
+		StorageEnabled:     true,
+		StoragePath:        dir,
+	})
+	defer stats.Close()
+
+	snapshot := stats.Snapshot()
+	if snapshot.TotalRequests != 1 || snapshot.TotalTokens != 7 {
+		t.Fatalf("snapshot after date shard replay = requests %d tokens %d, want 1/7", snapshot.TotalRequests, snapshot.TotalTokens)
+	}
+	if _, err := os.Stat(oldPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old shard still exists or stat failed unexpectedly: %v", err)
+	}
+	if _, err := os.Stat(recentPath); err != nil {
+		t.Fatalf("recent shard should remain: %v", err)
 	}
 }
 
