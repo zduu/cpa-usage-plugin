@@ -1848,6 +1848,13 @@ func buildBenchmarkSnapshot(recordCount int) StatisticsSnapshot {
 	return buildBenchmarkStats(recordCount).Snapshot()
 }
 
+func clearBenchmarkEventCache(stats *RequestStatistics) {
+	stats.mu.Lock()
+	stats.eventQueryCache = nil
+	stats.eventQueryCacheOrder = nil
+	stats.mu.Unlock()
+}
+
 func BenchmarkSummaryWithoutDetails100k(b *testing.B) {
 	stats := buildBenchmarkStats(100000)
 	b.ResetTimer()
@@ -1872,6 +1879,17 @@ func BenchmarkQueryEvents100k(b *testing.B) {
 	params := EventsQuery{Limit: 500, Offset: 0, Range: "7d", Model: "gpt-4.1"}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
+		clearBenchmarkEventCache(stats)
+		_ = stats.QueryEvents(params)
+	}
+}
+
+func BenchmarkQueryEventsCached100k(b *testing.B) {
+	stats := buildBenchmarkStats(100000)
+	params := EventsQuery{Limit: 500, Offset: 0, Range: "7d", Model: "gpt-4.1"}
+	_ = stats.QueryEvents(params)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
 		_ = stats.QueryEvents(params)
 	}
 }
@@ -1881,6 +1899,7 @@ func BenchmarkQueryEventsOffset100k(b *testing.B) {
 	params := EventsQuery{Limit: 500, Offset: 500, Range: "7d", Model: "gpt-4.1"}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
+		clearBenchmarkEventCache(stats)
 		_ = stats.QueryEvents(params)
 	}
 }

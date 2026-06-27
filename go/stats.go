@@ -84,6 +84,9 @@ type RequestStatistics struct {
 	summaryCache        DashboardSummary
 	summaryCacheVersion uint64
 	summaryCacheWindow  time.Time
+
+	eventQueryCache      map[dashboardEventCacheKey]EventsResult
+	eventQueryCacheOrder []dashboardEventCacheKey
 }
 
 type apiStats struct {
@@ -139,6 +142,17 @@ type clientAPIStatAccumulator struct {
 	models map[string]*ClientAPIModelStat
 }
 
+type dashboardEventCacheKey struct {
+	limit      int
+	offset     int
+	timeBucket int64
+	rangeKey   string
+	model      string
+	source     string
+	authIndex  string
+	api        string
+}
+
 // apiKeySalt is a per-process random salt used to produce stable grouping IDs.
 var apiKeySalt string
 
@@ -152,6 +166,7 @@ var hourKeys = [24]string{
 const (
 	dashboardHealthSlotCount = 672
 	dashboardHealthStep      = 15 * time.Minute
+	dashboardEventCacheMax   = 16
 )
 
 func init() {
@@ -281,6 +296,8 @@ func (s *RequestStatistics) invalidateSummaryLocked() {
 	}
 	s.summaryVersion++
 	s.summaryCacheValid = false
+	s.eventQueryCache = nil
+	s.eventQueryCacheOrder = nil
 }
 
 func (s *RequestStatistics) Record(record UsageRecord) {
@@ -2156,6 +2173,75 @@ func dashboardEventWindowLimit(offset, limit int) int {
 	return offset + limit
 }
 
+func dashboardEventCacheKeyFor(params EventsQuery, now time.Time) dashboardEventCacheKey {
+	var timeBucket int64
+	if params.Range != "" && params.Range != "all" {
+		timeBucket = now.UTC().Unix()
+	}
+	return dashboardEventCacheKey{
+		limit:      params.Limit,
+		offset:     params.Offset,
+		timeBucket: timeBucket,
+		rangeKey:   params.Range,
+		model:      params.Model,
+		source:     params.Source,
+		authIndex:  params.AuthIndex,
+		api:        params.API,
+	}
+}
+
+func cloneEventsResult(result EventsResult, generatedAt time.Time) EventsResult {
+	cloned := result
+	cloned.Events = cloneRequestDetails(result.Events)
+	if !generatedAt.IsZero() {
+		cloned.GeneratedAt = generatedAt.UTC().Format(time.RFC3339)
+	}
+	return cloned
+}
+
+func cloneRequestDetails(details []RequestDetail) []RequestDetail {
+	if details == nil {
+		return nil
+	}
+	cloned := make([]RequestDetail, len(details))
+	for i, detail := range details {
+		cloned[i] = detail
+		if detail.Headers != nil {
+			cloned[i].Headers = cloneHeaders(detail.Headers)
+		}
+	}
+	return cloned
+}
+
+func cloneHeaders(headers map[string][]string) map[string][]string {
+	if headers == nil {
+		return nil
+	}
+	cloned := make(map[string][]string, len(headers))
+	for key, values := range headers {
+		cloned[key] = append([]string(nil), values...)
+	}
+	return cloned
+}
+
+func (s *RequestStatistics) cacheDashboardEventsLocked(key dashboardEventCacheKey, result EventsResult) {
+	if s == nil {
+		return
+	}
+	if s.eventQueryCache == nil {
+		s.eventQueryCache = make(map[dashboardEventCacheKey]EventsResult)
+	}
+	if _, exists := s.eventQueryCache[key]; !exists {
+		s.eventQueryCacheOrder = append(s.eventQueryCacheOrder, key)
+	}
+	s.eventQueryCache[key] = cloneEventsResult(result, time.Time{})
+	for len(s.eventQueryCacheOrder) > dashboardEventCacheMax {
+		evict := s.eventQueryCacheOrder[0]
+		s.eventQueryCacheOrder = s.eventQueryCacheOrder[1:]
+		delete(s.eventQueryCache, evict)
+	}
+}
+
 func dashboardEventMatches(d RequestDetail, params EventsQuery, cutoff time.Time) bool {
 	if !cutoff.IsZero() && !d.Timestamp.IsZero() && d.Timestamp.Before(cutoff) {
 		return false
@@ -2193,9 +2279,6 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool) Event
 		return EventsResult{}
 	}
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	if paginate {
 		if params.Limit <= 0 || params.Limit > 500 {
 			params.Limit = 50
@@ -2208,8 +2291,23 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool) Event
 		params.Offset = 0
 	}
 
+	if paginate {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+	} else {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+	}
+
 	now := time.Now()
 	cutoff := dashboardRangeCutoff(params.Range, now)
+	var cacheKey dashboardEventCacheKey
+	if paginate {
+		cacheKey = dashboardEventCacheKeyFor(params, now)
+		if cached, ok := s.eventQueryCache[cacheKey]; ok {
+			return cloneEventsResult(cached, now)
+		}
+	}
 
 	var all []dashboardEventDetail
 	var pageWindow dashboardEventHeap
@@ -2275,13 +2373,15 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool) Event
 	}
 
 	if params.Offset >= total {
-		return EventsResult{
+		result := EventsResult{
 			Events:      []RequestDetail{},
 			Total:       total,
 			Limit:       params.Limit,
 			Offset:      params.Offset,
 			GeneratedAt: now.UTC().Format(time.RFC3339),
 		}
+		s.cacheDashboardEventsLocked(cacheKey, result)
+		return result
 	}
 
 	end := params.Offset + params.Limit
@@ -2294,13 +2394,15 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool) Event
 		events[i] = dm.RequestDetail
 	}
 
-	return EventsResult{
+	result := EventsResult{
 		Events:      events,
 		Total:       total,
 		Limit:       params.Limit,
 		Offset:      params.Offset,
 		GeneratedAt: now.UTC().Format(time.RFC3339),
 	}
+	s.cacheDashboardEventsLocked(cacheKey, result)
+	return result
 }
 
 // QueryAPIDetail returns range-scoped aggregates and recent events for one API
