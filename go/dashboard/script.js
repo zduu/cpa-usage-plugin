@@ -10,6 +10,8 @@ let clientApiSort = 'requests';
 let pollTimer = null, pollFailures = 0;
 const eventsLimit = 500;
 const apiDetailRecentLimit = 120;
+const visiblePollDelayMs = 30000;
+const hiddenPollDelayMs = 300000;
 let apiDetailSeq = 0;
 
 // Dom helpers
@@ -258,40 +260,21 @@ function normalizeApiDetailEvent(d) {
   });
 }
 
-async function fetchApiDetailEvents(api) {
+async function fetchApiDetailData(api) {
   const params = new URLSearchParams();
   params.set('range', $('range').value);
   params.set('api', api);
-  const data = await fetchAllEventPages(
-    (pageParams) => fetchJsonPayload(pluginEndpoint('dashboard-events') + '?' + pageParams.toString(), { cache: 'no-store' }),
-    params,
-    eventsLimit
-  );
-  return {
-    rows: (data.events || []).map(normalizeApiDetailEvent),
-    total: data.total || 0
-  };
+  params.set('recent_limit', String(apiDetailRecentLimit));
+  const data = await fetchJsonPayload(pluginEndpoint('dashboard-api-detail') + '?' + params.toString(), { cache: 'no-store' });
+  data.recent_events = (data.recent_events || []).map(normalizeApiDetailEvent);
+  return data;
 }
 
-function apiDetailErrorRows(rows) {
-  const errors = rows.filter((d) => d.failed).reduce((map, d) => {
-    const status = d.status_code || '-';
-    const failure = d.failure || '未返回错误内容';
-    const key = status + '|' + failure;
-    const row = map.get(key) || { status, failure, count: 0 };
-    row.count++;
-    map.set(key, row);
-    return map;
-  }, new Map());
-  return [...errors.values()].sort((a, b) => b.count - a.count);
-}
-
-function apiDetailErrorHtml(rows, loading, error) {
+function apiDetailErrorHtml(errorRows, loading, error) {
   if (loading) return '<div><div class="subtle" style="margin-bottom:8px">错误统计</div><div class="empty">正在加载接口请求明细...</div></div>';
   if (error) return '<div><div class="subtle" style="margin-bottom:8px">错误统计</div><div class="empty">请求明细加载失败：' + esc(error.message || '未知错误') + '</div></div>';
-  const errorRows = apiDetailErrorRows(rows);
   return '<div><div class="subtle" style="margin-bottom:8px">错误统计</div>' +
-    (errorRows.length ? '<div class="tableWrap"><table><thead><tr><th>状态码</th><th>次数</th><th>错误</th></tr></thead><tbody>' + errorRows.slice(0, 10).map((r) => '<tr><td class="bad">' + esc(r.status) + '</td><td>' + fmt.format(r.count) + '</td><td class="errorText">' + esc(r.failure) + '</td></tr>').join('') + '</tbody></table></div>' : '<div class="empty">暂无失败请求</div>') +
+    (errorRows.length ? '<div class="tableWrap"><table><thead><tr><th>状态码</th><th>次数</th><th>错误</th></tr></thead><tbody>' + errorRows.slice(0, 10).map((r) => '<tr><td class="bad">' + esc(r.status_code || '-') + '</td><td>' + fmt.format(r.count) + '</td><td class="errorText">' + esc(r.failure || '未返回错误内容') + '</td></tr>').join('') + '</tbody></table></div>' : '<div class="empty">暂无失败请求</div>') +
     '</div>';
 }
 
@@ -304,27 +287,31 @@ function apiDetailRecentHtml(rows, loading, error) {
 }
 
 function renderApiDetailContent(apiData, detailState) {
-  const rows = (detailState && detailState.rows) || [];
+  const detail = detailState && detailState.detail;
+  const rows = (detail && detail.recent_events) || [];
   const loading = detailState && detailState.loading;
   const error = detailState && detailState.error;
-  const requests = num(apiData.total_requests), success = num(apiData.success_count), failure = num(apiData.failure_count);
+  const summary = (detail && detail.summary) || apiData;
+  const requests = num(summary.total_requests), success = num(summary.success_count), failure = num(summary.failure_count);
   const rate = requests ? success / requests * 100 : 100;
-  const models = Object.entries(apiData.models || {}).map(([name, m]) => ({ name, requests: num(m.total_requests), success: num(m.success_count), failure: num(m.failure_count), tokens: num(m.total_tokens), input_tokens: num(m.input_tokens), output_tokens: num(m.output_tokens), cached_tokens: num(m.cached_tokens), reasoning_tokens: num(m.reasoning_tokens), avgLatency: num(m.avg_latency_ms) })).sort((a, b) => b.requests - a.requests);
-  const sources = rows.length ? groupedRows(rows, sourceKey, sourceLabel) : [];
+  const models = detail ? (detail.model_stats || []).map((m) => ({ name: m.model || 'unknown', requests: num(m.total_requests), success: num(m.success_count), failure: num(m.failure_count), tokens: num(m.total_tokens), input_tokens: num(m.input_tokens), output_tokens: num(m.output_tokens), cached_tokens: num(m.cached_tokens), reasoning_tokens: num(m.reasoning_tokens), avgLatency: num(m.avg_latency_ms) })) : Object.entries(apiData.models || {}).map(([name, m]) => ({ name, requests: num(m.total_requests), success: num(m.success_count), failure: num(m.failure_count), tokens: num(m.total_tokens), input_tokens: num(m.input_tokens), output_tokens: num(m.output_tokens), cached_tokens: num(m.cached_tokens), reasoning_tokens: num(m.reasoning_tokens), avgLatency: num(m.avg_latency_ms) }));
+  models.sort((a, b) => b.requests - a.requests);
+  const sources = detail ? (detail.source_stats || []).map((s) => ({ name: s.source || '未知来源', requests: num(s.total_requests), success: num(s.success_count), failure: num(s.failure_count), tokens: num(s.total_tokens) })) : [];
+  const errorRows = (detail && detail.error_stats) || [];
   const totalCost = models.reduce((s, m) => s + aggregateCost({ model: m.name, input_tokens: m.input_tokens, output_tokens: m.output_tokens, cached_tokens: m.cached_tokens, reasoning_tokens: m.reasoning_tokens }, modelPrices), 0);
   $('apiDetail').innerHTML = '<div class="detailGrid">' +
     metricHtml('请求数', fmt.format(requests), '<span class="ok">成功 ' + fmt.format(success) + '</span><span class="bad">失败 ' + fmt.format(failure) + '</span>') +
     metricHtml('成功率', '<span class="' + (rate >= 95 ? 'ok' : rate >= 80 ? 'neutral' : 'bad') + '">' + pct(rate) + '</span>') +
-    metricHtml('总 token', compact(apiData.total_tokens), '<span>缓存 token：' + compact(apiData.cached_tokens) + '</span><span>思考 token：' + compact(apiData.reasoning_tokens) + '</span>') +
-    metricHtml('平均延迟', formatMs(apiData.avg_latency_ms)) +
-    metricHtml('模型数', fmt.format(models.length), rows.length ? '<span>来源 ' + fmt.format(sources.length) + '</span>' : '') +
-    metricHtml('总花费', money.format(totalCost), '<span>总 token 数：' + compact(apiData.total_tokens) + '</span>') +
+    metricHtml('总 token', compact(summary.total_tokens), '<span>缓存 token：' + compact(summary.cached_tokens) + '</span><span>思考 token：' + compact(summary.reasoning_tokens) + '</span>') +
+    metricHtml('平均延迟', formatMs(summary.avg_latency_ms)) +
+    metricHtml('模型数', fmt.format(models.length), sources.length ? '<span>来源 ' + fmt.format(sources.length) + '</span>' : '') +
+    metricHtml('总花费', money.format(totalCost), '<span>总 token 数：' + compact(summary.total_tokens) + '</span>') +
     '</div>' +
     '<div class="splitGrid">' +
     barsHtml('模型分布', models, requests, '暂无模型数据') +
-    barsHtml('来源分布', sources, rows.length, loading ? '正在加载来源数据...' : '暂无来源数据') +
+    barsHtml('来源分布', sources, requests, loading ? '正在加载来源数据...' : '暂无来源数据') +
     '</div>' +
-    '<div class="splitGrid">' + apiDetailErrorHtml(rows, loading, error) + apiDetailRecentHtml(rows, loading, error) + '</div>';
+    '<div class="splitGrid">' + apiDetailErrorHtml(errorRows, loading, error) + apiDetailRecentHtml(rows, loading, error) + '</div>';
 }
 
 async function renderApiDetail() {
@@ -336,9 +323,9 @@ async function renderApiDetail() {
   setText('apiDetailTitle', friendlyApiName(api));
   renderApiDetailContent(apiData, { loading: true });
   try {
-    const result = await fetchApiDetailEvents(api);
+    const result = await fetchApiDetailData(api);
     if (seq !== apiDetailSeq || api !== selectedApi) return;
-    renderApiDetailContent(apiData, result);
+    renderApiDetailContent(apiData, { detail: result });
   } catch (e) {
     if (seq !== apiDetailSeq || api !== selectedApi) return;
     renderApiDetailContent(apiData, { error: e });
@@ -534,6 +521,7 @@ async function rerender() {
   await renderApiDetail();
 }
 
+function pollDelay() { return document.visibilityState === 'hidden' ? hiddenPollDelayMs : visiblePollDelayMs }
 function schedulePoll(delayMs) { if (pollTimer) clearTimeout(pollTimer); pollTimer = setTimeout(load, delayMs) }
 function nextFailureDelay() { return Math.min(300000, [5000, 15000, 45000, 90000, 180000][Math.min(pollFailures - 1, 4)] || 300000) }
 
@@ -547,7 +535,7 @@ async function load() {
     summaryData = data;
     setText('updated', '更新于 ' + new Date(data.generated_at || Date.now()).toLocaleTimeString());
     await rerender();
-    pollFailures = 0; schedulePoll(30000);
+    pollFailures = 0; schedulePoll(pollDelay());
   } catch (error) {
     // Fallback: try old dashboard-data endpoint
     try {
@@ -558,12 +546,20 @@ async function load() {
       summaryData = buildSummaryFromFullUsage(data);
       setText('updated', '更新于 ' + new Date(data.generated_at || Date.now()).toLocaleTimeString() + '（兼容模式）');
       await rerender();
-      pollFailures = 0; schedulePoll(30000);
+      pollFailures = 0; schedulePoll(pollDelay());
     } catch (fallbackError) {
       setText('updated', (error && error.message) || '加载用量统计失败');
       pollFailures++; schedulePoll(nextFailureDelay());
     }
   }
+}
+
+function handleVisibilityChange() {
+  if (document.visibilityState === 'visible') {
+    load();
+    return;
+  }
+  schedulePoll(hiddenPollDelayMs);
 }
 
 // Event bindings
@@ -608,4 +604,5 @@ $('importFile').onchange = async (e) => {
     e.target.value = '';
   }
 };
+if (document.addEventListener) document.addEventListener('visibilitychange', handleVisibilityChange);
 load();

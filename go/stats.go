@@ -339,8 +339,9 @@ func (s *RequestStatistics) configureStorageLocked() {
 		s.storageLastError = err.Error()
 		return
 	}
+	replayLastError := ""
 	if err := s.replayStorageLocked(abs); err != nil {
-		s.storageLastError = err.Error()
+		replayLastError = err.Error()
 	}
 	file, err := os.OpenFile(abs, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -351,7 +352,7 @@ func (s *RequestStatistics) configureStorageLocked() {
 	s.storageLoadedPath = abs
 	s.storageFile = file
 	s.storageWriter = bufio.NewWriter(file)
-	s.storageLastError = ""
+	s.storageLastError = replayLastError
 }
 
 func (s *RequestStatistics) replayStorageLocked(path string) error {
@@ -369,6 +370,7 @@ func (s *RequestStatistics) replayStorageLocked(path string) error {
 	scanner.Buffer(buf, 10*1024*1024)
 	now := time.Now()
 	existing := s.detailKeysLocked()
+	var invalidLines int
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
@@ -376,10 +378,12 @@ func (s *RequestStatistics) replayStorageLocked(path string) error {
 		}
 		var persisted persistedDetail
 		if err := json.Unmarshal([]byte(line), &persisted); err != nil {
-			return fmt.Errorf("replay storage: %w", err)
+			invalidLines++
+			continue
 		}
 		apiName := strings.TrimSpace(persisted.API)
 		if apiName == "" {
+			invalidLines++
 			continue
 		}
 		modelName := normalizeModelName(persisted.Model)
@@ -402,6 +406,9 @@ func (s *RequestStatistics) replayStorageLocked(path string) error {
 	}
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("scan storage: %w", err)
+	}
+	if invalidLines > 0 {
+		return fmt.Errorf("replay storage skipped %d invalid line(s)", invalidLines)
 	}
 	return nil
 }
@@ -454,19 +461,30 @@ func (s *RequestStatistics) closeStorageLocked() {
 	if s == nil {
 		return
 	}
+	flushed := false
+	synced := true
 	if s.storageWriter != nil {
 		if err := s.storageWriter.Flush(); err != nil {
 			s.storageLastError = err.Error()
+		} else {
+			flushed = true
 		}
 		s.storageWriter = nil
 	}
 	if s.storageFile != nil {
+		if err := s.storageFile.Sync(); err != nil {
+			s.storageLastError = err.Error()
+			synced = false
+		}
 		if err := s.storageFile.Close(); err != nil {
 			s.storageLastError = err.Error()
 		}
 		s.storageFile = nil
 	}
 	s.storageLoadedPath = ""
+	if flushed && synced {
+		s.storageLastFlush = time.Now()
+	}
 }
 
 func (s *RequestStatistics) loadModelPricesLocked() {
@@ -1406,6 +1424,19 @@ func clientAPIGroupKey(detail RequestDetail) string {
 	return "(unknown)"
 }
 
+func dashboardRangeCutoff(rangeKey string, now time.Time) time.Time {
+	switch rangeKey {
+	case "7h":
+		return now.Add(-7 * time.Hour)
+	case "24h":
+		return now.Add(-24 * time.Hour)
+	case "7d":
+		return now.Add(-7 * 24 * time.Hour)
+	default:
+		return time.Time{}
+	}
+}
+
 // QueryEvents returns paginated, filtered event details.
 func (s *RequestStatistics) QueryEvents(params EventsQuery) EventsResult {
 	if s == nil {
@@ -1420,15 +1451,7 @@ func (s *RequestStatistics) QueryEvents(params EventsQuery) EventsResult {
 	}
 
 	now := time.Now()
-	var cutoff time.Time
-	switch params.Range {
-	case "7h":
-		cutoff = now.Add(-7 * time.Hour)
-	case "24h":
-		cutoff = now.Add(-24 * time.Hour)
-	case "7d":
-		cutoff = now.Add(-7 * 24 * time.Hour)
-	}
+	cutoff := dashboardRangeCutoff(params.Range, now)
 
 	// Collect all matching events
 	type detailWithMeta struct {
@@ -1502,6 +1525,180 @@ func (s *RequestStatistics) QueryEvents(params EventsQuery) EventsResult {
 		Offset:      params.Offset,
 		GeneratedAt: now.UTC().Format(time.RFC3339),
 	}
+}
+
+// QueryAPIDetail returns range-scoped aggregates and recent events for one API
+// without making the browser page through every matching event.
+func (s *RequestStatistics) QueryAPIDetail(api string, rangeKey string, recentLimit int, errorLimit int) APIDetailResponse {
+	result := APIDetailResponse{
+		API:         api,
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	if s == nil {
+		return result
+	}
+	if recentLimit <= 0 || recentLimit > 500 {
+		recentLimit = 120
+	}
+	if errorLimit <= 0 || errorLimit > 100 {
+		errorLimit = 20
+	}
+
+	now := time.Now()
+	cutoff := dashboardRangeCutoff(rangeKey, now)
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	apiSt, ok := s.apis[api]
+	if !ok || apiSt == nil {
+		result.GeneratedAt = now.UTC().Format(time.RFC3339)
+		return result
+	}
+
+	modelAgg := make(map[string]*ModelStat)
+	sourceAgg := make(map[string]*SourceStat)
+	errorAgg := make(map[string]*APIDetailErrorStat)
+	var latencySum int64
+	var latencyN int64
+
+	for modelName, modelSt := range apiSt.Models {
+		if modelSt == nil {
+			continue
+		}
+		for _, d := range modelSt.Details {
+			if !cutoff.IsZero() && !d.Timestamp.IsZero() && d.Timestamp.Before(cutoff) {
+				continue
+			}
+			totalTokens := detailTotalTokens(d.Tokens)
+			inputTokens := nonNegativeInt64(d.Tokens.InputTokens)
+			outputTokens := nonNegativeInt64(d.Tokens.OutputTokens)
+			reasoningTokens := nonNegativeInt64(d.Tokens.ReasoningTokens)
+			cachedTokens := normalizedCacheTokens(d.Tokens)
+
+			result.TotalEvents++
+			result.Summary.TotalRequests++
+			if d.Failed {
+				result.Summary.FailureCount++
+			} else {
+				result.Summary.SuccessCount++
+			}
+			result.Summary.TotalTokens += totalTokens
+			result.Summary.InputTokens += inputTokens
+			result.Summary.OutputTokens += outputTokens
+			result.Summary.CachedTokens += cachedTokens
+			result.Summary.ReasoningTokens += reasoningTokens
+			if d.LatencyMs > 0 {
+				latencySum += d.LatencyMs
+				latencyN++
+			}
+
+			modelLabel := normalizeModelName(modelName)
+			if d.Model != "" {
+				modelLabel = d.Model
+			}
+			ms, ok := modelAgg[modelLabel]
+			if !ok {
+				ms = &ModelStat{Model: modelLabel}
+				modelAgg[modelLabel] = ms
+			}
+			ms.TotalRequests++
+			if d.Failed {
+				ms.FailureCount++
+			} else {
+				ms.SuccessCount++
+			}
+			ms.TotalTokens += totalTokens
+			ms.InputTokens += inputTokens
+			ms.OutputTokens += outputTokens
+			ms.CachedTokens += cachedTokens
+			ms.ReasoningTokens += reasoningTokens
+			if d.LatencyMs > 0 {
+				ms.latencySum += d.LatencyMs
+				ms.latencyN++
+			}
+
+			source := strings.TrimSpace(d.Source)
+			if source == "" {
+				source = "未知来源"
+			}
+			ss, ok := sourceAgg[source]
+			if !ok {
+				ss = &SourceStat{Source: source, Provider: d.Provider}
+				sourceAgg[source] = ss
+			}
+			ss.TotalRequests++
+			if d.Failed {
+				ss.FailureCount++
+			} else {
+				ss.SuccessCount++
+			}
+			ss.TotalTokens += totalTokens
+
+			if d.Failed {
+				failure := strings.TrimSpace(d.Failure)
+				if failure == "" {
+					failure = "未返回错误内容"
+				}
+				key := fmt.Sprintf("%d|%s", d.StatusCode, failure)
+				es, ok := errorAgg[key]
+				if !ok {
+					es = &APIDetailErrorStat{StatusCode: d.StatusCode, Failure: failure}
+					errorAgg[key] = es
+				}
+				es.Count++
+			}
+
+			result.RecentEvents = append(result.RecentEvents, d)
+		}
+	}
+
+	if latencyN > 0 {
+		result.Summary.AvgLatencyMs = float64(latencySum) / float64(latencyN)
+	}
+	result.ModelStats = make([]ModelStat, 0, len(modelAgg))
+	for _, ms := range modelAgg {
+		if ms.latencyN > 0 {
+			ms.AvgLatencyMs = float64(ms.latencySum) / float64(ms.latencyN)
+		}
+		ms.latencySum = 0
+		ms.latencyN = 0
+		result.ModelStats = append(result.ModelStats, *ms)
+	}
+	sort.SliceStable(result.ModelStats, func(i, j int) bool {
+		return result.ModelStats[i].TotalRequests > result.ModelStats[j].TotalRequests
+	})
+
+	result.SourceStats = make([]SourceStat, 0, len(sourceAgg))
+	for _, ss := range sourceAgg {
+		result.SourceStats = append(result.SourceStats, *ss)
+	}
+	sort.SliceStable(result.SourceStats, func(i, j int) bool {
+		return result.SourceStats[i].TotalRequests > result.SourceStats[j].TotalRequests
+	})
+
+	result.ErrorStats = make([]APIDetailErrorStat, 0, len(errorAgg))
+	for _, es := range errorAgg {
+		result.ErrorStats = append(result.ErrorStats, *es)
+	}
+	sort.SliceStable(result.ErrorStats, func(i, j int) bool {
+		return result.ErrorStats[i].Count > result.ErrorStats[j].Count
+	})
+	if len(result.ErrorStats) > errorLimit {
+		result.ErrorStats = result.ErrorStats[:errorLimit]
+	}
+
+	sort.SliceStable(result.RecentEvents, func(i, j int) bool {
+		if result.RecentEvents[i].Timestamp.Equal(result.RecentEvents[j].Timestamp) {
+			return result.RecentEvents[i].Model < result.RecentEvents[j].Model
+		}
+		return result.RecentEvents[i].Timestamp.After(result.RecentEvents[j].Timestamp)
+	})
+	if len(result.RecentEvents) > recentLimit {
+		result.RecentEvents = result.RecentEvents[:recentLimit]
+	}
+	result.GeneratedAt = now.UTC().Format(time.RFC3339)
+	return result
 }
 
 func (s *RequestStatistics) countDetailsLocked() int64 {

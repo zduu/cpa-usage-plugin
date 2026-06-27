@@ -36,6 +36,8 @@ func handleManagement(requestBody []byte) ([]byte, error) {
 		return handleDashboardSummary()
 	case req.Method == "GET" && tail == "dashboard-events":
 		return handleDashboardEvents(req.Query)
+	case req.Method == "GET" && tail == "dashboard-api-detail":
+		return handleDashboardAPIDetail(req.Query)
 	case req.Method == "GET" && tail == "dashboard-data":
 		return handleDashboardData()
 	case req.Method == "GET" && tail == "model-prices":
@@ -99,6 +101,11 @@ func handleManagementRegister() ([]byte, error) {
 			},
 			{
 				Method:      "GET",
+				Path:        "/plugins/usage-statistics/dashboard-api-detail",
+				Description: "获取单个上游接口的聚合详情。",
+			},
+			{
+				Method:      "GET",
 				Path:        "/plugins/usage-statistics/model-prices",
 				Description: "获取全局模型价格表。",
 			},
@@ -135,6 +142,10 @@ func handleManagementRegister() ([]byte, error) {
 			{
 				Path:        "/dashboard-events",
 				Description: "用量统计请求事件明细（分页）。",
+			},
+			{
+				Path:        "/dashboard-api-detail",
+				Description: "单个上游接口聚合详情。",
 			},
 			{
 				Path:        "/model-prices",

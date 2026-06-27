@@ -97,6 +97,45 @@ func handleDashboardEvents(query map[string][]string) ([]byte, error) {
 	return okEnvelopeJSON(string(mustMarshal(resp)))
 }
 
+// handleDashboardAPIDetail returns compact per-upstream detail widgets.
+func handleDashboardAPIDetail(query map[string][]string) ([]byte, error) {
+	api := ""
+	if v, ok := query["api"]; ok && len(v) > 0 {
+		api = v[0]
+	}
+	rangeKey := ""
+	if v, ok := query["range"]; ok && len(v) > 0 {
+		rangeKey = v[0]
+	}
+	recentLimit := 120
+	if v, ok := query["recent_limit"]; ok && len(v) > 0 {
+		if n, err := strconv.Atoi(v[0]); err == nil && n > 0 {
+			recentLimit = n
+		}
+	}
+	errorLimit := 20
+	if v, ok := query["error_limit"]; ok && len(v) > 0 {
+		if n, err := strconv.Atoi(v[0]); err == nil && n > 0 {
+			errorLimit = n
+		}
+	}
+
+	result := stats.QueryAPIDetail(api, rangeKey, recentLimit, errorLimit)
+	responseJSON, err := json.Marshal(result)
+	if err != nil {
+		return nil, err
+	}
+	resp := ManagementResponse{
+		StatusCode: http.StatusOK,
+		Headers: map[string][]string{
+			"Content-Type":  {"application/json; charset=utf-8"},
+			"Cache-Control": {"no-store"},
+		},
+		Body: responseJSON,
+	}
+	return okEnvelopeJSON(string(mustMarshal(resp)))
+}
+
 // handleHealthCheck returns a lightweight health/status endpoint.
 func handleHealthCheck() ([]byte, error) {
 	type HealthResponse struct {

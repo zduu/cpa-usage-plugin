@@ -420,6 +420,57 @@ func TestStorageReplayRestoresRecords(t *testing.T) {
 	}
 }
 
+func TestStorageReplaySkipsInvalidLines(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage-statistics.jsonl")
+	when := time.Now().Add(-time.Minute).UTC()
+	lines := []string{
+		string(mustMarshal(persistedDetail{
+			API:   "openai",
+			Model: "gpt-4",
+			Detail: RequestDetail{
+				Model:     "gpt-4",
+				Timestamp: when,
+				Source:    "openai-prod",
+				Provider:  "openai",
+				Tokens:    TokenStats{InputTokens: 10, OutputTokens: 5},
+			},
+		})),
+		`{"api":"broken","model":`,
+		string(mustMarshal(persistedDetail{
+			API:   "deepseek",
+			Model: "deepseek-chat",
+			Detail: RequestDetail{
+				Model:     "deepseek-chat",
+				Timestamp: when.Add(time.Second),
+				Source:    "deepseek-prod",
+				Provider:  "deepseek",
+				Tokens:    TokenStats{TotalTokens: 7},
+			},
+		})),
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatalf("write storage fixture: %v", err)
+	}
+
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		MaxDetailsPerModel: 100,
+		RetentionDays:      0,
+		DedupWindowMinutes: 0,
+		StorageEnabled:     true,
+		StoragePath:        path,
+	})
+	defer stats.Close()
+
+	snapshot := stats.Snapshot()
+	if snapshot.TotalRequests != 2 || snapshot.TotalTokens != 22 {
+		t.Fatalf("snapshot after invalid replay = requests %d tokens %d, want 2/22", snapshot.TotalRequests, snapshot.TotalTokens)
+	}
+	if status := stats.StorageStatus(); !strings.Contains(status.LastError, "skipped 1 invalid line") {
+		t.Fatalf("storage last error = %q, want invalid line warning", status.LastError)
+	}
+}
+
 func TestStripCredentialSuffix(t *testing.T) {
 	tests := map[string]string{
 		"openai-compatible-opencode · apikey · 5312415661d8a481": "openai-compatible-opencode",

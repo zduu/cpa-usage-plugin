@@ -40,6 +40,8 @@ class FakeElement {
 
 function createDashboardHarness(options = {}) {
   const elements = new Map();
+  const listeners = new Map();
+  let visibilityState = options.visibilityState || 'visible';
   const sortButtons = ['requests', 'tokens', 'cost'].map((name) => {
     const el = new FakeElement('sort-' + name);
     el.dataset.apiSort = name;
@@ -48,9 +50,13 @@ function createDashboardHarness(options = {}) {
   const downloads = [];
   const fetchCalls = [];
   const fetchRequests = [];
+  const timeoutDelays = [];
   let prices = { 'gpt-4.1': { prompt: 2, completion: 8, cache: 0.5 } };
 
   const document = {
+    get visibilityState() {
+      return visibilityState;
+    },
     getElementById(id) {
       if (!elements.has(id)) elements.set(id, new FakeElement(id));
       return elements.get(id);
@@ -61,6 +67,11 @@ function createDashboardHarness(options = {}) {
     },
     createElement(tag) {
       return new FakeElement(tag);
+    },
+    addEventListener(type, handler) {
+      const handlers = listeners.get(type) || [];
+      handlers.push(handler);
+      listeners.set(type, handlers);
     },
   };
 
@@ -127,19 +138,52 @@ function createDashboardHarness(options = {}) {
     const parsed = new URL(url, 'http://test.local/v0/management/plugins/usage-statistics/dashboard');
     const offset = Number(parsed.searchParams.get('offset') || 0);
     const limit = Number(parsed.searchParams.get('limit') || 500);
-    const api = parsed.searchParams.get('api');
-    const totalRows = api ? 8 : 1200;
-    const count = Math.min(limit, Math.max(totalRows - offset, 0));
+    const count = Math.min(limit, Math.max(1200 - offset, 0));
     return {
-      total: totalRows,
+      total: 1200,
       limit,
       offset,
       generated_at: new Date().toISOString(),
       events: Array.from({ length: count }, (_, i) => {
         const idx = offset + i;
-        const failed = Boolean(api) && idx === 1;
         return {
           timestamp: new Date(1700000000000 + idx).toISOString(),
+          model: 'gpt-4.1',
+          source: 'openai-prod',
+          provider: 'openai',
+          auth_index: 'auth-1',
+          failed: false,
+          latency_ms: 120,
+          tokens: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+        };
+      }),
+    };
+  }
+
+  function apiDetailPayload() {
+    return {
+      api: 'openai',
+      summary: {
+        total_requests: 8,
+        success_count: 7,
+        failure_count: 1,
+        total_tokens: 105,
+        input_tokens: 70,
+        output_tokens: 35,
+        cached_tokens: 10,
+        reasoning_tokens: 5,
+        avg_latency_ms: 113,
+      },
+      model_stats: [
+        { model: 'gpt-4.1', total_requests: 7, success_count: 7, failure_count: 0, total_tokens: 105, input_tokens: 70, output_tokens: 35, cached_tokens: 10, reasoning_tokens: 5 },
+        { model: 'deepseek-v4-flash-free', total_requests: 1, success_count: 0, failure_count: 1, total_tokens: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, reasoning_tokens: 0 },
+      ],
+      source_stats: [{ source: 'openai-prod', total_requests: 8, success_count: 7, failure_count: 1, total_tokens: 105 }],
+      error_stats: [{ status_code: 401, count: 1, failure: '{"type":"error","error":{"type":"ModelError","message":"Model deepseek-v4-flash-free is not supported"}}' }],
+      recent_events: Array.from({ length: 8 }, (_, i) => {
+        const failed = i === 1;
+        return {
+          timestamp: new Date(1700000008000 - i * 1000).toISOString(),
           model: failed ? 'deepseek-v4-flash-free' : 'gpt-4.1',
           source: 'openai-prod',
           provider: 'openai',
@@ -151,6 +195,8 @@ function createDashboardHarness(options = {}) {
           tokens: failed ? { total_tokens: 0 } : { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
         };
       }),
+      total_events: 8,
+      generated_at: new Date().toISOString(),
     };
   }
 
@@ -173,7 +219,7 @@ function createDashboardHarness(options = {}) {
     location: { pathname: options.pathname || '/v0/management/plugins/usage-statistics/dashboard', host: 'test.local' },
     navigator: { userAgent: 'node-test' },
     window: { innerWidth: 1200, innerHeight: 800 },
-    setTimeout() { return 1; },
+    setTimeout(_fn, delay) { timeoutDelays.push(delay); return timeoutDelays.length; },
     clearTimeout() {},
     alert(message) { downloads.push({ alert: message }); },
     fetch: async (url, options = {}) => {
@@ -190,6 +236,7 @@ function createDashboardHarness(options = {}) {
         }
         payload = { prices, updated_at: new Date().toISOString(), storage: {} };
       } else if (String(url).includes('dashboard-summary')) payload = summary;
+      else if (String(url).includes('dashboard-api-detail')) payload = apiDetailPayload(String(url));
       else if (String(url).includes('dashboard-events')) payload = eventsPage(String(url));
       else if (String(url).includes('usage/export')) payload = { version: 1, usage: {} };
       else payload = {};
@@ -223,7 +270,12 @@ function createDashboardHarness(options = {}) {
   const script = fs.readFileSync(path.join(__dirname, 'script.js'), 'utf8');
   vm.runInContext(helpers + '\n' + script, context, { filename: 'dashboard-bundle.js' });
 
-  return { context, document, fetchCalls, fetchRequests, downloads };
+  const setVisibility = (state) => {
+    visibilityState = state;
+    (listeners.get('visibilitychange') || []).forEach((handler) => handler());
+  };
+
+  return { context, document, fetchCalls, fetchRequests, downloads, timeoutDelays, setVisibility };
 }
 
 async function waitFor(fn) {
@@ -242,12 +294,13 @@ test('dashboard loads summary and export button fetches all event pages', async 
   assert.strictEqual(document.getElementById('totalCost').textContent, 'US$0.05');
   const apiDetail = document.getElementById('apiDetail').innerHTML;
   assert.match(apiDetail, /总花费/);
-  assert.match(apiDetail, /US\$0\.05/);
-  assert.match(apiDetail, /总 token 数：24k/);
-  assert.match(apiDetail, /缓存 token：100/);
-  assert.match(apiDetail, /思考 token：50/);
   assert.doesNotMatch(apiDetail, /Token\/请求/);
   await waitFor(() => /ModelError/.test(document.getElementById('apiDetail').innerHTML));
+  const loadedApiDetail = document.getElementById('apiDetail').innerHTML;
+  assert.match(loadedApiDetail, /US\$0\.00/);
+  assert.match(loadedApiDetail, /总 token 数：105/);
+  assert.match(loadedApiDetail, /缓存 token：10/);
+  assert.match(loadedApiDetail, /思考 token：5/);
   assert.match(document.getElementById('apiDetail').innerHTML, /错误统计/);
   assert.match(document.getElementById('apiDetail').innerHTML, /最近请求/);
   assert.match(document.getElementById('apiDetail').innerHTML, /401/);
@@ -259,14 +312,26 @@ test('dashboard loads summary and export button fetches all event pages', async 
 
   const exportCalls = fetchCalls
     .filter((url) => url.includes('dashboard-events'))
-    .slice(fetchCalls.filter((url, idx) => idx < beforeExportCallCount && url.includes('dashboard-events')).length)
-    .filter((url) => !new URL(url, 'http://test.local').searchParams.has('api'));
+    .slice(fetchCalls.filter((url, idx) => idx < beforeExportCallCount && url.includes('dashboard-events')).length);
   assert.deepStrictEqual(
     exportCalls.map((url) => new URL(url, 'http://test.local').searchParams.get('offset')),
     ['0', '500', '1000']
   );
   const exported = JSON.parse(downloads.find((d) => d.text && d.text.startsWith('[')).text);
   assert.strictEqual(exported.length, 1200);
+});
+
+test('dashboard uses a slower polling interval while hidden', async () => {
+  const { fetchCalls, timeoutDelays, setVisibility } = createDashboardHarness({ visibilityState: 'hidden' });
+
+  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-summary')));
+  await waitFor(() => timeoutDelays.includes(300000));
+  assert.notStrictEqual(timeoutDelays[timeoutDelays.length - 1], 30000);
+
+  const beforeVisibleFetches = fetchCalls.length;
+  setVisibility('visible');
+  await waitFor(() => fetchCalls.length > beforeVisibleFetches);
+  await waitFor(() => timeoutDelays.includes(30000));
 });
 
 test('model price settings are loaded and saved through backend API', async () => {
@@ -301,17 +366,18 @@ test('event list is not implicitly filtered by selected upstream API', async () 
 
   await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-events')));
   const isEventsCall = (url) => url.includes('dashboard-events');
+  const isApiDetailCall = (url) => url.includes('dashboard-api-detail');
   const hasApiFilter = (url) => new URL(url, 'http://test.local').searchParams.has('api');
   const globalEventsCount = () => fetchCalls.filter((url) => isEventsCall(url) && !hasApiFilter(url)).length;
-  const apiDetailEventsCount = () => fetchCalls.filter((url) => isEventsCall(url) && hasApiFilter(url)).length;
+  const apiDetailCount = () => fetchCalls.filter(isApiDetailCall).length;
   const firstEventsCall = fetchCalls.find((url) => isEventsCall(url) && !hasApiFilter(url));
   assert.strictEqual(new URL(firstEventsCall, 'http://test.local').searchParams.get('api'), null);
-  await waitFor(() => apiDetailEventsCount() > 0);
+  await waitFor(() => apiDetailCount() > 0);
 
   const beforeGlobal = globalEventsCount();
-  const beforeApiDetail = apiDetailEventsCount();
+  const beforeApiDetail = apiDetailCount();
   document.getElementById('apiSelect').onchange();
-  await waitFor(() => apiDetailEventsCount() > beforeApiDetail);
+  await waitFor(() => apiDetailCount() > beforeApiDetail);
   assert.strictEqual(
     globalEventsCount(),
     beforeGlobal,

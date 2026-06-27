@@ -660,3 +660,35 @@ type EventsResult struct {
 	Offset      int             `json:"offset"`
 	GeneratedAt string          `json:"generated_at"`
 }
+
+// APIDetailSummary is the range-scoped summary for one upstream API.
+type APIDetailSummary struct {
+	TotalRequests   int64   `json:"total_requests"`
+	SuccessCount    int64   `json:"success_count"`
+	FailureCount    int64   `json:"failure_count"`
+	TotalTokens     int64   `json:"total_tokens"`
+	InputTokens     int64   `json:"input_tokens"`
+	OutputTokens    int64   `json:"output_tokens"`
+	CachedTokens    int64   `json:"cached_tokens"`
+	ReasoningTokens int64   `json:"reasoning_tokens"`
+	AvgLatencyMs    float64 `json:"avg_latency_ms"`
+}
+
+// APIDetailErrorStat aggregates failures by status code and redacted body.
+type APIDetailErrorStat struct {
+	StatusCode int    `json:"status_code,omitempty"`
+	Count      int64  `json:"count"`
+	Failure    string `json:"failure"`
+}
+
+// APIDetailResponse is a compact backend-rendered detail payload for one API.
+type APIDetailResponse struct {
+	API          string               `json:"api"`
+	Summary      APIDetailSummary     `json:"summary"`
+	ModelStats   []ModelStat          `json:"model_stats"`
+	SourceStats  []SourceStat         `json:"source_stats"`
+	ErrorStats   []APIDetailErrorStat `json:"error_stats"`
+	RecentEvents []RequestDetail      `json:"recent_events"`
+	TotalEvents  int                  `json:"total_events"`
+	GeneratedAt  string               `json:"generated_at"`
+}

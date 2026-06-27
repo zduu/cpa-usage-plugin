@@ -470,6 +470,73 @@ func TestDashboardEventsRangeFilter(t *testing.T) {
 	}
 }
 
+func TestDashboardAPIDetailAggregatesErrorsAndRecentEvents(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 200, DedupWindowMinutes: 0, RetentionDays: 30})
+	base := time.Now().Add(-30 * time.Minute)
+	for i := 0; i < 5; i++ {
+		failed := i == 1 || i == 3
+		record := UsageRecord{
+			Provider:    "openai",
+			Source:      "openai",
+			Model:       "gpt-4",
+			RequestedAt: base.Add(time.Duration(i) * time.Minute),
+			Failed:      failed,
+			Detail:      UsageDetail{InputTokens: int64(10 + i), OutputTokens: 5},
+		}
+		if failed {
+			record.Failure = UsageFailure{StatusCode: 401, Body: `{"error":{"type":"ModelError","message":"not supported"}}`}
+		}
+		stats.Record(record)
+	}
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Source:      "openai",
+		Model:       "gpt-4",
+		RequestedAt: time.Now().Add(-48 * time.Hour),
+		Failed:      true,
+		Failure:     UsageFailure{StatusCode: 500, Body: "old failure"},
+		Detail:      UsageDetail{TotalTokens: 99},
+	})
+	stats.Record(UsageRecord{
+		Provider:    "deepseek",
+		Source:      "deepseek",
+		Model:       "deepseek-chat",
+		RequestedAt: base.Add(time.Hour),
+		Detail:      UsageDetail{TotalTokens: 1000},
+	})
+
+	result := stats.QueryAPIDetail("openai", "24h", 3, 10)
+	if result.API != "openai" {
+		t.Fatalf("api = %q, want openai", result.API)
+	}
+	if result.Summary.TotalRequests != 5 || result.Summary.FailureCount != 2 || result.Summary.SuccessCount != 3 {
+		t.Fatalf("summary = %#v, want 5 total / 2 failed / 3 success", result.Summary)
+	}
+	if result.Summary.TotalTokens != 85 {
+		t.Fatalf("total tokens = %d, want 85", result.Summary.TotalTokens)
+	}
+	if len(result.ModelStats) != 1 || result.ModelStats[0].Model != "gpt-4" || result.ModelStats[0].TotalRequests != 5 {
+		t.Fatalf("model stats = %#v", result.ModelStats)
+	}
+	if len(result.SourceStats) != 1 || result.SourceStats[0].Source != "openai" || result.SourceStats[0].TotalRequests != 5 {
+		t.Fatalf("source stats = %#v", result.SourceStats)
+	}
+	if len(result.ErrorStats) != 1 || result.ErrorStats[0].StatusCode != 401 || result.ErrorStats[0].Count != 2 {
+		t.Fatalf("error stats = %#v, want one 401 x2", result.ErrorStats)
+	}
+	if len(result.RecentEvents) != 3 {
+		t.Fatalf("recent events = %d, want 3", len(result.RecentEvents))
+	}
+	if !result.RecentEvents[0].Timestamp.After(result.RecentEvents[1].Timestamp) ||
+		!result.RecentEvents[1].Timestamp.After(result.RecentEvents[2].Timestamp) {
+		t.Fatalf("recent events not sorted descending: %#v", result.RecentEvents)
+	}
+	if result.TotalEvents != 5 {
+		t.Fatalf("total events = %d, want 5", result.TotalEvents)
+	}
+}
+
 // ============================================================================
 // P1 Tests: Import tracking + backward compatibility
 // ============================================================================
