@@ -2120,14 +2120,31 @@ func dashboardRangeCutoff(rangeKey string, now time.Time) time.Time {
 }
 
 type dashboardEventDetail struct {
-	RequestDetail
-	sortKey  string
-	sequence int64
+	detail    *RequestDetail
+	sortKey   string
+	modelName string
+	sequence  int64
+}
+
+func (d dashboardEventDetail) requestDetail() RequestDetail {
+	if d.detail == nil {
+		return RequestDetail{}
+	}
+	return *d.detail
+}
+
+func (d dashboardEventDetail) timestamp() time.Time {
+	if d.detail == nil {
+		return time.Time{}
+	}
+	return d.detail.Timestamp
 }
 
 func dashboardEventBefore(a, b dashboardEventDetail) bool {
-	if !a.Timestamp.Equal(b.Timestamp) {
-		return a.Timestamp.After(b.Timestamp)
+	at := a.timestamp()
+	bt := b.timestamp()
+	if !at.Equal(bt) {
+		return at.After(bt)
 	}
 	if a.sortKey != b.sortKey {
 		return a.sortKey < b.sortKey
@@ -2286,12 +2303,12 @@ func appendDashboardEventIndexForAPI(events []dashboardEventDetail, apiName stri
 		return events
 	}
 	sequence := int64(len(events))
-	for _, modelSt := range apiSt.Models {
+	for modelName, modelSt := range apiSt.Models {
 		if modelSt == nil {
 			continue
 		}
-		for _, d := range modelSt.Details {
-			events = append(events, dashboardEventDetail{RequestDetail: d, sortKey: apiName, sequence: sequence})
+		for i := range modelSt.Details {
+			events = append(events, dashboardEventDetail{detail: &modelSt.Details[i], sortKey: apiName, modelName: modelName, sequence: sequence})
 			sequence++
 		}
 	}
@@ -2301,7 +2318,7 @@ func appendDashboardEventIndexForAPI(events []dashboardEventDetail, apiName stri
 func requestDetailsFromDashboardEvents(events []dashboardEventDetail) []RequestDetail {
 	details := make([]RequestDetail, len(events))
 	for i, event := range events {
-		details[i] = event.RequestDetail
+		details[i] = event.requestDetail()
 	}
 	return details
 }
@@ -2313,8 +2330,12 @@ func dashboardEventQueryHasFilters(params EventsQuery) bool {
 		params.AuthIndex != ""
 }
 
+func dashboardEventPastCutoff(d RequestDetail, cutoff time.Time) bool {
+	return !cutoff.IsZero() && !d.Timestamp.IsZero() && d.Timestamp.Before(cutoff)
+}
+
 func dashboardEventMatches(d RequestDetail, params EventsQuery, cutoff time.Time) bool {
-	if !cutoff.IsZero() && !d.Timestamp.IsZero() && d.Timestamp.Before(cutoff) {
+	if dashboardEventPastCutoff(d, cutoff) {
 		return false
 	}
 	if params.Model != "" && d.Model != params.Model {
@@ -2416,7 +2437,10 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool) Event
 	var events []RequestDetail
 	total := 0
 	for _, dm := range index {
-		d := dm.RequestDetail
+		d := dm.requestDetail()
+		if dashboardEventPastCutoff(d, cutoff) {
+			break
+		}
 		if !dashboardEventMatches(d, params, cutoff) {
 			continue
 		}
@@ -2482,11 +2506,11 @@ func (s *RequestStatistics) QueryAPIDetail(api string, rangeKey string, recentLi
 	now := time.Now()
 	cutoff := dashboardRangeCutoff(rangeKey, now)
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	apiSt, ok := s.apis[api]
-	if !ok || apiSt == nil {
+	index := s.dashboardEventIndexLocked(api)
+	if len(index) == 0 {
 		result.GeneratedAt = now.UTC().Format(time.RFC3339)
 		return result
 	}
@@ -2500,96 +2524,92 @@ func (s *RequestStatistics) QueryAPIDetail(api string, rangeKey string, recentLi
 	var latencyN int64
 	sequence := int64(0)
 
-	for modelName, modelSt := range apiSt.Models {
-		if modelSt == nil {
-			continue
+	for _, dm := range index {
+		d := dm.requestDetail()
+		if dashboardEventPastCutoff(d, cutoff) {
+			break
 		}
-		for _, d := range modelSt.Details {
-			if !cutoff.IsZero() && !d.Timestamp.IsZero() && d.Timestamp.Before(cutoff) {
-				continue
-			}
-			totalTokens := detailTotalTokens(d.Tokens)
-			inputTokens := nonNegativeInt64(d.Tokens.InputTokens)
-			outputTokens := nonNegativeInt64(d.Tokens.OutputTokens)
-			reasoningTokens := nonNegativeInt64(d.Tokens.ReasoningTokens)
-			cachedTokens := normalizedCacheTokens(d.Tokens)
+		totalTokens := detailTotalTokens(d.Tokens)
+		inputTokens := nonNegativeInt64(d.Tokens.InputTokens)
+		outputTokens := nonNegativeInt64(d.Tokens.OutputTokens)
+		reasoningTokens := nonNegativeInt64(d.Tokens.ReasoningTokens)
+		cachedTokens := normalizedCacheTokens(d.Tokens)
 
-			result.TotalEvents++
-			result.Summary.TotalRequests++
-			if d.Failed {
-				result.Summary.FailureCount++
-			} else {
-				result.Summary.SuccessCount++
-			}
-			result.Summary.TotalTokens += totalTokens
-			result.Summary.InputTokens += inputTokens
-			result.Summary.OutputTokens += outputTokens
-			result.Summary.CachedTokens += cachedTokens
-			result.Summary.ReasoningTokens += reasoningTokens
-			if d.LatencyMs > 0 {
-				latencySum += d.LatencyMs
-				latencyN++
-			}
-
-			modelLabel := normalizeModelName(modelName)
-			if d.Model != "" {
-				modelLabel = d.Model
-			}
-			ms, ok := modelAgg[modelLabel]
-			if !ok {
-				ms = &ModelStat{Model: modelLabel}
-				modelAgg[modelLabel] = ms
-			}
-			ms.TotalRequests++
-			if d.Failed {
-				ms.FailureCount++
-			} else {
-				ms.SuccessCount++
-			}
-			ms.TotalTokens += totalTokens
-			ms.InputTokens += inputTokens
-			ms.OutputTokens += outputTokens
-			ms.CachedTokens += cachedTokens
-			ms.ReasoningTokens += reasoningTokens
-			if d.LatencyMs > 0 {
-				ms.latencySum += d.LatencyMs
-				ms.latencyN++
-			}
-
-			source := strings.TrimSpace(d.Source)
-			if source == "" {
-				source = "未知来源"
-			}
-			ss, ok := sourceAgg[source]
-			if !ok {
-				ss = &SourceStat{Source: source, Provider: d.Provider}
-				sourceAgg[source] = ss
-			}
-			ss.TotalRequests++
-			if d.Failed {
-				ss.FailureCount++
-			} else {
-				ss.SuccessCount++
-			}
-			ss.TotalTokens += totalTokens
-
-			if d.Failed {
-				failure := strings.TrimSpace(d.Failure)
-				if failure == "" {
-					failure = "未返回错误内容"
-				}
-				key := fmt.Sprintf("%d|%s", d.StatusCode, failure)
-				es, ok := errorAgg[key]
-				if !ok {
-					es = &APIDetailErrorStat{StatusCode: d.StatusCode, Failure: failure}
-					errorAgg[key] = es
-				}
-				es.Count++
-			}
-
-			appendBoundedDashboardEventHeap(&recentEvents, dashboardEventDetail{RequestDetail: d, sortKey: d.Model, sequence: sequence}, recentLimit)
-			sequence++
+		result.TotalEvents++
+		result.Summary.TotalRequests++
+		if d.Failed {
+			result.Summary.FailureCount++
+		} else {
+			result.Summary.SuccessCount++
 		}
+		result.Summary.TotalTokens += totalTokens
+		result.Summary.InputTokens += inputTokens
+		result.Summary.OutputTokens += outputTokens
+		result.Summary.CachedTokens += cachedTokens
+		result.Summary.ReasoningTokens += reasoningTokens
+		if d.LatencyMs > 0 {
+			latencySum += d.LatencyMs
+			latencyN++
+		}
+
+		modelLabel := normalizeModelName(dm.modelName)
+		if d.Model != "" {
+			modelLabel = d.Model
+		}
+		ms, ok := modelAgg[modelLabel]
+		if !ok {
+			ms = &ModelStat{Model: modelLabel}
+			modelAgg[modelLabel] = ms
+		}
+		ms.TotalRequests++
+		if d.Failed {
+			ms.FailureCount++
+		} else {
+			ms.SuccessCount++
+		}
+		ms.TotalTokens += totalTokens
+		ms.InputTokens += inputTokens
+		ms.OutputTokens += outputTokens
+		ms.CachedTokens += cachedTokens
+		ms.ReasoningTokens += reasoningTokens
+		if d.LatencyMs > 0 {
+			ms.latencySum += d.LatencyMs
+			ms.latencyN++
+		}
+
+		source := strings.TrimSpace(d.Source)
+		if source == "" {
+			source = "未知来源"
+		}
+		ss, ok := sourceAgg[source]
+		if !ok {
+			ss = &SourceStat{Source: source, Provider: d.Provider}
+			sourceAgg[source] = ss
+		}
+		ss.TotalRequests++
+		if d.Failed {
+			ss.FailureCount++
+		} else {
+			ss.SuccessCount++
+		}
+		ss.TotalTokens += totalTokens
+
+		if d.Failed {
+			failure := strings.TrimSpace(d.Failure)
+			if failure == "" {
+				failure = "未返回错误内容"
+			}
+			key := fmt.Sprintf("%d|%s", d.StatusCode, failure)
+			es, ok := errorAgg[key]
+			if !ok {
+				es = &APIDetailErrorStat{StatusCode: d.StatusCode, Failure: failure}
+				errorAgg[key] = es
+			}
+			es.Count++
+		}
+
+		appendBoundedDashboardEventHeap(&recentEvents, dashboardEventDetail{detail: dm.detail, sortKey: d.Model, sequence: sequence}, recentLimit)
+		sequence++
 	}
 
 	if latencyN > 0 {
@@ -2632,7 +2652,7 @@ func (s *RequestStatistics) QueryAPIDetail(api string, rangeKey string, recentLi
 	})
 	result.RecentEvents = make([]RequestDetail, len(recentEvents))
 	for i, dm := range recentEvents {
-		result.RecentEvents[i] = dm.RequestDetail
+		result.RecentEvents[i] = dm.requestDetail()
 	}
 	result.GeneratedAt = now.UTC().Format(time.RFC3339)
 	return result

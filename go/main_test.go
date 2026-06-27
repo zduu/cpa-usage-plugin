@@ -1855,6 +1855,14 @@ func clearBenchmarkEventCache(stats *RequestStatistics) {
 	stats.mu.Unlock()
 }
 
+func clearBenchmarkEventIndex(stats *RequestStatistics) {
+	stats.mu.Lock()
+	stats.eventIndexVersion = 0
+	stats.eventIndex = nil
+	stats.eventAPIIndex = nil
+	stats.mu.Unlock()
+}
+
 func BenchmarkSummaryWithoutDetails100k(b *testing.B) {
 	stats := buildBenchmarkStats(100000)
 	b.ResetTimer()
@@ -1906,8 +1914,18 @@ func BenchmarkQueryEventsOffset100k(b *testing.B) {
 
 func BenchmarkQueryAPIDetail100k(b *testing.B) {
 	stats := buildBenchmarkStats(100000)
+	_ = stats.QueryAPIDetail("openai · openai-prod", "7d", 120, 20)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
+		_ = stats.QueryAPIDetail("openai · openai-prod", "7d", 120, 20)
+	}
+}
+
+func BenchmarkQueryAPIDetailColdIndex100k(b *testing.B) {
+	stats := buildBenchmarkStats(100000)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		clearBenchmarkEventIndex(stats)
 		_ = stats.QueryAPIDetail("openai · openai-prod", "7d", 120, 20)
 	}
 }
