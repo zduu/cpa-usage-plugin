@@ -795,6 +795,62 @@ func TestSummaryWithoutDetailsMatchesCounts(t *testing.T) {
 	}
 }
 
+func TestSummaryWithoutDetailsIncrementalAggregatesAfterTrimAndRebuild(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 2, RetentionDays: 0, DedupWindowMinutes: 0})
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < 3; i++ {
+		stats.Record(UsageRecord{
+			Provider:    "openai",
+			Model:       "gpt-4.1",
+			RequestedAt: base.Add(time.Duration(i) * time.Minute),
+			Latency:     time.Duration((i+1)*10) * time.Millisecond,
+			Detail: UsageDetail{
+				InputTokens:     int64(i + 1),
+				OutputTokens:    int64((i + 1) * 10),
+				ReasoningTokens: int64((i + 1) * 100),
+				CachedTokens:    int64(i + 5),
+			},
+		})
+	}
+
+	assertSummary := func(label string, summary DashboardSummary) {
+		if summary.Usage.TotalRequests != 2 || summary.Usage.TotalTokens != 555 {
+			t.Fatalf("%s usage totals = requests %d tokens %d, want 2/555", label, summary.Usage.TotalRequests, summary.Usage.TotalTokens)
+		}
+		if summary.Usage.InputTokens != 5 || summary.Usage.OutputTokens != 50 ||
+			summary.Usage.ReasoningTokens != 500 || summary.Usage.CachedTokens != 13 {
+			t.Fatalf("%s usage token parts = %#v", label, summary.Usage)
+		}
+		if summary.Usage.AvgLatencyMs != 25 {
+			t.Fatalf("%s usage avg latency = %v, want 25", label, summary.Usage.AvgLatencyMs)
+		}
+		api := summary.Usage.APIs["openai"]
+		if api.InputTokens != 5 || api.OutputTokens != 50 || api.ReasoningTokens != 500 ||
+			api.CachedTokens != 13 || api.AvgLatencyMs != 25 {
+			t.Fatalf("%s api aggregate = %#v", label, api)
+		}
+		model := api.Models["gpt-4.1"]
+		if model.InputTokens != 5 || model.OutputTokens != 50 || model.ReasoningTokens != 500 ||
+			model.CachedTokens != 13 || model.AvgLatencyMs != 25 {
+			t.Fatalf("%s model aggregate = %#v", label, model)
+		}
+		if len(summary.ModelStats) != 1 || summary.ModelStats[0].InputTokens != 5 ||
+			summary.ModelStats[0].AvgLatencyMs != 25 {
+			t.Fatalf("%s model stats = %#v", label, summary.ModelStats)
+		}
+	}
+
+	assertSummary("incremental", stats.SummaryWithoutDetails())
+
+	stats.mu.Lock()
+	stats.rebuildAggregatesLocked()
+	stats.invalidateSummaryLocked()
+	stats.mu.Unlock()
+
+	assertSummary("rebuilt", stats.SummaryWithoutDetails())
+}
+
 func TestSummaryWithoutDetailsCacheReturnsCopyAndInvalidates(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0})

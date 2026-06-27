@@ -1856,6 +1856,17 @@ func BenchmarkSummaryWithoutDetails100k(b *testing.B) {
 	}
 }
 
+func BenchmarkSummaryWithoutDetailsRebuild100k(b *testing.B) {
+	stats := buildBenchmarkStats(100000)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		stats.mu.Lock()
+		stats.invalidateSummaryLocked()
+		stats.mu.Unlock()
+		_ = stats.SummaryWithoutDetails()
+	}
+}
+
 func BenchmarkQueryEvents100k(b *testing.B) {
 	stats := buildBenchmarkStats(100000)
 	params := EventsQuery{Limit: 500, Offset: 0, Range: "7d", Model: "gpt-4.1"}
