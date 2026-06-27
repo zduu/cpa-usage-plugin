@@ -51,9 +51,10 @@ type RequestStatistics struct {
 	tokensByHour   map[int]int64
 	healthBuckets  map[int64]healthBucket
 
-	sourceStats     map[string]*sourceStatAccumulator
-	credentialStats map[string]*CredentialStat
-	clientAPIStats  map[string]*clientAPIStatAccumulator
+	modelSummaryStats map[string]*ModelStat
+	sourceStats       map[string]*sourceStatAccumulator
+	credentialStats   map[string]*CredentialStat
+	clientAPIStats    map[string]*clientAPIStatAccumulator
 
 	logResponseHeaders headerWhitelist
 	storageEnabled     bool
@@ -186,6 +187,7 @@ func NewRequestStatistics() *RequestStatistics {
 		tokensByDay:        make(map[string]int64),
 		tokensByHour:       make(map[int]int64),
 		healthBuckets:      make(map[int64]healthBucket),
+		modelSummaryStats:  make(map[string]*ModelStat),
 		sourceStats:        make(map[string]*sourceStatAccumulator),
 		credentialStats:    make(map[string]*CredentialStat),
 		clientAPIStats:     make(map[string]*clientAPIStatAccumulator),
@@ -396,6 +398,7 @@ func (s *RequestStatistics) recordDetailLocked(apiName, modelName string, detail
 	s.requestsByHour[hourKey]++
 	s.tokensByDay[dayKey] += totals.totalTokens
 	s.tokensByHour[hourKey] += totals.totalTokens
+	s.incrementModelSummaryStatsLocked(modelName, detail, totals)
 	s.incrementSummaryDimensionStatsLocked(modelName, detail, totals)
 	s.incrementHealthBucketLocked(detail)
 	if detail.Timestamp.After(s.lastRecordedAt) {
@@ -1062,6 +1065,53 @@ func (s *RequestStatistics) updateAPIStats(apiSt *apiStats, model string, detail
 	return totals
 }
 
+func (s *RequestStatistics) incrementModelSummaryStatsLocked(modelName string, detail RequestDetail, totals detailTotals) {
+	if s.modelSummaryStats == nil {
+		s.modelSummaryStats = make(map[string]*ModelStat)
+	}
+	modelStat, ok := s.modelSummaryStats[modelName]
+	if !ok {
+		modelStat = &ModelStat{Model: modelName}
+		s.modelSummaryStats[modelName] = modelStat
+	}
+	modelStat.TotalRequests++
+	if detail.Failed {
+		modelStat.FailureCount++
+	} else {
+		modelStat.SuccessCount++
+	}
+	modelStat.TotalTokens += totals.totalTokens
+	modelStat.InputTokens += totals.inputTokens
+	modelStat.OutputTokens += totals.outputTokens
+	modelStat.CachedTokens += totals.cachedTokens
+	modelStat.ReasoningTokens += totals.reasoningTokens
+	modelStat.latencySum += totals.latencySum
+	modelStat.latencyN += totals.latencyN
+}
+
+func (s *RequestStatistics) decrementModelSummaryStatsLocked(modelName string, detail RequestDetail, totals detailTotals) {
+	modelStat, ok := s.modelSummaryStats[modelName]
+	if !ok {
+		return
+	}
+	modelStat.TotalRequests--
+	if detail.Failed {
+		modelStat.FailureCount--
+	} else {
+		modelStat.SuccessCount--
+	}
+	modelStat.TotalTokens -= totals.totalTokens
+	modelStat.InputTokens -= totals.inputTokens
+	modelStat.OutputTokens -= totals.outputTokens
+	modelStat.CachedTokens -= totals.cachedTokens
+	modelStat.ReasoningTokens -= totals.reasoningTokens
+	modelStat.latencySum -= totals.latencySum
+	modelStat.latencyN -= totals.latencyN
+	if modelStat.TotalRequests <= 0 {
+		delete(s.modelSummaryStats, modelName)
+	}
+}
+
 func (s *RequestStatistics) incrementSummaryDimensionStatsLocked(modelName string, detail RequestDetail, totals detailTotals) {
 	if s.sourceStats == nil {
 		s.sourceStats = make(map[string]*sourceStatAccumulator)
@@ -1376,6 +1426,7 @@ func (s *RequestStatistics) decrementCounters(d RequestDetail, apiSt *apiStats, 
 	s.requestsByHour[hourKey]--
 	s.tokensByDay[dayKey] -= totals.totalTokens
 	s.tokensByHour[hourKey] -= totals.totalTokens
+	s.decrementModelSummaryStatsLocked(modelName, d, totals)
 	s.decrementSummaryDimensionStatsLocked(modelName, d, totals)
 	s.decrementHealthBucketLocked(d)
 }
@@ -1399,6 +1450,7 @@ func (s *RequestStatistics) rebuildAggregatesLocked() {
 	s.tokensByDay = make(map[string]int64)
 	s.tokensByHour = make(map[int]int64)
 	s.healthBuckets = make(map[int64]healthBucket)
+	s.modelSummaryStats = make(map[string]*ModelStat)
 	s.sourceStats = make(map[string]*sourceStatAccumulator)
 	s.credentialStats = make(map[string]*CredentialStat)
 	s.clientAPIStats = make(map[string]*clientAPIStatAccumulator)
@@ -1465,6 +1517,7 @@ func (s *RequestStatistics) rebuildAggregatesLocked() {
 				s.requestsByHour[hourKey]++
 				s.tokensByDay[dayKey] += totals.totalTokens
 				s.tokensByHour[hourKey] += totals.totalTokens
+				s.incrementModelSummaryStatsLocked(modelName, detail, totals)
 				s.incrementSummaryDimensionStatsLocked(modelName, detail, totals)
 				s.incrementHealthBucketLocked(detail)
 			}
@@ -1865,8 +1918,6 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsLocked(now time.Time, heal
 
 	summary.Usage.APIs = make(map[string]APISnapshotWithoutDetails, len(s.apis))
 
-	modelAgg := make(map[string]*ModelStat)
-
 	healthStart := healthWindow.Add(-dashboardHealthSlotCount * dashboardHealthStep)
 
 	for apiName, apiSt := range s.apis {
@@ -1900,35 +1951,21 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsLocked(now time.Time, heal
 				modelSnap.AvgLatencyMs = float64(modelSt.latencySum) / float64(modelSt.latencyN)
 			}
 
-			m, ok := modelAgg[modelName]
-			if !ok {
-				m = &ModelStat{Model: modelName}
-				modelAgg[modelName] = m
-			}
-			m.TotalRequests += modelSt.TotalRequests
-			m.SuccessCount += modelSt.SuccessCount
-			m.FailureCount += modelSt.FailureCount
-			m.TotalTokens += modelSt.TotalTokens
-			m.InputTokens += modelSt.InputTokens
-			m.OutputTokens += modelSt.OutputTokens
-			m.CachedTokens += modelSt.CachedTokens
-			m.ReasoningTokens += modelSt.ReasoningTokens
-			m.latencySum += modelSt.latencySum
-			m.latencyN += modelSt.latencyN
 			apiSnap.Models[modelName] = modelSnap
 		}
 		summary.Usage.APIs[apiName] = apiSnap
 	}
 
 	// Finalize model average latencies from accumulated sums.
-	summary.ModelStats = make([]ModelStat, 0, len(modelAgg))
-	for _, m := range modelAgg {
-		if m.latencyN > 0 {
-			m.AvgLatencyMs = float64(m.latencySum) / float64(m.latencyN)
+	summary.ModelStats = make([]ModelStat, 0, len(s.modelSummaryStats))
+	for _, m := range s.modelSummaryStats {
+		stat := *m
+		if stat.latencyN > 0 {
+			stat.AvgLatencyMs = float64(stat.latencySum) / float64(stat.latencyN)
 		}
-		m.latencySum = 0
-		m.latencyN = 0
-		summary.ModelStats = append(summary.ModelStats, *m)
+		stat.latencySum = 0
+		stat.latencyN = 0
+		summary.ModelStats = append(summary.ModelStats, stat)
 	}
 	sort.SliceStable(summary.ModelStats, func(i, j int) bool {
 		return summary.ModelStats[i].TotalRequests > summary.ModelStats[j].TotalRequests
