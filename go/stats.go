@@ -1859,6 +1859,14 @@ func appendBoundedDashboardEventHeap(events *dashboardEventHeap, candidate dashb
 	}
 }
 
+func dashboardEventWindowLimit(offset, limit int) int {
+	maxInt := int(^uint(0) >> 1)
+	if offset > maxInt-limit {
+		return maxInt
+	}
+	return offset + limit
+}
+
 func dashboardEventMatches(d RequestDetail, params EventsQuery, cutoff time.Time) bool {
 	if !cutoff.IsZero() && !d.Timestamp.IsZero() && d.Timestamp.Before(cutoff) {
 		return false
@@ -1915,13 +1923,13 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool) Event
 	cutoff := dashboardRangeCutoff(params.Range, now)
 
 	var all []dashboardEventDetail
-	var firstPage dashboardEventHeap
+	var pageWindow dashboardEventHeap
 	total := 0
 	sequence := int64(0)
-	firstPageLimit := 0
-	if paginate && params.Offset == 0 {
-		firstPageLimit = params.Limit
-		heap.Init(&firstPage)
+	pageWindowLimit := 0
+	if paginate {
+		pageWindowLimit = dashboardEventWindowLimit(params.Offset, params.Limit)
+		heap.Init(&pageWindow)
 	}
 	collect := func(apiName string, apiSt *apiStats) {
 		if apiSt == nil {
@@ -1938,8 +1946,8 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool) Event
 				candidate := dashboardEventDetail{RequestDetail: d, sortKey: apiName, sequence: sequence}
 				sequence++
 				total++
-				if firstPageLimit > 0 {
-					appendBoundedDashboardEventHeap(&firstPage, candidate, firstPageLimit)
+				if pageWindowLimit > 0 {
+					appendBoundedDashboardEventHeap(&pageWindow, candidate, pageWindowLimit)
 				} else {
 					all = append(all, candidate)
 				}
@@ -1954,8 +1962,8 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool) Event
 			collect(apiName, apiSt)
 		}
 	}
-	if firstPageLimit > 0 {
-		all = []dashboardEventDetail(firstPage)
+	if pageWindowLimit > 0 {
+		all = []dashboardEventDetail(pageWindow)
 	}
 
 	// Sort by timestamp descending, then by api name for stability

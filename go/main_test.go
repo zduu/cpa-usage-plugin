@@ -1833,6 +1833,15 @@ func BenchmarkQueryEvents100k(b *testing.B) {
 	}
 }
 
+func BenchmarkQueryEventsOffset100k(b *testing.B) {
+	stats := buildBenchmarkStats(100000)
+	params := EventsQuery{Limit: 500, Offset: 500, Range: "7d", Model: "gpt-4.1"}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = stats.QueryEvents(params)
+	}
+}
+
 func BenchmarkQueryAPIDetail100k(b *testing.B) {
 	stats := buildBenchmarkStats(100000)
 	b.ResetTimer()
