@@ -382,6 +382,7 @@ func handleImportUsage(body []byte) ([]byte, error) {
 	// Track last import result
 	stats.mu.Lock()
 	stats.lastImportResult = &responseData
+	stats.invalidateSummaryLocked()
 	stats.mu.Unlock()
 
 	responseJSON, err := json.Marshal(responseData)

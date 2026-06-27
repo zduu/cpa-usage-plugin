@@ -766,6 +766,46 @@ func TestSummaryWithoutDetailsMatchesCounts(t *testing.T) {
 	}
 }
 
+func TestSummaryWithoutDetailsCacheReturnsCopyAndInvalidates(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0})
+	stats.Record(UsageRecord{
+		Provider: "openai",
+		Model:    "gpt-4",
+		Detail:   UsageDetail{TotalTokens: 100},
+	})
+
+	first := stats.SummaryWithoutDetails()
+	if !stats.summaryCacheValid {
+		t.Fatal("summary cache should be populated after first summary")
+	}
+	first.Usage.TotalRequests = 999
+	first.Usage.APIs["openai"] = APISnapshotWithoutDetails{TotalRequests: 999}
+	first.HealthGrid[0].Total = 999
+
+	second := stats.SummaryWithoutDetails()
+	if second.Usage.TotalRequests != 1 {
+		t.Fatalf("cached summary was mutated through returned value: total_requests=%d", second.Usage.TotalRequests)
+	}
+	if second.Usage.APIs["openai"].TotalRequests != 1 {
+		t.Fatalf("cached API summary was mutated: %#v", second.Usage.APIs["openai"])
+	}
+	if second.HealthGrid[0].Total == 999 {
+		t.Fatal("cached health grid was mutated through returned value")
+	}
+
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-4",
+		RequestedAt: time.Now().Add(time.Second),
+		Detail:      UsageDetail{TotalTokens: 50},
+	})
+	third := stats.SummaryWithoutDetails()
+	if third.Usage.TotalRequests != 2 || third.Usage.TotalTokens != 150 {
+		t.Fatalf("summary cache did not invalidate after record: requests=%d tokens=%d", third.Usage.TotalRequests, third.Usage.TotalTokens)
+	}
+}
+
 // ============================================================================
 // P2 Tests: Stats engine observability
 // ============================================================================

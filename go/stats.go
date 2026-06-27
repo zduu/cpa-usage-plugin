@@ -65,6 +65,12 @@ type RequestStatistics struct {
 
 	lastImportResult *ImportResponse
 	evictedTotal     int64
+
+	summaryVersion      uint64
+	summaryCacheValid   bool
+	summaryCache        DashboardSummary
+	summaryCacheVersion uint64
+	summaryCacheWindow  time.Time
 }
 
 type apiStats struct {
@@ -187,6 +193,7 @@ func (s *RequestStatistics) ConfigurePatch(cfg runtimeConfigPatch) {
 	s.pruneLocked(time.Now(), true)
 	s.rebuildAggregatesLocked()
 	s.rebuildSeenLocked(time.Now())
+	s.invalidateSummaryLocked()
 }
 
 func intPtr(value int) *int {
@@ -206,6 +213,14 @@ func stringPtr(value string) *string {
 
 func boolPtr(value bool) *bool {
 	return &value
+}
+
+func (s *RequestStatistics) invalidateSummaryLocked() {
+	if s == nil {
+		return
+	}
+	s.summaryVersion++
+	s.summaryCacheValid = false
 }
 
 func (s *RequestStatistics) Record(record UsageRecord) {
@@ -321,6 +336,7 @@ func (s *RequestStatistics) recordDetailLocked(apiName, modelName string, detail
 	if detail.Timestamp.After(s.lastRecordedAt) {
 		s.lastRecordedAt = detail.Timestamp
 	}
+	s.invalidateSummaryLocked()
 	return true
 }
 
@@ -969,6 +985,7 @@ func (s *RequestStatistics) pruneLocked(now time.Time, sortNeeded bool) {
 	if s == nil {
 		return
 	}
+	changed := false
 	var cutoff time.Time
 	if s.retention > 0 {
 		cutoff = now.Add(-s.retention)
@@ -992,6 +1009,7 @@ func (s *RequestStatistics) pruneLocked(now time.Time, sortNeeded bool) {
 					} else {
 						s.decrementCounters(d, apiSt, modelSt)
 						s.evictedTotal++
+						changed = true
 					}
 				}
 				details = kept
@@ -1007,6 +1025,7 @@ func (s *RequestStatistics) pruneLocked(now time.Time, sortNeeded bool) {
 				for _, d := range removed {
 					s.decrementCounters(d, apiSt, modelSt)
 					s.evictedTotal++
+					changed = true
 				}
 				details = append([]RequestDetail(nil), details[len(details)-keep:]...)
 			}
@@ -1018,6 +1037,9 @@ func (s *RequestStatistics) pruneLocked(now time.Time, sortNeeded bool) {
 		if len(apiSt.Models) == 0 {
 			delete(s.apis, apiName)
 		}
+	}
+	if changed {
+		s.invalidateSummaryLocked()
 	}
 }
 
@@ -1365,14 +1387,89 @@ func dedupKey(apiName, modelName string, detail RequestDetail) string {
 
 // SummaryWithoutDetails computes a lightweight dashboard summary without detail arrays.
 func (s *RequestStatistics) SummaryWithoutDetails() DashboardSummary {
-	summary := DashboardSummary{}
 	if s == nil {
-		return summary
+		return DashboardSummary{}
 	}
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	now := time.Now()
+	healthWindow := summaryHealthWindow(now)
 
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.summaryCacheValid && s.summaryCacheVersion == s.summaryVersion && s.summaryCacheWindow.Equal(healthWindow) {
+		return cloneDashboardSummaryWithGeneratedAt(s.summaryCache, now)
+	}
+
+	summary := s.buildSummaryWithoutDetailsLocked(now, healthWindow)
+	s.summaryCache = cloneDashboardSummary(summary)
+	s.summaryCacheValid = true
+	s.summaryCacheVersion = s.summaryVersion
+	s.summaryCacheWindow = healthWindow
+	return summary
+}
+
+func summaryHealthWindow(now time.Time) time.Time {
+	healthStep := 15 * time.Minute
+	return now.UTC().Truncate(healthStep).Add(healthStep)
+}
+
+func cloneDashboardSummaryWithGeneratedAt(summary DashboardSummary, now time.Time) DashboardSummary {
+	cloned := cloneDashboardSummary(summary)
+	cloned.GeneratedAt = now.UTC().Format(time.RFC3339)
+	return cloned
+}
+
+func cloneDashboardSummary(summary DashboardSummary) DashboardSummary {
+	cloned := summary
+	cloned.Usage = cloneStatisticsSnapshotWithoutDetails(summary.Usage)
+	cloned.HealthGrid = append([]HealthGridSlot(nil), summary.HealthGrid...)
+	cloned.SourceStats = append([]SourceStat(nil), summary.SourceStats...)
+	cloned.CredentialStats = append([]CredentialStat(nil), summary.CredentialStats...)
+	cloned.ClientAPIStats = make([]ClientAPIStat, len(summary.ClientAPIStats))
+	for i, stat := range summary.ClientAPIStats {
+		cloned.ClientAPIStats[i] = stat
+		cloned.ClientAPIStats[i].Models = append([]ClientAPIModelStat(nil), stat.Models...)
+	}
+	cloned.ModelStats = append([]ModelStat(nil), summary.ModelStats...)
+	if summary.Meta.LastImport != nil {
+		lastImport := *summary.Meta.LastImport
+		cloned.Meta.LastImport = &lastImport
+	}
+	return cloned
+}
+
+func cloneStatisticsSnapshotWithoutDetails(snapshot StatisticsSnapshotWithoutDetails) StatisticsSnapshotWithoutDetails {
+	cloned := snapshot
+	cloned.APIs = make(map[string]APISnapshotWithoutDetails, len(snapshot.APIs))
+	for apiName, apiSnapshot := range snapshot.APIs {
+		apiClone := apiSnapshot
+		apiClone.Models = make(map[string]ModelSnapshotWithoutDetails, len(apiSnapshot.Models))
+		for modelName, modelSnapshot := range apiSnapshot.Models {
+			apiClone.Models[modelName] = modelSnapshot
+		}
+		cloned.APIs[apiName] = apiClone
+	}
+	cloned.RequestsByDay = cloneInt64Map(snapshot.RequestsByDay)
+	cloned.RequestsByHour = cloneInt64Map(snapshot.RequestsByHour)
+	cloned.TokensByDay = cloneInt64Map(snapshot.TokensByDay)
+	cloned.TokensByHour = cloneInt64Map(snapshot.TokensByHour)
+	return cloned
+}
+
+func cloneInt64Map(values map[string]int64) map[string]int64 {
+	if values == nil {
+		return nil
+	}
+	cloned := make(map[string]int64, len(values))
+	for k, v := range values {
+		cloned[k] = v
+	}
+	return cloned
+}
+
+func (s *RequestStatistics) buildSummaryWithoutDetailsLocked(now time.Time, healthWindow time.Time) DashboardSummary {
+	summary := DashboardSummary{}
 	summary.Usage.TotalRequests = s.totalRequests
 	summary.Usage.SuccessCount = s.successCount
 	summary.Usage.FailureCount = s.failureCount
@@ -1393,7 +1490,7 @@ func (s *RequestStatistics) SummaryWithoutDetails() DashboardSummary {
 
 	healthSlots := make([]struct{ s, f int64 }, 672)
 	healthStep := 15 * time.Minute
-	healthStart := time.Now().UTC().Add(-672 * healthStep)
+	healthStart := healthWindow.Add(-672 * healthStep)
 
 	for apiName, apiSt := range s.apis {
 		apiSnap := APISnapshotWithoutDetails{
@@ -1673,7 +1770,7 @@ func (s *RequestStatistics) SummaryWithoutDetails() DashboardSummary {
 		}
 	}
 
-	summary.GeneratedAt = time.Now().UTC().Format(time.RFC3339)
+	summary.GeneratedAt = now.UTC().Format(time.RFC3339)
 	return summary
 }
 
