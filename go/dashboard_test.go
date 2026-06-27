@@ -374,6 +374,12 @@ func TestDashboardEventsPagination(t *testing.T) {
 	if result.Limit != 5 || result.Offset != 0 {
 		t.Fatalf("limit/offset mismatch: %d/%d", result.Limit, result.Offset)
 	}
+	for i, event := range result.Events {
+		want := int64(29 - i)
+		if event.Tokens.TotalTokens != want {
+			t.Fatalf("page 1 event %d total tokens = %d, want %d", i, event.Tokens.TotalTokens, want)
+		}
+	}
 
 	// Second page
 	result2 := stats.QueryEvents(EventsQuery{Limit: 5, Offset: 5})
@@ -385,6 +391,12 @@ func TestDashboardEventsPagination(t *testing.T) {
 	}
 	if result2.Offset != 5 {
 		t.Fatalf("page 2: offset = %d, want 5", result2.Offset)
+	}
+	for i, event := range result2.Events {
+		want := int64(24 - i)
+		if event.Tokens.TotalTokens != want {
+			t.Fatalf("page 2 event %d total tokens = %d, want %d", i, event.Tokens.TotalTokens, want)
+		}
 	}
 }
 
@@ -444,6 +456,31 @@ func TestDashboardEventsEmptyResult(t *testing.T) {
 	}
 	if len(result.Events) != 0 {
 		t.Fatalf("events should be empty, got %d", len(result.Events))
+	}
+}
+
+func TestDashboardEventsNegativeOffsetUsesFirstPage(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0})
+	base := time.Now().Add(-time.Minute)
+	for i := 0; i < 3; i++ {
+		stats.Record(UsageRecord{
+			Provider:    "openai",
+			Model:       "gpt-4",
+			RequestedAt: base.Add(time.Duration(i) * time.Second),
+			Detail:      UsageDetail{TotalTokens: int64(i + 1)},
+		})
+	}
+
+	result := stats.QueryEvents(EventsQuery{Limit: 2, Offset: -10})
+	if result.Offset != 0 {
+		t.Fatalf("offset = %d, want 0", result.Offset)
+	}
+	if len(result.Events) != 2 {
+		t.Fatalf("events = %d, want 2", len(result.Events))
+	}
+	if result.Events[0].Tokens.TotalTokens != 3 || result.Events[1].Tokens.TotalTokens != 2 {
+		t.Fatalf("events are not the first page in descending order: %#v", result.Events)
 	}
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"container/heap"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -1437,6 +1438,66 @@ func dashboardRangeCutoff(rangeKey string, now time.Time) time.Time {
 	}
 }
 
+type dashboardEventDetail struct {
+	RequestDetail
+	apiName  string
+	sequence int64
+}
+
+func dashboardEventBefore(a, b dashboardEventDetail) bool {
+	if !a.Timestamp.Equal(b.Timestamp) {
+		return a.Timestamp.After(b.Timestamp)
+	}
+	if a.apiName != b.apiName {
+		return a.apiName < b.apiName
+	}
+	return a.sequence < b.sequence
+}
+
+type dashboardEventHeap []dashboardEventDetail
+
+func (h dashboardEventHeap) Len() int { return len(h) }
+
+func (h dashboardEventHeap) Less(i, j int) bool {
+	return dashboardEventBefore(h[j], h[i])
+}
+
+func (h dashboardEventHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+
+func (h *dashboardEventHeap) Push(x any) {
+	*h = append(*h, x.(dashboardEventDetail))
+}
+
+func (h *dashboardEventHeap) Pop() any {
+	old := *h
+	n := len(old)
+	item := old[n-1]
+	*h = old[:n-1]
+	return item
+}
+
+func dashboardEventMatches(d RequestDetail, params EventsQuery, cutoff time.Time) bool {
+	if !cutoff.IsZero() && !d.Timestamp.IsZero() && d.Timestamp.Before(cutoff) {
+		return false
+	}
+	if params.Model != "" && d.Model != params.Model {
+		return false
+	}
+	if params.Source != "" {
+		src := d.Source
+		if src == "" {
+			src = "未知来源"
+		}
+		if src != params.Source {
+			return false
+		}
+	}
+	if params.AuthIndex != "" && d.AuthIndex != params.AuthIndex {
+		return false
+	}
+	return true
+}
+
 // QueryEvents returns paginated, filtered event details.
 func (s *RequestStatistics) QueryEvents(params EventsQuery) EventsResult {
 	if s == nil {
@@ -1449,54 +1510,66 @@ func (s *RequestStatistics) QueryEvents(params EventsQuery) EventsResult {
 	if params.Limit <= 0 || params.Limit > 500 {
 		params.Limit = 50
 	}
+	if params.Offset < 0 {
+		params.Offset = 0
+	}
 
 	now := time.Now()
 	cutoff := dashboardRangeCutoff(params.Range, now)
 
-	// Collect all matching events
-	type detailWithMeta struct {
-		RequestDetail
-		apiName string
+	var all []dashboardEventDetail
+	var firstPage dashboardEventHeap
+	total := 0
+	sequence := int64(0)
+	firstPageLimit := 0
+	if params.Offset == 0 {
+		firstPageLimit = params.Limit
+		heap.Init(&firstPage)
 	}
-	var all []detailWithMeta
-	for apiName, apiSt := range s.apis {
-		if params.API != "" && apiName != params.API {
-			continue
+	collect := func(apiName string, apiSt *apiStats) {
+		if apiSt == nil {
+			return
 		}
 		for _, modelSt := range apiSt.Models {
+			if modelSt == nil {
+				continue
+			}
 			for _, d := range modelSt.Details {
-				if !cutoff.IsZero() && !d.Timestamp.IsZero() && d.Timestamp.Before(cutoff) {
+				if !dashboardEventMatches(d, params, cutoff) {
 					continue
 				}
-				if params.Model != "" && d.Model != params.Model {
-					continue
-				}
-				if params.Source != "" {
-					src := d.Source
-					if src == "" {
-						src = "未知来源"
+				candidate := dashboardEventDetail{RequestDetail: d, apiName: apiName, sequence: sequence}
+				sequence++
+				total++
+				if firstPageLimit > 0 {
+					if firstPage.Len() < firstPageLimit {
+						heap.Push(&firstPage, candidate)
+					} else if dashboardEventBefore(candidate, firstPage[0]) {
+						firstPage[0] = candidate
+						heap.Fix(&firstPage, 0)
 					}
-					if src != params.Source {
-						continue
-					}
+				} else {
+					all = append(all, candidate)
 				}
-				if params.AuthIndex != "" && d.AuthIndex != params.AuthIndex {
-					continue
-				}
-				all = append(all, detailWithMeta{RequestDetail: d, apiName: apiName})
 			}
 		}
 	}
 
-	// Sort by timestamp descending, then by api name for stability
-	sort.SliceStable(all, func(i, j int) bool {
-		if all[i].Timestamp.Equal(all[j].Timestamp) {
-			return all[i].apiName < all[j].apiName
+	if params.API != "" {
+		collect(params.API, s.apis[params.API])
+	} else {
+		for apiName, apiSt := range s.apis {
+			collect(apiName, apiSt)
 		}
-		return all[i].Timestamp.After(all[j].Timestamp)
-	})
+	}
+	if firstPageLimit > 0 {
+		all = []dashboardEventDetail(firstPage)
+	}
 
-	total := len(all)
+	// Sort by timestamp descending, then by api name for stability
+	sort.Slice(all, func(i, j int) bool {
+		return dashboardEventBefore(all[i], all[j])
+	})
 
 	if params.Offset >= total {
 		return EventsResult{
