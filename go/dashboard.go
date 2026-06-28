@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	_ "embed"
+	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -127,31 +130,87 @@ func dashboardEventsETag(params EventsQuery, now time.Time) string {
 	)
 }
 
+type dashboardExportFormat string
+
+const (
+	dashboardExportJSON  dashboardExportFormat = "json"
+	dashboardExportJSONL dashboardExportFormat = "jsonl"
+	dashboardExportCSV   dashboardExportFormat = "csv"
+)
+
+type dashboardEventsExportOptions struct {
+	Format dashboardExportFormat
+	Gzip   bool
+}
+
+func dashboardEventsExportOptionsFromQuery(query map[string][]string) dashboardEventsExportOptions {
+	opts := dashboardEventsExportOptions{Format: dashboardExportJSON}
+	if v, ok := query["format"]; ok && len(v) > 0 {
+		switch strings.ToLower(strings.TrimSpace(v[0])) {
+		case "jsonl", "ndjson":
+			opts.Format = dashboardExportJSONL
+		case "csv":
+			opts.Format = dashboardExportCSV
+		default:
+			opts.Format = dashboardExportJSON
+		}
+	}
+	if queryBool(query, "gzip") || queryBool(query, "compress") || queryValue(query, "encoding") == "gzip" {
+		opts.Gzip = true
+	}
+	return opts
+}
+
+func queryValue(query map[string][]string, key string) string {
+	if v, ok := query[key]; ok && len(v) > 0 {
+		return strings.ToLower(strings.TrimSpace(v[0]))
+	}
+	return ""
+}
+
+func queryBool(query map[string][]string, key string) bool {
+	switch queryValue(query, key) {
+	case "1", "true", "yes", "y", "on", "gzip":
+		return true
+	default:
+		return false
+	}
+}
+
 // handleDashboardEventsExport returns all filtered event details for one export.
 func handleDashboardEventsExport(query map[string][]string, headers map[string][]string) ([]byte, error) {
 	params := normalizeEventsQuery(dashboardEventsQuery(query), false)
-	etag := dashboardEventsExportETag(params, time.Now())
+	opts := dashboardEventsExportOptionsFromQuery(query)
+	etag := dashboardEventsExportETag(params, opts, time.Now())
 	if dashboardIfNoneMatch(headers, etag) {
-		return dashboardNotModified(etag)
+		return dashboardNotModifiedWithHeaders(dashboardExportHeaders(etag, dashboardExportContentType(opts.Format), opts.Gzip))
 	}
 	result := stats.QueryAllEvents(params)
-	responseJSON, err := json.Marshal(result)
+	body, contentType, err := encodeDashboardEventsExport(result, opts)
 	if err != nil {
 		return nil, err
 	}
+	if opts.Gzip {
+		body, err = gzipBytes(body)
+		if err != nil {
+			return nil, err
+		}
+	}
 	resp := ManagementResponse{
 		StatusCode: http.StatusOK,
-		Headers:    dashboardJSONHeaders(etag),
-		Body:       responseJSON,
+		Headers:    dashboardExportHeaders(etag, contentType, opts.Gzip),
+		Body:       body,
 	}
 	return okEnvelopeJSON(string(mustMarshal(resp)))
 }
 
-func dashboardEventsExportETag(params EventsQuery, now time.Time) string {
+func dashboardEventsExportETag(params EventsQuery, opts dashboardEventsExportOptions, now time.Time) string {
 	key := dashboardEventCacheKeyFor(params, now)
 	return dashboardWeakETag(
 		"events-export",
 		strconv.FormatUint(stats.DashboardVersion(), 10),
+		string(opts.Format),
+		strconv.FormatBool(opts.Gzip),
 		strconv.FormatInt(key.timeBucket, 10),
 		key.rangeKey,
 		key.model,
@@ -159,6 +218,119 @@ func dashboardEventsExportETag(params EventsQuery, now time.Time) string {
 		key.authIndex,
 		key.api,
 	)
+}
+
+func encodeDashboardEventsExport(result EventsResult, opts dashboardEventsExportOptions) ([]byte, string, error) {
+	switch opts.Format {
+	case dashboardExportJSONL:
+		raw, err := dashboardEventsJSONL(result.Events)
+		return raw, dashboardExportContentType(opts.Format), err
+	case dashboardExportCSV:
+		raw, err := dashboardEventsCSV(result.Events)
+		return raw, dashboardExportContentType(opts.Format), err
+	default:
+		raw, err := json.Marshal(result)
+		return raw, dashboardExportContentType(opts.Format), err
+	}
+}
+
+func dashboardExportContentType(format dashboardExportFormat) string {
+	switch format {
+	case dashboardExportJSONL:
+		return "application/x-ndjson; charset=utf-8"
+	case dashboardExportCSV:
+		return "text/csv; charset=utf-8"
+	default:
+		return "application/json; charset=utf-8"
+	}
+}
+
+func dashboardExportHeaders(etag string, contentType string, gzipped bool) map[string][]string {
+	headers := map[string][]string{
+		"Content-Type":  {contentType},
+		"Cache-Control": {"private, no-cache"},
+		"ETag":          {etag},
+	}
+	if gzipped {
+		headers["Content-Encoding"] = []string{"gzip"}
+	}
+	return headers
+}
+
+func gzipBytes(raw []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	writer := gzip.NewWriter(&buf)
+	if _, err := writer.Write(raw); err != nil {
+		_ = writer.Close()
+		return nil, err
+	}
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func dashboardEventsJSONL(events []RequestDetail) ([]byte, error) {
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	for _, event := range events {
+		if err := encoder.Encode(event); err != nil {
+			return nil, err
+		}
+	}
+	return buf.Bytes(), nil
+}
+
+func dashboardEventsCSV(events []RequestDetail) ([]byte, error) {
+	var buf bytes.Buffer
+	writer := csv.NewWriter(&buf)
+	if err := writer.Write([]string{"时间", "模型", "来源", "凭证", "结果", "延迟毫秒", "TTFT毫秒", "输入 token", "输出 token", "思考 token", "缓存 token", "总 token", "状态码", "错误"}); err != nil {
+		return nil, err
+	}
+	for _, event := range events {
+		tokens := event.Tokens
+		status := "成功"
+		if event.Failed {
+			status = "失败"
+		}
+		if err := writer.Write([]string{
+			event.Timestamp.UTC().Format(time.RFC3339),
+			event.Model,
+			dashboardExportSource(event),
+			event.AuthIndex,
+			status,
+			strconv.FormatInt(event.LatencyMs, 10),
+			strconv.FormatInt(event.TTFTMs, 10),
+			strconv.FormatInt(tokens.InputTokens, 10),
+			strconv.FormatInt(tokens.OutputTokens, 10),
+			strconv.FormatInt(tokens.ReasoningTokens, 10),
+			strconv.FormatInt(normalizedCacheTokens(tokens), 10),
+			strconv.FormatInt(detailTotalTokens(tokens), 10),
+			dashboardExportStatusCode(event),
+			event.Failure,
+		}); err != nil {
+			return nil, err
+		}
+	}
+	writer.Flush()
+	return buf.Bytes(), writer.Error()
+}
+
+func dashboardExportSource(event RequestDetail) string {
+	if strings.TrimSpace(event.Source) != "" {
+		return event.Source
+	}
+	if strings.TrimSpace(event.Provider) != "" {
+		return event.Provider
+	}
+	return "未知来源"
+}
+
+func dashboardExportStatusCode(event RequestDetail) string {
+	if event.StatusCode == 0 {
+		return ""
+	}
+	return strconv.Itoa(event.StatusCode)
 }
 
 // handleDashboardAPIDetail returns compact per-upstream detail widgets.
@@ -231,9 +403,13 @@ func dashboardJSONHeaders(etag string) map[string][]string {
 }
 
 func dashboardNotModified(etag string) ([]byte, error) {
+	return dashboardNotModifiedWithHeaders(dashboardJSONHeaders(etag))
+}
+
+func dashboardNotModifiedWithHeaders(headers map[string][]string) ([]byte, error) {
 	resp := ManagementResponse{
 		StatusCode: http.StatusNotModified,
-		Headers:    dashboardJSONHeaders(etag),
+		Headers:    headers,
 	}
 	return okEnvelopeJSON(string(mustMarshal(resp)))
 }

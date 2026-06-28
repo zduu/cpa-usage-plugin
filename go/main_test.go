@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -1271,6 +1274,100 @@ func TestDashboardManagementEndpointsReturnNotModifiedForMatchingETag(t *testing
 		if got := second.Headers["ETag"]; len(got) != 1 || got[0] != etag[0] {
 			t.Fatalf("%s conditional ETag = %#v, want %q", req.Path, got, etag[0])
 		}
+	}
+}
+
+func TestDashboardEventsExportSupportsCSVJSONLAndGzip(t *testing.T) {
+	previousStats := stats
+	stats = NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0})
+	t.Cleanup(func() { stats = previousStats })
+
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Source:      "openai-prod",
+		Model:       "gpt-4",
+		RequestedAt: time.Now().Add(-time.Minute),
+		Detail:      UsageDetail{InputTokens: 10, OutputTokens: 5},
+	})
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Source:      "openai-prod",
+		Model:       "gpt-4",
+		RequestedAt: time.Now(),
+		Failed:      true,
+		Failure:     UsageFailure{StatusCode: 429, Body: "rate limited"},
+		Detail:      UsageDetail{TotalTokens: 0},
+	})
+
+	csvResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "GET",
+		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export",
+		Query:  map[string][]string{"format": {"csv"}},
+	}), nil)
+	if got := csvResp.Headers["Content-Type"]; len(got) != 1 || !strings.HasPrefix(got[0], "text/csv") {
+		t.Fatalf("csv content type = %#v", got)
+	}
+	csvBody := string(csvResp.Body)
+	if !strings.HasPrefix(csvBody, "时间,模型,来源") || !strings.Contains(csvBody, "gpt-4") || !strings.Contains(csvBody, "rate limited") {
+		t.Fatalf("csv body missing expected rows: %q", csvBody)
+	}
+
+	jsonlResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "GET",
+		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export",
+		Query:  map[string][]string{"format": {"jsonl"}},
+	}), nil)
+	if got := jsonlResp.Headers["Content-Type"]; len(got) != 1 || !strings.HasPrefix(got[0], "application/x-ndjson") {
+		t.Fatalf("jsonl content type = %#v", got)
+	}
+	lines := strings.Split(strings.TrimSpace(string(jsonlResp.Body)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("jsonl lines = %d, want 2: %q", len(lines), string(jsonlResp.Body))
+	}
+	var first RequestDetail
+	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil || first.Model != "gpt-4" {
+		t.Fatalf("decode first jsonl line: detail=%#v err=%v", first, err)
+	}
+
+	gzipResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "GET",
+		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export",
+		Query:  map[string][]string{"format": {"csv"}, "gzip": {"1"}},
+	}), nil)
+	if got := gzipResp.Headers["Content-Encoding"]; len(got) != 1 || got[0] != "gzip" {
+		t.Fatalf("gzip content encoding = %#v", got)
+	}
+	reader, err := gzip.NewReader(bytes.NewReader(gzipResp.Body))
+	if err != nil {
+		t.Fatalf("new gzip reader: %v", err)
+	}
+	decompressed, err := io.ReadAll(reader)
+	if closeErr := reader.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("read gzip body: %v", err)
+	}
+	if !strings.HasPrefix(string(decompressed), "时间,模型,来源") {
+		t.Fatalf("decompressed csv body = %q", string(decompressed))
+	}
+
+	etag := gzipResp.Headers["ETag"]
+	if len(etag) != 1 || etag[0] == "" {
+		t.Fatalf("gzip export missing ETag: %#v", gzipResp.Headers)
+	}
+	notModified := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method:  "GET",
+		Path:    "/v0/management/plugins/usage-statistics/dashboard-events-export",
+		Query:   map[string][]string{"format": {"csv"}, "gzip": {"1"}},
+		Headers: map[string][]string{"If-None-Match": {etag[0]}},
+	}), nil)
+	if notModified.StatusCode != http.StatusNotModified {
+		t.Fatalf("gzip conditional status = %d, want 304", notModified.StatusCode)
+	}
+	if got := notModified.Headers["Content-Encoding"]; len(got) != 1 || got[0] != "gzip" {
+		t.Fatalf("gzip conditional content encoding = %#v", got)
 	}
 }
 

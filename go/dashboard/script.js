@@ -73,6 +73,18 @@ async function fetchJsonPayload(url, options) {
   return meta.data;
 }
 
+async function fetchTextPayload(url, options) {
+  const response = await fetch(url, options);
+  const text = await response.text();
+  if (!response.ok) throw new Error(text || ('请求失败：' + response.status));
+  if (!text) return '';
+  let payload = null;
+  try { payload = JSON.parse(text) } catch { return text }
+  const meta = unwrapPluginPayloadWithMeta(payload);
+  if (meta.data == null) return '';
+  return typeof meta.data === 'string' ? meta.data : JSON.stringify(meta.data);
+}
+
 async function fetchConditionalJsonPayload(cacheKey, url, options) {
   const cached = conditionalPayloadCache.get(cacheKey);
   const merged = Object.assign({}, options || {});
@@ -588,9 +600,15 @@ async function exportRows(kind) {
   const fs = $('filterSource').value; if (fs) params.set('source', fs);
   const fa = $('filterAuth').value; if (fa) params.set('auth', fa);
   try {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    if (kind === 'csv') {
+      params.set('format', 'csv');
+      const csv = await fetchTextPayload(pluginEndpoint('dashboard-events-export') + '?' + params.toString(), { cache: 'no-store' });
+      download('usage-events-' + stamp + '.csv', csv, 'text/csv;charset=utf-8');
+      return;
+    }
     const data = await fetchJsonPayload(pluginEndpoint('dashboard-events-export') + '?' + params.toString(), { cache: 'no-store' });
     const rows = data.events || [];
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     if (kind === 'json') { download('usage-events-' + stamp + '.json', JSON.stringify(rows, null, 2), 'application/json;charset=utf-8'); return }
     download('usage-events-' + stamp + '.csv', rowsCsv(rows), 'text/csv;charset=utf-8');
   } catch (e) { alert('导出失败'); }
@@ -605,11 +623,17 @@ async function exportApiRows(kind) {
   const fa = $('filterAuth').value; if (fa) params.set('auth', fa);
   params.set('api', selectedApi);
   try {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const name = (friendlyApiName(selectedApi) || 'api').replace(/[\\/:*?"<>|\s]+/g, '-').slice(0, 80);
+    if (kind === 'csv') {
+      params.set('format', 'csv');
+      const csv = await fetchTextPayload(pluginEndpoint('dashboard-events-export') + '?' + params.toString(), { cache: 'no-store' });
+      download('usage-api-' + name + '-' + stamp + '.csv', csv, 'text/csv;charset=utf-8');
+      return;
+    }
     const data = await fetchJsonPayload(pluginEndpoint('dashboard-events-export') + '?' + params.toString(), { cache: 'no-store' });
     const rows = data.events || [];
     if (!rows.length) return;
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const name = (friendlyApiName(selectedApi) || 'api').replace(/[\\/:*?"<>|\s]+/g, '-').slice(0, 80);
     if (kind === 'json') { download('usage-api-' + name + '-' + stamp + '.json', JSON.stringify(rows, null, 2), 'application/json;charset=utf-8'); return }
     download('usage-api-' + name + '-' + stamp + '.csv', rowsCsv(rows), 'text/csv;charset=utf-8');
   } catch (e) { alert('导出失败'); }

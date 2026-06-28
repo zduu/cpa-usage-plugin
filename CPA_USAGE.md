@@ -304,6 +304,22 @@ curl "http://127.0.0.1:8317/v0/management/plugins/usage-statistics/dashboard-eve
   -H 'x-management-key: <你的管理密钥>'
 ```
 
+### 按筛选导出事件
+
+默认返回 JSON；需要直接下载 CSV 或便于逐行处理的 JSONL 时，可增加 `format` 参数。大导出可增加 `gzip=1`，客户端需按 gzip 解压响应体。
+
+```bash
+# 导出最近 24 小时事件为 CSV
+curl "http://127.0.0.1:8317/v0/management/plugins/usage-statistics/dashboard-events-export?range=24h&format=csv" \
+  -H 'x-management-key: <你的管理密钥>' \
+  -o usage-events.csv
+
+# 导出最近 7 天事件为 gzip 压缩 JSONL
+curl "http://127.0.0.1:8317/v0/management/plugins/usage-statistics/dashboard-events-export?range=7d&format=jsonl&gzip=1" \
+  -H 'x-management-key: <你的管理密钥>' \
+  -o usage-events.jsonl.gz
+```
+
 ### 健康检查
 
 ```bash

@@ -171,6 +171,12 @@ function createDashboardHarness(options = {}) {
     const parsed = new URL(url, 'http://test.local/v0/management/plugins/usage-statistics/dashboard');
     const api = parsed.searchParams.get('api');
     const totalRows = api ? 8 : 1200;
+    if (parsed.searchParams.get('format') === 'csv') {
+      return '时间,模型,来源,凭证,结果,延迟毫秒,TTFT毫秒,输入 token,输出 token,思考 token,缓存 token,总 token,状态码,错误\n' +
+        eventsPage('http://test.local/dashboard-events?limit=' + totalRows + '&offset=0').events.slice(0, totalRows)
+          .map((event) => [event.timestamp, event.model, event.source, event.auth_index, event.failed ? '失败' : '成功', event.latency_ms, '', event.tokens.input_tokens, event.tokens.output_tokens, '', '', event.tokens.total_tokens, '', ''].join(','))
+          .join('\n');
+    }
     return {
       total: totalRows,
       limit: totalRows,
@@ -330,6 +336,14 @@ function createDashboardHarness(options = {}) {
       else if (String(url).includes('dashboard-events')) payload = eventsPage(String(url));
       else if (String(url).includes('usage/export')) payload = { version: 1, usage: {} };
       else payload = {};
+      if (typeof payload === 'string') {
+        return {
+          ok: true,
+          status: 200,
+          headers: fetchHeaders({ 'Content-Type': ['text/csv; charset=utf-8'] }),
+          text: async () => payload,
+        };
+      }
       return fetchResponse(payload, route, String(url), options);
     },
     Blob: class FakeBlob {
@@ -411,11 +425,14 @@ test('dashboard loads summary and export button uses backend event export', asyn
   const exportEventsCount = () => fetchCalls.filter((url) => url.includes('dashboard-events-export')).length;
   const beforePagedEvents = pagedEventsCount();
   const beforeExportEvents = exportEventsCount();
+  await document.getElementById('exportRowsCsv').onclick();
+  await waitFor(() => downloads.some((d) => d.text && d.text.startsWith('时间,模型')));
   await document.getElementById('exportRowsJson').onclick();
   await waitFor(() => downloads.some((d) => d.text && d.text.startsWith('[')));
 
   assert.strictEqual(pagedEventsCount(), beforePagedEvents);
-  assert.strictEqual(exportEventsCount(), beforeExportEvents + 1);
+  assert.strictEqual(exportEventsCount(), beforeExportEvents + 2);
+  assert.ok(fetchCalls.some((url) => url.includes('dashboard-events-export') && new URL(url, 'http://test.local').searchParams.get('format') === 'csv'));
   const exported = JSON.parse(downloads.find((d) => d.text && d.text.startsWith('[')).text);
   assert.strictEqual(exported.length, 1200);
 });

@@ -104,7 +104,7 @@ func handleManagementRegister() ([]byte, error) {
 			{
 				Method:      "GET",
 				Path:        "/plugins/usage-statistics/dashboard-events-export",
-				Description: "一次性导出筛选后的请求事件明细。",
+				Description: "一次性导出筛选后的请求事件明细，支持 JSON、CSV、JSONL 和 gzip。",
 			},
 			{
 				Method:      "GET",
@@ -152,7 +152,7 @@ func handleManagementRegister() ([]byte, error) {
 			},
 			{
 				Path:        "/dashboard-events-export",
-				Description: "筛选后的请求事件明细导出数据。",
+				Description: "筛选后的请求事件明细导出数据，支持 JSON、CSV、JSONL 和 gzip。",
 			},
 			{
 				Path:        "/dashboard-api-detail",
