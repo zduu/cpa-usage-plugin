@@ -293,7 +293,7 @@ curl http://127.0.0.1:8317/v0/management/plugins/usage-statistics/dashboard-summ
 
 响应包含 `usage`（无 details 聚合数据）、`health_grid`（672 个 15 分钟槽位）、`source_stats`（用于事件来源筛选）、`credential_stats`、`client_api_stats`、`model_stats` 和 `_meta` 元数据。
 
-`/dashboard-summary`、`/dashboard-events` 和 `/dashboard-api-detail` 会返回弱 `ETag`；内置看板轮询会自动带上 `If-None-Match`，数据未变化时复用本地缓存。外部脚本也可在下一次请求带上 `If-None-Match`，接口返回 304 时跳过重复解析和传输。
+`/dashboard-summary`、`/dashboard-events`、`/dashboard-api-detail` 和 `/dashboard-events-export` 会返回弱 `ETag`；内置看板轮询会自动带上 `If-None-Match`，数据未变化时复用本地缓存。外部脚本也可在下一次请求带上 `If-None-Match`，接口返回 304 时跳过重复解析和传输。
 
 ### 查询事件
 

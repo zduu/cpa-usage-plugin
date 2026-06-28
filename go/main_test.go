@@ -1170,6 +1170,11 @@ func TestDashboardManagementEndpointsReturnNotModifiedForMatchingETag(t *testing
 		},
 		{
 			Method: "GET",
+			Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export",
+			Query:  map[string][]string{"model": {"gpt-4"}},
+		},
+		{
+			Method: "GET",
 			Path:   "/v0/management/plugins/usage-statistics/dashboard-api-detail",
 			Query:  map[string][]string{"api": {"openai · openai-prod"}},
 		},

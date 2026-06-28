@@ -128,8 +128,12 @@ func dashboardEventsETag(params EventsQuery, now time.Time) string {
 }
 
 // handleDashboardEventsExport returns all filtered event details for one export.
-func handleDashboardEventsExport(query map[string][]string) ([]byte, error) {
-	params := dashboardEventsQuery(query)
+func handleDashboardEventsExport(query map[string][]string, headers map[string][]string) ([]byte, error) {
+	params := normalizeEventsQuery(dashboardEventsQuery(query), false)
+	etag := dashboardEventsExportETag(params, time.Now())
+	if dashboardIfNoneMatch(headers, etag) {
+		return dashboardNotModified(etag)
+	}
 	result := stats.QueryAllEvents(params)
 	responseJSON, err := json.Marshal(result)
 	if err != nil {
@@ -137,13 +141,24 @@ func handleDashboardEventsExport(query map[string][]string) ([]byte, error) {
 	}
 	resp := ManagementResponse{
 		StatusCode: http.StatusOK,
-		Headers: map[string][]string{
-			"Content-Type":  {"application/json; charset=utf-8"},
-			"Cache-Control": {"no-store"},
-		},
-		Body: responseJSON,
+		Headers:    dashboardJSONHeaders(etag),
+		Body:       responseJSON,
 	}
 	return okEnvelopeJSON(string(mustMarshal(resp)))
+}
+
+func dashboardEventsExportETag(params EventsQuery, now time.Time) string {
+	key := dashboardEventCacheKeyFor(params, now)
+	return dashboardWeakETag(
+		"events-export",
+		strconv.FormatUint(stats.DashboardVersion(), 10),
+		strconv.FormatInt(key.timeBucket, 10),
+		key.rangeKey,
+		key.model,
+		key.source,
+		key.authIndex,
+		key.api,
+	)
 }
 
 // handleDashboardAPIDetail returns compact per-upstream detail widgets.
