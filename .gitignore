@@ -8,7 +8,6 @@
 .DS_Store
 temp/
 .claude/
-OPTIMIZATION_RECOMMENDATIONS.md
 
 # IDE
 .idea/
