@@ -189,9 +189,29 @@ function storageBatchTitle(storage) {
   const parts = ['最近批量写入 ' + records.toLocaleString() + ' 条'];
   const duration = num(storage.last_write_batch_duration_ms);
   if (duration > 0) parts.push('耗时 ' + formatMs(duration));
+  const avgDuration = num(storage.write_batch_avg_duration_ms);
+  if (avgDuration > 0) parts.push('平均耗时 ' + formatMs(avgDuration));
   const wait = num(storage.last_write_queue_wait_ms);
   if (wait > 0) parts.push('最长排队 ' + formatMs(wait));
+  const avgWait = num(storage.write_queue_wait_avg_ms);
+  if (avgWait > 0) parts.push('平均排队 ' + formatMs(avgWait));
   return parts.join('，');
+}
+
+function storagePressureLabel(value) {
+  switch (String(value || '')) {
+    case 'full': return '队列已满';
+    case 'backlog': return '队列积压';
+    case 'queued': return '正在排队';
+    case 'slow': return '写入偏慢';
+    case 'normal': return '正常';
+    default: return '';
+  }
+}
+
+function storagePressureTitle(storage) {
+  const label = storagePressureLabel(storage && storage.write_pressure);
+  return label ? '写入压力：' + label : '';
 }
 
 function storageTitle() {
@@ -225,33 +245,39 @@ function renderStorageStatus() {
     el.textContent = '持久化排队中';
     el.classList.add('warn');
     const capacity = num(storage.write_queue_capacity);
-    el.title = storageTitle(queued.toLocaleString() + ' 条记录等待后台写入' + (capacity > 0 ? '，队列容量 ' + capacity.toLocaleString() : ''), storageBatchTitle(storage));
+    el.title = storageTitle(queued.toLocaleString() + ' 条记录等待后台写入' + (capacity > 0 ? '，队列容量 ' + capacity.toLocaleString() : ''), storagePressureTitle(storage), storageBatchTitle(storage));
     return;
   }
   const pending = num(storage.pending_buffered_records);
   if (pending > 0) {
     el.textContent = '持久化待同步';
     el.classList.add('warn');
-    el.title = storageTitle(pending.toLocaleString() + ' 条记录待刷新到文件', storageBatchTitle(storage));
+    el.title = storageTitle(pending.toLocaleString() + ' 条记录待刷新到文件', storagePressureTitle(storage), storageBatchTitle(storage));
     return;
   }
   const pendingSync = num(storage.pending_unsynced_records);
   if (pendingSync > 0) {
     el.textContent = '持久化待落盘';
     el.classList.add('warn');
-    el.title = storageTitle(pendingSync.toLocaleString() + ' 条记录待同步到磁盘', storageBatchTitle(storage));
+    el.title = storageTitle(pendingSync.toLocaleString() + ' 条记录待同步到磁盘', storagePressureTitle(storage), storageBatchTitle(storage));
     return;
   }
   const pendingSnapshot = num(storage.pending_snapshot_records);
   if (pendingSnapshot > 0) {
     el.textContent = '快照待更新';
     el.classList.add('warn');
-    el.title = storageTitle(pendingSnapshot.toLocaleString() + ' 条记录待写入快照', storageBatchTitle(storage));
+    el.title = storageTitle(pendingSnapshot.toLocaleString() + ' 条记录待写入快照', storagePressureTitle(storage), storageBatchTitle(storage));
+    return;
+  }
+  if (storage.write_pressure === 'slow') {
+    el.textContent = '持久化写入偏慢';
+    el.classList.add('warn');
+    el.title = storageTitle(storagePressureTitle(storage), storageBatchTitle(storage));
     return;
   }
   el.textContent = storage.last_flush_at ? '持久化已同步' : '持久化已开启';
   el.classList.add('ok');
-  el.title = storageTitle(storage.last_snapshot_at || storage.loaded_path || storage.path || '', storageBatchTitle(storage));
+  el.title = storageTitle(storage.last_snapshot_at || storage.loaded_path || storage.path || '', storagePressureTitle(storage), storageBatchTitle(storage));
 }
 
 function renderHealth() {

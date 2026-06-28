@@ -516,6 +516,9 @@ test('dashboard shows storage writer batch metrics in title', async () => {
       last_write_batch_records: 12,
       last_write_batch_duration_ms: 1.6,
       last_write_queue_wait_ms: 3.2,
+      write_batch_avg_duration_ms: 2.4,
+      write_queue_wait_avg_ms: 1.2,
+      write_pressure: 'normal',
     },
   });
 
@@ -523,7 +526,27 @@ test('dashboard shows storage writer batch metrics in title', async () => {
   await waitFor(() => el.textContent === '持久化已同步');
   assert.strictEqual(el.textContent, '持久化已同步');
   assert.match(el.title, /最近批量写入 12 条/);
+  assert.match(el.title, /写入压力：正常/);
+  assert.match(el.title, /平均耗时/);
   assert.match(el.title, /最长排队/);
+});
+
+test('dashboard warns when storage writer is slow without queue backlog', async () => {
+  const { document } = createDashboardHarness({
+    storage: {
+      enabled: true,
+      path: 'usage-statistics.jsonl',
+      last_flush_at: '2026-06-28T01:00:00Z',
+      last_write_batch_records: 8,
+      write_queue_wait_avg_ms: 250,
+      write_pressure: 'slow',
+    },
+  });
+
+  const el = document.getElementById('storageStatus');
+  await waitFor(() => el.textContent === '持久化写入偏慢');
+  assert.strictEqual(el.textContent, '持久化写入偏慢');
+  assert.match(el.title, /写入压力：写入偏慢/);
 });
 
 test('dashboard uses a slower polling interval while hidden', async () => {

@@ -24,7 +24,7 @@
 - `/health.runtime` 暴露摘要缓存、事件缓存、索引规模和最近查询耗时指标。
 - 看板摘要、事件分页、上游详情和事件导出接口支持弱 ETag 与 `If-None-Match` 条件请求，前端轮询会在 304 时复用本地缓存。
 - 事件导出接口支持 JSON、CSV、JSONL 和可选 gzip；看板 CSV 导出已改为服务端生成，浏览器不再先下载完整 JSON 数组再转换。
-- 页面会显示持久化状态、后台写入队列积压、最近 writer 批次指标、待 flush 记录数、最后 flush 时间和最近导入结果。
+- 页面会显示持久化状态、后台写入队列积压、最近 writer 批次指标、writer 滑动平均、写入压力状态、待 flush 记录数、最后 flush 时间和最近导入结果。
 
 ## P0 建议
 
@@ -140,11 +140,12 @@ plugins:
 - 队列满时阻塞在统计锁外，不静默丢弃。
 - `/health.storage` 暴露 `write_queue_length`、`write_queue_capacity`、最近错误、待 flush/sync/snapshot 记录数。
 - `/health.storage` 暴露最近 writer 批次的 `last_write_batch_records`、`last_write_batch_duration_ms` 和 `last_write_queue_wait_ms`，看板底部状态 tooltip 也会显示这些指标。
+- `/health.storage` 暴露 writer 累计批次/记录、批次耗时 EWMA、队列等待 EWMA、最长等待和 `write_pressure`，看板可在无明显积压但持续写入偏慢时提示。
 
 后续可以继续补：
 
-- writer 批次耗时直方图或滑动平均，便于区分偶发抖动和持续磁盘压力。
-- 队列等待时长阈值告警或状态分级。
+- writer 批次耗时直方图或分位数，便于量化长尾磁盘抖动。
+- 将 `write_pressure` 接到外部告警或管理端全局健康提示。
 
 收益：
 
@@ -237,12 +238,13 @@ go test -run '^$' -bench 'BenchmarkSummaryWithoutDetails|BenchmarkQueryEvents|Be
 9. 持久化写入改为后台有界队列，磁盘写入、flush、fsync 和 snapshot 不再占用请求统计锁。
 10. 事件导出接口支持 JSON/CSV/JSONL 和可选 gzip，看板 CSV 导出改为服务端生成。
 11. 后台持久化 writer 批量处理队列记录，并暴露最近批次条数、写入耗时和最长排队时长。
+12. 后台 writer 暴露滑动平均、累计写入量和 `write_pressure` 状态，看板可提示持续写入偏慢。
 
 下一步建议：
 
 1. 生产配置默认开启持久化，文档强调 volume、flush、retention 和升级前导出。
 2. 推动管理接口支持真流式导出，或增加后台导出任务模式，避免超大导出占用过多内存。
-3. 给后台 writer 增加滑动平均、分位数或阈值告警，便于识别持续磁盘压力。
+3. 给后台 writer 增加分位数或外部告警，便于识别长尾磁盘压力。
 4. 大数据量场景再评估 SQLite、bbolt 或 daily aggregate 归档。
 
 ## 发布前检查清单

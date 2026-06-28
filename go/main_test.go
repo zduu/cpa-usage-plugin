@@ -571,6 +571,41 @@ func TestStorageStatusReportsWriteBatchMetrics(t *testing.T) {
 	if status.LastWriteQueueWaitMs < 0 {
 		t.Fatalf("last write queue wait = %f, want >= 0", status.LastWriteQueueWaitMs)
 	}
+	if status.WriteBatchesTotal <= 0 {
+		t.Fatalf("write batches total = %d, want > 0", status.WriteBatchesTotal)
+	}
+	if status.WriteRecordsTotal <= 0 {
+		t.Fatalf("write records total = %d, want > 0", status.WriteRecordsTotal)
+	}
+	if status.WriteBatchAvgDurationMs <= 0 {
+		t.Fatalf("write batch avg duration = %f, want > 0", status.WriteBatchAvgDurationMs)
+	}
+	if status.WritePressure == "" {
+		t.Fatalf("write pressure should be reported when storage is enabled: %#v", status)
+	}
+}
+
+func TestStorageWritePressureClassification(t *testing.T) {
+	tests := []struct {
+		name          string
+		queueLength   int
+		queueCapacity int
+		avgWait       time.Duration
+		want          string
+	}{
+		{name: "normal", queueCapacity: 4096, want: "normal"},
+		{name: "queued", queueLength: 1, queueCapacity: 4096, want: "queued"},
+		{name: "backlog", queueLength: 1024, queueCapacity: 4096, want: "backlog"},
+		{name: "full", queueLength: 4096, queueCapacity: 4096, want: "full"},
+		{name: "slow", queueCapacity: 4096, avgWait: 250 * time.Millisecond, want: "slow"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := storageWritePressure(tt.queueLength, tt.queueCapacity, tt.avgWait); got != tt.want {
+				t.Fatalf("storageWritePressure() = %q, want %q", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestStorageSnapshotWritesByRecordInterval(t *testing.T) {

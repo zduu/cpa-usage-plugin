@@ -83,6 +83,11 @@ type RequestStatistics struct {
 	storageLastWriteBatchRecords  int
 	storageLastWriteBatchDuration time.Duration
 	storageLastWriteQueueWait     time.Duration
+	storageWriteBatchesTotal      int64
+	storageWriteRecordsTotal      int64
+	storageWriteBatchDurationAvg  time.Duration
+	storageWriteQueueWaitAvg      time.Duration
+	storageWriteQueueWaitMax      time.Duration
 	storageWorkerRunning          bool
 	storageQueue                  chan persistedDetail
 	storageStop                   chan struct{}
@@ -696,7 +701,25 @@ func (s *RequestStatistics) updateStorageWriteBatchMetrics(records int, duration
 	s.storageLastWriteBatchRecords = records
 	s.storageLastWriteBatchDuration = duration
 	s.storageLastWriteQueueWait = queueWait
+	s.storageWriteBatchesTotal++
+	s.storageWriteRecordsTotal += int64(records)
+	s.storageWriteBatchDurationAvg = storageDurationEWMA(s.storageWriteBatchDurationAvg, duration)
+	s.storageWriteQueueWaitAvg = storageDurationEWMA(s.storageWriteQueueWaitAvg, queueWait)
+	if queueWait > s.storageWriteQueueWaitMax {
+		s.storageWriteQueueWaitMax = queueWait
+	}
 	s.mu.Unlock()
+}
+
+func storageDurationEWMA(previous time.Duration, current time.Duration) time.Duration {
+	if current < 0 {
+		current = 0
+	}
+	if previous <= 0 {
+		return current
+	}
+	const alpha = 0.2
+	return time.Duration(float64(previous)*(1-alpha) + float64(current)*alpha)
 }
 
 func (w *storageWorkerState) open(s *RequestStatistics, now time.Time) error {
@@ -1300,6 +1323,11 @@ func (s *RequestStatistics) closeStorageLocked() {
 	s.storageLastWriteBatchRecords = 0
 	s.storageLastWriteBatchDuration = 0
 	s.storageLastWriteQueueWait = 0
+	s.storageWriteBatchesTotal = 0
+	s.storageWriteRecordsTotal = 0
+	s.storageWriteBatchDurationAvg = 0
+	s.storageWriteQueueWaitAvg = 0
+	s.storageWriteQueueWaitMax = 0
 	s.storageWorkerRunning = false
 	if s.storageEnabled && strings.TrimSpace(s.storageDir) != "" {
 		if err := s.writeStorageSnapshotLocked(now); err != nil {
@@ -3331,9 +3359,11 @@ func (s *RequestStatistics) StorageStatus() StorageStatus {
 
 func (s *RequestStatistics) storageStatusLocked() StorageStatus {
 	queueLength, queueCapacity := 0, 0
+	writePressure := ""
 	if s.storageEnabled {
 		queueLength = s.storageWriteQueueLength
 		queueCapacity = s.storageWriteQueueCapacity
+		writePressure = storageWritePressure(queueLength, queueCapacity, s.storageWriteQueueWaitAvg)
 	}
 	status := StorageStatus{
 		Enabled:                       s.storageEnabled,
@@ -3348,6 +3378,12 @@ func (s *RequestStatistics) storageStatusLocked() StorageStatus {
 		LastWriteBatchRecords:         s.storageLastWriteBatchRecords,
 		LastWriteBatchDurationMs:      storageDurationMilliseconds(s.storageLastWriteBatchDuration),
 		LastWriteQueueWaitMs:          storageDurationMilliseconds(s.storageLastWriteQueueWait),
+		WriteBatchesTotal:             s.storageWriteBatchesTotal,
+		WriteRecordsTotal:             s.storageWriteRecordsTotal,
+		WriteBatchAvgDurationMs:       storageDurationMilliseconds(s.storageWriteBatchDurationAvg),
+		WriteQueueWaitAvgMs:           storageDurationMilliseconds(s.storageWriteQueueWaitAvg),
+		WriteQueueWaitMaxMs:           storageDurationMilliseconds(s.storageWriteQueueWaitMax),
+		WritePressure:                 writePressure,
 		SnapshotIntervalSeconds:       int(s.storageSnapshotInterval.Seconds()),
 		SnapshotRecordIntervalRecords: s.storageSnapshotRecordInterval,
 		SyncIntervalSeconds:           int(s.storageSyncInterval.Seconds()),
@@ -3363,6 +3399,22 @@ func (s *RequestStatistics) storageStatusLocked() StorageStatus {
 		status.LastSyncAt = s.storageLastSync.UTC().Format(time.RFC3339)
 	}
 	return status
+}
+
+func storageWritePressure(queueLength int, queueCapacity int, avgWait time.Duration) string {
+	if queueCapacity > 0 && queueLength >= queueCapacity {
+		return "full"
+	}
+	if queueCapacity > 0 && queueLength*4 >= queueCapacity {
+		return "backlog"
+	}
+	if queueLength > 0 {
+		return "queued"
+	}
+	if avgWait >= 200*time.Millisecond {
+		return "slow"
+	}
+	return "normal"
 }
 
 func storageDurationMilliseconds(duration time.Duration) float64 {
