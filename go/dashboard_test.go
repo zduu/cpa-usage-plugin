@@ -339,6 +339,18 @@ func TestDashboardSummaryHasMetadata(t *testing.T) {
 	if summary.Meta.CurrentDetailCount != 1 {
 		t.Fatalf("detail_count = %d, want 1", summary.Meta.CurrentDetailCount)
 	}
+	if summary.Meta.SummaryVersion == 0 {
+		t.Fatal("summary_version should be populated after recording a request")
+	}
+	if summary.Meta.Storage.Enabled {
+		t.Fatal("storage should be disabled in this test configuration")
+	}
+	if summary.Meta.LastRecordedAt == "" {
+		t.Fatal("last_recorded_at should not be empty after recording a request")
+	}
+	if _, err := time.Parse(time.RFC3339, summary.Meta.LastRecordedAt); err != nil {
+		t.Fatalf("last_recorded_at is not RFC3339: %q", summary.Meta.LastRecordedAt)
+	}
 	if summary.Meta.LastImport != nil {
 		t.Fatal("last_import should be nil when no import has occurred")
 	}
@@ -374,6 +386,12 @@ func TestDashboardEventsPagination(t *testing.T) {
 	if result.Limit != 5 || result.Offset != 0 {
 		t.Fatalf("limit/offset mismatch: %d/%d", result.Limit, result.Offset)
 	}
+	for i, event := range result.Events {
+		want := int64(29 - i)
+		if event.Tokens.TotalTokens != want {
+			t.Fatalf("page 1 event %d total tokens = %d, want %d", i, event.Tokens.TotalTokens, want)
+		}
+	}
 
 	// Second page
 	result2 := stats.QueryEvents(EventsQuery{Limit: 5, Offset: 5})
@@ -385,6 +403,105 @@ func TestDashboardEventsPagination(t *testing.T) {
 	}
 	if result2.Offset != 5 {
 		t.Fatalf("page 2: offset = %d, want 5", result2.Offset)
+	}
+	for i, event := range result2.Events {
+		want := int64(24 - i)
+		if event.Tokens.TotalTokens != want {
+			t.Fatalf("page 2 event %d total tokens = %d, want %d", i, event.Tokens.TotalTokens, want)
+		}
+	}
+}
+
+func TestDashboardEventsCacheReturnsCopyAndInvalidates(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 200, DedupWindowMinutes: 0})
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < 3; i++ {
+		stats.Record(UsageRecord{
+			Provider:    "openai",
+			Model:       "gpt-4",
+			RequestedAt: base.Add(time.Duration(i) * time.Minute),
+			Detail:      UsageDetail{TotalTokens: int64(10 + i)},
+		})
+	}
+
+	params := EventsQuery{Limit: 2, Offset: 0}
+	first := stats.QueryEvents(params)
+	if len(first.Events) != 2 || first.Events[0].Tokens.TotalTokens != 12 {
+		t.Fatalf("first events = %#v, want newest two events", first.Events)
+	}
+	if len(stats.eventQueryCache) != 1 {
+		t.Fatalf("event cache len = %d, want 1", len(stats.eventQueryCache))
+	}
+	if len(stats.eventIndex) != 3 || stats.eventIndexVersion != stats.summaryVersion {
+		t.Fatalf("event index len/version = %d/%d, want 3/%d", len(stats.eventIndex), stats.eventIndexVersion, stats.summaryVersion)
+	}
+
+	first.Events[0].Model = "mutated"
+	second := stats.QueryEvents(params)
+	if second.Events[0].Model == "mutated" {
+		t.Fatalf("cached result was mutated through returned events: %#v", second.Events[0])
+	}
+
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-4",
+		RequestedAt: base.Add(10 * time.Minute),
+		Detail:      UsageDetail{TotalTokens: 99},
+	})
+	if len(stats.eventQueryCache) != 0 {
+		t.Fatalf("event cache len after record = %d, want 0", len(stats.eventQueryCache))
+	}
+	if stats.eventIndex != nil || stats.eventIndexVersion != 0 {
+		t.Fatalf("event index after record = len %d version %d, want cleared", len(stats.eventIndex), stats.eventIndexVersion)
+	}
+	updated := stats.QueryEvents(params)
+	if len(updated.Events) != 2 || updated.Events[0].Tokens.TotalTokens != 99 {
+		t.Fatalf("updated events = %#v, want new event first", updated.Events)
+	}
+}
+
+func TestRuntimeStatusReportsDashboardMetrics(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 200, DedupWindowMinutes: 0})
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < 2; i++ {
+		stats.Record(UsageRecord{
+			Provider:    "openai",
+			Model:       "gpt-4",
+			RequestedAt: base.Add(time.Duration(i) * time.Minute),
+			Detail:      UsageDetail{TotalTokens: int64(10 + i)},
+		})
+	}
+
+	_ = stats.SummaryWithoutDetails()
+	_ = stats.SummaryWithoutDetails()
+	params := EventsQuery{Limit: 2, Offset: 0}
+	_ = stats.QueryEvents(params)
+	_ = stats.QueryEvents(params)
+	_ = stats.QueryAPIDetail("openai", "24h", 10, 10)
+
+	status := stats.RuntimeStatus()
+	if status.SummaryCacheMisses != 1 || status.SummaryCacheHits != 1 {
+		t.Fatalf("summary cache metrics = hits %d misses %d, want 1/1", status.SummaryCacheHits, status.SummaryCacheMisses)
+	}
+	if !status.SummaryCacheValid || status.SummaryVersion == 0 {
+		t.Fatalf("summary cache status = valid %v version %d", status.SummaryCacheValid, status.SummaryVersion)
+	}
+	if status.EventCacheMisses != 1 || status.EventCacheHits != 1 || status.EventCacheEntries != 1 {
+		t.Fatalf("event cache metrics = hits %d misses %d entries %d, want 1/1/1",
+			status.EventCacheHits, status.EventCacheMisses, status.EventCacheEntries)
+	}
+	if status.LastEventsQueryTotal != 2 || status.EventIndexEntries != 2 {
+		t.Fatalf("event query metrics = total %d index entries %d, want 2/2",
+			status.LastEventsQueryTotal, status.EventIndexEntries)
+	}
+	if status.APIDetailQueries != 1 || status.LastAPIDetailTotalEvents != 2 {
+		t.Fatalf("api detail metrics = queries %d total %d, want 1/2",
+			status.APIDetailQueries, status.LastAPIDetailTotalEvents)
+	}
+	if status.LastSummaryDurationMs <= 0 || status.LastEventsQueryDurationMs <= 0 || status.LastAPIDetailDurationMs <= 0 {
+		t.Fatalf("query durations should be reported: %#v", status)
 	}
 }
 
@@ -411,6 +528,70 @@ func TestDashboardEventsModelFilter(t *testing.T) {
 	}
 	if result.Events[0].Model != "gpt-4" {
 		t.Fatalf("filtered event model = %q, want gpt-4", result.Events[0].Model)
+	}
+}
+
+func TestDashboardEventsSecondaryIndexesBuildAndInvalidate(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 200, DedupWindowMinutes: 0})
+	base := time.Now().Add(-time.Hour)
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Source:      "openai-prod",
+		Model:       "gpt-4",
+		AuthIndex:   "auth-a",
+		RequestedAt: base,
+		Detail:      UsageDetail{TotalTokens: 100},
+	})
+	stats.Record(UsageRecord{
+		Provider:    "deepseek",
+		Source:      "deepseek-prod",
+		Model:       "deepseek-chat",
+		AuthIndex:   "auth-b",
+		RequestedAt: base.Add(time.Minute),
+		Detail:      UsageDetail{TotalTokens: 50},
+	})
+
+	if result := stats.QueryEvents(EventsQuery{Limit: 50, Model: "gpt-4"}); result.Total != 1 {
+		t.Fatalf("model-filtered total = %d, want 1", result.Total)
+	}
+	if result := stats.QueryEvents(EventsQuery{Limit: 50, Source: "deepseek-prod"}); result.Total != 1 {
+		t.Fatalf("source-filtered total = %d, want 1", result.Total)
+	}
+	if result := stats.QueryEvents(EventsQuery{Limit: 50, AuthIndex: "auth-a"}); result.Total != 1 {
+		t.Fatalf("auth-filtered total = %d, want 1", result.Total)
+	}
+
+	func() {
+		stats.mu.RLock()
+		defer stats.mu.RUnlock()
+		if len(stats.eventModelIndex["gpt-4"]) != 1 {
+			t.Fatalf("model index len = %d, want 1", len(stats.eventModelIndex["gpt-4"]))
+		}
+		if len(stats.eventSourceIndex["deepseek-prod"]) != 1 {
+			t.Fatalf("source index len = %d, want 1", len(stats.eventSourceIndex["deepseek-prod"]))
+		}
+		if len(stats.eventAuthIndex["auth-a"]) != 1 {
+			t.Fatalf("auth index len = %d, want 1", len(stats.eventAuthIndex["auth-a"]))
+		}
+	}()
+
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Source:      "openai-prod",
+		Model:       "gpt-4",
+		AuthIndex:   "auth-a",
+		RequestedAt: base.Add(2 * time.Minute),
+		Detail:      UsageDetail{TotalTokens: 120},
+	})
+
+	stats.mu.RLock()
+	defer stats.mu.RUnlock()
+	if stats.eventIndex != nil || stats.eventModelIndex != nil || stats.eventSourceIndex != nil || stats.eventAuthIndex != nil {
+		t.Fatalf("event indexes should be cleared after record")
+	}
+	if stats.eventIndexVersion != 0 {
+		t.Fatalf("event index version after record = %d, want 0", stats.eventIndexVersion)
 	}
 }
 
@@ -447,6 +628,212 @@ func TestDashboardEventsEmptyResult(t *testing.T) {
 	}
 }
 
+func TestDashboardEventsNegativeOffsetUsesFirstPage(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0})
+	base := time.Now().Add(-time.Minute)
+	for i := 0; i < 3; i++ {
+		stats.Record(UsageRecord{
+			Provider:    "openai",
+			Model:       "gpt-4",
+			RequestedAt: base.Add(time.Duration(i) * time.Second),
+			Detail:      UsageDetail{TotalTokens: int64(i + 1)},
+		})
+	}
+
+	result := stats.QueryEvents(EventsQuery{Limit: 2, Offset: -10})
+	if result.Offset != 0 {
+		t.Fatalf("offset = %d, want 0", result.Offset)
+	}
+	if len(result.Events) != 2 {
+		t.Fatalf("events = %d, want 2", len(result.Events))
+	}
+	if result.Events[0].Tokens.TotalTokens != 3 || result.Events[1].Tokens.TotalTokens != 2 {
+		t.Fatalf("events are not the first page in descending order: %#v", result.Events)
+	}
+}
+
+func TestDashboardEventsExportReturnsAllFilteredRows(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0})
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < 7; i++ {
+		stats.Record(UsageRecord{
+			Provider:    "openai",
+			Model:       "gpt-4",
+			RequestedAt: base.Add(time.Duration(i) * time.Minute),
+			Detail:      UsageDetail{TotalTokens: int64(10 + i)},
+		})
+	}
+	for i := 0; i < 3; i++ {
+		stats.Record(UsageRecord{
+			Provider:    "deepseek",
+			Model:       "deepseek-chat",
+			RequestedAt: base.Add(time.Duration(i+10) * time.Minute),
+			Detail:      UsageDetail{TotalTokens: int64(100 + i)},
+		})
+	}
+
+	result := stats.QueryAllEvents(EventsQuery{Limit: 2, Offset: 5, API: "openai"})
+	if result.Total != 7 || len(result.Events) != 7 {
+		t.Fatalf("export result total/len = %d/%d, want 7/7", result.Total, len(result.Events))
+	}
+	if result.Limit != 7 || result.Offset != 0 {
+		t.Fatalf("export limit/offset = %d/%d, want 7/0", result.Limit, result.Offset)
+	}
+	if result.Events[0].Tokens.TotalTokens != 16 || result.Events[6].Tokens.TotalTokens != 10 {
+		t.Fatalf("export events not sorted newest first or not filtered: %#v", result.Events)
+	}
+}
+
+func TestDashboardEventsExportLimitKeepsTotalAndMarksTruncated(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0})
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < 6; i++ {
+		stats.Record(UsageRecord{
+			Provider:    "openai",
+			Model:       "gpt-4",
+			RequestedAt: base.Add(time.Duration(i) * time.Minute),
+			Detail:      UsageDetail{TotalTokens: int64(10 + i)},
+		})
+	}
+
+	result := stats.QueryExportEvents(EventsQuery{}, 3)
+	if result.Total != 6 || len(result.Events) != 3 || result.Limit != 3 || !result.Truncated {
+		t.Fatalf("limited export = total %d len %d limit %d truncated %v, want 6/3/3/true", result.Total, len(result.Events), result.Limit, result.Truncated)
+	}
+	if result.Events[0].Tokens.TotalTokens != 15 || result.Events[2].Tokens.TotalTokens != 13 {
+		t.Fatalf("limited export should keep newest rows first: %#v", result.Events)
+	}
+
+	filtered := stats.QueryExportEvents(EventsQuery{Range: "24h", Model: "gpt-4"}, 10)
+	if filtered.Total != 6 || len(filtered.Events) != 6 || filtered.Limit != 6 || filtered.Truncated {
+		t.Fatalf("uncapped filtered export = total %d len %d limit %d truncated %v, want 6/6/6/false", filtered.Total, len(filtered.Events), filtered.Limit, filtered.Truncated)
+	}
+}
+
+func TestDashboardEventsExportPageUsesSnapshotAndLimit(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0})
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < 6; i++ {
+		stats.Record(UsageRecord{
+			Provider:    "openai",
+			Model:       "gpt-4",
+			RequestedAt: base.Add(time.Duration(i) * time.Minute),
+			Detail:      UsageDetail{TotalTokens: int64(10 + i)},
+		})
+	}
+	snapshotAt := base.Add(10 * time.Minute)
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-4",
+		RequestedAt: snapshotAt.Add(time.Minute),
+		Detail:      UsageDetail{TotalTokens: 999},
+	})
+
+	first := stats.QueryExportEventsPage(EventsQuery{}, 0, 2, 3, snapshotAt)
+	if first.Total != 6 || len(first.Events) != 2 || first.Limit != 3 || !first.Truncated {
+		t.Fatalf("first export page = total %d len %d limit %d truncated %v, want 6/2/3/true", first.Total, len(first.Events), first.Limit, first.Truncated)
+	}
+	if first.Events[0].Tokens.TotalTokens != 15 || first.Events[1].Tokens.TotalTokens != 14 {
+		t.Fatalf("first export page should start with newest snapshot rows: %#v", first.Events)
+	}
+
+	second := stats.QueryExportEventsPage(EventsQuery{}, 2, 2, 3, snapshotAt)
+	if second.Total != 6 || len(second.Events) != 1 || second.Limit != 3 || !second.Truncated {
+		t.Fatalf("second export page = total %d len %d limit %d truncated %v, want 6/1/3/true", second.Total, len(second.Events), second.Limit, second.Truncated)
+	}
+	if second.Events[0].Tokens.TotalTokens != 13 {
+		t.Fatalf("second export page should continue after offset: %#v", second.Events)
+	}
+}
+
+func TestDashboardEventsExportLimitQueryReturnsTruncationHeaders(t *testing.T) {
+	previousStats := stats
+	stats = NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0})
+	t.Cleanup(func() { stats = previousStats })
+
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < 5; i++ {
+		stats.Record(UsageRecord{
+			Provider:    "openai",
+			Model:       "gpt-4",
+			RequestedAt: base.Add(time.Duration(i) * time.Minute),
+			Detail:      UsageDetail{TotalTokens: int64(10 + i)},
+		})
+	}
+
+	resp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "GET",
+		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export",
+		Query:  map[string][]string{"limit": {"2"}},
+	}), nil)
+
+	if got := resp.Headers["X-Total-Count"]; len(got) != 1 || got[0] != "5" {
+		t.Fatalf("X-Total-Count = %#v, want 5", got)
+	}
+	if got := resp.Headers["X-Exported-Count"]; len(got) != 1 || got[0] != "2" {
+		t.Fatalf("X-Exported-Count = %#v, want 2", got)
+	}
+	if got := resp.Headers["X-Export-Truncated"]; len(got) != 1 || got[0] != "true" {
+		t.Fatalf("X-Export-Truncated = %#v, want true", got)
+	}
+
+	var result EventsResult
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatalf("unmarshal limited export: %v", err)
+	}
+	if result.Total != 5 || len(result.Events) != 2 || result.Limit != 2 || !result.Truncated {
+		t.Fatalf("limited management export = total %d len %d limit %d truncated %v, want 5/2/2/true", result.Total, len(result.Events), result.Limit, result.Truncated)
+	}
+
+	runtime := stats.RuntimeStatus()
+	if runtime.EventsExportRequests != 1 || runtime.EventsExportTruncatedTotal != 1 {
+		t.Fatalf("export runtime counters = requests %d truncated %d, want 1/1", runtime.EventsExportRequests, runtime.EventsExportTruncatedTotal)
+	}
+	if runtime.LastEventsExportTotal != 5 || runtime.LastEventsExported != 2 || !runtime.LastEventsExportTruncated {
+		t.Fatalf("last export rows = total %d exported %d truncated %v, want 5/2/true",
+			runtime.LastEventsExportTotal, runtime.LastEventsExported, runtime.LastEventsExportTruncated)
+	}
+}
+
+func TestDashboardEventsExportQueryLimitCannotExceedConfiguredLimit(t *testing.T) {
+	previousStats := stats
+	stats = NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0, ExportMaxRecords: 3})
+	t.Cleanup(func() { stats = previousStats })
+
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < 5; i++ {
+		stats.Record(UsageRecord{
+			Provider:    "openai",
+			Model:       "gpt-4",
+			RequestedAt: base.Add(time.Duration(i) * time.Minute),
+			Detail:      UsageDetail{TotalTokens: int64(10 + i)},
+		})
+	}
+
+	resp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "GET",
+		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export",
+		Query:  map[string][]string{"limit": {"4"}},
+	}), nil)
+
+	if got := resp.Headers["X-Exported-Count"]; len(got) != 1 || got[0] != "3" {
+		t.Fatalf("X-Exported-Count = %#v, want configured cap 3", got)
+	}
+	var result EventsResult
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatalf("unmarshal limited export: %v", err)
+	}
+	if result.Total != 5 || len(result.Events) != 3 || result.Limit != 3 || !result.Truncated {
+		t.Fatalf("configured limited export = total %d len %d limit %d truncated %v, want 5/3/3/true", result.Total, len(result.Events), result.Limit, result.Truncated)
+	}
+}
+
 func TestDashboardEventsRangeFilter(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{MaxDetailsPerModel: 200, DedupWindowMinutes: 0, RetentionDays: 30})
@@ -467,6 +854,134 @@ func TestDashboardEventsRangeFilter(t *testing.T) {
 	result := stats.QueryEvents(EventsQuery{Limit: 50, Range: "24h"})
 	if result.Total != 1 {
 		t.Fatalf("24h range: total = %d, want 1", result.Total)
+	}
+}
+
+func TestDashboardAPIDetailAggregatesErrorsAndRecentEvents(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 200, DedupWindowMinutes: 0, RetentionDays: 30})
+	base := time.Now().Add(-30 * time.Minute)
+	for i := 0; i < 5; i++ {
+		failed := i == 1 || i == 3
+		record := UsageRecord{
+			Provider:    "openai",
+			Source:      "openai",
+			Model:       "gpt-4",
+			RequestedAt: base.Add(time.Duration(i) * time.Minute),
+			Failed:      failed,
+			Detail:      UsageDetail{InputTokens: int64(10 + i), OutputTokens: 5},
+		}
+		if failed {
+			record.Failure = UsageFailure{StatusCode: 401, Body: `{"error":{"type":"ModelError","message":"not supported"}}`}
+		}
+		stats.Record(record)
+	}
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Source:      "openai",
+		Model:       "gpt-4",
+		RequestedAt: time.Now().Add(-48 * time.Hour),
+		Failed:      true,
+		Failure:     UsageFailure{StatusCode: 500, Body: "old failure"},
+		Detail:      UsageDetail{TotalTokens: 99},
+	})
+	stats.Record(UsageRecord{
+		Provider:    "deepseek",
+		Source:      "deepseek",
+		Model:       "deepseek-chat",
+		RequestedAt: base.Add(time.Hour),
+		Detail:      UsageDetail{TotalTokens: 1000},
+	})
+
+	result := stats.QueryAPIDetail("openai", "24h", 3, 10)
+	if result.API != "openai" {
+		t.Fatalf("api = %q, want openai", result.API)
+	}
+	if result.Summary.TotalRequests != 5 || result.Summary.FailureCount != 2 || result.Summary.SuccessCount != 3 {
+		t.Fatalf("summary = %#v, want 5 total / 2 failed / 3 success", result.Summary)
+	}
+	if result.Summary.TotalTokens != 85 {
+		t.Fatalf("total tokens = %d, want 85", result.Summary.TotalTokens)
+	}
+	if len(result.ModelStats) != 1 || result.ModelStats[0].Model != "gpt-4" || result.ModelStats[0].TotalRequests != 5 {
+		t.Fatalf("model stats = %#v", result.ModelStats)
+	}
+	if len(result.SourceStats) != 1 || result.SourceStats[0].Source != "openai" || result.SourceStats[0].TotalRequests != 5 {
+		t.Fatalf("source stats = %#v", result.SourceStats)
+	}
+	if len(result.ErrorStats) != 1 || result.ErrorStats[0].StatusCode != 401 || result.ErrorStats[0].Count != 2 {
+		t.Fatalf("error stats = %#v, want one 401 x2", result.ErrorStats)
+	}
+	if len(result.RecentEvents) != 3 {
+		t.Fatalf("recent events = %d, want 3", len(result.RecentEvents))
+	}
+	if !result.RecentEvents[0].Timestamp.After(result.RecentEvents[1].Timestamp) ||
+		!result.RecentEvents[1].Timestamp.After(result.RecentEvents[2].Timestamp) {
+		t.Fatalf("recent events not sorted descending: %#v", result.RecentEvents)
+	}
+	if result.TotalEvents != 5 {
+		t.Fatalf("total events = %d, want 5", result.TotalEvents)
+	}
+}
+
+func TestDashboardAPIDetailAllRangeUsesAggregatesAfterDetailTrim(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 2, DedupWindowMinutes: 0, RetentionDays: 0})
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < 5; i++ {
+		stats.Record(UsageRecord{
+			Provider:    "openai",
+			Source:      "openai-prod",
+			Model:       "gpt-4",
+			RequestedAt: base.Add(time.Duration(i) * time.Minute),
+			Detail:      UsageDetail{InputTokens: int64(i + 1), OutputTokens: 10},
+		})
+	}
+
+	result := stats.QueryAPIDetail("openai · openai-prod", "all", 10, 10)
+	if result.Summary.TotalRequests != 5 {
+		t.Fatalf("summary total_requests = %d, want 5", result.Summary.TotalRequests)
+	}
+	if len(result.ModelStats) != 1 || result.ModelStats[0].TotalRequests != 5 {
+		t.Fatalf("model stats = %#v, want aggregate total 5", result.ModelStats)
+	}
+	if len(result.SourceStats) != 1 || result.SourceStats[0].Source != "openai-prod" || result.SourceStats[0].TotalRequests != 5 {
+		t.Fatalf("source stats = %#v, want aggregate source total 5", result.SourceStats)
+	}
+	if len(result.RecentEvents) != 2 {
+		t.Fatalf("recent events = %d, want retained detail count 2", len(result.RecentEvents))
+	}
+	if result.TotalEvents != 5 {
+		t.Fatalf("total events = %d, want aggregate total 5", result.TotalEvents)
+	}
+}
+
+func TestDashboardAPIDetailRecentEventsTieBreaksByModel(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 200, DedupWindowMinutes: 0, RetentionDays: 30})
+	ts := time.Now().Add(-5 * time.Minute)
+
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Source:      "openai",
+		Model:       "z-model",
+		RequestedAt: ts,
+		Detail:      UsageDetail{TotalTokens: 10},
+	})
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Source:      "openai",
+		Model:       "a-model",
+		RequestedAt: ts,
+		Detail:      UsageDetail{TotalTokens: 20},
+	})
+
+	result := stats.QueryAPIDetail("openai", "24h", 2, 10)
+	if len(result.RecentEvents) != 2 {
+		t.Fatalf("recent events = %d, want 2", len(result.RecentEvents))
+	}
+	if result.RecentEvents[0].Model != "a-model" || result.RecentEvents[1].Model != "z-model" {
+		t.Fatalf("recent events = %#v, want same timestamp sorted by model", result.RecentEvents)
 	}
 }
 
@@ -617,6 +1132,134 @@ func TestSummaryWithoutDetailsMatchesCounts(t *testing.T) {
 	}
 	if summary.Usage.TotalTokens != full.TotalTokens {
 		t.Fatalf("total_tokens: summary=%d full=%d", summary.Usage.TotalTokens, full.TotalTokens)
+	}
+}
+
+func TestSummaryWithoutDetailsKeepsAggregatesAfterDetailTrim(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 2, RetentionDays: 0, DedupWindowMinutes: 0})
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < 3; i++ {
+		source := "source-shared"
+		authIndex := "auth-live"
+		apiKey := "sk-client-live-123456"
+		if i == 0 {
+			authIndex = "auth-old"
+			apiKey = "sk-client-old-123456"
+		}
+		stats.Record(UsageRecord{
+			Provider:    "openai",
+			Model:       "gpt-4.1",
+			APIKey:      apiKey,
+			AuthIndex:   authIndex,
+			Source:      source,
+			RequestedAt: base.Add(time.Duration(i) * time.Minute),
+			Latency:     time.Duration((i+1)*10) * time.Millisecond,
+			Detail: UsageDetail{
+				InputTokens:     int64(i + 1),
+				OutputTokens:    int64((i + 1) * 10),
+				ReasoningTokens: int64((i + 1) * 100),
+				CachedTokens:    int64(i + 5),
+			},
+		})
+	}
+
+	assertSummary := func(label string, summary DashboardSummary) {
+		if summary.Usage.TotalRequests != 3 || summary.Usage.TotalTokens != 666 {
+			t.Fatalf("%s usage totals = requests %d tokens %d, want 3/666", label, summary.Usage.TotalRequests, summary.Usage.TotalTokens)
+		}
+		if summary.Usage.InputTokens != 6 || summary.Usage.OutputTokens != 60 ||
+			summary.Usage.ReasoningTokens != 600 || summary.Usage.CachedTokens != 18 {
+			t.Fatalf("%s usage token parts = %#v", label, summary.Usage)
+		}
+		if summary.Usage.AvgLatencyMs != 20 {
+			t.Fatalf("%s usage avg latency = %v, want 20", label, summary.Usage.AvgLatencyMs)
+		}
+		if len(summary.Usage.APIs) != 1 {
+			t.Fatalf("%s api count = %d, want 1: %#v", label, len(summary.Usage.APIs), summary.Usage.APIs)
+		}
+		var api APISnapshotWithoutDetails
+		for _, candidate := range summary.Usage.APIs {
+			api = candidate
+		}
+		if api.InputTokens != 6 || api.OutputTokens != 60 || api.ReasoningTokens != 600 ||
+			api.CachedTokens != 18 || api.AvgLatencyMs != 20 {
+			t.Fatalf("%s api aggregate = %#v", label, api)
+		}
+		model := api.Models["gpt-4.1"]
+		if model.InputTokens != 6 || model.OutputTokens != 60 || model.ReasoningTokens != 600 ||
+			model.CachedTokens != 18 || model.AvgLatencyMs != 20 {
+			t.Fatalf("%s model aggregate = %#v", label, model)
+		}
+		if len(summary.ModelStats) != 1 || summary.ModelStats[0].InputTokens != 6 ||
+			summary.ModelStats[0].AvgLatencyMs != 20 {
+			t.Fatalf("%s model stats = %#v", label, summary.ModelStats)
+		}
+		if len(summary.SourceStats) != 1 || summary.SourceStats[0].Source != "source-shared" ||
+			summary.SourceStats[0].TotalRequests != 3 || summary.SourceStats[0].TotalTokens != 666 {
+			t.Fatalf("%s source stats = %#v", label, summary.SourceStats)
+		}
+		if len(summary.CredentialStats) != 2 {
+			t.Fatalf("%s credential stats = %#v", label, summary.CredentialStats)
+		}
+		if len(summary.ClientAPIStats) != 1 || summary.ClientAPIStats[0].TotalRequests != 3 ||
+			summary.ClientAPIStats[0].TotalTokens != 666 || len(summary.ClientAPIStats[0].Models) != 1 ||
+			summary.ClientAPIStats[0].Models[0].TotalRequests != 3 {
+			t.Fatalf("%s client api stats = %#v", label, summary.ClientAPIStats)
+		}
+		var healthTotal int64
+		var healthSuccess int64
+		var healthFailure int64
+		for _, slot := range summary.HealthGrid {
+			healthTotal += slot.Total
+			healthSuccess += slot.Success
+			healthFailure += slot.Failure
+		}
+		if healthTotal != 3 || healthSuccess != 3 || healthFailure != 0 {
+			t.Fatalf("%s health totals = total %d success %d failure %d, want 3/3/0", label, healthTotal, healthSuccess, healthFailure)
+		}
+	}
+
+	assertSummary("incremental", stats.SummaryWithoutDetails())
+}
+
+func TestSummaryWithoutDetailsCacheReturnsCopyAndInvalidates(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0})
+	stats.Record(UsageRecord{
+		Provider: "openai",
+		Model:    "gpt-4",
+		Detail:   UsageDetail{TotalTokens: 100},
+	})
+
+	first := stats.SummaryWithoutDetails()
+	if !stats.summaryCacheValid {
+		t.Fatal("summary cache should be populated after first summary")
+	}
+	first.Usage.TotalRequests = 999
+	first.Usage.APIs["openai"] = APISnapshotWithoutDetails{TotalRequests: 999}
+	first.HealthGrid[0].Total = 999
+
+	second := stats.SummaryWithoutDetails()
+	if second.Usage.TotalRequests != 1 {
+		t.Fatalf("cached summary was mutated through returned value: total_requests=%d", second.Usage.TotalRequests)
+	}
+	if second.Usage.APIs["openai"].TotalRequests != 1 {
+		t.Fatalf("cached API summary was mutated: %#v", second.Usage.APIs["openai"])
+	}
+	if second.HealthGrid[0].Total == 999 {
+		t.Fatal("cached health grid was mutated through returned value")
+	}
+
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-4",
+		RequestedAt: time.Now().Add(time.Second),
+		Detail:      UsageDetail{TotalTokens: 50},
+	})
+	third := stats.SummaryWithoutDetails()
+	if third.Usage.TotalRequests != 2 || third.Usage.TotalTokens != 150 {
+		t.Fatalf("summary cache did not invalidate after record: requests=%d tokens=%d", third.Usage.TotalRequests, third.Usage.TotalTokens)
 	}
 }
 

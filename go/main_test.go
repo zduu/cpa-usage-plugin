@@ -1,9 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,6 +38,20 @@ func decodeManagementResponse(t *testing.T, raw []byte, target interface{}) Mana
 		}
 	}
 	return resp
+}
+
+func waitForTestCondition(t *testing.T, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !condition() {
+		t.Fatal("condition not met before timeout")
+	}
 }
 
 func invokeManagement(t *testing.T, req ManagementRequest) []byte {
@@ -292,6 +311,123 @@ func TestExportUsageIncludesMetadata(t *testing.T) {
 	}
 }
 
+func TestHealthCheckReportsAlertsForRuntimePressure(t *testing.T) {
+	previousStats := stats
+	stats = NewRequestStatistics()
+	t.Cleanup(func() { stats = previousStats })
+
+	stats.RecordEventsExport("json", false, EventsResult{
+		Events:    []RequestDetail{{Model: "gpt-4"}},
+		Total:     10,
+		Limit:     1,
+		Truncated: true,
+	}, 1024, 512, 25*time.Millisecond)
+
+	var health struct {
+		Status  string        `json:"status"`
+		Alerts  []HealthAlert `json:"alerts"`
+		Runtime RuntimeStatus `json:"runtime"`
+	}
+	resp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "GET",
+		Path:   "/v0/management/plugins/usage-statistics/health",
+	}), &health)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("health status code = %d, want 200", resp.StatusCode)
+	}
+	if health.Status != "warn" {
+		t.Fatalf("health status = %q, want warn", health.Status)
+	}
+	if len(health.Alerts) != 1 || health.Alerts[0].Code != "events_export_truncated" || health.Alerts[0].Severity != "warn" {
+		t.Fatalf("health alerts = %#v, want events_export_truncated warning", health.Alerts)
+	}
+	if health.Runtime.EventsExportRequests != 1 || !health.Runtime.LastEventsExportTruncated {
+		t.Fatalf("health runtime export metrics = %#v", health.Runtime)
+	}
+}
+
+func TestHealthAlertsClassifyStoragePressure(t *testing.T) {
+	alerts := healthAlerts(StorageStatus{WritePressure: "slow"}, RuntimeStatus{})
+	if healthStatus(alerts) != "warn" || len(alerts) != 1 || alerts[0].Code != "storage_writer_slow" {
+		t.Fatalf("slow storage alerts = status %q alerts %#v, want warn/storage_writer_slow", healthStatus(alerts), alerts)
+	}
+
+	alerts = healthAlerts(StorageStatus{WritePressure: "full"}, RuntimeStatus{})
+	if healthStatus(alerts) != "error" || len(alerts) != 1 || alerts[0].Code != "storage_writer_full" {
+		t.Fatalf("full storage alerts = status %q alerts %#v, want error/storage_writer_full", healthStatus(alerts), alerts)
+	}
+
+	alerts = healthAlerts(StorageStatus{LastError: "disk full"}, RuntimeStatus{})
+	if healthStatus(alerts) != "error" || len(alerts) != 1 || alerts[0].Code != "storage_error" {
+		t.Fatalf("storage error alerts = status %q alerts %#v, want error/storage_error", healthStatus(alerts), alerts)
+	}
+}
+
+func TestHealthAlertsReportRuntimeAndTailPressure(t *testing.T) {
+	alerts := healthAlerts(StorageStatus{
+		WriteBatchesTotal:       healthStorageWriterTailMinBatches,
+		WriteBatchP99DurationMs: healthStorageWriterTailLatencyMs,
+		WriteQueueWaitP99Ms:     healthStorageWriterTailLatencyMs,
+	}, RuntimeStatus{
+		EventsExportRequests:       1,
+		LastEventsExportDurationMs: healthSlowEventsExportDurationMs,
+		ConditionalRequests: map[string]ConditionalRequestStatus{
+			"dashboard-events": {
+				Requests:    healthConditionalLowHitMinRequests,
+				NotModified: 1,
+				Misses:      healthConditionalLowHitMinRequests - 1,
+				HitRate:     0.05,
+			},
+			"dashboard-summary": {
+				Requests:    healthConditionalLowHitMinRequests,
+				NotModified: healthConditionalLowHitMinRequests,
+				HitRate:     1,
+			},
+		},
+	})
+
+	if healthStatus(alerts) != "warn" {
+		t.Fatalf("health status = %q alerts %#v, want warn", healthStatus(alerts), alerts)
+	}
+	wantCodes := map[string]bool{
+		"events_export_slow":                 true,
+		"storage_writer_p99_slow":            true,
+		"storage_writer_queue_p99_slow":      true,
+		"dashboard_conditional_low_hit_rate": true,
+	}
+	if len(alerts) != len(wantCodes) {
+		t.Fatalf("alerts = %#v, want codes %#v", alerts, wantCodes)
+	}
+	for _, alert := range alerts {
+		if !wantCodes[alert.Code] || alert.Severity != "warn" {
+			t.Fatalf("unexpected alert = %#v, want warn in %#v", alert, wantCodes)
+		}
+	}
+}
+
+func TestHealthAlertsIgnoreLowSignalThresholds(t *testing.T) {
+	alerts := healthAlerts(StorageStatus{
+		WriteBatchesTotal:       healthStorageWriterTailMinBatches - 1,
+		WriteBatchP99DurationMs: healthStorageWriterTailLatencyMs,
+		WriteQueueWaitP99Ms:     healthStorageWriterTailLatencyMs,
+	}, RuntimeStatus{
+		EventsExportRequests:       1,
+		LastEventsExportDurationMs: healthSlowEventsExportDurationMs - 1,
+		ConditionalRequests: map[string]ConditionalRequestStatus{
+			"dashboard-events": {
+				Requests: healthConditionalLowHitMinRequests - 1,
+				Misses:   healthConditionalLowHitMinRequests - 1,
+				HitRate:  0,
+			},
+		},
+	})
+
+	if len(alerts) != 0 || healthStatus(alerts) != "ok" {
+		t.Fatalf("alerts = %#v status %q, want no alerts/ok", alerts, healthStatus(alerts))
+	}
+}
+
 func TestRecordStoresMaskedClientAPIKeyAndCleanSource(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Record(UsageRecord{
@@ -420,6 +556,668 @@ func TestStorageReplayRestoresRecords(t *testing.T) {
 	}
 }
 
+func TestStorageWritesDateShards(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage-statistics.jsonl")
+	cfg := runtimeConfig{
+		MaxDetailsPerModel:  100,
+		RetentionDays:       0,
+		DedupWindowMinutes:  0,
+		StorageEnabled:      true,
+		StoragePath:         path,
+		StorageFlushSeconds: 1,
+	}
+
+	stats := NewRequestStatistics()
+	stats.Configure(cfg)
+	stats.Record(UsageRecord{
+		Provider: "openai",
+		Model:    "gpt-4",
+		Detail:   UsageDetail{TotalTokens: 11},
+	})
+	status := stats.StorageStatus()
+	stats.Close()
+
+	shardPath := status.LoadedPath
+	if !strings.Contains(shardPath, string(filepath.Separator)+"usage-statistics"+string(filepath.Separator)+"usage-") {
+		t.Fatalf("loaded storage path %q does not look like a date shard", shardPath)
+	}
+	if _, err := os.Stat(shardPath); err != nil {
+		t.Fatalf("date shard %q was not written: %v", shardPath, err)
+	}
+	snapshotPath := storageSnapshotPath(filepath.Dir(shardPath))
+	if _, err := os.Stat(snapshotPath); err != nil {
+		t.Fatalf("snapshot %q was not written on close: %v", snapshotPath, err)
+	}
+
+	reloaded := NewRequestStatistics()
+	reloaded.Configure(cfg)
+	defer reloaded.Close()
+	if got := reloaded.Snapshot().TotalRequests; got != 1 {
+		t.Fatalf("replayed date shard requests = %d, want 1", got)
+	}
+}
+
+func TestStorageStatusReportsPendingBufferedRecords(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage-statistics.jsonl")
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		MaxDetailsPerModel:  100,
+		RetentionDays:       0,
+		DedupWindowMinutes:  0,
+		StorageEnabled:      true,
+		StoragePath:         path,
+		StorageFlushSeconds: 3600,
+	})
+	defer stats.Close()
+
+	stats.Record(UsageRecord{
+		Provider: "openai",
+		Model:    "gpt-4",
+		Detail:   UsageDetail{TotalTokens: 1},
+	})
+	waitForTestCondition(t, func() bool { return stats.StorageStatus().LastFlushAt != "" })
+	stats.Record(UsageRecord{
+		Provider: "openai",
+		Model:    "gpt-4",
+		Detail:   UsageDetail{TotalTokens: 2},
+	})
+
+	waitForTestCondition(t, func() bool { return stats.StorageStatus().PendingBufferedRecords == 1 })
+	if status := stats.StorageStatus(); status.WriteQueueCapacity != defaultStorageWriteQueueSize {
+		t.Fatalf("write queue capacity = %d, want %d", status.WriteQueueCapacity, defaultStorageWriteQueueSize)
+	}
+	stats.Close()
+	if status := stats.StorageStatus(); status.PendingBufferedRecords != 0 {
+		t.Fatalf("pending buffered records after close = %d, want 0", status.PendingBufferedRecords)
+	}
+}
+
+func TestStorageWorkerCollectsQueuedBatches(t *testing.T) {
+	queue := make(chan persistedDetail, defaultStorageWriteBatchSize+4)
+	first := persistedDetail{API: "api-0", Model: "gpt-4"}
+	for i := 1; i < defaultStorageWriteBatchSize+4; i++ {
+		queue <- persistedDetail{API: fmt.Sprintf("api-%d", i), Model: "gpt-4"}
+	}
+
+	batch := collectStorageBatch(queue, first)
+	if len(batch) != defaultStorageWriteBatchSize {
+		t.Fatalf("batch size = %d, want %d", len(batch), defaultStorageWriteBatchSize)
+	}
+	if batch[0].API != "api-0" {
+		t.Fatalf("first batch item = %q, want api-0", batch[0].API)
+	}
+	wantLast := fmt.Sprintf("api-%d", defaultStorageWriteBatchSize-1)
+	if batch[len(batch)-1].API != wantLast {
+		t.Fatalf("last batch item = %q, want %s", batch[len(batch)-1].API, wantLast)
+	}
+	if remaining := len(queue); remaining != 4 {
+		t.Fatalf("remaining queue length = %d, want 4", remaining)
+	}
+}
+
+func TestStorageStatusReportsWriteBatchMetrics(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage-statistics.jsonl")
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		MaxDetailsPerModel:  100,
+		RetentionDays:       0,
+		DedupWindowMinutes:  0,
+		StorageEnabled:      true,
+		StoragePath:         path,
+		StorageFlushSeconds: 3600,
+	})
+	defer stats.Close()
+
+	for i := 0; i < 16; i++ {
+		stats.Record(UsageRecord{
+			Provider:    "openai",
+			Model:       "gpt-4",
+			RequestedAt: time.Now().Add(time.Duration(i) * time.Millisecond),
+			Detail:      UsageDetail{TotalTokens: int64(i + 1)},
+		})
+	}
+
+	waitForTestCondition(t, func() bool { return stats.StorageStatus().LastWriteBatchRecords > 0 })
+	status := stats.StorageStatus()
+	if status.LastWriteBatchRecords <= 0 {
+		t.Fatalf("last write batch records = %d, want > 0", status.LastWriteBatchRecords)
+	}
+	if status.LastWriteBatchDurationMs <= 0 {
+		t.Fatalf("last write batch duration = %f, want > 0", status.LastWriteBatchDurationMs)
+	}
+	if status.LastWriteQueueWaitMs < 0 {
+		t.Fatalf("last write queue wait = %f, want >= 0", status.LastWriteQueueWaitMs)
+	}
+	if status.WriteBatchesTotal <= 0 {
+		t.Fatalf("write batches total = %d, want > 0", status.WriteBatchesTotal)
+	}
+	if status.WriteRecordsTotal <= 0 {
+		t.Fatalf("write records total = %d, want > 0", status.WriteRecordsTotal)
+	}
+	if status.WriteBatchAvgDurationMs <= 0 {
+		t.Fatalf("write batch avg duration = %f, want > 0", status.WriteBatchAvgDurationMs)
+	}
+	if status.WritePressure == "" {
+		t.Fatalf("write pressure should be reported when storage is enabled: %#v", status)
+	}
+}
+
+func TestStorageStatusReportsWriteBatchPercentiles(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.mu.Lock()
+	stats.storageEnabled = true
+	stats.mu.Unlock()
+
+	for i := 1; i <= 100; i++ {
+		stats.updateStorageWriteBatchMetrics(1, time.Duration(i)*time.Millisecond, time.Duration(i*2)*time.Millisecond)
+	}
+
+	status := stats.StorageStatus()
+	if status.WriteBatchP95DurationMs != 95 {
+		t.Fatalf("write batch p95 = %f, want 95", status.WriteBatchP95DurationMs)
+	}
+	if status.WriteBatchP99DurationMs != 99 {
+		t.Fatalf("write batch p99 = %f, want 99", status.WriteBatchP99DurationMs)
+	}
+	if status.WriteQueueWaitP95Ms != 190 {
+		t.Fatalf("write queue wait p95 = %f, want 190", status.WriteQueueWaitP95Ms)
+	}
+	if status.WriteQueueWaitP99Ms != 198 {
+		t.Fatalf("write queue wait p99 = %f, want 198", status.WriteQueueWaitP99Ms)
+	}
+}
+
+func TestStorageWriteDurationSampleWindowIsBounded(t *testing.T) {
+	var samples []time.Duration
+	for i := 0; i < storageWriteSampleMax+10; i++ {
+		samples = appendStorageDurationSample(samples, time.Duration(i)*time.Millisecond)
+	}
+	if len(samples) != storageWriteSampleMax {
+		t.Fatalf("sample window size = %d, want %d", len(samples), storageWriteSampleMax)
+	}
+	if samples[0] != 10*time.Millisecond {
+		t.Fatalf("oldest retained sample = %s, want 10ms", samples[0])
+	}
+}
+
+func TestStorageWritePressureClassification(t *testing.T) {
+	tests := []struct {
+		name          string
+		queueLength   int
+		queueCapacity int
+		avgWait       time.Duration
+		want          string
+	}{
+		{name: "normal", queueCapacity: 4096, want: "normal"},
+		{name: "queued", queueLength: 1, queueCapacity: 4096, want: "queued"},
+		{name: "backlog", queueLength: 1024, queueCapacity: 4096, want: "backlog"},
+		{name: "full", queueLength: 4096, queueCapacity: 4096, want: "full"},
+		{name: "slow", queueCapacity: 4096, avgWait: 250 * time.Millisecond, want: "slow"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := storageWritePressure(tt.queueLength, tt.queueCapacity, tt.avgWait); got != tt.want {
+				t.Fatalf("storageWritePressure() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStorageSnapshotWritesByRecordInterval(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "usage-statistics")
+	cfg := runtimeConfig{
+		MaxDetailsPerModel:            100,
+		RetentionDays:                 0,
+		DedupWindowMinutes:            0,
+		StorageEnabled:                true,
+		StoragePath:                   dir,
+		StorageFlushSeconds:           3600,
+		StorageSnapshotSeconds:        3600,
+		StorageSnapshotRecordInterval: 2,
+	}
+
+	stats := NewRequestStatistics()
+	stats.Configure(cfg)
+	defer stats.Close()
+	snapshotPath := storageSnapshotPath(dir)
+
+	stats.Record(UsageRecord{
+		Provider: "openai",
+		Model:    "gpt-4",
+		Detail:   UsageDetail{TotalTokens: 1},
+	})
+	if _, err := os.Stat(snapshotPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("snapshot should not exist after one record, stat err = %v", err)
+	}
+
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-4",
+		RequestedAt: time.Now().Add(time.Second),
+		Detail:      UsageDetail{TotalTokens: 2},
+	})
+	waitForTestCondition(t, func() bool {
+		_, err := os.Stat(snapshotPath)
+		return err == nil
+	})
+	status := stats.StorageStatus()
+	if status.LastSnapshotAt == "" {
+		t.Fatalf("last snapshot time should be reported: %#v", status)
+	}
+	if status.PendingSnapshotRecords != 0 {
+		t.Fatalf("pending snapshot records = %d, want 0", status.PendingSnapshotRecords)
+	}
+	if status.SnapshotRecordIntervalRecords != 2 {
+		t.Fatalf("snapshot record interval = %d, want 2", status.SnapshotRecordIntervalRecords)
+	}
+	stats.Close()
+
+	reloaded := NewRequestStatistics()
+	reloaded.Configure(cfg)
+	defer reloaded.Close()
+	if got := reloaded.Snapshot().TotalRequests; got != 2 {
+		t.Fatalf("reloaded requests = %d, want 2", got)
+	}
+}
+
+func TestStorageSyncsByRecordInterval(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "usage-statistics")
+	cfg := runtimeConfig{
+		MaxDetailsPerModel:        100,
+		RetentionDays:             0,
+		DedupWindowMinutes:        0,
+		StorageEnabled:            true,
+		StoragePath:               dir,
+		StorageFlushSeconds:       3600,
+		StorageSyncRecordInterval: 2,
+	}
+
+	stats := NewRequestStatistics()
+	stats.Configure(cfg)
+	defer stats.Close()
+	stats.Record(UsageRecord{
+		Provider: "openai",
+		Model:    "gpt-4",
+		Detail:   UsageDetail{TotalTokens: 1},
+	})
+	waitForTestCondition(t, func() bool {
+		status := stats.StorageStatus()
+		return status.PendingUnsyncedRecords == 1 && status.LastSyncAt == ""
+	})
+
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-4",
+		RequestedAt: time.Now().Add(time.Second),
+		Detail:      UsageDetail{TotalTokens: 2},
+	})
+	waitForTestCondition(t, func() bool {
+		status := stats.StorageStatus()
+		return status.PendingUnsyncedRecords == 0 && status.PendingBufferedRecords == 0 && status.LastSyncAt != ""
+	})
+	status := stats.StorageStatus()
+	if status.PendingUnsyncedRecords != 0 {
+		t.Fatalf("pending unsynced records = %d, want 0", status.PendingUnsyncedRecords)
+	}
+	if status.PendingBufferedRecords != 0 {
+		t.Fatalf("pending buffered records = %d, want 0 after sync flush", status.PendingBufferedRecords)
+	}
+	if status.LastSyncAt == "" {
+		t.Fatalf("last sync time should be reported: %#v", status)
+	}
+	if status.SyncRecordIntervalRecords != 2 {
+		t.Fatalf("sync record interval = %d, want 2", status.SyncRecordIntervalRecords)
+	}
+	stats.Close()
+}
+
+func TestStoragePersistsImportedSnapshotThroughBackgroundWriter(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "usage-statistics")
+	cfg := runtimeConfig{
+		MaxDetailsPerModel:  100,
+		RetentionDays:       0,
+		DedupWindowMinutes:  0,
+		StorageEnabled:      true,
+		StoragePath:         dir,
+		StorageFlushSeconds: 3600,
+	}
+	when := time.Now().Add(-time.Minute).UTC()
+	imported := StatisticsSnapshot{
+		APIs: map[string]APISnapshot{
+			"openai": {
+				Models: map[string]ModelSnapshot{
+					"gpt-4": {
+						Details: []RequestDetail{{
+							Model:     "gpt-4",
+							Timestamp: when,
+							Source:    "openai-prod",
+							Provider:  "openai",
+							Tokens:    TokenStats{TotalTokens: 7},
+						}},
+					},
+				},
+			},
+		},
+	}
+
+	stats := NewRequestStatistics()
+	stats.Configure(cfg)
+	result := stats.MergeSnapshot(imported)
+	if result.Added != 1 {
+		t.Fatalf("import added = %d, want 1", result.Added)
+	}
+	stats.Close()
+
+	reloaded := NewRequestStatistics()
+	reloaded.Configure(cfg)
+	defer reloaded.Close()
+	snapshot := reloaded.Snapshot()
+	if snapshot.TotalRequests != 1 || snapshot.TotalTokens != 7 {
+		t.Fatalf("replayed imported snapshot = requests %d tokens %d, want 1/7", snapshot.TotalRequests, snapshot.TotalTokens)
+	}
+}
+
+func TestStorageReplaySkipsInvalidLines(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage-statistics.jsonl")
+	when := time.Now().Add(-time.Minute).UTC()
+	lines := []string{
+		string(mustMarshal(persistedDetail{
+			API:   "openai",
+			Model: "gpt-4",
+			Detail: RequestDetail{
+				Model:     "gpt-4",
+				Timestamp: when,
+				Source:    "openai-prod",
+				Provider:  "openai",
+				Tokens:    TokenStats{InputTokens: 10, OutputTokens: 5},
+			},
+		})),
+		`{"api":"broken","model":`,
+		string(mustMarshal(persistedDetail{
+			API:   "deepseek",
+			Model: "deepseek-chat",
+			Detail: RequestDetail{
+				Model:     "deepseek-chat",
+				Timestamp: when.Add(time.Second),
+				Source:    "deepseek-prod",
+				Provider:  "deepseek",
+				Tokens:    TokenStats{TotalTokens: 7},
+			},
+		})),
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatalf("write storage fixture: %v", err)
+	}
+
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		MaxDetailsPerModel: 100,
+		RetentionDays:      0,
+		DedupWindowMinutes: 0,
+		StorageEnabled:     true,
+		StoragePath:        path,
+	})
+	defer stats.Close()
+
+	snapshot := stats.Snapshot()
+	if snapshot.TotalRequests != 2 || snapshot.TotalTokens != 22 {
+		t.Fatalf("snapshot after invalid replay = requests %d tokens %d, want 2/22", snapshot.TotalRequests, snapshot.TotalTokens)
+	}
+	if status := stats.StorageStatus(); !strings.Contains(status.LastError, "skipped 1 invalid line") {
+		t.Fatalf("storage last error = %q, want invalid line warning", status.LastError)
+	}
+}
+
+func TestStorageSnapshotSkipsOlderShardsAndReplaysSameDayDelta(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "usage-statistics")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir storage dir: %v", err)
+	}
+	snapshotAt := time.Now().UTC().Truncate(24 * time.Hour).Add(12 * time.Hour)
+	snapshotDetail := RequestDetail{
+		Model:     "gpt-4",
+		Timestamp: snapshotAt.Add(-time.Minute),
+		Source:    "openai-prod",
+		Provider:  "openai",
+		Tokens:    TokenStats{TotalTokens: 10},
+	}
+	newDetail := RequestDetail{
+		Model:     "gpt-4",
+		Timestamp: snapshotAt.Add(time.Minute),
+		Source:    "openai-prod",
+		Provider:  "openai",
+		Tokens:    TokenStats{TotalTokens: 7},
+	}
+	snapshotPayload := persistedStorageSnapshot{
+		Version:     1,
+		GeneratedAt: snapshotAt.Format(time.RFC3339),
+		Usage: StatisticsSnapshot{
+			APIs: map[string]APISnapshot{
+				"openai": {
+					Models: map[string]ModelSnapshot{
+						"gpt-4": {Details: []RequestDetail{snapshotDetail}},
+					},
+				},
+			},
+		},
+	}
+	if err := os.WriteFile(storageSnapshotPath(dir), mustMarshal(snapshotPayload), 0o600); err != nil {
+		t.Fatalf("write storage snapshot: %v", err)
+	}
+	writePersisted := func(path string, details ...RequestDetail) {
+		t.Helper()
+		var lines []string
+		for _, detail := range details {
+			lines = append(lines, string(mustMarshal(persistedDetail{API: "openai", Model: "gpt-4", Detail: detail})))
+		}
+		if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+			t.Fatalf("write storage shard: %v", err)
+		}
+	}
+	oldDetail := RequestDetail{
+		Model:     "gpt-4",
+		Timestamp: snapshotAt.Add(-24 * time.Hour),
+		Source:    "openai-prod",
+		Provider:  "openai",
+		Tokens:    TokenStats{TotalTokens: 99},
+	}
+	writePersisted(filepath.Join(dir, storageFileName(storageDate(oldDetail.Timestamp))), oldDetail)
+	writePersisted(filepath.Join(dir, storageFileName(storageDate(snapshotAt))), snapshotDetail, newDetail)
+
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		MaxDetailsPerModel: 100,
+		RetentionDays:      30,
+		DedupWindowMinutes: 0,
+		StorageEnabled:     true,
+		StoragePath:        dir,
+	})
+	defer stats.Close()
+
+	snapshot := stats.Snapshot()
+	if snapshot.TotalRequests != 2 || snapshot.TotalTokens != 17 {
+		t.Fatalf("snapshot restore = requests %d tokens %d, want 2/17", snapshot.TotalRequests, snapshot.TotalTokens)
+	}
+}
+
+func TestStorageSnapshotRestoresAggregateTotalsWithTrimmedDetails(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "usage-statistics")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir storage dir: %v", err)
+	}
+	now := time.Now().UTC()
+	details := []RequestDetail{
+		{
+			Model:     "gpt-4",
+			Timestamp: now.Add(-time.Minute),
+			Source:    "openai-prod",
+			Provider:  "openai",
+			Tokens:    TokenStats{TotalTokens: 10},
+		},
+		{
+			Model:     "gpt-4",
+			Timestamp: now,
+			Source:    "openai-prod",
+			Provider:  "openai",
+			Tokens:    TokenStats{TotalTokens: 10},
+		},
+	}
+	snapshotPayload := persistedStorageSnapshot{
+		Version:     1,
+		GeneratedAt: now.Format(time.RFC3339),
+		Usage: StatisticsSnapshot{
+			TotalRequests: 5,
+			SuccessCount:  5,
+			TotalTokens:   50,
+			APIs: map[string]APISnapshot{
+				"openai": {
+					TotalRequests: 5,
+					SuccessCount:  5,
+					TotalTokens:   50,
+					Models: map[string]ModelSnapshot{
+						"gpt-4": {
+							TotalRequests: 5,
+							SuccessCount:  5,
+							TotalTokens:   50,
+							Details:       details,
+						},
+					},
+				},
+			},
+		},
+	}
+	if err := os.WriteFile(storageSnapshotPath(dir), mustMarshal(snapshotPayload), 0o600); err != nil {
+		t.Fatalf("write storage snapshot: %v", err)
+	}
+
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		MaxDetailsPerModel: 2,
+		RetentionDays:      0,
+		DedupWindowMinutes: 0,
+		StorageEnabled:     true,
+		StoragePath:        dir,
+	})
+	defer stats.Close()
+
+	snapshot := stats.Snapshot()
+	apiKey := "openai · openai-prod"
+	model := snapshot.APIs[apiKey].Models["gpt-4"]
+	if snapshot.TotalRequests != 5 || snapshot.TotalTokens != 50 {
+		t.Fatalf("snapshot totals = requests %d tokens %d, want 5/50", snapshot.TotalRequests, snapshot.TotalTokens)
+	}
+	if model.TotalRequests != 5 || len(model.Details) != 2 {
+		t.Fatalf("model after restore = requests %d details %d, want 5/2", model.TotalRequests, len(model.Details))
+	}
+	detail := stats.QueryAPIDetail(apiKey, "all", 10, 10)
+	if detail.Summary.TotalRequests != 5 || len(detail.RecentEvents) != 2 {
+		t.Fatalf("api detail after restore = summary %#v recent %d, want total 5 and 2 recent", detail.Summary, len(detail.RecentEvents))
+	}
+}
+
+func TestStorageSnapshotCompactsShardsBeforeSnapshotDay(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "usage-statistics")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir storage dir: %v", err)
+	}
+	now := time.Now().UTC()
+	oldTime := now.Add(-24 * time.Hour)
+	writePersisted := func(path string, detailTime time.Time, tokens int64) {
+		t.Helper()
+		raw := mustMarshal(persistedDetail{
+			API:   "openai",
+			Model: "gpt-4",
+			Detail: RequestDetail{
+				Model:     "gpt-4",
+				Timestamp: detailTime,
+				Source:    "openai-prod",
+				Provider:  "openai",
+				Tokens:    TokenStats{TotalTokens: tokens},
+			},
+		})
+		if err := os.WriteFile(path, append(raw, '\n'), 0o600); err != nil {
+			t.Fatalf("write storage shard: %v", err)
+		}
+	}
+	oldPath := filepath.Join(dir, storageFileName(storageDate(oldTime)))
+	todayPath := filepath.Join(dir, storageFileName(storageDate(now)))
+	writePersisted(oldPath, oldTime, 5)
+	writePersisted(todayPath, now, 7)
+
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		MaxDetailsPerModel: 100,
+		RetentionDays:      30,
+		DedupWindowMinutes: 0,
+		StorageEnabled:     true,
+		StoragePath:        dir,
+	})
+	stats.Close()
+
+	if _, err := os.Stat(oldPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old shard should be compacted, stat err = %v", err)
+	}
+	if _, err := os.Stat(todayPath); err != nil {
+		t.Fatalf("today shard should remain for same-day delta replay: %v", err)
+	}
+	status := stats.StorageStatus()
+	if status.LastCompactionAt == "" || status.LastCompactedShards != 1 || status.CompactedShardsTotal != 1 {
+		t.Fatalf("compaction status = %#v, want one compacted shard", status)
+	}
+}
+
+func TestStorageReplaySkipsAndCleansExpiredDateShards(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "usage-statistics")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir storage dir: %v", err)
+	}
+	now := time.Now().UTC()
+	oldTime := now.Add(-10 * 24 * time.Hour)
+	recentTime := now.Add(-time.Hour)
+	writePersisted := func(path string, detailTime time.Time, tokens int64) {
+		t.Helper()
+		raw := mustMarshal(persistedDetail{
+			API:   "openai",
+			Model: "gpt-4",
+			Detail: RequestDetail{
+				Model:     "gpt-4",
+				Timestamp: detailTime,
+				Source:    "openai-prod",
+				Provider:  "openai",
+				Tokens:    TokenStats{TotalTokens: tokens},
+			},
+		})
+		if err := os.WriteFile(path, append(raw, '\n'), 0o600); err != nil {
+			t.Fatalf("write storage shard: %v", err)
+		}
+	}
+	oldPath := filepath.Join(dir, storageFileName(storageDate(oldTime)))
+	recentPath := filepath.Join(dir, storageFileName(storageDate(recentTime)))
+	writePersisted(oldPath, oldTime, 99)
+	writePersisted(recentPath, recentTime, 7)
+
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		MaxDetailsPerModel: 100,
+		RetentionDays:      7,
+		DedupWindowMinutes: 0,
+		StorageEnabled:     true,
+		StoragePath:        dir,
+	})
+	defer stats.Close()
+
+	snapshot := stats.Snapshot()
+	if snapshot.TotalRequests != 1 || snapshot.TotalTokens != 7 {
+		t.Fatalf("snapshot after date shard replay = requests %d tokens %d, want 1/7", snapshot.TotalRequests, snapshot.TotalTokens)
+	}
+	if _, err := os.Stat(oldPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old shard still exists or stat failed unexpectedly: %v", err)
+	}
+	if _, err := os.Stat(recentPath); err != nil {
+		t.Fatalf("recent shard should remain: %v", err)
+	}
+}
+
 func TestStripCredentialSuffix(t *testing.T) {
 	tests := map[string]string{
 		"openai-compatible-opencode · apikey · 5312415661d8a481": "openai-compatible-opencode",
@@ -436,8 +1234,9 @@ func TestStripCredentialSuffix(t *testing.T) {
 	}
 }
 
-func TestRecordDeduplicatesRepeatedUsageRecords(t *testing.T) {
+func TestRecordCountsRepeatedUsageRecords(t *testing.T) {
 	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{DedupWindowMinutes: 1440})
 	when := time.Now().Add(-time.Hour)
 	record := UsageRecord{
 		Provider:    "deepseek",
@@ -455,12 +1254,12 @@ func TestRecordDeduplicatesRepeatedUsageRecords(t *testing.T) {
 	stats.Record(record)
 
 	snapshot := stats.Snapshot()
-	if snapshot.TotalRequests != 1 || snapshot.TotalTokens != 15 {
-		t.Fatalf("snapshot = %#v, want one deduplicated request", snapshot)
+	if snapshot.TotalRequests != 2 || snapshot.TotalTokens != 30 {
+		t.Fatalf("snapshot = %#v, want two counted live usage records", snapshot)
 	}
 }
 
-func TestRecordPrunesByMaxDetailsPerModelAndRebuildsTotals(t *testing.T) {
+func TestRecordPrunesByMaxDetailsPerModelWithoutChangingTotals(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{MaxDetailsPerModel: 2, RetentionDays: 0, DedupWindowMinutes: 0})
 	base := time.Now().Add(-time.Hour)
@@ -478,8 +1277,11 @@ func TestRecordPrunesByMaxDetailsPerModelAndRebuildsTotals(t *testing.T) {
 
 	snapshot := stats.Snapshot()
 	model := snapshot.APIs["deepseek"].Models["deepseek-v3.1"]
-	if snapshot.TotalRequests != 2 || snapshot.TotalTokens != 5 {
-		t.Fatalf("snapshot totals = requests %d tokens %d, want 2/5", snapshot.TotalRequests, snapshot.TotalTokens)
+	if snapshot.TotalRequests != 3 || snapshot.TotalTokens != 6 {
+		t.Fatalf("snapshot totals = requests %d tokens %d, want 3/6", snapshot.TotalRequests, snapshot.TotalTokens)
+	}
+	if model.TotalRequests != 3 || model.TotalTokens != 6 {
+		t.Fatalf("model totals = requests %d tokens %d, want 3/6", model.TotalRequests, model.TotalTokens)
 	}
 	if len(model.Details) != 2 {
 		t.Fatalf("details len = %d, want 2", len(model.Details))
@@ -588,6 +1390,20 @@ configs:
 	}
 }
 
+func TestExportMaxRecordsConfig(t *testing.T) {
+	yaml := []byte(`
+configs:
+  usage-statistics:
+    export_max_records: 2500
+`)
+	raw := []byte(`{"config_yaml":"` + base64.StdEncoding.EncodeToString(yaml) + `"}`)
+
+	cfg := parseRuntimeConfig(raw)
+	if cfg.ExportMaxRecords != 2500 {
+		t.Fatalf("export_max_records = %d, want 2500", cfg.ExportMaxRecords)
+	}
+}
+
 func TestAPIKeyHashSaltConfig(t *testing.T) {
 	yaml := []byte(`
 configs:
@@ -609,6 +1425,10 @@ configs:
     storage_enabled: true
     storage_path: "/tmp/usage-statistics.jsonl"
     storage_flush_interval_seconds: 3
+    storage_snapshot_interval_seconds: 7
+    storage_snapshot_record_interval: 11
+    storage_sync_interval_seconds: 13
+    storage_sync_record_interval: 17
     price_storage_path: "/tmp/usage-statistics-prices.json"
 `)
 	raw := []byte(`{"config_yaml":"` + base64.StdEncoding.EncodeToString(yaml) + `"}`)
@@ -622,6 +1442,18 @@ configs:
 	}
 	if cfg.StorageFlushSeconds != 3 {
 		t.Fatalf("storage_flush_interval_seconds = %d, want 3", cfg.StorageFlushSeconds)
+	}
+	if cfg.StorageSnapshotSeconds != 7 {
+		t.Fatalf("storage_snapshot_interval_seconds = %d, want 7", cfg.StorageSnapshotSeconds)
+	}
+	if cfg.StorageSnapshotRecordInterval != 11 {
+		t.Fatalf("storage_snapshot_record_interval = %d, want 11", cfg.StorageSnapshotRecordInterval)
+	}
+	if cfg.StorageSyncSeconds != 13 {
+		t.Fatalf("storage_sync_interval_seconds = %d, want 13", cfg.StorageSyncSeconds)
+	}
+	if cfg.StorageSyncRecordInterval != 17 {
+		t.Fatalf("storage_sync_record_interval = %d, want 17", cfg.StorageSyncRecordInterval)
 	}
 	if cfg.PriceStoragePath != "/tmp/usage-statistics-prices.json" {
 		t.Fatalf("price_storage_path = %q", cfg.PriceStoragePath)
@@ -657,6 +1489,18 @@ func TestRegisterResponseExposesUpdateConfigFields(t *testing.T) {
 	if !strings.Contains(string(raw), `"Name":"storage_enabled"`) {
 		t.Fatalf("register response missing storage_enabled: %s", raw)
 	}
+	if !strings.Contains(string(raw), `"Name":"storage_snapshot_interval_seconds"`) {
+		t.Fatalf("register response missing storage_snapshot_interval_seconds: %s", raw)
+	}
+	if !strings.Contains(string(raw), `"Name":"storage_snapshot_record_interval"`) {
+		t.Fatalf("register response missing storage_snapshot_record_interval: %s", raw)
+	}
+	if !strings.Contains(string(raw), `"Name":"storage_sync_interval_seconds"`) {
+		t.Fatalf("register response missing storage_sync_interval_seconds: %s", raw)
+	}
+	if !strings.Contains(string(raw), `"Name":"storage_sync_record_interval"`) {
+		t.Fatalf("register response missing storage_sync_record_interval: %s", raw)
+	}
 	if !strings.Contains(string(raw), `"Name":"price_storage_path"`) {
 		t.Fatalf("register response missing price_storage_path: %s", raw)
 	}
@@ -688,7 +1532,7 @@ func TestManagementRegisterIncludesImportExportResources(t *testing.T) {
 	for _, resource := range result.Resources {
 		resources[resource.Path] = true
 	}
-	for _, path := range []string{"/usage/export", "/usage/import"} {
+	for _, path := range []string{"/usage/export", "/usage/import", "/dashboard-events-export-jobs", "/dashboard-events-export-download"} {
 		if !resources[path] {
 			t.Fatalf("management resources missing %s: %#v", path, result.Resources)
 		}
@@ -767,6 +1611,349 @@ func TestManagementModelPricesCRUDAndPersistence(t *testing.T) {
 	}), &deleted)
 	if _, ok := deleted.Prices["gpt-4.1"]; ok {
 		t.Fatalf("deleted price still present: %#v", deleted.Prices)
+	}
+}
+
+func TestDashboardManagementEndpointsReturnNotModifiedForMatchingETag(t *testing.T) {
+	previousStats := stats
+	stats = NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0})
+	t.Cleanup(func() { stats = previousStats })
+
+	stats.Record(UsageRecord{
+		Provider: "openai",
+		Source:   "openai-prod",
+		Model:    "gpt-4",
+		Detail:   UsageDetail{TotalTokens: 11},
+	})
+
+	tests := []ManagementRequest{
+		{Method: "GET", Path: "/v0/management/plugins/usage-statistics/dashboard-summary"},
+		{
+			Method: "GET",
+			Path:   "/v0/management/plugins/usage-statistics/dashboard-events",
+			Query:  map[string][]string{"limit": {"10"}, "offset": {"0"}},
+		},
+		{
+			Method: "GET",
+			Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export",
+			Query:  map[string][]string{"model": {"gpt-4"}},
+		},
+		{
+			Method: "GET",
+			Path:   "/v0/management/plugins/usage-statistics/dashboard-api-detail",
+			Query:  map[string][]string{"api": {"openai · openai-prod"}},
+		},
+	}
+
+	for _, req := range tests {
+		first := decodeManagementResponse(t, invokeManagement(t, req), nil)
+		if first.StatusCode != http.StatusOK {
+			t.Fatalf("%s first status = %d, want 200", req.Path, first.StatusCode)
+		}
+		etag := first.Headers["ETag"]
+		if len(etag) != 1 || etag[0] == "" {
+			t.Fatalf("%s missing ETag header: %#v", req.Path, first.Headers)
+		}
+
+		req.Headers = map[string][]string{"if-none-match": {`W/"stale"`}}
+		stale := decodeManagementResponse(t, invokeManagement(t, req), nil)
+		if stale.StatusCode != http.StatusOK {
+			t.Fatalf("%s stale conditional status = %d, want 200", req.Path, stale.StatusCode)
+		}
+
+		req.Headers = map[string][]string{"if-none-match": {etag[0]}}
+		second := decodeManagementResponse(t, invokeManagement(t, req), nil)
+		if second.StatusCode != http.StatusNotModified {
+			t.Fatalf("%s conditional status = %d, want 304", req.Path, second.StatusCode)
+		}
+		if len(second.Body) != 0 {
+			t.Fatalf("%s conditional body len = %d, want 0", req.Path, len(second.Body))
+		}
+		if got := second.Headers["ETag"]; len(got) != 1 || got[0] != etag[0] {
+			t.Fatalf("%s conditional ETag = %#v, want %q", req.Path, got, etag[0])
+		}
+	}
+
+	runtime := stats.RuntimeStatus()
+	for _, endpoint := range []string{"dashboard-summary", "dashboard-events", "dashboard-events-export", "dashboard-api-detail"} {
+		conditional := runtime.ConditionalRequests[endpoint]
+		if conditional.Requests != 2 || conditional.NotModified != 1 || conditional.Misses != 1 || conditional.HitRate != 0.5 {
+			t.Fatalf("%s conditional metrics = %#v, want requests=2 not_modified=1 misses=1 hit_rate=0.5", endpoint, conditional)
+		}
+	}
+}
+
+func TestDashboardEventsExportSupportsCSVJSONLAndGzip(t *testing.T) {
+	previousStats := stats
+	stats = NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0})
+	t.Cleanup(func() { stats = previousStats })
+
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Source:      "openai-prod",
+		Model:       "gpt-4",
+		RequestedAt: time.Now().Add(-time.Minute),
+		Detail:      UsageDetail{InputTokens: 10, OutputTokens: 5},
+	})
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Source:      "openai-prod",
+		Model:       "gpt-4",
+		RequestedAt: time.Now(),
+		Failed:      true,
+		Failure:     UsageFailure{StatusCode: 429, Body: "rate limited"},
+		Detail:      UsageDetail{TotalTokens: 0},
+	})
+
+	csvResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "GET",
+		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export",
+		Query:  map[string][]string{"format": {"csv"}},
+	}), nil)
+	if got := csvResp.Headers["Content-Type"]; len(got) != 1 || !strings.HasPrefix(got[0], "text/csv") {
+		t.Fatalf("csv content type = %#v", got)
+	}
+	csvBody := string(csvResp.Body)
+	if !strings.HasPrefix(csvBody, "时间,模型,来源") || !strings.Contains(csvBody, "gpt-4") || !strings.Contains(csvBody, "rate limited") {
+		t.Fatalf("csv body missing expected rows: %q", csvBody)
+	}
+
+	jsonlResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "GET",
+		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export",
+		Query:  map[string][]string{"format": {"jsonl"}},
+	}), nil)
+	if got := jsonlResp.Headers["Content-Type"]; len(got) != 1 || !strings.HasPrefix(got[0], "application/x-ndjson") {
+		t.Fatalf("jsonl content type = %#v", got)
+	}
+	lines := strings.Split(strings.TrimSpace(string(jsonlResp.Body)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("jsonl lines = %d, want 2: %q", len(lines), string(jsonlResp.Body))
+	}
+	var first RequestDetail
+	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil || first.Model != "gpt-4" {
+		t.Fatalf("decode first jsonl line: detail=%#v err=%v", first, err)
+	}
+
+	gzipResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "GET",
+		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export",
+		Query:  map[string][]string{"format": {"csv"}, "gzip": {"1"}},
+	}), nil)
+	if got := gzipResp.Headers["Content-Type"]; len(got) != 1 || got[0] != "application/gzip" {
+		t.Fatalf("gzip content type = %#v", got)
+	}
+	if got := gzipResp.Headers["X-Export-Content-Type"]; len(got) != 1 || !strings.HasPrefix(got[0], "text/csv") {
+		t.Fatalf("gzip original content type = %#v", got)
+	}
+	if got := gzipResp.Headers["Content-Encoding"]; len(got) != 0 {
+		t.Fatalf("gzip content encoding = %#v, want none", got)
+	}
+	reader, err := gzip.NewReader(bytes.NewReader(gzipResp.Body))
+	if err != nil {
+		t.Fatalf("new gzip reader: %v", err)
+	}
+	decompressed, err := io.ReadAll(reader)
+	if closeErr := reader.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("read gzip body: %v", err)
+	}
+	if !strings.HasPrefix(string(decompressed), "时间,模型,来源") {
+		t.Fatalf("decompressed csv body = %q", string(decompressed))
+	}
+
+	etag := gzipResp.Headers["ETag"]
+	if len(etag) != 1 || etag[0] == "" {
+		t.Fatalf("gzip export missing ETag: %#v", gzipResp.Headers)
+	}
+	notModified := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method:  "GET",
+		Path:    "/v0/management/plugins/usage-statistics/dashboard-events-export",
+		Query:   map[string][]string{"format": {"csv"}, "gzip": {"1"}},
+		Headers: map[string][]string{"If-None-Match": {etag[0]}},
+	}), nil)
+	if notModified.StatusCode != http.StatusNotModified {
+		t.Fatalf("gzip conditional status = %d, want 304", notModified.StatusCode)
+	}
+	if got := notModified.Headers["Content-Type"]; len(got) != 1 || got[0] != "application/gzip" {
+		t.Fatalf("gzip conditional content type = %#v", got)
+	}
+	if got := notModified.Headers["X-Export-Content-Type"]; len(got) != 1 || !strings.HasPrefix(got[0], "text/csv") {
+		t.Fatalf("gzip conditional original content type = %#v", got)
+	}
+	if got := notModified.Headers["Content-Encoding"]; len(got) != 0 {
+		t.Fatalf("gzip conditional content encoding = %#v, want none", got)
+	}
+
+	runtime := stats.RuntimeStatus()
+	if runtime.EventsExportRequests != 3 || runtime.EventsExportGzipRequests != 1 || runtime.EventsExportTruncatedTotal != 0 {
+		t.Fatalf("export runtime counters = requests %d gzip %d truncated %d, want 3/1/0",
+			runtime.EventsExportRequests, runtime.EventsExportGzipRequests, runtime.EventsExportTruncatedTotal)
+	}
+	if runtime.LastEventsExportFormat != "csv" || !runtime.LastEventsExportGzip {
+		t.Fatalf("last export format/gzip = %q/%v, want csv/true", runtime.LastEventsExportFormat, runtime.LastEventsExportGzip)
+	}
+	if runtime.LastEventsExportTotal != 2 || runtime.LastEventsExported != 2 || runtime.LastEventsExportTruncated {
+		t.Fatalf("last export rows = total %d exported %d truncated %v, want 2/2/false",
+			runtime.LastEventsExportTotal, runtime.LastEventsExported, runtime.LastEventsExportTruncated)
+	}
+	if runtime.LastEventsExportDurationMs <= 0 || runtime.LastEventsExportRawBytes <= 0 || runtime.LastEventsExportBodyBytes <= 0 {
+		t.Fatalf("last export pressure metrics should be reported: %#v", runtime)
+	}
+}
+
+func TestDashboardEventsExportAsyncJobLifecycle(t *testing.T) {
+	previousStats := stats
+	previousJobs := dashboardExportJobs
+	stats = NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0, ExportMaxRecords: 100})
+	dashboardExportJobs = newDashboardExportJobManager()
+	t.Cleanup(func() {
+		dashboardExportJobs = previousJobs
+		stats = previousStats
+	})
+
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Source:      "openai-prod",
+		Model:       "gpt-4",
+		RequestedAt: time.Now().Add(-time.Minute),
+		Detail:      UsageDetail{InputTokens: 10, OutputTokens: 5},
+	})
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Source:      "openai-prod",
+		Model:       "gpt-4",
+		RequestedAt: time.Now(),
+		Failed:      true,
+		Failure:     UsageFailure{StatusCode: 429, Body: "rate limited"},
+	})
+
+	var created dashboardExportJobResponse
+	createResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "POST",
+		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export-jobs",
+		Query:  map[string][]string{"format": {"csv"}},
+	}), &created)
+	if createResp.StatusCode != http.StatusAccepted || created.ID == "" || created.Status == "" {
+		t.Fatalf("created async export = status %d body %#v, want 202 with job id", createResp.StatusCode, created)
+	}
+
+	var status dashboardExportJobResponse
+	waitForTestCondition(t, func() bool {
+		decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+			Method: "GET",
+			Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export-jobs",
+			Query:  map[string][]string{"id": {created.ID}},
+		}), &status)
+		return status.Status == dashboardExportJobSucceeded
+	})
+	if status.DownloadPath == "" || status.Total != 2 || status.Exported != 2 || status.BodyBytes <= 0 {
+		t.Fatalf("completed async export status = %#v, want ready counts and download path", status)
+	}
+
+	downloadResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "GET",
+		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export-download",
+		Query:  map[string][]string{"id": {created.ID}},
+	}), nil)
+	if downloadResp.StatusCode != http.StatusOK {
+		t.Fatalf("download status = %d, want 200", downloadResp.StatusCode)
+	}
+	if got := downloadResp.Headers["Content-Type"]; len(got) != 1 || !strings.HasPrefix(got[0], "text/csv") {
+		t.Fatalf("download content type = %#v", got)
+	}
+	if got := downloadResp.Headers["X-Total-Count"]; len(got) != 1 || got[0] != "2" {
+		t.Fatalf("download total header = %#v, want 2", got)
+	}
+	body := string(downloadResp.Body)
+	if !strings.HasPrefix(body, "时间,模型,来源") || !strings.Contains(body, "rate limited") {
+		t.Fatalf("download body missing expected CSV content: %q", body)
+	}
+
+	runtime := stats.RuntimeStatus()
+	if runtime.EventsExportRequests != 1 || runtime.LastEventsExportFormat != "csv" || runtime.LastEventsExported != 2 {
+		t.Fatalf("runtime async export metrics = %#v, want one csv export with 2 rows", runtime)
+	}
+
+	deleteResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "DELETE",
+		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export-jobs",
+		Query:  map[string][]string{"id": {created.ID}},
+	}), nil)
+	if deleteResp.StatusCode != http.StatusOK {
+		t.Fatalf("delete status = %d, want 200", deleteResp.StatusCode)
+	}
+
+	var gzipCreated dashboardExportJobResponse
+	gzipCreateResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "POST",
+		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export-jobs",
+		Query:  map[string][]string{"format": {"csv"}, "gzip": {"1"}},
+	}), &gzipCreated)
+	if gzipCreateResp.StatusCode != http.StatusAccepted || gzipCreated.ID == "" {
+		t.Fatalf("created gzip async export = status %d body %#v, want 202 with job id", gzipCreateResp.StatusCode, gzipCreated)
+	}
+
+	var gzipStatus dashboardExportJobResponse
+	waitForTestCondition(t, func() bool {
+		decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+			Method: "GET",
+			Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export-jobs",
+			Query:  map[string][]string{"id": {gzipCreated.ID}},
+		}), &gzipStatus)
+		return gzipStatus.Status == dashboardExportJobSucceeded
+	})
+	if gzipStatus.BodyBytes <= 0 || gzipStatus.RawBytes <= 0 || !strings.HasSuffix(gzipStatus.DownloadPath, gzipCreated.ID) {
+		t.Fatalf("completed gzip async export status = %#v, want ready download", gzipStatus)
+	}
+
+	gzipDownloadResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "GET",
+		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export-download",
+		Query:  map[string][]string{"id": {gzipCreated.ID}},
+	}), nil)
+	if gzipDownloadResp.StatusCode != http.StatusOK {
+		t.Fatalf("gzip download status = %d, want 200", gzipDownloadResp.StatusCode)
+	}
+	if got := gzipDownloadResp.Headers["Content-Type"]; len(got) != 1 || got[0] != "application/gzip" {
+		t.Fatalf("gzip download content type = %#v", got)
+	}
+	if got := gzipDownloadResp.Headers["X-Export-Content-Type"]; len(got) != 1 || !strings.HasPrefix(got[0], "text/csv") {
+		t.Fatalf("gzip download original content type = %#v", got)
+	}
+	if got := gzipDownloadResp.Headers["Content-Encoding"]; len(got) != 0 {
+		t.Fatalf("gzip download content encoding = %#v, want none", got)
+	}
+	if got := gzipDownloadResp.Headers["Content-Disposition"]; len(got) != 1 || !strings.Contains(got[0], ".csv.gz") {
+		t.Fatalf("gzip download disposition = %#v, want .csv.gz filename", got)
+	}
+	gzipReader, err := gzip.NewReader(bytes.NewReader(gzipDownloadResp.Body))
+	if err != nil {
+		t.Fatalf("new async gzip reader: %v", err)
+	}
+	gzipDecompressed, err := io.ReadAll(gzipReader)
+	if closeErr := gzipReader.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("read async gzip body: %v", err)
+	}
+	if !strings.HasPrefix(string(gzipDecompressed), "时间,模型,来源") || !strings.Contains(string(gzipDecompressed), "rate limited") {
+		t.Fatalf("async gzip decompressed body missing expected CSV content: %q", string(gzipDecompressed))
+	}
+
+	gzipDeleteResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "DELETE",
+		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export-jobs",
+		Query:  map[string][]string{"id": {gzipCreated.ID}},
+	}), nil)
+	if gzipDeleteResp.StatusCode != http.StatusOK {
+		t.Fatalf("gzip delete status = %d, want 200", gzipDeleteResp.StatusCode)
 	}
 }
 
@@ -1408,7 +2595,7 @@ func TestSnapshotIsDeepCopy(t *testing.T) {
 	}
 }
 
-func TestConfigure_ShrinkingMaxCleansUpCounters(t *testing.T) {
+func TestConfigureShrinkingMaxDetailsKeepsCounters(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{MaxDetailsPerModel: 5, RetentionDays: 0, DedupWindowMinutes: 0})
 	base := time.Now().Add(-time.Hour)
@@ -1422,15 +2609,21 @@ func TestConfigure_ShrinkingMaxCleansUpCounters(t *testing.T) {
 	}
 
 	snapBefore := stats.Snapshot()
-	if snapBefore.TotalRequests != 5 {
-		t.Fatalf("before shrink: expected 5 requests, got %d", snapBefore.TotalRequests)
+	if snapBefore.TotalRequests != 10 {
+		t.Fatalf("before shrink: expected 10 requests, got %d", snapBefore.TotalRequests)
+	}
+	if got := len(snapBefore.APIs["deepseek"].Models["deepseek-v3"].Details); got != 5 {
+		t.Fatalf("before shrink: expected 5 details, got %d", got)
 	}
 
 	// Shrink further
 	stats.Configure(runtimeConfig{MaxDetailsPerModel: 2, RetentionDays: 0, DedupWindowMinutes: 0})
 	snapAfter := stats.Snapshot()
-	if snapAfter.TotalRequests != 2 {
-		t.Fatalf("after shrink to 2: expected 2, got %d", snapAfter.TotalRequests)
+	if snapAfter.TotalRequests != 10 {
+		t.Fatalf("after shrink to 2: expected 10 requests, got %d", snapAfter.TotalRequests)
+	}
+	if got := len(snapAfter.APIs["deepseek"].Models["deepseek-v3"].Details); got != 2 {
+		t.Fatalf("after shrink to 2: expected 2 details, got %d", got)
 	}
 }
 
@@ -1578,7 +2771,7 @@ func buildBenchmarkStats(recordCount int) *RequestStatistics {
 		detail.Tokens.TotalTokens = detailTotalTokens(detail.Tokens)
 		apiName := provider + " · " + provider + "-prod"
 		if existing, ok := stats.apis[apiName]; !ok || existing == nil {
-			stats.apis[apiName] = &apiStats{Models: make(map[string]*modelStats)}
+			stats.apis[apiName] = &apiStats{Models: make(map[string]*modelStats), Sources: make(map[string]*sourceStatAccumulator)}
 		}
 		stats.apis[apiName].Models[model] = ensureBenchmarkModel(stats.apis[apiName].Models[model])
 		stats.apis[apiName].Models[model].Details = append(stats.apis[apiName].Models[model].Details, detail)
@@ -1599,10 +2792,39 @@ func buildBenchmarkSnapshot(recordCount int) StatisticsSnapshot {
 	return buildBenchmarkStats(recordCount).Snapshot()
 }
 
+func clearBenchmarkEventCache(stats *RequestStatistics) {
+	stats.mu.Lock()
+	stats.eventQueryCache = nil
+	stats.eventQueryCacheOrder = nil
+	stats.mu.Unlock()
+}
+
+func clearBenchmarkEventIndex(stats *RequestStatistics) {
+	stats.mu.Lock()
+	stats.eventIndexVersion = 0
+	stats.eventIndex = nil
+	stats.eventAPIIndex = nil
+	stats.eventModelIndex = nil
+	stats.eventSourceIndex = nil
+	stats.eventAuthIndex = nil
+	stats.mu.Unlock()
+}
+
 func BenchmarkSummaryWithoutDetails100k(b *testing.B) {
 	stats := buildBenchmarkStats(100000)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
+		_ = stats.SummaryWithoutDetails()
+	}
+}
+
+func BenchmarkSummaryWithoutDetailsRebuild100k(b *testing.B) {
+	stats := buildBenchmarkStats(100000)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		stats.mu.Lock()
+		stats.invalidateSummaryLocked()
+		stats.mu.Unlock()
 		_ = stats.SummaryWithoutDetails()
 	}
 }
@@ -1612,7 +2834,46 @@ func BenchmarkQueryEvents100k(b *testing.B) {
 	params := EventsQuery{Limit: 500, Offset: 0, Range: "7d", Model: "gpt-4.1"}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
+		clearBenchmarkEventCache(stats)
 		_ = stats.QueryEvents(params)
+	}
+}
+
+func BenchmarkQueryEventsCached100k(b *testing.B) {
+	stats := buildBenchmarkStats(100000)
+	params := EventsQuery{Limit: 500, Offset: 0, Range: "7d", Model: "gpt-4.1"}
+	_ = stats.QueryEvents(params)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = stats.QueryEvents(params)
+	}
+}
+
+func BenchmarkQueryEventsOffset100k(b *testing.B) {
+	stats := buildBenchmarkStats(100000)
+	params := EventsQuery{Limit: 500, Offset: 500, Range: "7d", Model: "gpt-4.1"}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		clearBenchmarkEventCache(stats)
+		_ = stats.QueryEvents(params)
+	}
+}
+
+func BenchmarkQueryAPIDetail100k(b *testing.B) {
+	stats := buildBenchmarkStats(100000)
+	_ = stats.QueryAPIDetail("openai · openai-prod", "7d", 120, 20)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = stats.QueryAPIDetail("openai · openai-prod", "7d", 120, 20)
+	}
+}
+
+func BenchmarkQueryAPIDetailColdIndex100k(b *testing.B) {
+	stats := buildBenchmarkStats(100000)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		clearBenchmarkEventIndex(stats)
+		_ = stats.QueryAPIDetail("openai · openai-prod", "7d", 120, 20)
 	}
 }
 

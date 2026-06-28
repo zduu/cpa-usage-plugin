@@ -33,9 +33,21 @@ func handleManagement(requestBody []byte) ([]byte, error) {
 	case req.Method == "GET" && tail == "dashboard":
 		return handleDashboardPage()
 	case req.Method == "GET" && tail == "dashboard-summary":
-		return handleDashboardSummary()
+		return handleDashboardSummary(req.Headers)
 	case req.Method == "GET" && tail == "dashboard-events":
-		return handleDashboardEvents(req.Query)
+		return handleDashboardEvents(req.Query, req.Headers)
+	case req.Method == "GET" && tail == "dashboard-events-export":
+		return handleDashboardEventsExport(req.Query, req.Headers)
+	case req.Method == "POST" && tail == "dashboard-events-export-jobs":
+		return handleDashboardEventsExportJobCreate(req.Query)
+	case req.Method == "GET" && tail == "dashboard-events-export-jobs":
+		return handleDashboardEventsExportJobStatus(req.Query)
+	case req.Method == "DELETE" && tail == "dashboard-events-export-jobs":
+		return handleDashboardEventsExportJobDelete(req.Query)
+	case req.Method == "GET" && tail == "dashboard-events-export-download":
+		return handleDashboardEventsExportDownload(req.Query)
+	case req.Method == "GET" && tail == "dashboard-api-detail":
+		return handleDashboardAPIDetail(req.Query, req.Headers)
 	case req.Method == "GET" && tail == "dashboard-data":
 		return handleDashboardData()
 	case req.Method == "GET" && tail == "model-prices":
@@ -99,6 +111,36 @@ func handleManagementRegister() ([]byte, error) {
 			},
 			{
 				Method:      "GET",
+				Path:        "/plugins/usage-statistics/dashboard-events-export",
+				Description: "导出筛选后的请求事件明细，支持 JSON、CSV、JSONL、gzip 和上限保护。",
+			},
+			{
+				Method:      "POST",
+				Path:        "/plugins/usage-statistics/dashboard-events-export-jobs",
+				Description: "创建后台事件导出任务。",
+			},
+			{
+				Method:      "GET",
+				Path:        "/plugins/usage-statistics/dashboard-events-export-jobs",
+				Description: "查询后台事件导出任务状态。",
+			},
+			{
+				Method:      "DELETE",
+				Path:        "/plugins/usage-statistics/dashboard-events-export-jobs",
+				Description: "删除后台事件导出任务和临时文件。",
+			},
+			{
+				Method:      "GET",
+				Path:        "/plugins/usage-statistics/dashboard-events-export-download",
+				Description: "下载已完成的后台事件导出任务结果。",
+			},
+			{
+				Method:      "GET",
+				Path:        "/plugins/usage-statistics/dashboard-api-detail",
+				Description: "获取单个上游接口的聚合详情。",
+			},
+			{
+				Method:      "GET",
 				Path:        "/plugins/usage-statistics/model-prices",
 				Description: "获取全局模型价格表。",
 			},
@@ -135,6 +177,22 @@ func handleManagementRegister() ([]byte, error) {
 			{
 				Path:        "/dashboard-events",
 				Description: "用量统计请求事件明细（分页）。",
+			},
+			{
+				Path:        "/dashboard-events-export",
+				Description: "筛选后的请求事件明细导出数据，支持 JSON、CSV、JSONL、gzip 和上限保护。",
+			},
+			{
+				Path:        "/dashboard-events-export-jobs",
+				Description: "后台事件导出任务状态。",
+			},
+			{
+				Path:        "/dashboard-events-export-download",
+				Description: "后台事件导出任务结果下载。",
+			},
+			{
+				Path:        "/dashboard-api-detail",
+				Description: "单个上游接口聚合详情。",
 			},
 			{
 				Path:        "/model-prices",
@@ -360,6 +418,7 @@ func handleImportUsage(body []byte) ([]byte, error) {
 	// Track last import result
 	stats.mu.Lock()
 	stats.lastImportResult = &responseData
+	stats.invalidateSummaryLocked()
 	stats.mu.Unlock()
 
 	responseJSON, err := json.Marshal(responseData)
