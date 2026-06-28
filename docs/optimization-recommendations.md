@@ -23,6 +23,7 @@
 - 事件查询已有版本化缓存和时间倒序索引，当前分支继续补了模型、来源、凭证筛选的按需二级索引。
 - `/health.runtime` 暴露摘要缓存、事件缓存、索引规模和最近查询耗时指标。
 - 看板摘要、事件分页、上游详情和事件导出接口支持弱 ETag 与 `If-None-Match` 条件请求，前端轮询会在 304 时复用本地缓存。
+- `/health.runtime.conditional_requests` 按端点统计带 `If-None-Match` 请求的 304 命中、未命中和命中率。
 - 事件导出接口支持 JSON、CSV、JSONL 和可选 gzip；看板 CSV 导出已改为服务端生成，浏览器不再先下载完整 JSON 数组再转换。
 - 页面会显示持久化状态、后台写入队列积压、最近 writer 批次指标、writer 滑动平均、写入压力状态、待 flush 记录数、最后 flush 时间和最近导入结果。
 
@@ -154,10 +155,10 @@ plugins:
 
 ### 4. 继续扩大 HTTP 条件请求覆盖
 
-当前看板摘要、事件分页、上游详情和事件导出接口已返回弱 ETag，并支持 `If-None-Match` 返回 304；前端轮询已保存 ETag，服务端返回 304 时会直接复用本地数据。后续可以继续补：
+当前看板摘要、事件分页、上游详情和事件导出接口已返回弱 ETag，并支持 `If-None-Match` 返回 304；前端轮询已保存 ETag，服务端返回 304 时会直接复用本地数据。`/health.runtime.conditional_requests` 已按端点暴露条件请求数、304 命中数、未命中数和命中率，`CPA_USAGE.md` 已补外部脚本示例。后续可以继续补：
 
-- 为外部脚本补充 ETag 使用示例和 304 处理示例。
-- 条件请求命中率指标，便于观察多浏览器和外部脚本的减压效果。
+- 按客户端或来源拆分条件请求命中率，便于识别频繁无效轮询来源。
+- 如果 CPA 管理层支持标准 HTTP 缓存头透传，可继续补代理缓存示例。
 
 收益：
 
@@ -239,6 +240,7 @@ go test -run '^$' -bench 'BenchmarkSummaryWithoutDetails|BenchmarkQueryEvents|Be
 10. 事件导出接口支持 JSON/CSV/JSONL 和可选 gzip，看板 CSV 导出改为服务端生成。
 11. 后台持久化 writer 批量处理队列记录，并暴露最近批次条数、写入耗时和最长排队时长。
 12. 后台 writer 暴露滑动平均、累计写入量和 `write_pressure` 状态，看板可提示持续写入偏慢。
+13. `/health.runtime` 暴露条件请求命中率，外部脚本示例已说明如何复用 ETag。
 
 下一步建议：
 

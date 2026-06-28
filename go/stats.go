@@ -128,6 +128,7 @@ type RequestStatistics struct {
 	apiDetailQueries        int64
 	lastAPIDetailDuration   time.Duration
 	lastAPIDetailTotal      int
+	conditionalRequests     map[string]conditionalRequestCounter
 }
 
 type apiStats struct {
@@ -256,6 +257,7 @@ func NewRequestStatistics() *RequestStatistics {
 		storageWriteQueueCapacity:     defaultStorageWriteQueueSize,
 		priceStoragePath:              defaultRuntimeConfig().PriceStoragePath,
 		modelPrices:                   make(map[string]ModelPrice),
+		conditionalRequests:           make(map[string]conditionalRequestCounter),
 		startedAt:                     time.Now(),
 	}
 }
@@ -464,6 +466,11 @@ type storageWorkerConfig struct {
 	syncInterval           time.Duration
 	syncRecordInterval     int
 	lastSnapshot           time.Time
+}
+
+type conditionalRequestCounter struct {
+	Requests    int64
+	NotModified int64
 }
 
 type storageWorkerState struct {
@@ -3424,6 +3431,27 @@ func storageDurationMilliseconds(duration time.Duration) float64 {
 	return float64(duration) / float64(time.Millisecond)
 }
 
+func (s *RequestStatistics) RecordConditionalRequest(endpoint string, hasValidator bool, notModified bool) {
+	if s == nil || !hasValidator {
+		return
+	}
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		endpoint = "unknown"
+	}
+	s.mu.Lock()
+	if s.conditionalRequests == nil {
+		s.conditionalRequests = make(map[string]conditionalRequestCounter)
+	}
+	counter := s.conditionalRequests[endpoint]
+	counter.Requests++
+	if notModified {
+		counter.NotModified++
+	}
+	s.conditionalRequests[endpoint] = counter
+	s.mu.Unlock()
+}
+
 func (s *RequestStatistics) RuntimeStatus() RuntimeStatus {
 	if s == nil {
 		return RuntimeStatus{}
@@ -3447,6 +3475,7 @@ func (s *RequestStatistics) RuntimeStatus() RuntimeStatus {
 		APIDetailQueries:          s.apiDetailQueries,
 		LastAPIDetailDurationMs:   durationMilliseconds(s.lastAPIDetailDuration),
 		LastAPIDetailTotalEvents:  s.lastAPIDetailTotal,
+		ConditionalRequests:       conditionalRequestStatusMap(s.conditionalRequests),
 	}
 	if !s.startedAt.IsZero() {
 		status.StartedAt = s.startedAt.UTC().Format(time.RFC3339)
@@ -3460,6 +3489,29 @@ func (s *RequestStatistics) RuntimeStatus() RuntimeStatus {
 			Skipped:            s.lastImportResult.Skipped,
 			IgnoredByRetention: s.lastImportResult.IgnoredByRetention,
 		}
+	}
+	return status
+}
+
+func conditionalRequestStatusMap(counters map[string]conditionalRequestCounter) map[string]ConditionalRequestStatus {
+	if len(counters) == 0 {
+		return nil
+	}
+	status := make(map[string]ConditionalRequestStatus, len(counters))
+	for endpoint, counter := range counters {
+		misses := counter.Requests - counter.NotModified
+		if misses < 0 {
+			misses = 0
+		}
+		entry := ConditionalRequestStatus{
+			Requests:    counter.Requests,
+			NotModified: counter.NotModified,
+			Misses:      misses,
+		}
+		if counter.Requests > 0 {
+			entry.HitRate = float64(counter.NotModified) / float64(counter.Requests)
+		}
+		status[endpoint] = entry
 	}
 	return status
 }

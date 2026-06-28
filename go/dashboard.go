@@ -39,7 +39,7 @@ func init() {
 // handleDashboardSummary returns lightweight dashboard data without detail arrays.
 func handleDashboardSummary(headers map[string][]string) ([]byte, error) {
 	etag := dashboardSummaryETag(time.Now())
-	if dashboardIfNoneMatch(headers, etag) {
+	if dashboardConditionalMatch("dashboard-summary", headers, etag) {
 		return dashboardNotModified(etag)
 	}
 	summary := stats.SummaryWithoutDetails()
@@ -98,7 +98,7 @@ func handleDashboardEvents(query map[string][]string, headers map[string][]strin
 	params := dashboardEventsQuery(query)
 	params = normalizeEventsQuery(params, true)
 	etag := dashboardEventsETag(params, time.Now())
-	if dashboardIfNoneMatch(headers, etag) {
+	if dashboardConditionalMatch("dashboard-events", headers, etag) {
 		return dashboardNotModified(etag)
 	}
 	result := stats.QueryEvents(params)
@@ -182,7 +182,7 @@ func handleDashboardEventsExport(query map[string][]string, headers map[string][
 	params := normalizeEventsQuery(dashboardEventsQuery(query), false)
 	opts := dashboardEventsExportOptionsFromQuery(query)
 	etag := dashboardEventsExportETag(params, opts, time.Now())
-	if dashboardIfNoneMatch(headers, etag) {
+	if dashboardConditionalMatch("dashboard-events-export", headers, etag) {
 		return dashboardNotModifiedWithHeaders(dashboardExportHeaders(etag, dashboardExportContentType(opts.Format), opts.Gzip))
 	}
 	result := stats.QueryAllEvents(params)
@@ -357,7 +357,7 @@ func handleDashboardAPIDetail(query map[string][]string, headers map[string][]st
 	}
 
 	etag := dashboardAPIDetailETag(api, rangeKey, recentLimit, errorLimit, time.Now())
-	if dashboardIfNoneMatch(headers, etag) {
+	if dashboardConditionalMatch("dashboard-api-detail", headers, etag) {
 		return dashboardNotModified(etag)
 	}
 	result := stats.QueryAPIDetail(api, rangeKey, recentLimit, errorLimit)
@@ -412,6 +412,30 @@ func dashboardNotModifiedWithHeaders(headers map[string][]string) ([]byte, error
 		Headers:    headers,
 	}
 	return okEnvelopeJSON(string(mustMarshal(resp)))
+}
+
+func dashboardConditionalMatch(endpoint string, headers map[string][]string, etag string) bool {
+	hasValidator := dashboardHasIfNoneMatch(headers)
+	matched := dashboardIfNoneMatch(headers, etag)
+	stats.RecordConditionalRequest(endpoint, hasValidator, matched)
+	return matched
+}
+
+func dashboardHasIfNoneMatch(headers map[string][]string) bool {
+	for key, values := range headers {
+		if !strings.EqualFold(key, "If-None-Match") {
+			continue
+		}
+		if len(values) == 0 {
+			return true
+		}
+		for _, value := range values {
+			if strings.TrimSpace(value) != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func dashboardIfNoneMatch(headers map[string][]string, etag string) bool {

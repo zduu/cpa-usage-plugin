@@ -18,6 +18,7 @@
 - 事件导出接口新增 `format=csv|jsonl` 和 `gzip=1`，看板 CSV 导出改为服务端生成，减少浏览器侧大数组转换开销。
 - 后台持久化 writer 改为批量处理队列记录，并在 `/health.storage` 暴露最近批次条数、写入耗时和最长排队时长。
 - `/health.storage` 新增 writer 累计批次、累计记录、耗时/排队滑动平均和 `write_pressure` 状态，看板可提示持续写入偏慢。
+- `/health.runtime` 新增 `conditional_requests`，按端点统计带 `If-None-Match` 请求的 304 命中、未命中和命中率。
 
 ## v1.2.18 - 2026-06-28
 

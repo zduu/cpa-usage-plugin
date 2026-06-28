@@ -1357,6 +1357,12 @@ func TestDashboardManagementEndpointsReturnNotModifiedForMatchingETag(t *testing
 			t.Fatalf("%s missing ETag header: %#v", req.Path, first.Headers)
 		}
 
+		req.Headers = map[string][]string{"if-none-match": {`W/"stale"`}}
+		stale := decodeManagementResponse(t, invokeManagement(t, req), nil)
+		if stale.StatusCode != http.StatusOK {
+			t.Fatalf("%s stale conditional status = %d, want 200", req.Path, stale.StatusCode)
+		}
+
 		req.Headers = map[string][]string{"if-none-match": {etag[0]}}
 		second := decodeManagementResponse(t, invokeManagement(t, req), nil)
 		if second.StatusCode != http.StatusNotModified {
@@ -1367,6 +1373,14 @@ func TestDashboardManagementEndpointsReturnNotModifiedForMatchingETag(t *testing
 		}
 		if got := second.Headers["ETag"]; len(got) != 1 || got[0] != etag[0] {
 			t.Fatalf("%s conditional ETag = %#v, want %q", req.Path, got, etag[0])
+		}
+	}
+
+	runtime := stats.RuntimeStatus()
+	for _, endpoint := range []string{"dashboard-summary", "dashboard-events", "dashboard-events-export", "dashboard-api-detail"} {
+		conditional := runtime.ConditionalRequests[endpoint]
+		if conditional.Requests != 2 || conditional.NotModified != 1 || conditional.Misses != 1 || conditional.HitRate != 0.5 {
+			t.Fatalf("%s conditional metrics = %#v, want requests=2 not_modified=1 misses=1 hit_rate=0.5", endpoint, conditional)
 		}
 	}
 }

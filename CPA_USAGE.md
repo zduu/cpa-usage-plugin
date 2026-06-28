@@ -296,6 +296,19 @@ curl http://127.0.0.1:8317/v0/management/plugins/usage-statistics/dashboard-summ
 
 `/dashboard-summary`、`/dashboard-events`、`/dashboard-api-detail` 和 `/dashboard-events-export` 会返回弱 `ETag`；内置看板轮询会自动带上 `If-None-Match`，数据未变化时复用本地缓存。外部脚本也可在下一次请求带上 `If-None-Match`，接口返回 304 时跳过重复解析和传输。
 
+```bash
+curl -sD /tmp/cpa-usage.headers \
+  "http://127.0.0.1:8317/v0/management/plugins/usage-statistics/dashboard-summary" \
+  -H 'x-management-key: <你的管理密钥>' \
+  -o /tmp/cpa-usage-summary.json
+
+etag=$(awk 'tolower($1)=="etag:" {print $2}' /tmp/cpa-usage.headers | tr -d '\r')
+curl -i \
+  "http://127.0.0.1:8317/v0/management/plugins/usage-statistics/dashboard-summary" \
+  -H 'x-management-key: <你的管理密钥>' \
+  -H "If-None-Match: $etag"
+```
+
 ### 查询事件
 
 ```bash
@@ -327,7 +340,7 @@ curl http://127.0.0.1:8317/v0/management/plugins/usage-statistics/health \
   -H 'x-management-key: <你的管理密钥>'
 ```
 
-`storage` 字段会返回持久化状态、后台写入队列长度、最近 writer 批次指标、writer 滑动平均和 `write_pressure`、待 flush/sync/snapshot 记录数和最近错误；`runtime` 字段会返回摘要缓存命中/未命中、事件缓存命中/未命中、事件索引条目数，以及最近 summary/events/api-detail 查询耗时，便于观察看板压力和筛选性能。
+`storage` 字段会返回持久化状态、后台写入队列长度、最近 writer 批次指标、writer 滑动平均和 `write_pressure`、待 flush/sync/snapshot 记录数和最近错误；`runtime` 字段会返回摘要缓存命中/未命中、事件缓存命中/未命中、事件索引条目数、条件请求 304 命中率，以及最近 summary/events/api-detail 查询耗时，便于观察看板压力和筛选性能。
 
 ### 数据导出
 
