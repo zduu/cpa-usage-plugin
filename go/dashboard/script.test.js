@@ -280,6 +280,9 @@ function createDashboardHarness(options = {}) {
 
   function dashboardDataPayload() {
     const now = Date.now();
+    const aggregateRequests = options.trimmedDashboardData ? 4 : 2;
+    const aggregateSuccess = options.trimmedDashboardData ? 3 : 1;
+    const aggregateTokens = options.trimmedDashboardData ? 45 : 15;
     const details = [
       {
         timestamp: new Date(now - 5 * 60 * 1000).toISOString(),
@@ -307,26 +310,26 @@ function createDashboardHarness(options = {}) {
     return {
       generated_at: new Date(now).toISOString(),
       usage: {
-        total_requests: 2,
-        success_count: 1,
+        total_requests: aggregateRequests,
+        success_count: aggregateSuccess,
         failure_count: 1,
-        total_tokens: 15,
+        total_tokens: aggregateTokens,
         requests_by_day: {},
         requests_by_hour: {},
         tokens_by_day: {},
         tokens_by_hour: {},
         apis: {
           openai: {
-            total_requests: 2,
-            success_count: 1,
+            total_requests: aggregateRequests,
+            success_count: aggregateSuccess,
             failure_count: 1,
-            total_tokens: 15,
+            total_tokens: aggregateTokens,
             models: {
               'gpt-4.1': {
-                total_requests: 2,
-                success_count: 1,
+                total_requests: aggregateRequests,
+                success_count: aggregateSuccess,
                 failure_count: 1,
-                total_tokens: 15,
+                total_tokens: aggregateTokens,
                 details,
               },
             },
@@ -810,6 +813,20 @@ test('dashboard api detail refresh keeps cached content while loading', async ()
   await promise;
 });
 
+test('dashboard api detail uses the same full-range scope as upstream stats', async () => {
+  const { document, fetchRequests } = createDashboardHarness();
+  const apiDetailRequests = () => fetchRequests.filter((req) => req.url.includes('dashboard-api-detail'));
+
+  await waitFor(() => apiDetailRequests().length > 0);
+  assert.strictEqual(new URL(apiDetailRequests().at(-1).url, 'http://test.local').searchParams.get('range'), 'all');
+
+  document.getElementById('range').value = '7d';
+  await document.getElementById('range').onchange();
+
+  await waitFor(() => apiDetailRequests().length > 1);
+  assert.strictEqual(new URL(apiDetailRequests().at(-1).url, 'http://test.local').searchParams.get('range'), 'all');
+});
+
 test('dashboard fallback keeps health grid visible when summary endpoint fails', async () => {
   const { document, fetchCalls } = createDashboardHarness({ failDashboardSummary: true });
   await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-data')) && document.getElementById('healthGrid').innerHTML.includes('healthCell'));
@@ -819,6 +836,15 @@ test('dashboard fallback keeps health grid visible when summary endpoint fails',
   assert.strictEqual(document.getElementById('healthSuccess').textContent, '成功 1');
   assert.strictEqual(document.getElementById('healthFailure').textContent, '失败 1');
   assert.match(document.getElementById('updated').textContent, /兼容模式/);
+});
+
+test('dashboard fallback keeps upstream aggregates when details are trimmed', async () => {
+  const { document, fetchCalls } = createDashboardHarness({ failDashboardSummary: true, trimmedDashboardData: true });
+
+  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-data')) && document.getElementById('apiStats').innerHTML.includes('openai'));
+
+  assert.strictEqual(document.getElementById('totalRequests').textContent, '4');
+  assert.match(document.getElementById('apiStats').innerHTML, /4 <span class="ok">\(3<\/span> <span class="bad">1\)<\/span>/);
 });
 
 test('dashboard detail refresh sends conditional requests for events and api detail', async () => {

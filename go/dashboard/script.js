@@ -456,7 +456,7 @@ function normalizeApiDetailEvent(d) {
 
 async function fetchApiDetailData(api) {
   const params = new URLSearchParams();
-  params.set('range', $('range').value);
+  params.set('range', 'all');
   params.set('api', api);
   params.set('recent_limit', String(apiDetailRecentLimit));
   const url = pluginEndpoint('dashboard-api-detail') + '?' + params.toString();
@@ -466,7 +466,7 @@ async function fetchApiDetailData(api) {
 }
 
 function apiDetailCacheKey(api) {
-  return $('range').value + '\x00' + api;
+  return api;
 }
 
 function apiDetailErrorHtml(errorRows, loading, error) {
@@ -642,6 +642,24 @@ function finalizeCounterRow(row) {
   delete row.latency;
   return row;
 }
+function applySnapshotCounter(row, raw) {
+  if (!raw || typeof raw !== 'object') return row;
+  ['total_requests', 'success_count', 'failure_count', 'total_tokens', 'input_tokens', 'output_tokens', 'cached_tokens', 'reasoning_tokens', 'avg_latency_ms'].forEach((field) => {
+    if (Object.prototype.hasOwnProperty.call(raw, field)) row[field] = num(raw[field]);
+  });
+  return row;
+}
+function mergeCounterRow(target, row) {
+  target.total_requests += num(row.total_requests);
+  target.success_count += num(row.success_count);
+  target.failure_count += num(row.failure_count);
+  target.total_tokens += num(row.total_tokens);
+  target.input_tokens += num(row.input_tokens);
+  target.output_tokens += num(row.output_tokens);
+  target.cached_tokens += num(row.cached_tokens);
+  target.reasoning_tokens += num(row.reasoning_tokens);
+  return target;
+}
 function buildSummaryFromFullUsage(data) {
   const rawUsage = data.usage || {};
   const usage = {
@@ -664,7 +682,7 @@ function buildSummaryFromFullUsage(data) {
   const latency = [];
   const details = [];
   Object.entries(rawUsage.apis || {}).forEach(([api, a]) => {
-    const apiRow = { total_requests: a.total_requests || 0, success_count: a.success_count || 0, failure_count: a.failure_count || 0, total_tokens: a.total_tokens || 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, reasoning_tokens: 0, avg_latency_ms: 0, models: {}, latency: [] };
+    const apiRow = { total_requests: 0, success_count: 0, failure_count: 0, total_tokens: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, reasoning_tokens: 0, avg_latency_ms: 0, models: {}, latency: [] };
     Object.entries(a.models || {}).forEach(([model, m]) => {
       const modelRow = makeCounterRow(model);
       (m.details || []).forEach((d) => {
@@ -680,10 +698,6 @@ function buildSummaryFromFullUsage(data) {
         usage.reasoning_tokens += num(tokens.reasoning_tokens);
         if (num(d.latency_ms) > 0) latency.push(num(d.latency_ms));
 
-        const globalModel = modelAgg.get(d.model) || makeCounterRow(d.model);
-        addDetailToCounter(globalModel, d);
-        modelAgg.set(d.model, globalModel);
-
         const src = sourceLabel(d);
         const sourceRow = sourceAgg.get(src) || { source: src, provider: d.provider || '', total_requests: 0, success_count: 0, failure_count: 0, total_tokens: 0 };
         sourceRow.total_requests++; d.failed ? sourceRow.failure_count++ : sourceRow.success_count++; sourceRow.total_tokens += totalTokens(d);
@@ -697,11 +711,17 @@ function buildSummaryFromFullUsage(data) {
         clientRow.modelMap.set(d.model, clientModel);
         clientAgg.set(clientKey, clientRow);
       });
-      apiRow.models[model] = finalizeCounterRow(modelRow);
+      const finalizedModel = finalizeCounterRow(applySnapshotCounter(modelRow, m));
+      apiRow.models[model] = finalizedModel;
+      const globalModel = modelAgg.get(model) || makeCounterRow(model);
+      mergeCounterRow(globalModel, finalizedModel);
+      modelAgg.set(model, globalModel);
     });
-    usage.apis[api] = finalizeCounterRow(apiRow);
+    usage.apis[api] = finalizeCounterRow(applySnapshotCounter(apiRow, a));
   });
+  applySnapshotCounter(usage, rawUsage);
   usage.avg_latency_ms = latency.length ? latency.reduce((a, b) => a + b, 0) / latency.length : 0;
+  if (Object.prototype.hasOwnProperty.call(rawUsage, 'avg_latency_ms')) usage.avg_latency_ms = num(rawUsage.avg_latency_ms);
   return {
     usage,
     health_grid: buildHealthGridFromDetails(details, data.generated_at),

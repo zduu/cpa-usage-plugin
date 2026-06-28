@@ -39,7 +39,7 @@ func handleRegister(requestBody []byte) ([]byte, error) {
 					Name:        "dedup_window_minutes",
 					Type:        "integer",
 					Default:     defaultDedupWindowMinutes,
-					Description: "持久化重放和导入的去重窗口分钟数，0 表示关闭去重；实时 usage 记录不会去重。",
+					Description: "兼容旧配置；导入会跳过精确重复记录，实时 usage 记录和持久化重放不会按窗口去重。",
 				},
 				{
 					Name:        "log_response_headers",

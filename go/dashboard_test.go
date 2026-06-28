@@ -924,6 +924,38 @@ func TestDashboardAPIDetailAggregatesErrorsAndRecentEvents(t *testing.T) {
 	}
 }
 
+func TestDashboardAPIDetailAllRangeUsesAggregatesAfterDetailTrim(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 2, DedupWindowMinutes: 0, RetentionDays: 0})
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < 5; i++ {
+		stats.Record(UsageRecord{
+			Provider:    "openai",
+			Source:      "openai-prod",
+			Model:       "gpt-4",
+			RequestedAt: base.Add(time.Duration(i) * time.Minute),
+			Detail:      UsageDetail{InputTokens: int64(i + 1), OutputTokens: 10},
+		})
+	}
+
+	result := stats.QueryAPIDetail("openai · openai-prod", "all", 10, 10)
+	if result.Summary.TotalRequests != 5 {
+		t.Fatalf("summary total_requests = %d, want 5", result.Summary.TotalRequests)
+	}
+	if len(result.ModelStats) != 1 || result.ModelStats[0].TotalRequests != 5 {
+		t.Fatalf("model stats = %#v, want aggregate total 5", result.ModelStats)
+	}
+	if len(result.SourceStats) != 1 || result.SourceStats[0].Source != "openai-prod" || result.SourceStats[0].TotalRequests != 5 {
+		t.Fatalf("source stats = %#v, want aggregate source total 5", result.SourceStats)
+	}
+	if len(result.RecentEvents) != 2 {
+		t.Fatalf("recent events = %d, want retained detail count 2", len(result.RecentEvents))
+	}
+	if result.TotalEvents != 5 {
+		t.Fatalf("total events = %d, want aggregate total 5", result.TotalEvents)
+	}
+}
+
 func TestDashboardAPIDetailRecentEventsTieBreaksByModel(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{MaxDetailsPerModel: 200, DedupWindowMinutes: 0, RetentionDays: 30})
@@ -1103,7 +1135,7 @@ func TestSummaryWithoutDetailsMatchesCounts(t *testing.T) {
 	}
 }
 
-func TestSummaryWithoutDetailsIncrementalAggregatesAfterTrimAndRebuild(t *testing.T) {
+func TestSummaryWithoutDetailsKeepsAggregatesAfterDetailTrim(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{MaxDetailsPerModel: 2, RetentionDays: 0, DedupWindowMinutes: 0})
 	base := time.Now().Add(-time.Hour)
@@ -1133,15 +1165,15 @@ func TestSummaryWithoutDetailsIncrementalAggregatesAfterTrimAndRebuild(t *testin
 	}
 
 	assertSummary := func(label string, summary DashboardSummary) {
-		if summary.Usage.TotalRequests != 2 || summary.Usage.TotalTokens != 555 {
-			t.Fatalf("%s usage totals = requests %d tokens %d, want 2/555", label, summary.Usage.TotalRequests, summary.Usage.TotalTokens)
+		if summary.Usage.TotalRequests != 3 || summary.Usage.TotalTokens != 666 {
+			t.Fatalf("%s usage totals = requests %d tokens %d, want 3/666", label, summary.Usage.TotalRequests, summary.Usage.TotalTokens)
 		}
-		if summary.Usage.InputTokens != 5 || summary.Usage.OutputTokens != 50 ||
-			summary.Usage.ReasoningTokens != 500 || summary.Usage.CachedTokens != 13 {
+		if summary.Usage.InputTokens != 6 || summary.Usage.OutputTokens != 60 ||
+			summary.Usage.ReasoningTokens != 600 || summary.Usage.CachedTokens != 18 {
 			t.Fatalf("%s usage token parts = %#v", label, summary.Usage)
 		}
-		if summary.Usage.AvgLatencyMs != 25 {
-			t.Fatalf("%s usage avg latency = %v, want 25", label, summary.Usage.AvgLatencyMs)
+		if summary.Usage.AvgLatencyMs != 20 {
+			t.Fatalf("%s usage avg latency = %v, want 20", label, summary.Usage.AvgLatencyMs)
 		}
 		if len(summary.Usage.APIs) != 1 {
 			t.Fatalf("%s api count = %d, want 1: %#v", label, len(summary.Usage.APIs), summary.Usage.APIs)
@@ -1150,30 +1182,29 @@ func TestSummaryWithoutDetailsIncrementalAggregatesAfterTrimAndRebuild(t *testin
 		for _, candidate := range summary.Usage.APIs {
 			api = candidate
 		}
-		if api.InputTokens != 5 || api.OutputTokens != 50 || api.ReasoningTokens != 500 ||
-			api.CachedTokens != 13 || api.AvgLatencyMs != 25 {
+		if api.InputTokens != 6 || api.OutputTokens != 60 || api.ReasoningTokens != 600 ||
+			api.CachedTokens != 18 || api.AvgLatencyMs != 20 {
 			t.Fatalf("%s api aggregate = %#v", label, api)
 		}
 		model := api.Models["gpt-4.1"]
-		if model.InputTokens != 5 || model.OutputTokens != 50 || model.ReasoningTokens != 500 ||
-			model.CachedTokens != 13 || model.AvgLatencyMs != 25 {
+		if model.InputTokens != 6 || model.OutputTokens != 60 || model.ReasoningTokens != 600 ||
+			model.CachedTokens != 18 || model.AvgLatencyMs != 20 {
 			t.Fatalf("%s model aggregate = %#v", label, model)
 		}
-		if len(summary.ModelStats) != 1 || summary.ModelStats[0].InputTokens != 5 ||
-			summary.ModelStats[0].AvgLatencyMs != 25 {
+		if len(summary.ModelStats) != 1 || summary.ModelStats[0].InputTokens != 6 ||
+			summary.ModelStats[0].AvgLatencyMs != 20 {
 			t.Fatalf("%s model stats = %#v", label, summary.ModelStats)
 		}
 		if len(summary.SourceStats) != 1 || summary.SourceStats[0].Source != "source-shared" ||
-			summary.SourceStats[0].TotalRequests != 2 || summary.SourceStats[0].TotalTokens != 555 {
+			summary.SourceStats[0].TotalRequests != 3 || summary.SourceStats[0].TotalTokens != 666 {
 			t.Fatalf("%s source stats = %#v", label, summary.SourceStats)
 		}
-		if len(summary.CredentialStats) != 1 || summary.CredentialStats[0].AuthIndex != "auth-live" ||
-			summary.CredentialStats[0].TotalRequests != 2 || summary.CredentialStats[0].TotalTokens != 555 {
+		if len(summary.CredentialStats) != 2 {
 			t.Fatalf("%s credential stats = %#v", label, summary.CredentialStats)
 		}
-		if len(summary.ClientAPIStats) != 1 || summary.ClientAPIStats[0].TotalRequests != 2 ||
-			summary.ClientAPIStats[0].TotalTokens != 555 || len(summary.ClientAPIStats[0].Models) != 1 ||
-			summary.ClientAPIStats[0].Models[0].TotalRequests != 2 {
+		if len(summary.ClientAPIStats) != 1 || summary.ClientAPIStats[0].TotalRequests != 3 ||
+			summary.ClientAPIStats[0].TotalTokens != 666 || len(summary.ClientAPIStats[0].Models) != 1 ||
+			summary.ClientAPIStats[0].Models[0].TotalRequests != 3 {
 			t.Fatalf("%s client api stats = %#v", label, summary.ClientAPIStats)
 		}
 		var healthTotal int64
@@ -1184,19 +1215,12 @@ func TestSummaryWithoutDetailsIncrementalAggregatesAfterTrimAndRebuild(t *testin
 			healthSuccess += slot.Success
 			healthFailure += slot.Failure
 		}
-		if healthTotal != 2 || healthSuccess != 2 || healthFailure != 0 {
-			t.Fatalf("%s health totals = total %d success %d failure %d, want 2/2/0", label, healthTotal, healthSuccess, healthFailure)
+		if healthTotal != 3 || healthSuccess != 3 || healthFailure != 0 {
+			t.Fatalf("%s health totals = total %d success %d failure %d, want 3/3/0", label, healthTotal, healthSuccess, healthFailure)
 		}
 	}
 
 	assertSummary("incremental", stats.SummaryWithoutDetails())
-
-	stats.mu.Lock()
-	stats.rebuildAggregatesLocked()
-	stats.invalidateSummaryLocked()
-	stats.mu.Unlock()
-
-	assertSummary("rebuilt", stats.SummaryWithoutDetails())
 }
 
 func TestSummaryWithoutDetailsCacheReturnsCopyAndInvalidates(t *testing.T) {

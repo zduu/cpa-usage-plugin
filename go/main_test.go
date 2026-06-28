@@ -1040,6 +1040,81 @@ func TestStorageSnapshotSkipsOlderShardsAndReplaysSameDayDelta(t *testing.T) {
 	}
 }
 
+func TestStorageSnapshotRestoresAggregateTotalsWithTrimmedDetails(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "usage-statistics")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir storage dir: %v", err)
+	}
+	now := time.Now().UTC()
+	details := []RequestDetail{
+		{
+			Model:     "gpt-4",
+			Timestamp: now.Add(-time.Minute),
+			Source:    "openai-prod",
+			Provider:  "openai",
+			Tokens:    TokenStats{TotalTokens: 10},
+		},
+		{
+			Model:     "gpt-4",
+			Timestamp: now,
+			Source:    "openai-prod",
+			Provider:  "openai",
+			Tokens:    TokenStats{TotalTokens: 10},
+		},
+	}
+	snapshotPayload := persistedStorageSnapshot{
+		Version:     1,
+		GeneratedAt: now.Format(time.RFC3339),
+		Usage: StatisticsSnapshot{
+			TotalRequests: 5,
+			SuccessCount:  5,
+			TotalTokens:   50,
+			APIs: map[string]APISnapshot{
+				"openai": {
+					TotalRequests: 5,
+					SuccessCount:  5,
+					TotalTokens:   50,
+					Models: map[string]ModelSnapshot{
+						"gpt-4": {
+							TotalRequests: 5,
+							SuccessCount:  5,
+							TotalTokens:   50,
+							Details:       details,
+						},
+					},
+				},
+			},
+		},
+	}
+	if err := os.WriteFile(storageSnapshotPath(dir), mustMarshal(snapshotPayload), 0o600); err != nil {
+		t.Fatalf("write storage snapshot: %v", err)
+	}
+
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		MaxDetailsPerModel: 2,
+		RetentionDays:      0,
+		DedupWindowMinutes: 0,
+		StorageEnabled:     true,
+		StoragePath:        dir,
+	})
+	defer stats.Close()
+
+	snapshot := stats.Snapshot()
+	apiKey := "openai · openai-prod"
+	model := snapshot.APIs[apiKey].Models["gpt-4"]
+	if snapshot.TotalRequests != 5 || snapshot.TotalTokens != 50 {
+		t.Fatalf("snapshot totals = requests %d tokens %d, want 5/50", snapshot.TotalRequests, snapshot.TotalTokens)
+	}
+	if model.TotalRequests != 5 || len(model.Details) != 2 {
+		t.Fatalf("model after restore = requests %d details %d, want 5/2", model.TotalRequests, len(model.Details))
+	}
+	detail := stats.QueryAPIDetail(apiKey, "all", 10, 10)
+	if detail.Summary.TotalRequests != 5 || len(detail.RecentEvents) != 2 {
+		t.Fatalf("api detail after restore = summary %#v recent %d, want total 5 and 2 recent", detail.Summary, len(detail.RecentEvents))
+	}
+}
+
 func TestStorageSnapshotCompactsShardsBeforeSnapshotDay(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "usage-statistics")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -1184,7 +1259,7 @@ func TestRecordCountsRepeatedUsageRecords(t *testing.T) {
 	}
 }
 
-func TestRecordPrunesByMaxDetailsPerModelAndRebuildsTotals(t *testing.T) {
+func TestRecordPrunesByMaxDetailsPerModelWithoutChangingTotals(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{MaxDetailsPerModel: 2, RetentionDays: 0, DedupWindowMinutes: 0})
 	base := time.Now().Add(-time.Hour)
@@ -1202,8 +1277,11 @@ func TestRecordPrunesByMaxDetailsPerModelAndRebuildsTotals(t *testing.T) {
 
 	snapshot := stats.Snapshot()
 	model := snapshot.APIs["deepseek"].Models["deepseek-v3.1"]
-	if snapshot.TotalRequests != 2 || snapshot.TotalTokens != 5 {
-		t.Fatalf("snapshot totals = requests %d tokens %d, want 2/5", snapshot.TotalRequests, snapshot.TotalTokens)
+	if snapshot.TotalRequests != 3 || snapshot.TotalTokens != 6 {
+		t.Fatalf("snapshot totals = requests %d tokens %d, want 3/6", snapshot.TotalRequests, snapshot.TotalTokens)
+	}
+	if model.TotalRequests != 3 || model.TotalTokens != 6 {
+		t.Fatalf("model totals = requests %d tokens %d, want 3/6", model.TotalRequests, model.TotalTokens)
 	}
 	if len(model.Details) != 2 {
 		t.Fatalf("details len = %d, want 2", len(model.Details))
@@ -2517,7 +2595,7 @@ func TestSnapshotIsDeepCopy(t *testing.T) {
 	}
 }
 
-func TestConfigure_ShrinkingMaxCleansUpCounters(t *testing.T) {
+func TestConfigureShrinkingMaxDetailsKeepsCounters(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{MaxDetailsPerModel: 5, RetentionDays: 0, DedupWindowMinutes: 0})
 	base := time.Now().Add(-time.Hour)
@@ -2531,15 +2609,21 @@ func TestConfigure_ShrinkingMaxCleansUpCounters(t *testing.T) {
 	}
 
 	snapBefore := stats.Snapshot()
-	if snapBefore.TotalRequests != 5 {
-		t.Fatalf("before shrink: expected 5 requests, got %d", snapBefore.TotalRequests)
+	if snapBefore.TotalRequests != 10 {
+		t.Fatalf("before shrink: expected 10 requests, got %d", snapBefore.TotalRequests)
+	}
+	if got := len(snapBefore.APIs["deepseek"].Models["deepseek-v3"].Details); got != 5 {
+		t.Fatalf("before shrink: expected 5 details, got %d", got)
 	}
 
 	// Shrink further
 	stats.Configure(runtimeConfig{MaxDetailsPerModel: 2, RetentionDays: 0, DedupWindowMinutes: 0})
 	snapAfter := stats.Snapshot()
-	if snapAfter.TotalRequests != 2 {
-		t.Fatalf("after shrink to 2: expected 2, got %d", snapAfter.TotalRequests)
+	if snapAfter.TotalRequests != 10 {
+		t.Fatalf("after shrink to 2: expected 10 requests, got %d", snapAfter.TotalRequests)
+	}
+	if got := len(snapAfter.APIs["deepseek"].Models["deepseek-v3"].Details); got != 2 {
+		t.Fatalf("after shrink to 2: expected 2 details, got %d", got)
 	}
 }
 
@@ -2687,7 +2771,7 @@ func buildBenchmarkStats(recordCount int) *RequestStatistics {
 		detail.Tokens.TotalTokens = detailTotalTokens(detail.Tokens)
 		apiName := provider + " · " + provider + "-prod"
 		if existing, ok := stats.apis[apiName]; !ok || existing == nil {
-			stats.apis[apiName] = &apiStats{Models: make(map[string]*modelStats)}
+			stats.apis[apiName] = &apiStats{Models: make(map[string]*modelStats), Sources: make(map[string]*sourceStatAccumulator)}
 		}
 		stats.apis[apiName].Models[model] = ensureBenchmarkModel(stats.apis[apiName].Models[model])
 		stats.apis[apiName].Models[model].Details = append(stats.apis[apiName].Models[model].Details, detail)
