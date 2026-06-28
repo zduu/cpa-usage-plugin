@@ -1,6 +1,6 @@
 # CPA Usage Statistics Plugin 优化建议
 
-本文基于当前项目代码审查，重点覆盖数据持久性、减轻 CPA 服务压力、看板查询性能和发布说明流程。
+本文基于当前项目代码审查，重点覆盖数据持久性、减轻 CPA 服务压力、看板查询性能和发布说明流程。建议按“先保护数据、再降低请求链路压力、最后处理超大规模存储”的顺序推进。
 
 ## 目标
 
@@ -21,7 +21,7 @@
 - 摘要聚合、健康网格、模型/来源/凭证/客户端 API 统计已增量维护。
 - 事件查询已有版本化缓存和时间倒序索引，当前分支继续补了模型、来源、凭证筛选的按需二级索引。
 - `/health.runtime` 暴露摘要缓存、事件缓存、索引规模和最近查询耗时指标。
-- 看板摘要、事件分页和上游详情接口支持弱 ETag 与 `If-None-Match` 条件请求。
+- 看板摘要、事件分页和上游详情接口支持弱 ETag 与 `If-None-Match` 条件请求，前端轮询会在 304 时复用本地缓存。
 - 页面会显示持久化状态、待 flush 记录数、最后 flush 时间和最近导入结果。
 
 ## P0 建议
@@ -90,7 +90,7 @@ plugins:
 
 ### 4. 发布流程必须写 release 说明
 
-当前 GitHub Actions 使用 `generate_release_notes: true`，但自动说明不一定覆盖用户关心的配置和兼容性。建议每次发版前维护一段人工 release notes，至少包含：
+当前发布 workflow 会通过 `scripts/extract-release-notes.sh` 从 `CHANGELOG.md` 抽取当前 tag 对应的小节作为 release body；`generate_release_notes: true` 只能作为补充，不能替代人工说明。建议每次发版前维护一段 release notes，至少包含：
 
 - 新增功能。
 - 行为变化。
@@ -98,7 +98,7 @@ plugins:
 - 升级注意事项。
 - 验证命令和测试环境。
 
-建议新增 `CHANGELOG.md` 或 `.github/release-template.md`，发布时把本次条目复制到 GitHub Release body。对于持久化、数据格式、管理接口变更，不能只依赖自动生成。
+发布前必须把 `CHANGELOG.md` 的 `Unreleased` 内容整理到对应版本小节，例如 `## v1.2.19 - 2026-06-28`。对于持久化、数据格式、管理接口变更，不能只依赖自动生成。
 
 ## P1 建议
 
@@ -145,9 +145,8 @@ plugins:
 
 ### 4. 继续扩大 HTTP 条件请求覆盖
 
-当前看板摘要、事件分页和上游详情接口已返回弱 ETag，并支持 `If-None-Match` 返回 304。后续可以继续补：
+当前看板摘要、事件分页和上游详情接口已返回弱 ETag，并支持 `If-None-Match` 返回 304；前端轮询已保存 ETag，服务端返回 304 时会直接复用本地数据。后续可以继续补：
 
-- 前端在轮询时保存 ETag 并主动发起条件请求。
 - 导出接口按筛选条件返回 ETag，避免外部脚本重复下载相同结果。
 
 收益：
@@ -214,13 +213,22 @@ go test -run '^$' -bench 'BenchmarkSummaryWithoutDetails|BenchmarkQueryEvents|Be
 
 ## 推荐落地顺序
 
-1. 保持当前轻量摘要、事件分页、事件索引优化，并补齐对应测试。
-2. 新增 release notes 模板，下一次发版必须手写说明。
-3. 生产配置默认开启持久化，文档强调 volume、flush、retention。
-4. 增加周期性 snapshot 和可选 sync。
-5. 把持久化写入从统计锁中移到后台队列。
-6. 给管理接口补 ETag/304。
-7. 大数据量场景再评估 SQLite 或聚合归档。
+当前分支已完成或基本完成：
+
+1. 保持轻量摘要、事件分页、上游详情接口，避免看板首屏拉取全量 `details`。
+2. 补回上游详情里的错误统计和最近请求，保留排障能力。
+3. 对模型、来源、凭证筛选增加按需二级索引，降低事件查询扫描成本。
+4. 用 `CHANGELOG.md` 驱动 release notes，发布时强制带人工说明。
+5. 增加周期性 snapshot、可选 fsync 和运行状态展示。
+6. 给摘要、事件分页、上游详情接口补 ETag/304，并在 `/health.runtime` 暴露缓存、索引和查询耗时。
+7. 前端轮询接入 ETag 缓存，服务端返回 304 时复用本地数据。
+
+下一步建议：
+
+1. 生产配置默认开启持久化，文档强调 volume、flush、retention 和升级前导出。
+2. 把持久化写入从统计锁中移到后台有界队列，减少磁盘抖动对请求路径的影响。
+3. 导出接口增加流式 JSONL/CSV、ETag 和可选 gzip，避免大导出占用过多内存。
+4. 大数据量场景再评估 SQLite、bbolt 或 daily aggregate 归档。
 
 ## 发布前检查清单
 

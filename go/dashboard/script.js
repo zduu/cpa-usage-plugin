@@ -13,14 +13,43 @@ const apiDetailRecentLimit = 120;
 const visiblePollDelayMs = 30000;
 const hiddenPollDelayMs = 300000;
 let apiDetailSeq = 0;
+const conditionalPayloadCache = new Map();
 
 // Dom helpers
 const $ = (id) => document.getElementById(id);
 const setText = (id, value) => { $(id).textContent = value };
 
-async function fetchJsonPayload(url, options) {
+function cloneHeaders(headers) {
+  if (!headers) return {};
+  if (Array.isArray(headers)) return Object.fromEntries(headers);
+  if (typeof headers.forEach === 'function') {
+    const cloned = {};
+    headers.forEach((value, key) => { cloned[key] = value });
+    return cloned;
+  }
+  return Object.assign({}, headers);
+}
+
+function headerValue(headers, name) {
+  if (!headers) return '';
+  if (typeof headers.get === 'function') return headers.get(name) || headers.get(String(name).toLowerCase()) || '';
+  const target = String(name).toLowerCase();
+  for (const [key, value] of Object.entries(headers)) {
+    if (String(key).toLowerCase() !== target) continue;
+    return Array.isArray(value) ? String(value[0] || '') : String(value || '');
+  }
+  return '';
+}
+
+async function fetchJsonPayloadWithMeta(url, options) {
   const response = await fetch(url, options);
   const text = await response.text();
+  const responseHeaders = {};
+  const responseEtag = headerValue(response.headers, 'ETag');
+  if (responseEtag) responseHeaders.ETag = [responseEtag];
+  if (response.status === 304) {
+    return { data: '', statusCode: 304, headers: responseHeaders };
+  }
   let payload = null;
   if (text) {
     try { payload = JSON.parse(text) } catch {
@@ -32,7 +61,33 @@ async function fetchJsonPayload(url, options) {
     const message = payload && payload.error && payload.error.message ? payload.error.message : (text || ('请求失败：' + response.status));
     throw new Error(message);
   }
-  return unwrapPluginPayload(payload);
+  const meta = unwrapPluginPayloadWithMeta(payload);
+  meta.headers = Object.assign({}, meta.headers || {});
+  if (responseEtag && !headerValue(meta.headers, 'ETag')) meta.headers.ETag = responseHeaders.ETag;
+  if (!meta.statusCode) meta.statusCode = response.status || 200;
+  return meta;
+}
+
+async function fetchJsonPayload(url, options) {
+  const meta = await fetchJsonPayloadWithMeta(url, options);
+  return meta.data;
+}
+
+async function fetchConditionalJsonPayload(cacheKey, url, options) {
+  const cached = conditionalPayloadCache.get(cacheKey);
+  const merged = Object.assign({}, options || {});
+  const headers = cloneHeaders(merged.headers);
+  if (cached && cached.etag && !headerValue(headers, 'If-None-Match')) headers['If-None-Match'] = cached.etag;
+  merged.headers = headers;
+  const meta = await fetchJsonPayloadWithMeta(url, merged);
+  if (meta.statusCode === 304) {
+    if (cached && Object.prototype.hasOwnProperty.call(cached, 'data')) return cached.data;
+    throw new Error('服务端返回 304，但本地没有可复用缓存');
+  }
+  const etag = headerValue(meta.headers, 'ETag');
+  if (etag) conditionalPayloadCache.set(cacheKey, { etag, data: meta.data });
+  else conditionalPayloadCache.delete(cacheKey);
+  return meta.data;
 }
 
 function managementFetchOptions(options) {
@@ -313,7 +368,8 @@ async function fetchApiDetailData(api) {
   params.set('range', $('range').value);
   params.set('api', api);
   params.set('recent_limit', String(apiDetailRecentLimit));
-  const data = await fetchJsonPayload(pluginEndpoint('dashboard-api-detail') + '?' + params.toString(), { cache: 'no-store' });
+  const url = pluginEndpoint('dashboard-api-detail') + '?' + params.toString();
+  const data = await fetchConditionalJsonPayload('dashboard-api-detail:' + url, url, { cache: 'no-store' });
   data.recent_events = (data.recent_events || []).map(normalizeApiDetailEvent);
   return data;
 }
@@ -411,7 +467,8 @@ async function renderEvents() {
   const fs = $('filterSource').value; if (fs) params.set('source', fs);
   const fa = $('filterAuth').value; if (fa) params.set('auth', fa);
   try {
-    eventsData = await fetchJsonPayload(pluginEndpoint('dashboard-events') + '?' + params.toString(), { cache: 'no-store' });
+    const url = pluginEndpoint('dashboard-events') + '?' + params.toString();
+    eventsData = await fetchConditionalJsonPayload('dashboard-events:' + url, url, { cache: 'no-store' });
   } catch (e) {
     eventsData = { events: [], total: 0, limit: eventsLimit, offset: 0 };
   }
@@ -586,7 +643,7 @@ async function load(options) {
     const previousSummary = summaryData;
     // Try new summary endpoint first
     const [data] = await Promise.all([
-      fetchJsonPayload(pluginEndpoint('dashboard-summary'), { cache: 'no-store' }),
+      fetchConditionalJsonPayload('dashboard-summary', pluginEndpoint('dashboard-summary'), { cache: 'no-store' }),
       loadModelPrices()
     ]);
     summaryData = data;

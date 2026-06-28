@@ -109,6 +109,8 @@ GET  /v0/management/plugins/usage-statistics/health
 | `/dashboard-data` | GET | 兼容旧版，返回含全部 `details` 数组的完整数据。 |
 | `/health` | GET | 运行健康状态：`detail_count`、`evicted_total`、`total_requests`。 |
 
+`/dashboard-summary`、`/dashboard-events` 和 `/dashboard-api-detail` 支持弱 ETag；内置看板轮询会自动使用 `If-None-Match`，减少未变化数据的重复传输。
+
 浏览器资源入口由插件注册到 CPA 管理端，菜单名为"用量统计"。
 
 ## 使用说明

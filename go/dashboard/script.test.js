@@ -53,6 +53,8 @@ function createDashboardHarness(options = {}) {
   const timeoutDelays = [];
   let summaryLastRecordedAt = options.lastRecordedAt || '2023-11-15T06:13:20Z';
   let prices = { 'gpt-4.1': { prompt: 2, completion: 8, cache: 0.5 } };
+  const dashboardEtags = !!options.dashboardEtags;
+  const wrapDashboardResponses = !!options.wrapDashboardResponses;
 
   const document = {
     get visibilityState() {
@@ -218,6 +220,71 @@ function createDashboardHarness(options = {}) {
     };
   }
 
+  function requestHeaderValue(requestOptions, name) {
+    const headers = requestOptions && requestOptions.headers;
+    if (!headers) return '';
+    if (typeof headers.get === 'function') return headers.get(name) || headers.get(String(name).toLowerCase()) || '';
+    const target = String(name).toLowerCase();
+    for (const [key, value] of Object.entries(headers)) {
+      if (String(key).toLowerCase() === target) return Array.isArray(value) ? String(value[0] || '') : String(value || '');
+    }
+    return '';
+  }
+
+  function dashboardRoute(url) {
+    const text = String(url);
+    if (text.includes('dashboard-summary')) return 'dashboard-summary';
+    if (text.includes('dashboard-api-detail')) return 'dashboard-api-detail';
+    if (text.includes('dashboard-events') && !text.includes('dashboard-events-export')) return 'dashboard-events';
+    return '';
+  }
+
+  function dashboardEtag(route, url) {
+    if (route === 'dashboard-summary') return 'W/"summary-' + summaryLastRecordedAt + '"';
+    return 'W/"' + route + '-' + Buffer.from(String(url)).toString('base64url') + '"';
+  }
+
+  function fetchHeaders(headers) {
+    return {
+      get(name) {
+        const target = String(name).toLowerCase();
+        for (const [key, value] of Object.entries(headers || {})) {
+          if (String(key).toLowerCase() === target) return Array.isArray(value) ? String(value[0] || '') : String(value || '');
+        }
+        return '';
+      },
+    };
+  }
+
+  function fetchResponse(payload, route, url, requestOptions) {
+    let status = 200;
+    const headers = {};
+    if (dashboardEtags && route) {
+      const etag = dashboardEtag(route, url);
+      headers.ETag = [etag];
+      if (requestHeaderValue(requestOptions, 'If-None-Match') === etag) status = 304;
+    }
+    if (wrapDashboardResponses && route) {
+      const result = {
+        status_code: status,
+        headers,
+        body: status === 304 ? null : JSON.stringify(payload),
+      };
+      return {
+        ok: true,
+        status: 200,
+        headers: fetchHeaders({}),
+        text: async () => JSON.stringify({ ok: true, result: JSON.stringify(result) }),
+      };
+    }
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      headers: fetchHeaders(headers),
+      text: async () => status === 304 ? '' : JSON.stringify(payload),
+    };
+  }
+
   const context = {
     console,
     Intl,
@@ -244,6 +311,7 @@ function createDashboardHarness(options = {}) {
       fetchCalls.push(String(url));
       fetchRequests.push({ url: String(url), options });
       let payload;
+      const route = dashboardRoute(url);
       if (String(url).includes('model-prices')) {
         if (options.method === 'PUT') {
           const body = JSON.parse(options.body || '{}');
@@ -262,11 +330,7 @@ function createDashboardHarness(options = {}) {
       else if (String(url).includes('dashboard-events')) payload = eventsPage(String(url));
       else if (String(url).includes('usage/export')) payload = { version: 1, usage: {} };
       else payload = {};
-      return {
-        ok: true,
-        status: 200,
-        text: async () => JSON.stringify(payload),
-      };
+      return fetchResponse(payload, route, String(url), options);
     },
     Blob: class FakeBlob {
       constructor(parts, options) {
@@ -309,6 +373,17 @@ async function waitFor(fn) {
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
   throw new Error('condition not met');
+}
+
+function optionHeaderValue(options, name) {
+  const headers = options && options.headers;
+  if (!headers) return '';
+  if (typeof headers.get === 'function') return headers.get(name) || headers.get(String(name).toLowerCase()) || '';
+  const target = String(name).toLowerCase();
+  for (const [key, value] of Object.entries(headers)) {
+    if (String(key).toLowerCase() === target) return Array.isArray(value) ? String(value[0] || '') : String(value || '');
+  }
+  return '';
 }
 
 test('dashboard loads summary and export button uses backend event export', async () => {
@@ -434,6 +509,48 @@ test('dashboard polling skips detail requests when no new records arrive', async
   await document.getElementById('refreshBtn').onclick();
   assert.ok(countCalls('dashboard-events') > beforeManualEvents);
   assert.ok(countCalls('dashboard-api-detail') > beforeManualApiDetail);
+});
+
+test('dashboard summary polling reuses cached data on management 304', async () => {
+  const { fetchCalls, fetchRequests, setVisibility } = createDashboardHarness({
+    dashboardEtags: true,
+    wrapDashboardResponses: true,
+  });
+  const summaryRequests = () => fetchRequests.filter((req) => req.url.includes('dashboard-summary'));
+  const countCalls = (part) => fetchCalls.filter((url) => url.includes(part)).length;
+
+  await waitFor(() => summaryRequests().length > 0 && countCalls('dashboard-events?') > 0 && countCalls('dashboard-api-detail') > 0);
+  assert.strictEqual(optionHeaderValue(summaryRequests()[0].options, 'If-None-Match'), '');
+
+  const beforeSummary = summaryRequests().length;
+  const beforeEvents = countCalls('dashboard-events?');
+  const beforeApiDetail = countCalls('dashboard-api-detail');
+  setVisibility('visible');
+
+  await waitFor(() => summaryRequests().length > beforeSummary);
+  const latestSummary = summaryRequests().at(-1);
+  assert.strictEqual(optionHeaderValue(latestSummary.options, 'If-None-Match'), 'W/"summary-2023-11-15T06:13:20Z"');
+  assert.strictEqual(countCalls('dashboard-events?'), beforeEvents);
+  assert.strictEqual(countCalls('dashboard-api-detail'), beforeApiDetail);
+});
+
+test('dashboard detail refresh sends conditional requests for events and api detail', async () => {
+  const { document, fetchRequests } = createDashboardHarness({
+    dashboardEtags: true,
+    wrapDashboardResponses: true,
+  });
+  const eventRequests = () => fetchRequests.filter((req) => req.url.includes('dashboard-events?'));
+  const apiDetailRequests = () => fetchRequests.filter((req) => req.url.includes('dashboard-api-detail'));
+
+  await waitFor(() => eventRequests().length > 0 && apiDetailRequests().length > 0);
+  const beforeEvents = eventRequests().length;
+  const beforeApiDetail = apiDetailRequests().length;
+  await document.getElementById('refreshBtn').onclick();
+
+  await waitFor(() => eventRequests().length > beforeEvents && apiDetailRequests().length > beforeApiDetail);
+  assert.match(optionHeaderValue(eventRequests().at(-1).options, 'If-None-Match'), /^W\/"dashboard-events-/);
+  assert.match(optionHeaderValue(apiDetailRequests().at(-1).options, 'If-None-Match'), /^W\/"dashboard-api-detail-/);
+  assert.match(document.getElementById('apiDetail').innerHTML, /最近请求/);
 });
 
 test('model price settings are loaded and saved through backend API', async () => {
