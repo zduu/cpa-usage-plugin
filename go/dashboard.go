@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -33,6 +34,14 @@ type HealthAlert struct {
 	Code     string `json:"code"`
 	Message  string `json:"message"`
 }
+
+const (
+	healthSlowEventsExportDurationMs     = 5000
+	healthStorageWriterTailLatencyMs     = 1000
+	healthStorageWriterTailMinBatches    = 20
+	healthConditionalLowHitMinRequests   = 20
+	healthConditionalLowHitRateThreshold = 0.20
+)
 
 func init() {
 	h := strings.Replace(dashboardPageHTML, "</head>",
@@ -586,6 +595,53 @@ func healthAlerts(storage StorageStatus, runtime RuntimeStatus) []HealthAlert {
 			Severity: "warn",
 			Code:     "events_export_truncated",
 			Message:  "最近一次事件导出被上限截断",
+		})
+	}
+	if runtime.EventsExportRequests > 0 && runtime.LastEventsExportDurationMs >= healthSlowEventsExportDurationMs {
+		alerts = append(alerts, HealthAlert{
+			Severity: "warn",
+			Code:     "events_export_slow",
+			Message:  "最近一次事件导出耗时过高",
+		})
+	}
+	if storage.WriteBatchesTotal >= healthStorageWriterTailMinBatches && storage.WriteBatchP99DurationMs >= healthStorageWriterTailLatencyMs {
+		alerts = append(alerts, HealthAlert{
+			Severity: "warn",
+			Code:     "storage_writer_p99_slow",
+			Message:  "持久化 writer p99 写入耗时过高",
+		})
+	}
+	if storage.WriteBatchesTotal >= healthStorageWriterTailMinBatches && storage.WriteQueueWaitP99Ms >= healthStorageWriterTailLatencyMs {
+		alerts = append(alerts, HealthAlert{
+			Severity: "warn",
+			Code:     "storage_writer_queue_p99_slow",
+			Message:  "持久化 writer p99 排队等待过高",
+		})
+	}
+	alerts = append(alerts, lowConditionalRequestAlerts(runtime)...)
+	return alerts
+}
+
+func lowConditionalRequestAlerts(runtime RuntimeStatus) []HealthAlert {
+	if len(runtime.ConditionalRequests) == 0 {
+		return nil
+	}
+	endpoints := make([]string, 0, len(runtime.ConditionalRequests))
+	for endpoint := range runtime.ConditionalRequests {
+		endpoints = append(endpoints, endpoint)
+	}
+	sort.Strings(endpoints)
+
+	var alerts []HealthAlert
+	for _, endpoint := range endpoints {
+		conditional := runtime.ConditionalRequests[endpoint]
+		if conditional.Requests < healthConditionalLowHitMinRequests || conditional.HitRate >= healthConditionalLowHitRateThreshold {
+			continue
+		}
+		alerts = append(alerts, HealthAlert{
+			Severity: "warn",
+			Code:     "dashboard_conditional_low_hit_rate",
+			Message:  "看板条件请求 304 命中率过低: " + endpoint,
 		})
 	}
 	return alerts

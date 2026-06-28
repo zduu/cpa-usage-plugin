@@ -364,6 +364,70 @@ func TestHealthAlertsClassifyStoragePressure(t *testing.T) {
 	}
 }
 
+func TestHealthAlertsReportRuntimeAndTailPressure(t *testing.T) {
+	alerts := healthAlerts(StorageStatus{
+		WriteBatchesTotal:       healthStorageWriterTailMinBatches,
+		WriteBatchP99DurationMs: healthStorageWriterTailLatencyMs,
+		WriteQueueWaitP99Ms:     healthStorageWriterTailLatencyMs,
+	}, RuntimeStatus{
+		EventsExportRequests:       1,
+		LastEventsExportDurationMs: healthSlowEventsExportDurationMs,
+		ConditionalRequests: map[string]ConditionalRequestStatus{
+			"dashboard-events": {
+				Requests:    healthConditionalLowHitMinRequests,
+				NotModified: 1,
+				Misses:      healthConditionalLowHitMinRequests - 1,
+				HitRate:     0.05,
+			},
+			"dashboard-summary": {
+				Requests:    healthConditionalLowHitMinRequests,
+				NotModified: healthConditionalLowHitMinRequests,
+				HitRate:     1,
+			},
+		},
+	})
+
+	if healthStatus(alerts) != "warn" {
+		t.Fatalf("health status = %q alerts %#v, want warn", healthStatus(alerts), alerts)
+	}
+	wantCodes := map[string]bool{
+		"events_export_slow":                 true,
+		"storage_writer_p99_slow":            true,
+		"storage_writer_queue_p99_slow":      true,
+		"dashboard_conditional_low_hit_rate": true,
+	}
+	if len(alerts) != len(wantCodes) {
+		t.Fatalf("alerts = %#v, want codes %#v", alerts, wantCodes)
+	}
+	for _, alert := range alerts {
+		if !wantCodes[alert.Code] || alert.Severity != "warn" {
+			t.Fatalf("unexpected alert = %#v, want warn in %#v", alert, wantCodes)
+		}
+	}
+}
+
+func TestHealthAlertsIgnoreLowSignalThresholds(t *testing.T) {
+	alerts := healthAlerts(StorageStatus{
+		WriteBatchesTotal:       healthStorageWriterTailMinBatches - 1,
+		WriteBatchP99DurationMs: healthStorageWriterTailLatencyMs,
+		WriteQueueWaitP99Ms:     healthStorageWriterTailLatencyMs,
+	}, RuntimeStatus{
+		EventsExportRequests:       1,
+		LastEventsExportDurationMs: healthSlowEventsExportDurationMs - 1,
+		ConditionalRequests: map[string]ConditionalRequestStatus{
+			"dashboard-events": {
+				Requests: healthConditionalLowHitMinRequests - 1,
+				Misses:   healthConditionalLowHitMinRequests - 1,
+				HitRate:  0,
+			},
+		},
+	})
+
+	if len(alerts) != 0 || healthStatus(alerts) != "ok" {
+		t.Fatalf("alerts = %#v status %q, want no alerts/ok", alerts, healthStatus(alerts))
+	}
+}
+
 func TestRecordStoresMaskedClientAPIKeyAndCleanSource(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Record(UsageRecord{
