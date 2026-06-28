@@ -397,6 +397,7 @@ type StorageStatus struct {
 	LoadedPath                    string  `json:"loaded_path,omitempty"`
 	LastFlushAt                   string  `json:"last_flush_at,omitempty"`
 	LastSnapshotAt                string  `json:"last_snapshot_at,omitempty"`
+	LastCompactionAt              string  `json:"last_compaction_at,omitempty"`
 	LastSyncAt                    string  `json:"last_sync_at,omitempty"`
 	LastError                     string  `json:"last_error,omitempty"`
 	PendingBufferedRecords        int64   `json:"pending_buffered_records,omitempty"`
@@ -413,6 +414,8 @@ type StorageStatus struct {
 	WriteQueueWaitAvgMs           float64 `json:"write_queue_wait_avg_ms,omitempty"`
 	WriteQueueWaitMaxMs           float64 `json:"write_queue_wait_max_ms,omitempty"`
 	WritePressure                 string  `json:"write_pressure,omitempty"`
+	LastCompactedShards           int     `json:"last_compacted_shards,omitempty"`
+	CompactedShardsTotal          int64   `json:"compacted_shards_total,omitempty"`
 	SnapshotIntervalSeconds       int     `json:"snapshot_interval_seconds,omitempty"`
 	SnapshotRecordIntervalRecords int     `json:"snapshot_record_interval_records,omitempty"`
 	SyncIntervalSeconds           int     `json:"sync_interval_seconds,omitempty"`

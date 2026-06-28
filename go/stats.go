@@ -69,6 +69,7 @@ type RequestStatistics struct {
 	storageActiveDate             string
 	storageLastFlush              time.Time
 	storageLastSnapshot           time.Time
+	storageLastCompaction         time.Time
 	storageLastSync               time.Time
 	storageLastError              string
 	storageBuffered               int64
@@ -88,6 +89,8 @@ type RequestStatistics struct {
 	storageWriteBatchDurationAvg  time.Duration
 	storageWriteQueueWaitAvg      time.Duration
 	storageWriteQueueWaitMax      time.Duration
+	storageLastCompactedShards    int
+	storageCompactedShardsTotal   int64
 	storageWorkerRunning          bool
 	storageQueue                  chan persistedDetail
 	storageStop                   chan struct{}
@@ -718,6 +721,20 @@ func (s *RequestStatistics) updateStorageWriteBatchMetrics(records int, duration
 	s.mu.Unlock()
 }
 
+func (s *RequestStatistics) updateStorageCompaction(compacted int, when time.Time) {
+	if s == nil || compacted <= 0 {
+		return
+	}
+	if when.IsZero() {
+		when = time.Now()
+	}
+	s.mu.Lock()
+	s.storageLastCompaction = when
+	s.storageLastCompactedShards = compacted
+	s.storageCompactedShardsTotal += int64(compacted)
+	s.mu.Unlock()
+}
+
 func storageDurationEWMA(previous time.Duration, current time.Duration) time.Duration {
 	if current < 0 {
 		current = 0
@@ -842,6 +859,12 @@ func (w *storageWorkerState) writeSnapshot(s *RequestStatistics, now time.Time) 
 	if err := writeStorageSnapshotFile(w.cfg.dir, snapshot, now); err != nil {
 		s.setStorageLastError(err)
 		return false
+	}
+	compacted, err := compactStorageShardsBeforeSnapshot(w.cfg.dir, now, w.loadedPath)
+	if err != nil {
+		s.setStorageLastError(err)
+	} else if compacted > 0 {
+		s.updateStorageCompaction(compacted, now)
 	}
 	w.lastSnapshot = now
 	w.snapshotRecords = 0
@@ -1091,6 +1114,15 @@ func (s *RequestStatistics) writeStorageSnapshotLocked(now time.Time) error {
 	if err := writeStorageSnapshotFile(s.storageDir, s.snapshotLocked(), now); err != nil {
 		return err
 	}
+	compacted, err := compactStorageShardsBeforeSnapshot(s.storageDir, now, s.storageLoadedPath)
+	if err != nil {
+		return err
+	}
+	if compacted > 0 {
+		s.storageLastCompaction = now
+		s.storageLastCompactedShards = compacted
+		s.storageCompactedShardsTotal += int64(compacted)
+	}
 	s.storageLastSnapshot = now
 	s.storageSnapshotRecords = 0
 	return nil
@@ -1138,6 +1170,42 @@ func writeStorageSnapshotFile(dir string, snapshot StatisticsSnapshot, now time.
 	}
 	_ = syncDir(dir)
 	return nil
+}
+
+func compactStorageShardsBeforeSnapshot(dir string, snapshotAt time.Time, loadedPath string) (int, error) {
+	if strings.TrimSpace(dir) == "" || snapshotAt.IsZero() {
+		return 0, nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	snapshotDay := snapshotAt.UTC().Truncate(24 * time.Hour)
+	var compacted int
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		fileDate, ok := parseStorageFileDate(entry.Name())
+		if !ok || !fileDate.Before(snapshotDay) {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		if loadedPath != "" && path == loadedPath {
+			continue
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return compacted, err
+		}
+		compacted++
+	}
+	if compacted > 0 {
+		_ = syncDir(dir)
+	}
+	return compacted, nil
 }
 
 func syncDir(dir string) error {
@@ -1335,6 +1403,11 @@ func (s *RequestStatistics) closeStorageLocked() {
 	s.storageWriteBatchDurationAvg = 0
 	s.storageWriteQueueWaitAvg = 0
 	s.storageWriteQueueWaitMax = 0
+	if !s.storageEnabled {
+		s.storageLastCompaction = time.Time{}
+		s.storageLastCompactedShards = 0
+		s.storageCompactedShardsTotal = 0
+	}
 	s.storageWorkerRunning = false
 	if s.storageEnabled && strings.TrimSpace(s.storageDir) != "" {
 		if err := s.writeStorageSnapshotLocked(now); err != nil {
@@ -3391,6 +3464,8 @@ func (s *RequestStatistics) storageStatusLocked() StorageStatus {
 		WriteQueueWaitAvgMs:           storageDurationMilliseconds(s.storageWriteQueueWaitAvg),
 		WriteQueueWaitMaxMs:           storageDurationMilliseconds(s.storageWriteQueueWaitMax),
 		WritePressure:                 writePressure,
+		LastCompactedShards:           s.storageLastCompactedShards,
+		CompactedShardsTotal:          s.storageCompactedShardsTotal,
 		SnapshotIntervalSeconds:       int(s.storageSnapshotInterval.Seconds()),
 		SnapshotRecordIntervalRecords: s.storageSnapshotRecordInterval,
 		SyncIntervalSeconds:           int(s.storageSyncInterval.Seconds()),
@@ -3401,6 +3476,9 @@ func (s *RequestStatistics) storageStatusLocked() StorageStatus {
 	}
 	if !s.storageLastSnapshot.IsZero() {
 		status.LastSnapshotAt = s.storageLastSnapshot.UTC().Format(time.RFC3339)
+	}
+	if !s.storageLastCompaction.IsZero() {
+		status.LastCompactionAt = s.storageLastCompaction.UTC().Format(time.RFC3339)
 	}
 	if !s.storageLastSync.IsZero() {
 		status.LastSyncAt = s.storageLastSync.UTC().Format(time.RFC3339)

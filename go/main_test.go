@@ -885,6 +885,57 @@ func TestStorageSnapshotSkipsOlderShardsAndReplaysSameDayDelta(t *testing.T) {
 	}
 }
 
+func TestStorageSnapshotCompactsShardsBeforeSnapshotDay(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "usage-statistics")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir storage dir: %v", err)
+	}
+	now := time.Now().UTC()
+	oldTime := now.Add(-24 * time.Hour)
+	writePersisted := func(path string, detailTime time.Time, tokens int64) {
+		t.Helper()
+		raw := mustMarshal(persistedDetail{
+			API:   "openai",
+			Model: "gpt-4",
+			Detail: RequestDetail{
+				Model:     "gpt-4",
+				Timestamp: detailTime,
+				Source:    "openai-prod",
+				Provider:  "openai",
+				Tokens:    TokenStats{TotalTokens: tokens},
+			},
+		})
+		if err := os.WriteFile(path, append(raw, '\n'), 0o600); err != nil {
+			t.Fatalf("write storage shard: %v", err)
+		}
+	}
+	oldPath := filepath.Join(dir, storageFileName(storageDate(oldTime)))
+	todayPath := filepath.Join(dir, storageFileName(storageDate(now)))
+	writePersisted(oldPath, oldTime, 5)
+	writePersisted(todayPath, now, 7)
+
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		MaxDetailsPerModel: 100,
+		RetentionDays:      30,
+		DedupWindowMinutes: 0,
+		StorageEnabled:     true,
+		StoragePath:        dir,
+	})
+	stats.Close()
+
+	if _, err := os.Stat(oldPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old shard should be compacted, stat err = %v", err)
+	}
+	if _, err := os.Stat(todayPath); err != nil {
+		t.Fatalf("today shard should remain for same-day delta replay: %v", err)
+	}
+	status := stats.StorageStatus()
+	if status.LastCompactionAt == "" || status.LastCompactedShards != 1 || status.CompactedShardsTotal != 1 {
+		t.Fatalf("compaction status = %#v, want one compacted shard", status)
+	}
+}
+
 func TestStorageReplaySkipsAndCleansExpiredDateShards(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "usage-statistics")
 	if err := os.MkdirAll(dir, 0o755); err != nil {

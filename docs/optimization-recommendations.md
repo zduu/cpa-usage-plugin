@@ -16,7 +16,7 @@
 - 上游详情使用 `/dashboard-api-detail` 返回聚合、错误统计和最近请求，避免前端自己分页拼全量。
 - JSONL 持久化支持 `storage_enabled`、`storage_path`、`storage_flush_interval_seconds`。
 - 新写入数据按日期分片，启动时只 replay 保留窗口内分片。
-- 正常关闭、日期切换、达到时间间隔或记录间隔会写入 `snapshot.json`，下次启动先加载快照再 replay 增量。
+- 正常关闭、日期切换、达到时间间隔或记录间隔会写入 `snapshot.json`，snapshot 成功后会清理 snapshot 日期之前的旧 JSONL 分片，下次启动先加载快照再 replay 当天及之后的增量。
 - 可选 `storage_sync_interval_seconds` 和 `storage_sync_record_interval` 可对 JSONL 文件执行周期 fsync。
 - JSON marshal、文件写入、flush、fsync 和 snapshot 已由后台有界队列 worker 批量处理，请求记录路径只同步更新内存统计并排队持久化事件。
 - 摘要聚合、健康网格、模型/来源/凭证/客户端 API 统计已增量维护。
@@ -105,11 +105,12 @@ plugins:
 
 ## P1 建议
 
-### 1. 增加快照压缩策略
+### 1. 继续完善快照压缩策略
 
-当前已支持按 `storage_snapshot_interval_seconds` 和 `storage_snapshot_record_interval` 周期写入 snapshot。后续建议继续增加：
+当前已支持按 `storage_snapshot_interval_seconds` 和 `storage_snapshot_record_interval` 周期写入 snapshot，并会在 snapshot 成功后清理 snapshot 日期之前的旧 JSONL 分片。`/health.storage` 会暴露最近和累计清理数量。后续建议继续增加：
 
-- 快照成功后，可选择压缩或标记老分片，减少下次启动 replay 范围。
+- 可选压缩 snapshot 当天之前但需要审计留存的分片，而不是直接删除。
+- 清理失败次数和最近清理错误分类。
 
 收益：
 
@@ -241,6 +242,7 @@ go test -run '^$' -bench 'BenchmarkSummaryWithoutDetails|BenchmarkQueryEvents|Be
 11. 后台持久化 writer 批量处理队列记录，并暴露最近批次条数、写入耗时和最长排队时长。
 12. 后台 writer 暴露滑动平均、累计写入量和 `write_pressure` 状态，看板可提示持续写入偏慢。
 13. `/health.runtime` 暴露条件请求命中率，外部脚本示例已说明如何复用 ETag。
+14. snapshot 成功后清理 snapshot 日期之前的旧 JSONL 分片，减少磁盘占用和下次启动目录扫描范围。
 
 下一步建议：
 
