@@ -96,6 +96,12 @@ func handleRegister(requestBody []byte) ([]byte, error) {
 					Description: "每新增多少条持久化记录执行一次 fsync，0 表示不按记录数强制同步。",
 				},
 				{
+					Name:        "export_max_records",
+					Type:        "integer",
+					Default:     defaultExportMaxRecords,
+					Description: "看板事件导出最多返回的明细条数，0 表示不限制。",
+				},
+				{
 					Name:        "price_storage_path",
 					Type:        "string",
 					Default:     defaultPriceStoragePath,
@@ -176,6 +182,9 @@ func parseRuntimeConfig(requestBody []byte) runtimeConfig {
 	if patch.StorageSyncRecordInterval != nil {
 		cfg.StorageSyncRecordInterval = *patch.StorageSyncRecordInterval
 	}
+	if patch.ExportMaxRecords != nil {
+		cfg.ExportMaxRecords = *patch.ExportMaxRecords
+	}
 	if patch.PriceStoragePath != nil {
 		cfg.PriceStoragePath = *patch.PriceStoragePath
 	}
@@ -203,6 +212,7 @@ func parseRuntimeConfigPatch(requestBody []byte) runtimeConfigPatch {
 		StorageSnapshotRecordInterval: intPtr(defaults.StorageSnapshotRecordInterval),
 		StorageSyncSeconds:            intPtr(defaults.StorageSyncSeconds),
 		StorageSyncRecordInterval:     intPtr(defaults.StorageSyncRecordInterval),
+		ExportMaxRecords:              intPtr(defaults.ExportMaxRecords),
 		PriceStoragePath:              stringPtr(defaults.PriceStoragePath),
 		UpdateEnabled:                 boolPtr(defaults.UpdateEnabled),
 		UpdateVersion:                 stringPtr(defaults.UpdateVersion),
@@ -249,6 +259,9 @@ func parseRuntimeConfigPatch(requestBody []byte) runtimeConfigPatch {
 	}
 	if v, ok := intConfig(values, "storage_sync_record_interval"); ok {
 		patch.StorageSyncRecordInterval = intPtr(v)
+	}
+	if v, ok := intConfig(values, "export_max_records"); ok {
+		patch.ExportMaxRecords = intPtr(v)
 	}
 	if s, ok := stringConfig(values, "price_storage_path"); ok {
 		patch.PriceStoragePath = stringPtr(s)

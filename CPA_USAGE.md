@@ -103,6 +103,8 @@ plugins:
       storage_sync_interval_seconds: 0
       # 可选：每新增多少条持久化记录执行一次 fsync。默认 0，不按记录数强制同步。
       storage_sync_record_interval: 0
+      # 可选：看板事件导出最多返回的明细条数。默认 100000，0 表示不限制。
+      export_max_records: 100000
       # 可选：模型价格表 JSON 文件路径。相对路径基于 CPA 工作目录。
       price_storage_path: usage-statistics-prices.json
       # 可选：允许外部脚本更新插件文件。默认 false。
@@ -328,7 +330,7 @@ curl "http://127.0.0.1:8317/v0/management/plugins/usage-statistics/dashboard-eve
   -o usage-events.csv
 
 # 导出最近 7 天事件为 gzip 压缩 JSONL
-curl "http://127.0.0.1:8317/v0/management/plugins/usage-statistics/dashboard-events-export?range=7d&format=jsonl&gzip=1" \
+curl "http://127.0.0.1:8317/v0/management/plugins/usage-statistics/dashboard-events-export?range=7d&format=jsonl&gzip=1&limit=50000" \
   -H 'x-management-key: <你的管理密钥>' \
   -o usage-events.jsonl.gz
 ```
@@ -339,6 +341,8 @@ curl "http://127.0.0.1:8317/v0/management/plugins/usage-statistics/dashboard-eve
 curl http://127.0.0.1:8317/v0/management/plugins/usage-statistics/health \
   -H 'x-management-key: <你的管理密钥>'
 ```
+
+`dashboard-events-export` 默认最多返回 `export_max_records` 条明细，也可以用 `limit` 为单次导出指定更小上限；JSON 响应会带 `truncated`，CSV/JSONL 响应头会带 `X-Total-Count`、`X-Exported-Count` 和 `X-Export-Truncated`。需要完全不限制时可配置 `export_max_records: 0`，但超大导出会增加 CPA 管理接口内存和响应体压力。
 
 `storage` 字段会返回持久化状态、后台写入队列长度、最近 writer 批次指标、writer 滑动平均和 `write_pressure`、最近和累计清理旧分片数量、待 flush/sync/snapshot 记录数和最近错误；`runtime` 字段会返回摘要缓存命中/未命中、事件缓存命中/未命中、事件索引条目数、条件请求 304 命中率，以及最近 summary/events/api-detail 查询耗时，便于观察看板压力和筛选性能。
 

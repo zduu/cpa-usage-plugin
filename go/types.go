@@ -17,6 +17,7 @@ const (
 	defaultStorageSyncRecords            = 0
 	defaultStorageWriteQueueSize         = 4096
 	defaultStorageWriteBatchSize         = 128
+	defaultExportMaxRecords              = 100000
 	defaultPriceStoragePath              = "usage-statistics-prices.json"
 )
 
@@ -44,6 +45,7 @@ type runtimeConfig struct {
 	StorageSnapshotRecordInterval int
 	StorageSyncSeconds            int
 	StorageSyncRecordInterval     int
+	ExportMaxRecords              int
 	PriceStoragePath              string
 	UpdateEnabled                 bool
 	UpdateVersion                 string
@@ -62,6 +64,7 @@ type runtimeConfigPatch struct {
 	StorageSnapshotRecordInterval *int
 	StorageSyncSeconds            *int
 	StorageSyncRecordInterval     *int
+	ExportMaxRecords              *int
 	PriceStoragePath              *string
 	UpdateEnabled                 *bool
 	UpdateVersion                 *string
@@ -81,6 +84,7 @@ func defaultRuntimeConfig() runtimeConfig {
 		StorageSnapshotRecordInterval: defaultStorageSnapshotRecords,
 		StorageSyncSeconds:            defaultStorageSyncSeconds,
 		StorageSyncRecordInterval:     defaultStorageSyncRecords,
+		ExportMaxRecords:              defaultExportMaxRecords,
 		PriceStoragePath:              defaultPriceStoragePath,
 		UpdateEnabled:                 false,
 		UpdateVersion:                 "latest",
@@ -388,6 +392,7 @@ type ExportConfig struct {
 	StorageSnapshotRecordInterval int    `json:"storage_snapshot_record_interval,omitempty"`
 	StorageSyncSeconds            int    `json:"storage_sync_interval_seconds,omitempty"`
 	StorageSyncRecordInterval     int    `json:"storage_sync_record_interval,omitempty"`
+	ExportMaxRecords              int    `json:"export_max_records,omitempty"`
 	PriceStoragePath              string `json:"price_storage_path,omitempty"`
 }
 
@@ -729,6 +734,7 @@ type EventsResult struct {
 	Total       int             `json:"total"`
 	Limit       int             `json:"limit"`
 	Offset      int             `json:"offset"`
+	Truncated   bool            `json:"truncated,omitempty"`
 	GeneratedAt string          `json:"generated_at"`
 }
 

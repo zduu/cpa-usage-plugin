@@ -74,15 +74,21 @@ async function fetchJsonPayload(url, options) {
 }
 
 async function fetchTextPayload(url, options) {
+  const meta = await fetchTextPayloadWithMeta(url, options);
+  return meta.data;
+}
+
+async function fetchTextPayloadWithMeta(url, options) {
   const response = await fetch(url, options);
   const text = await response.text();
   if (!response.ok) throw new Error(text || ('请求失败：' + response.status));
-  if (!text) return '';
+  if (!text) return { data: '', statusCode: response.status || 200, headers: {} };
   let payload = null;
-  try { payload = JSON.parse(text) } catch { return text }
+  try { payload = JSON.parse(text) } catch { return { data: text, statusCode: response.status || 200, headers: {} } }
   const meta = unwrapPluginPayloadWithMeta(payload);
-  if (meta.data == null) return '';
-  return typeof meta.data === 'string' ? meta.data : JSON.stringify(meta.data);
+  if (meta.data == null) meta.data = '';
+  meta.data = typeof meta.data === 'string' ? meta.data : JSON.stringify(meta.data);
+  return meta;
 }
 
 async function fetchConditionalJsonPayload(cacheKey, url, options) {
@@ -644,12 +650,14 @@ async function exportRows(kind) {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     if (kind === 'csv') {
       params.set('format', 'csv');
-      const csv = await fetchTextPayload(pluginEndpoint('dashboard-events-export') + '?' + params.toString(), { cache: 'no-store' });
-      download('usage-events-' + stamp + '.csv', csv, 'text/csv;charset=utf-8');
+      const meta = await fetchTextPayloadWithMeta(pluginEndpoint('dashboard-events-export') + '?' + params.toString(), { cache: 'no-store' });
+      notifyExportTruncated(exportTruncationFromHeaders(meta.headers));
+      download('usage-events-' + stamp + '.csv', meta.data, 'text/csv;charset=utf-8');
       return;
     }
     const data = await fetchJsonPayload(pluginEndpoint('dashboard-events-export') + '?' + params.toString(), { cache: 'no-store' });
     const rows = data.events || [];
+    notifyExportTruncated({ truncated: !!data.truncated, total: data.total, exported: rows.length });
     if (kind === 'json') { download('usage-events-' + stamp + '.json', JSON.stringify(rows, null, 2), 'application/json;charset=utf-8'); return }
     download('usage-events-' + stamp + '.csv', rowsCsv(rows), 'text/csv;charset=utf-8');
   } catch (e) { alert('导出失败'); }
@@ -668,16 +676,31 @@ async function exportApiRows(kind) {
     const name = (friendlyApiName(selectedApi) || 'api').replace(/[\\/:*?"<>|\s]+/g, '-').slice(0, 80);
     if (kind === 'csv') {
       params.set('format', 'csv');
-      const csv = await fetchTextPayload(pluginEndpoint('dashboard-events-export') + '?' + params.toString(), { cache: 'no-store' });
-      download('usage-api-' + name + '-' + stamp + '.csv', csv, 'text/csv;charset=utf-8');
+      const meta = await fetchTextPayloadWithMeta(pluginEndpoint('dashboard-events-export') + '?' + params.toString(), { cache: 'no-store' });
+      notifyExportTruncated(exportTruncationFromHeaders(meta.headers));
+      download('usage-api-' + name + '-' + stamp + '.csv', meta.data, 'text/csv;charset=utf-8');
       return;
     }
     const data = await fetchJsonPayload(pluginEndpoint('dashboard-events-export') + '?' + params.toString(), { cache: 'no-store' });
     const rows = data.events || [];
     if (!rows.length) return;
+    notifyExportTruncated({ truncated: !!data.truncated, total: data.total, exported: rows.length });
     if (kind === 'json') { download('usage-api-' + name + '-' + stamp + '.json', JSON.stringify(rows, null, 2), 'application/json;charset=utf-8'); return }
     download('usage-api-' + name + '-' + stamp + '.csv', rowsCsv(rows), 'text/csv;charset=utf-8');
   } catch (e) { alert('导出失败'); }
+}
+
+function exportTruncationFromHeaders(headers) {
+  return {
+    truncated: headerValue(headers, 'X-Export-Truncated') === 'true',
+    total: num(headerValue(headers, 'X-Total-Count')),
+    exported: num(headerValue(headers, 'X-Exported-Count')),
+  };
+}
+
+function notifyExportTruncated(info) {
+  if (!info || !info.truncated) return;
+  alert('导出已截断：共 ' + fmt.format(num(info.total)) + ' 条，已导出 ' + fmt.format(num(info.exported)) + ' 条');
 }
 
 function summaryRecordKey(data) {

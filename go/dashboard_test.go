@@ -683,6 +683,108 @@ func TestDashboardEventsExportReturnsAllFilteredRows(t *testing.T) {
 	}
 }
 
+func TestDashboardEventsExportLimitKeepsTotalAndMarksTruncated(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0})
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < 6; i++ {
+		stats.Record(UsageRecord{
+			Provider:    "openai",
+			Model:       "gpt-4",
+			RequestedAt: base.Add(time.Duration(i) * time.Minute),
+			Detail:      UsageDetail{TotalTokens: int64(10 + i)},
+		})
+	}
+
+	result := stats.QueryExportEvents(EventsQuery{}, 3)
+	if result.Total != 6 || len(result.Events) != 3 || result.Limit != 3 || !result.Truncated {
+		t.Fatalf("limited export = total %d len %d limit %d truncated %v, want 6/3/3/true", result.Total, len(result.Events), result.Limit, result.Truncated)
+	}
+	if result.Events[0].Tokens.TotalTokens != 15 || result.Events[2].Tokens.TotalTokens != 13 {
+		t.Fatalf("limited export should keep newest rows first: %#v", result.Events)
+	}
+
+	filtered := stats.QueryExportEvents(EventsQuery{Range: "24h", Model: "gpt-4"}, 10)
+	if filtered.Total != 6 || len(filtered.Events) != 6 || filtered.Limit != 6 || filtered.Truncated {
+		t.Fatalf("uncapped filtered export = total %d len %d limit %d truncated %v, want 6/6/6/false", filtered.Total, len(filtered.Events), filtered.Limit, filtered.Truncated)
+	}
+}
+
+func TestDashboardEventsExportLimitQueryReturnsTruncationHeaders(t *testing.T) {
+	previousStats := stats
+	stats = NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0})
+	t.Cleanup(func() { stats = previousStats })
+
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < 5; i++ {
+		stats.Record(UsageRecord{
+			Provider:    "openai",
+			Model:       "gpt-4",
+			RequestedAt: base.Add(time.Duration(i) * time.Minute),
+			Detail:      UsageDetail{TotalTokens: int64(10 + i)},
+		})
+	}
+
+	resp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "GET",
+		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export",
+		Query:  map[string][]string{"limit": {"2"}},
+	}), nil)
+
+	if got := resp.Headers["X-Total-Count"]; len(got) != 1 || got[0] != "5" {
+		t.Fatalf("X-Total-Count = %#v, want 5", got)
+	}
+	if got := resp.Headers["X-Exported-Count"]; len(got) != 1 || got[0] != "2" {
+		t.Fatalf("X-Exported-Count = %#v, want 2", got)
+	}
+	if got := resp.Headers["X-Export-Truncated"]; len(got) != 1 || got[0] != "true" {
+		t.Fatalf("X-Export-Truncated = %#v, want true", got)
+	}
+
+	var result EventsResult
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatalf("unmarshal limited export: %v", err)
+	}
+	if result.Total != 5 || len(result.Events) != 2 || result.Limit != 2 || !result.Truncated {
+		t.Fatalf("limited management export = total %d len %d limit %d truncated %v, want 5/2/2/true", result.Total, len(result.Events), result.Limit, result.Truncated)
+	}
+}
+
+func TestDashboardEventsExportQueryLimitCannotExceedConfiguredLimit(t *testing.T) {
+	previousStats := stats
+	stats = NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0, ExportMaxRecords: 3})
+	t.Cleanup(func() { stats = previousStats })
+
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < 5; i++ {
+		stats.Record(UsageRecord{
+			Provider:    "openai",
+			Model:       "gpt-4",
+			RequestedAt: base.Add(time.Duration(i) * time.Minute),
+			Detail:      UsageDetail{TotalTokens: int64(10 + i)},
+		})
+	}
+
+	resp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "GET",
+		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export",
+		Query:  map[string][]string{"limit": {"4"}},
+	}), nil)
+
+	if got := resp.Headers["X-Exported-Count"]; len(got) != 1 || got[0] != "3" {
+		t.Fatalf("X-Exported-Count = %#v, want configured cap 3", got)
+	}
+	var result EventsResult
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatalf("unmarshal limited export: %v", err)
+	}
+	if result.Total != 5 || len(result.Events) != 3 || result.Limit != 3 || !result.Truncated {
+		t.Fatalf("configured limited export = total %d len %d limit %d truncated %v, want 5/3/3/true", result.Total, len(result.Events), result.Limit, result.Truncated)
+	}
+}
+
 func TestDashboardEventsRangeFilter(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{MaxDetailsPerModel: 200, DedupWindowMinutes: 0, RetentionDays: 30})

@@ -141,6 +141,7 @@ const (
 type dashboardEventsExportOptions struct {
 	Format dashboardExportFormat
 	Gzip   bool
+	Limit  int
 }
 
 func dashboardEventsExportOptionsFromQuery(query map[string][]string) dashboardEventsExportOptions {
@@ -157,6 +158,11 @@ func dashboardEventsExportOptionsFromQuery(query map[string][]string) dashboardE
 	}
 	if queryBool(query, "gzip") || queryBool(query, "compress") || queryValue(query, "encoding") == "gzip" {
 		opts.Gzip = true
+	}
+	if v, ok := query["limit"]; ok && len(v) > 0 {
+		if n, err := strconv.Atoi(v[0]); err == nil && n > 0 {
+			opts.Limit = n
+		}
 	}
 	return opts
 }
@@ -181,11 +187,12 @@ func queryBool(query map[string][]string, key string) bool {
 func handleDashboardEventsExport(query map[string][]string, headers map[string][]string) ([]byte, error) {
 	params := normalizeEventsQuery(dashboardEventsQuery(query), false)
 	opts := dashboardEventsExportOptionsFromQuery(query)
+	opts.Limit = effectiveDashboardExportLimit(opts.Limit, stats.ExportMaxRecords())
 	etag := dashboardEventsExportETag(params, opts, time.Now())
 	if dashboardConditionalMatch("dashboard-events-export", headers, etag) {
 		return dashboardNotModifiedWithHeaders(dashboardExportHeaders(etag, dashboardExportContentType(opts.Format), opts.Gzip))
 	}
-	result := stats.QueryAllEvents(params)
+	result := stats.QueryExportEvents(params, opts.Limit)
 	body, contentType, err := encodeDashboardEventsExport(result, opts)
 	if err != nil {
 		return nil, err
@@ -198,10 +205,20 @@ func handleDashboardEventsExport(query map[string][]string, headers map[string][
 	}
 	resp := ManagementResponse{
 		StatusCode: http.StatusOK,
-		Headers:    dashboardExportHeaders(etag, contentType, opts.Gzip),
+		Headers:    dashboardExportResultHeaders(etag, contentType, opts.Gzip, result),
 		Body:       body,
 	}
 	return okEnvelopeJSON(string(mustMarshal(resp)))
+}
+
+func effectiveDashboardExportLimit(requestLimit int, configuredLimit int) int {
+	if configuredLimit <= 0 {
+		return requestLimit
+	}
+	if requestLimit <= 0 || requestLimit > configuredLimit {
+		return configuredLimit
+	}
+	return requestLimit
 }
 
 func dashboardEventsExportETag(params EventsQuery, opts dashboardEventsExportOptions, now time.Time) string {
@@ -211,6 +228,7 @@ func dashboardEventsExportETag(params EventsQuery, opts dashboardEventsExportOpt
 		strconv.FormatUint(stats.DashboardVersion(), 10),
 		string(opts.Format),
 		strconv.FormatBool(opts.Gzip),
+		strconv.Itoa(opts.Limit),
 		strconv.FormatInt(key.timeBucket, 10),
 		key.rangeKey,
 		key.model,
@@ -254,6 +272,14 @@ func dashboardExportHeaders(etag string, contentType string, gzipped bool) map[s
 	if gzipped {
 		headers["Content-Encoding"] = []string{"gzip"}
 	}
+	return headers
+}
+
+func dashboardExportResultHeaders(etag string, contentType string, gzipped bool, result EventsResult) map[string][]string {
+	headers := dashboardExportHeaders(etag, contentType, gzipped)
+	headers["X-Total-Count"] = []string{strconv.Itoa(result.Total)}
+	headers["X-Exported-Count"] = []string{strconv.Itoa(len(result.Events))}
+	headers["X-Export-Truncated"] = []string{strconv.FormatBool(result.Truncated)}
 	return headers
 }
 

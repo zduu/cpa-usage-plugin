@@ -24,7 +24,7 @@
 - `/health.runtime` 暴露摘要缓存、事件缓存、索引规模和最近查询耗时指标。
 - 看板摘要、事件分页、上游详情和事件导出接口支持弱 ETag 与 `If-None-Match` 条件请求，前端轮询会在 304 时复用本地缓存。
 - `/health.runtime.conditional_requests` 按端点统计带 `If-None-Match` 请求的 304 命中、未命中和命中率。
-- 事件导出接口支持 JSON、CSV、JSONL 和可选 gzip；看板 CSV 导出已改为服务端生成，浏览器不再先下载完整 JSON 数组再转换。
+- 事件导出接口支持 JSON、CSV、JSONL 和可选 gzip；看板 CSV 导出已改为服务端生成，浏览器不再先下载完整 JSON 数组再转换。导出默认受 `export_max_records` 保护，也可用 `limit` 为单次导出设置更小上限，响应会标记总数、导出数和是否截断。
 - 页面会显示持久化状态、后台写入队列积压、最近 writer 批次指标、writer 滑动平均、写入压力状态、待 flush 记录数、最后 flush 时间和最近导入结果。
 
 ## P0 建议
@@ -168,14 +168,14 @@ plugins:
 
 ### 5. 继续推进真流式或后台导出
 
-当前已支持 `format=csv|jsonl` 和 `gzip=1`，并且看板 CSV 由服务端直接生成，减少浏览器侧大数组转换开销。但 CPA 插件管理响应当前仍是单个 `ManagementResponse.Body []byte`，没有真正的 chunked streaming 能力；导出仍会先得到匹配事件集合并编码为一次性响应体。
+当前已支持 `format=csv|jsonl`、`gzip=1`、`export_max_records` 和单次请求 `limit`，并且看板 CSV 由服务端直接生成，减少浏览器侧大数组转换开销。但 CPA 插件管理响应当前仍是单个 `ManagementResponse.Body []byte`，没有真正的 chunked streaming 能力；导出仍会先得到受上限保护的匹配事件集合并编码为一次性响应体。
 
 数据量继续上来后建议：
 
 - 推动管理接口协议支持 chunked streaming，或增加后台导出任务模式。
 - 大导出按筛选条件边扫描边写，不构造完整数组。
-- 给导出增加最大行数、时间窗口限制或异步任务状态查询。
-- 为 gzip 导出补充外部脚本示例和大小/耗时指标。
+- 为大导出增加强制时间窗口或异步任务状态查询。
+- 为 gzip 导出补充大小/耗时指标。
 
 收益：
 
@@ -243,11 +243,12 @@ go test -run '^$' -bench 'BenchmarkSummaryWithoutDetails|BenchmarkQueryEvents|Be
 12. 后台 writer 暴露滑动平均、累计写入量和 `write_pressure` 状态，看板可提示持续写入偏慢。
 13. `/health.runtime` 暴露条件请求命中率，外部脚本示例已说明如何复用 ETag。
 14. snapshot 成功后清理 snapshot 日期之前的旧 JSONL 分片，减少磁盘占用和下次启动目录扫描范围。
+15. 事件导出支持 `export_max_records` 默认上限和单次 `limit`，JSON/响应头标记截断状态，降低超大导出对管理接口的压力。
 
 下一步建议：
 
 1. 生产配置默认开启持久化，文档强调 volume、flush、retention 和升级前导出。
-2. 推动管理接口支持真流式导出，或增加后台导出任务模式，避免超大导出占用过多内存。
+2. 推动管理接口支持真流式导出，或增加后台导出任务模式，进一步降低超大导出的内存峰值。
 3. 给后台 writer 增加分位数或外部告警，便于识别长尾磁盘压力。
 4. 大数据量场景再评估 SQLite、bbolt 或 daily aggregate 归档。
 

@@ -97,6 +97,8 @@ type RequestStatistics struct {
 	storageDone                   chan struct{}
 	storageStopping               bool
 
+	exportMaxRecords int
+
 	priceStoragePath       string
 	priceStorageLoadedPath string
 	priceStorageLastError  string
@@ -258,6 +260,7 @@ func NewRequestStatistics() *RequestStatistics {
 		storageSyncInterval:           time.Duration(defaultStorageSyncSeconds) * time.Second,
 		storageSyncRecordInterval:     defaultStorageSyncRecords,
 		storageWriteQueueCapacity:     defaultStorageWriteQueueSize,
+		exportMaxRecords:              defaultExportMaxRecords,
 		priceStoragePath:              defaultRuntimeConfig().PriceStoragePath,
 		modelPrices:                   make(map[string]ModelPrice),
 		conditionalRequests:           make(map[string]conditionalRequestCounter),
@@ -279,6 +282,7 @@ func (s *RequestStatistics) Configure(cfg runtimeConfig) {
 		StorageSnapshotRecordInterval: positiveIntPtr(cfg.StorageSnapshotRecordInterval),
 		StorageSyncSeconds:            intPtr(cfg.StorageSyncSeconds),
 		StorageSyncRecordInterval:     intPtr(cfg.StorageSyncRecordInterval),
+		ExportMaxRecords:              intPtr(cfg.ExportMaxRecords),
 		PriceStoragePath:              stringPtr(cfg.PriceStoragePath),
 		UpdateEnabled:                 boolPtr(cfg.UpdateEnabled),
 		UpdateVersion:                 stringPtr(cfg.UpdateVersion),
@@ -333,6 +337,9 @@ func (s *RequestStatistics) ConfigurePatch(cfg runtimeConfigPatch) {
 	}
 	if cfg.StorageSyncRecordInterval != nil && *cfg.StorageSyncRecordInterval >= 0 {
 		s.storageSyncRecordInterval = *cfg.StorageSyncRecordInterval
+	}
+	if cfg.ExportMaxRecords != nil && *cfg.ExportMaxRecords >= 0 {
+		s.exportMaxRecords = *cfg.ExportMaxRecords
 	}
 	if cfg.PriceStoragePath != nil && strings.TrimSpace(*cfg.PriceStoragePath) != "" {
 		s.priceStoragePath = strings.TrimSpace(*cfg.PriceStoragePath)
@@ -3039,12 +3046,18 @@ func dashboardEventMatches(d RequestDetail, params EventsQuery, cutoff time.Time
 
 // QueryEvents returns paginated, filtered event details.
 func (s *RequestStatistics) QueryEvents(params EventsQuery) EventsResult {
-	return s.queryEvents(params, true)
+	return s.queryEvents(params, true, 0)
 }
 
 // QueryAllEvents returns every matching event for backend-generated exports.
 func (s *RequestStatistics) QueryAllEvents(params EventsQuery) EventsResult {
-	return s.queryEvents(params, false)
+	return s.queryEvents(params, false, 0)
+}
+
+// QueryExportEvents returns matching events up to maxRecords while still
+// counting the full match total for capped backend-generated exports.
+func (s *RequestStatistics) QueryExportEvents(params EventsQuery, maxRecords int) EventsResult {
+	return s.queryEvents(params, false, maxRecords)
 }
 
 func normalizeEventsQuery(params EventsQuery, paginate bool) EventsQuery {
@@ -3062,7 +3075,7 @@ func normalizeEventsQuery(params EventsQuery, paginate bool) EventsQuery {
 	return params
 }
 
-func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool) EventsResult {
+func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool, exportLimit int) EventsResult {
 	if s == nil {
 		return EventsResult{}
 	}
@@ -3094,11 +3107,20 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool) Event
 	if !dashboardEventQueryHasFilters(params) {
 		total := len(index)
 		if !paginate {
+			eventsIndex := index
+			limit := total
+			truncated := false
+			if exportLimit > 0 && total > exportLimit {
+				eventsIndex = index[:exportLimit]
+				limit = exportLimit
+				truncated = true
+			}
 			return finish(EventsResult{
-				Events:      requestDetailsFromDashboardEvents(index),
+				Events:      requestDetailsFromDashboardEvents(eventsIndex),
 				Total:       total,
-				Limit:       total,
+				Limit:       limit,
 				Offset:      0,
+				Truncated:   truncated,
 				GeneratedAt: now.UTC().Format(time.RFC3339),
 			})
 		}
@@ -3138,7 +3160,11 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool) Event
 		if !dashboardEventMatches(d, params, cutoff) {
 			continue
 		}
-		if !paginate || (total >= params.Offset && len(events) < params.Limit) {
+		if !paginate {
+			if exportLimit <= 0 || len(events) < exportLimit {
+				events = append(events, d)
+			}
+		} else if total >= params.Offset && len(events) < params.Limit {
 			events = append(events, d)
 		}
 		total++
@@ -3151,8 +3177,9 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool) Event
 		return finish(EventsResult{
 			Events:      events,
 			Total:       total,
-			Limit:       total,
+			Limit:       exportResultLimit(total, exportLimit),
 			Offset:      0,
+			Truncated:   exportLimit > 0 && total > exportLimit,
 			GeneratedAt: now.UTC().Format(time.RFC3339),
 		})
 	}
@@ -3178,6 +3205,13 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool) Event
 	}
 	s.cacheDashboardEventsLocked(cacheKey, result)
 	return finish(result)
+}
+
+func exportResultLimit(total int, exportLimit int) int {
+	if exportLimit > 0 && total > exportLimit {
+		return exportLimit
+	}
+	return total
 }
 
 // QueryAPIDetail returns range-scoped aggregates and recent events for one API
@@ -3424,8 +3458,18 @@ func (s *RequestStatistics) ConfigSnapshot() ExportConfig {
 		StorageSnapshotRecordInterval: s.storageSnapshotRecordInterval,
 		StorageSyncSeconds:            int(s.storageSyncInterval.Seconds()),
 		StorageSyncRecordInterval:     s.storageSyncRecordInterval,
+		ExportMaxRecords:              s.exportMaxRecords,
 		PriceStoragePath:              s.priceStoragePath,
 	}
+}
+
+func (s *RequestStatistics) ExportMaxRecords() int {
+	if s == nil {
+		return defaultExportMaxRecords
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.exportMaxRecords
 }
 
 func (s *RequestStatistics) StorageStatus() StorageStatus {

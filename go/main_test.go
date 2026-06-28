@@ -1156,6 +1156,20 @@ configs:
 	}
 }
 
+func TestExportMaxRecordsConfig(t *testing.T) {
+	yaml := []byte(`
+configs:
+  usage-statistics:
+    export_max_records: 2500
+`)
+	raw := []byte(`{"config_yaml":"` + base64.StdEncoding.EncodeToString(yaml) + `"}`)
+
+	cfg := parseRuntimeConfig(raw)
+	if cfg.ExportMaxRecords != 2500 {
+		t.Fatalf("export_max_records = %d, want 2500", cfg.ExportMaxRecords)
+	}
+}
+
 func TestAPIKeyHashSaltConfig(t *testing.T) {
 	yaml := []byte(`
 configs:

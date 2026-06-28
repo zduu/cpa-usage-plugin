@@ -437,6 +437,19 @@ test('dashboard loads summary and export button uses backend event export', asyn
   assert.strictEqual(exported.length, 1200);
 });
 
+test('dashboard export truncation headers produce a user notice', () => {
+  const { context, downloads } = createDashboardHarness();
+  const info = context.exportTruncationFromHeaders({
+    'X-Export-Truncated': ['true'],
+    'X-Total-Count': ['1200'],
+    'X-Exported-Count': ['500'],
+  });
+
+  context.notifyExportTruncated(info);
+
+  assert.deepStrictEqual(downloads.find((d) => d.alert), { alert: '导出已截断：共 1,200 条，已导出 500 条' });
+});
+
 test('dashboard shows pending storage buffer status', async () => {
   const { document, fetchCalls } = createDashboardHarness({
     storage: {
