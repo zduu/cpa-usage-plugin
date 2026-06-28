@@ -205,7 +205,7 @@ plugins:
 - 事件缓存命中/未命中次数。
 - 最近一次 summary、events、api-detail 查询耗时。
 
-后续建议 CI 增加固定 benchmark：
+CI 已增加固定 benchmark：
 
 ```bash
 cd go
