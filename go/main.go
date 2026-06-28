@@ -110,6 +110,9 @@ func cliproxyPluginFree(ptr unsafe.Pointer, len C.size_t) {
 
 //export cliproxyPluginShutdown
 func cliproxyPluginShutdown() {
+	if dashboardExportJobs != nil {
+		dashboardExportJobs.close()
+	}
 	if stats != nil {
 		stats.Close()
 	}

@@ -55,6 +55,8 @@ function createDashboardHarness(options = {}) {
   let prices = { 'gpt-4.1': { prompt: 2, completion: 8, cache: 0.5 } };
   const dashboardEtags = !!options.dashboardEtags;
   const wrapDashboardResponses = !!options.wrapDashboardResponses;
+  const exportJobs = new Map();
+  let exportJobSeq = 0;
 
   const document = {
     get visibilityState() {
@@ -184,6 +186,52 @@ function createDashboardHarness(options = {}) {
       generated_at: new Date().toISOString(),
       events: eventsPage('http://test.local/dashboard-events?limit=' + totalRows + '&offset=0').events.slice(0, totalRows),
     };
+  }
+
+  function exportJobHeaders(payload) {
+    const total = payload && typeof payload === 'object' ? payload.total : 1200;
+    const exported = payload && typeof payload === 'object' && Array.isArray(payload.events) ? payload.events.length : total;
+    return {
+      'Content-Type': [typeof payload === 'string' ? 'text/csv; charset=utf-8' : 'application/json; charset=utf-8'],
+      'X-Total-Count': [String(total)],
+      'X-Exported-Count': [String(exported)],
+      'X-Export-Truncated': ['false'],
+    };
+  }
+
+  function exportJobResponse(job) {
+    return {
+      id: job.id,
+      status: job.status,
+      format: job.format,
+      gzip: false,
+      created_at: new Date().toISOString(),
+      finished_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + 900000).toISOString(),
+      total: job.total,
+      exported: job.exported,
+      truncated: false,
+      body_bytes: typeof job.payload === 'string' ? job.payload.length : JSON.stringify(job.payload).length,
+      content_type: job.headers['Content-Type'][0],
+      download_path: '/dashboard-events-export-download?id=' + job.id,
+    };
+  }
+
+  function createExportJob(url) {
+    const parsed = new URL(url, 'http://test.local/v0/management/plugins/usage-statistics/dashboard');
+    const payload = eventsExport(url);
+    const id = 'job-' + (++exportJobSeq);
+    const job = {
+      id,
+      status: 'succeeded',
+      format: parsed.searchParams.get('format') || 'json',
+      payload,
+      headers: exportJobHeaders(payload),
+      total: payload && typeof payload === 'object' ? payload.total : 1200,
+      exported: payload && typeof payload === 'object' && Array.isArray(payload.events) ? payload.events.length : 1200,
+    };
+    exportJobs.set(id, job);
+    return exportJobResponse(job);
   }
 
   function apiDetailPayload() {
@@ -332,6 +380,32 @@ function createDashboardHarness(options = {}) {
         payload = summary;
       }
       else if (String(url).includes('dashboard-api-detail')) payload = apiDetailPayload(String(url));
+      else if (String(url).includes('dashboard-events-export-download')) {
+        const parsed = new URL(String(url), 'http://test.local/v0/management/plugins/usage-statistics/dashboard');
+        const job = exportJobs.get(parsed.searchParams.get('id'));
+        payload = job ? job.payload : {};
+        if (typeof payload === 'string') {
+          return {
+            ok: true,
+            status: 200,
+            headers: fetchHeaders(job.headers),
+            text: async () => payload,
+          };
+        }
+        return fetchResponse(payload, route, String(url), options);
+      }
+      else if (String(url).includes('dashboard-events-export-jobs')) {
+        const parsed = new URL(String(url), 'http://test.local/v0/management/plugins/usage-statistics/dashboard');
+        if (options.method === 'POST') {
+          payload = createExportJob(String(url));
+        } else if (options.method === 'DELETE') {
+          exportJobs.delete(parsed.searchParams.get('id'));
+          payload = { status: 'deleted' };
+        } else {
+          const job = exportJobs.get(parsed.searchParams.get('id'));
+          payload = job ? exportJobResponse(job) : { error: 'not found' };
+        }
+      }
       else if (String(url).includes('dashboard-events-export')) payload = eventsExport(String(url));
       else if (String(url).includes('dashboard-events')) payload = eventsPage(String(url));
       else if (String(url).includes('usage/export')) payload = { version: 1, usage: {} };
@@ -401,7 +475,7 @@ function optionHeaderValue(options, name) {
 }
 
 test('dashboard loads summary and export button uses backend event export', async () => {
-  const { document, fetchCalls, downloads } = createDashboardHarness();
+  const { document, fetchCalls, fetchRequests, downloads } = createDashboardHarness();
 
   await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-events')));
   assert.strictEqual(document.getElementById('totalRequests').textContent, '1,200');
@@ -422,17 +496,23 @@ test('dashboard loads summary and export button uses backend event export', asyn
   assert.match(document.getElementById('apiDetail').innerHTML, /deepseek-v4-flash-free/);
 
   const pagedEventsCount = () => fetchCalls.filter((url) => url.includes('dashboard-events?')).length;
-  const exportEventsCount = () => fetchCalls.filter((url) => url.includes('dashboard-events-export')).length;
+  const exportJobCreateCount = () => fetchRequests.filter((request) => request.url.includes('dashboard-events-export-jobs') && request.options.method === 'POST').length;
+  const syncExportEventsCount = () => fetchCalls.filter((url) => /dashboard-events-export\?/.test(url)).length;
+  const exportDownloadCount = () => fetchCalls.filter((url) => url.includes('dashboard-events-export-download')).length;
   const beforePagedEvents = pagedEventsCount();
-  const beforeExportEvents = exportEventsCount();
+  const beforeExportJobs = exportJobCreateCount();
+  const beforeSyncExports = syncExportEventsCount();
+  const beforeExportDownloads = exportDownloadCount();
   await document.getElementById('exportRowsCsv').onclick();
   await waitFor(() => downloads.some((d) => d.text && d.text.startsWith('时间,模型')));
   await document.getElementById('exportRowsJson').onclick();
   await waitFor(() => downloads.some((d) => d.text && d.text.startsWith('[')));
 
   assert.strictEqual(pagedEventsCount(), beforePagedEvents);
-  assert.strictEqual(exportEventsCount(), beforeExportEvents + 2);
-  assert.ok(fetchCalls.some((url) => url.includes('dashboard-events-export') && new URL(url, 'http://test.local').searchParams.get('format') === 'csv'));
+  assert.strictEqual(exportJobCreateCount(), beforeExportJobs + 2);
+  assert.strictEqual(syncExportEventsCount(), beforeSyncExports);
+  assert.strictEqual(exportDownloadCount(), beforeExportDownloads + 2);
+  assert.ok(fetchRequests.some((request) => request.url.includes('dashboard-events-export-jobs') && request.options.method === 'POST' && new URL(request.url, 'http://test.local').searchParams.get('format') === 'csv'));
   const exported = JSON.parse(downloads.find((d) => d.text && d.text.startsWith('[')).text);
   assert.strictEqual(exported.length, 1200);
 });

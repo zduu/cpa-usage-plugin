@@ -1453,7 +1453,7 @@ func TestManagementRegisterIncludesImportExportResources(t *testing.T) {
 	for _, resource := range result.Resources {
 		resources[resource.Path] = true
 	}
-	for _, path := range []string{"/usage/export", "/usage/import"} {
+	for _, path := range []string{"/usage/export", "/usage/import", "/dashboard-events-export-jobs", "/dashboard-events-export-download"} {
 		if !resources[path] {
 			t.Fatalf("management resources missing %s: %#v", path, result.Resources)
 		}
@@ -1712,6 +1712,90 @@ func TestDashboardEventsExportSupportsCSVJSONLAndGzip(t *testing.T) {
 	}
 	if runtime.LastEventsExportDurationMs <= 0 || runtime.LastEventsExportRawBytes <= 0 || runtime.LastEventsExportBodyBytes <= 0 {
 		t.Fatalf("last export pressure metrics should be reported: %#v", runtime)
+	}
+}
+
+func TestDashboardEventsExportAsyncJobLifecycle(t *testing.T) {
+	previousStats := stats
+	previousJobs := dashboardExportJobs
+	stats = NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0, ExportMaxRecords: 100})
+	dashboardExportJobs = newDashboardExportJobManager()
+	t.Cleanup(func() {
+		dashboardExportJobs = previousJobs
+		stats = previousStats
+	})
+
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Source:      "openai-prod",
+		Model:       "gpt-4",
+		RequestedAt: time.Now().Add(-time.Minute),
+		Detail:      UsageDetail{InputTokens: 10, OutputTokens: 5},
+	})
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Source:      "openai-prod",
+		Model:       "gpt-4",
+		RequestedAt: time.Now(),
+		Failed:      true,
+		Failure:     UsageFailure{StatusCode: 429, Body: "rate limited"},
+	})
+
+	var created dashboardExportJobResponse
+	createResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "POST",
+		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export-jobs",
+		Query:  map[string][]string{"format": {"csv"}},
+	}), &created)
+	if createResp.StatusCode != http.StatusAccepted || created.ID == "" || created.Status == "" {
+		t.Fatalf("created async export = status %d body %#v, want 202 with job id", createResp.StatusCode, created)
+	}
+
+	var status dashboardExportJobResponse
+	waitForTestCondition(t, func() bool {
+		decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+			Method: "GET",
+			Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export-jobs",
+			Query:  map[string][]string{"id": {created.ID}},
+		}), &status)
+		return status.Status == dashboardExportJobSucceeded
+	})
+	if status.DownloadPath == "" || status.Total != 2 || status.Exported != 2 || status.BodyBytes <= 0 {
+		t.Fatalf("completed async export status = %#v, want ready counts and download path", status)
+	}
+
+	downloadResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "GET",
+		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export-download",
+		Query:  map[string][]string{"id": {created.ID}},
+	}), nil)
+	if downloadResp.StatusCode != http.StatusOK {
+		t.Fatalf("download status = %d, want 200", downloadResp.StatusCode)
+	}
+	if got := downloadResp.Headers["Content-Type"]; len(got) != 1 || !strings.HasPrefix(got[0], "text/csv") {
+		t.Fatalf("download content type = %#v", got)
+	}
+	if got := downloadResp.Headers["X-Total-Count"]; len(got) != 1 || got[0] != "2" {
+		t.Fatalf("download total header = %#v, want 2", got)
+	}
+	body := string(downloadResp.Body)
+	if !strings.HasPrefix(body, "时间,模型,来源") || !strings.Contains(body, "rate limited") {
+		t.Fatalf("download body missing expected CSV content: %q", body)
+	}
+
+	runtime := stats.RuntimeStatus()
+	if runtime.EventsExportRequests != 1 || runtime.LastEventsExportFormat != "csv" || runtime.LastEventsExported != 2 {
+		t.Fatalf("runtime async export metrics = %#v, want one csv export with 2 rows", runtime)
+	}
+
+	deleteResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "DELETE",
+		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export-jobs",
+		Query:  map[string][]string{"id": {created.ID}},
+	}), nil)
+	if deleteResp.StatusCode != http.StatusOK {
+		t.Fatalf("delete status = %d, want 200", deleteResp.StatusCode)
 	}
 }
 

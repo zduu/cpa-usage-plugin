@@ -554,6 +554,47 @@ async function renderEvents() {
 
 function download(name, text, type) { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000) }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function createExportJob(params) {
+  return fetchJsonPayload(pluginEndpoint('dashboard-events-export-jobs') + '?' + params.toString(), { method: 'POST', cache: 'no-store' });
+}
+
+async function getExportJob(id) {
+  return fetchJsonPayload(pluginEndpoint('dashboard-events-export-jobs?id=' + encodeURIComponent(id)), { cache: 'no-store' });
+}
+
+async function deleteExportJob(id) {
+  try {
+    await fetchJsonPayload(pluginEndpoint('dashboard-events-export-jobs?id=' + encodeURIComponent(id)), { method: 'DELETE', cache: 'no-store' });
+  } catch {}
+}
+
+async function waitForExportJob(job) {
+  let current = job;
+  for (let i = 0; i < 120; i++) {
+    if (current && current.status === 'succeeded') return current;
+    if (current && current.status === 'failed') throw new Error(current.error || '导出任务失败');
+    await delay(i < 10 ? 250 : 1000);
+    current = await getExportJob(job.id);
+  }
+  throw new Error('导出任务超时');
+}
+
+async function fetchExportJobResult(params) {
+  const job = await createExportJob(params);
+  if (!job || !job.id) throw new Error('导出任务未返回 ID');
+  try {
+    const completed = await waitForExportJob(job);
+    const downloadPath = completed.download_path || ('dashboard-events-export-download?id=' + encodeURIComponent(job.id));
+    return await fetchTextPayloadWithMeta(pluginEndpoint(downloadPath), { cache: 'no-store' });
+  } finally {
+    await deleteExportJob(job.id);
+  }
+}
+
 function rowsCsv(rows) {
   const head = ['时间', '模型', '来源', '凭证', '结果', '延迟毫秒', 'TTFT毫秒', '输入 token', '输出 token', '思考 token', '缓存 token', '总 token', '状态码', '错误'];
   return [head, ...rows.map((d) => [d.timestamp, d.model, sourceLabel(d), d.auth_index || '', d.failed ? '失败' : '成功', num(d.latency_ms), num(d.ttft_ms), num(d.tokens && d.tokens.input_tokens), num(d.tokens && d.tokens.output_tokens), num(d.tokens && d.tokens.reasoning_tokens), num(d.tokens && Math.max(d.tokens.cached_tokens || 0, d.tokens.cache_tokens || 0)), num(d.tokens && d.tokens.total_tokens), d.status_code || '', d.failure || ''])].map((row) => row.map((v) => '"' + String(v ?? '').replace(/"/g, '""') + '"').join(',')).join('\n');
@@ -656,12 +697,14 @@ async function exportRows(kind) {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     if (kind === 'csv') {
       params.set('format', 'csv');
-      const meta = await fetchTextPayloadWithMeta(pluginEndpoint('dashboard-events-export') + '?' + params.toString(), { cache: 'no-store' });
+      const meta = await fetchExportJobResult(params);
       notifyExportTruncated(exportTruncationFromHeaders(meta.headers));
       download('usage-events-' + stamp + '.csv', meta.data, 'text/csv;charset=utf-8');
       return;
     }
-    const data = await fetchJsonPayload(pluginEndpoint('dashboard-events-export') + '?' + params.toString(), { cache: 'no-store' });
+    params.set('format', 'json');
+    const meta = await fetchExportJobResult(params);
+    const data = typeof meta.data === 'string' ? JSON.parse(meta.data || '{}') : meta.data;
     const rows = data.events || [];
     notifyExportTruncated({ truncated: !!data.truncated, total: data.total, exported: rows.length });
     if (kind === 'json') { download('usage-events-' + stamp + '.json', JSON.stringify(rows, null, 2), 'application/json;charset=utf-8'); return }
@@ -682,12 +725,14 @@ async function exportApiRows(kind) {
     const name = (friendlyApiName(selectedApi) || 'api').replace(/[\\/:*?"<>|\s]+/g, '-').slice(0, 80);
     if (kind === 'csv') {
       params.set('format', 'csv');
-      const meta = await fetchTextPayloadWithMeta(pluginEndpoint('dashboard-events-export') + '?' + params.toString(), { cache: 'no-store' });
+      const meta = await fetchExportJobResult(params);
       notifyExportTruncated(exportTruncationFromHeaders(meta.headers));
       download('usage-api-' + name + '-' + stamp + '.csv', meta.data, 'text/csv;charset=utf-8');
       return;
     }
-    const data = await fetchJsonPayload(pluginEndpoint('dashboard-events-export') + '?' + params.toString(), { cache: 'no-store' });
+    params.set('format', 'json');
+    const meta = await fetchExportJobResult(params);
+    const data = typeof meta.data === 'string' ? JSON.parse(meta.data || '{}') : meta.data;
     const rows = data.events || [];
     if (!rows.length) return;
     notifyExportTruncated({ truncated: !!data.truncated, total: data.total, exported: rows.length });
