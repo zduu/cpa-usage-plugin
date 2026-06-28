@@ -585,6 +585,44 @@ func TestStorageStatusReportsWriteBatchMetrics(t *testing.T) {
 	}
 }
 
+func TestStorageStatusReportsWriteBatchPercentiles(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.mu.Lock()
+	stats.storageEnabled = true
+	stats.mu.Unlock()
+
+	for i := 1; i <= 100; i++ {
+		stats.updateStorageWriteBatchMetrics(1, time.Duration(i)*time.Millisecond, time.Duration(i*2)*time.Millisecond)
+	}
+
+	status := stats.StorageStatus()
+	if status.WriteBatchP95DurationMs != 95 {
+		t.Fatalf("write batch p95 = %f, want 95", status.WriteBatchP95DurationMs)
+	}
+	if status.WriteBatchP99DurationMs != 99 {
+		t.Fatalf("write batch p99 = %f, want 99", status.WriteBatchP99DurationMs)
+	}
+	if status.WriteQueueWaitP95Ms != 190 {
+		t.Fatalf("write queue wait p95 = %f, want 190", status.WriteQueueWaitP95Ms)
+	}
+	if status.WriteQueueWaitP99Ms != 198 {
+		t.Fatalf("write queue wait p99 = %f, want 198", status.WriteQueueWaitP99Ms)
+	}
+}
+
+func TestStorageWriteDurationSampleWindowIsBounded(t *testing.T) {
+	var samples []time.Duration
+	for i := 0; i < storageWriteSampleMax+10; i++ {
+		samples = appendStorageDurationSample(samples, time.Duration(i)*time.Millisecond)
+	}
+	if len(samples) != storageWriteSampleMax {
+		t.Fatalf("sample window size = %d, want %d", len(samples), storageWriteSampleMax)
+	}
+	if samples[0] != 10*time.Millisecond {
+		t.Fatalf("oldest retained sample = %s, want 10ms", samples[0])
+	}
+}
+
 func TestStorageWritePressureClassification(t *testing.T) {
 	tests := []struct {
 		name          string

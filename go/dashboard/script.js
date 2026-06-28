@@ -197,10 +197,16 @@ function storageBatchTitle(storage) {
   if (duration > 0) parts.push('耗时 ' + formatMs(duration));
   const avgDuration = num(storage.write_batch_avg_duration_ms);
   if (avgDuration > 0) parts.push('平均耗时 ' + formatMs(avgDuration));
+  const p95Duration = num(storage.write_batch_p95_duration_ms);
+  const p99Duration = num(storage.write_batch_p99_duration_ms);
+  if (p95Duration > 0) parts.push('耗时 p95 ' + formatMs(p95Duration) + (p99Duration > 0 ? ' / p99 ' + formatMs(p99Duration) : ''));
   const wait = num(storage.last_write_queue_wait_ms);
   if (wait > 0) parts.push('最长排队 ' + formatMs(wait));
   const avgWait = num(storage.write_queue_wait_avg_ms);
   if (avgWait > 0) parts.push('平均排队 ' + formatMs(avgWait));
+  const p95Wait = num(storage.write_queue_wait_p95_ms);
+  const p99Wait = num(storage.write_queue_wait_p99_ms);
+  if (p95Wait > 0) parts.push('排队 p95 ' + formatMs(p95Wait) + (p99Wait > 0 ? ' / p99 ' + formatMs(p99Wait) : ''));
   return parts.join('，');
 }
 

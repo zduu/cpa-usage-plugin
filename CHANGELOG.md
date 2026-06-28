@@ -19,6 +19,7 @@
 - 事件导出新增 `export_max_records` 默认上限和 `limit` 查询参数，响应会标记总数、导出数和是否截断，避免超大导出一次性压垮管理接口。
 - 后台持久化 writer 改为批量处理队列记录，并在 `/health.storage` 暴露最近批次条数、写入耗时和最长排队时长。
 - `/health.storage` 新增 writer 累计批次、累计记录、耗时/排队滑动平均和 `write_pressure` 状态，看板可提示持续写入偏慢。
+- `/health.storage` 新增 writer 最近窗口 p95/p99 批次耗时和排队等待，看板 tooltip 可用于识别长尾磁盘抖动。
 - `/health.runtime` 新增 `conditional_requests`，按端点统计带 `If-None-Match` 请求的 304 命中、未命中和命中率。
 - 持久化 snapshot 成功后会清理 snapshot 日期之前的旧 JSONL 分片，并在 `/health.storage` 暴露最近和累计清理数量。
 

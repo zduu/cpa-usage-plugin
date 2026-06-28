@@ -87,7 +87,9 @@ type RequestStatistics struct {
 	storageWriteBatchesTotal      int64
 	storageWriteRecordsTotal      int64
 	storageWriteBatchDurationAvg  time.Duration
+	storageWriteBatchDurations    []time.Duration
 	storageWriteQueueWaitAvg      time.Duration
+	storageWriteQueueWaits        []time.Duration
 	storageWriteQueueWaitMax      time.Duration
 	storageLastCompactedShards    int
 	storageCompactedShardsTotal   int64
@@ -214,6 +216,7 @@ const (
 	dashboardHealthSlotCount = 672
 	dashboardHealthStep      = 15 * time.Minute
 	dashboardEventCacheMax   = 16
+	storageWriteSampleMax    = 256
 )
 
 func init() {
@@ -722,10 +725,24 @@ func (s *RequestStatistics) updateStorageWriteBatchMetrics(records int, duration
 	s.storageWriteRecordsTotal += int64(records)
 	s.storageWriteBatchDurationAvg = storageDurationEWMA(s.storageWriteBatchDurationAvg, duration)
 	s.storageWriteQueueWaitAvg = storageDurationEWMA(s.storageWriteQueueWaitAvg, queueWait)
+	s.storageWriteBatchDurations = appendStorageDurationSample(s.storageWriteBatchDurations, duration)
+	s.storageWriteQueueWaits = appendStorageDurationSample(s.storageWriteQueueWaits, queueWait)
 	if queueWait > s.storageWriteQueueWaitMax {
 		s.storageWriteQueueWaitMax = queueWait
 	}
 	s.mu.Unlock()
+}
+
+func appendStorageDurationSample(samples []time.Duration, sample time.Duration) []time.Duration {
+	if sample < 0 {
+		sample = 0
+	}
+	if len(samples) < storageWriteSampleMax {
+		return append(samples, sample)
+	}
+	copy(samples, samples[1:])
+	samples[len(samples)-1] = sample
+	return samples
 }
 
 func (s *RequestStatistics) updateStorageCompaction(compacted int, when time.Time) {
@@ -1408,7 +1425,9 @@ func (s *RequestStatistics) closeStorageLocked() {
 	s.storageWriteBatchesTotal = 0
 	s.storageWriteRecordsTotal = 0
 	s.storageWriteBatchDurationAvg = 0
+	s.storageWriteBatchDurations = nil
 	s.storageWriteQueueWaitAvg = 0
+	s.storageWriteQueueWaits = nil
 	s.storageWriteQueueWaitMax = 0
 	if !s.storageEnabled {
 		s.storageLastCompaction = time.Time{}
@@ -3505,7 +3524,11 @@ func (s *RequestStatistics) storageStatusLocked() StorageStatus {
 		WriteBatchesTotal:             s.storageWriteBatchesTotal,
 		WriteRecordsTotal:             s.storageWriteRecordsTotal,
 		WriteBatchAvgDurationMs:       storageDurationMilliseconds(s.storageWriteBatchDurationAvg),
+		WriteBatchP95DurationMs:       storageDurationMilliseconds(storageDurationPercentile(s.storageWriteBatchDurations, 0.95)),
+		WriteBatchP99DurationMs:       storageDurationMilliseconds(storageDurationPercentile(s.storageWriteBatchDurations, 0.99)),
 		WriteQueueWaitAvgMs:           storageDurationMilliseconds(s.storageWriteQueueWaitAvg),
+		WriteQueueWaitP95Ms:           storageDurationMilliseconds(storageDurationPercentile(s.storageWriteQueueWaits, 0.95)),
+		WriteQueueWaitP99Ms:           storageDurationMilliseconds(storageDurationPercentile(s.storageWriteQueueWaits, 0.99)),
 		WriteQueueWaitMaxMs:           storageDurationMilliseconds(s.storageWriteQueueWaitMax),
 		WritePressure:                 writePressure,
 		LastCompactedShards:           s.storageLastCompactedShards,
@@ -3551,6 +3574,25 @@ func storageDurationMilliseconds(duration time.Duration) float64 {
 		return 0
 	}
 	return float64(duration) / float64(time.Millisecond)
+}
+
+func storageDurationPercentile(samples []time.Duration, percentile float64) time.Duration {
+	if len(samples) == 0 || percentile <= 0 {
+		return 0
+	}
+	ordered := make([]time.Duration, len(samples))
+	copy(ordered, samples)
+	sort.Slice(ordered, func(i, j int) bool {
+		return ordered[i] < ordered[j]
+	})
+	rank := int(math.Ceil(percentile*float64(len(ordered)))) - 1
+	if rank < 0 {
+		rank = 0
+	}
+	if rank >= len(ordered) {
+		rank = len(ordered) - 1
+	}
+	return ordered[rank]
 }
 
 func (s *RequestStatistics) RecordConditionalRequest(endpoint string, hasValidator bool, notModified bool) {

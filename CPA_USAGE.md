@@ -173,7 +173,7 @@ plugins:
 - `storage_flush_interval_seconds` 越小，异常退出时最多丢失的数据越少；默认 30 秒，想更稳可以设为 5 或 1。
 - `storage_snapshot_interval_seconds` 和 `storage_snapshot_record_interval` 控制启动恢复成本；默认 300 秒或 1000 条写一次快照，高请求量实例可降低记录间隔，低频实例可保持默认。
 - `storage_sync_interval_seconds` 和 `storage_sync_record_interval` 默认关闭；如果需要更强的异常断电保护，可配置如 `storage_sync_interval_seconds: 30` 或 `storage_sync_record_interval: 1000`，但会增加磁盘 I/O。
-- `/health` 的 `storage.write_queue_length` 和 `storage.write_queue_capacity` 可观察后台写入队列积压；`storage.last_write_batch_records`、`storage.last_write_batch_duration_ms`、`storage.last_write_queue_wait_ms` 可观察最近 writer 批次规模、写入耗时和最长排队时长；`storage.write_batch_avg_duration_ms`、`storage.write_queue_wait_avg_ms`、`storage.write_pressure` 可观察持续磁盘压力。看板底部出现“持久化排队中”或“持久化写入偏慢”时，说明磁盘写入速度短时间低于请求记录速度。
+- `/health` 的 `storage.write_queue_length` 和 `storage.write_queue_capacity` 可观察后台写入队列积压；`storage.last_write_batch_records`、`storage.last_write_batch_duration_ms`、`storage.last_write_queue_wait_ms` 可观察最近 writer 批次规模、写入耗时和最长排队时长；`storage.write_batch_avg_duration_ms`、`storage.write_batch_p95_duration_ms`、`storage.write_batch_p99_duration_ms`、`storage.write_queue_wait_avg_ms`、`storage.write_queue_wait_p95_ms`、`storage.write_queue_wait_p99_ms` 和 `storage.write_pressure` 可观察持续磁盘压力与长尾抖动。看板底部出现“持久化排队中”或“持久化写入偏慢”时，说明磁盘写入速度短时间低于请求记录速度。
 - 如果已经有内存数据，建议先导出；开启持久化并重启后，再把导出的 JSON 导入一次，后续数据才会继续写入持久化文件。
 
 ## 按配置更新插件文件
@@ -344,7 +344,7 @@ curl http://127.0.0.1:8317/v0/management/plugins/usage-statistics/health \
 
 `dashboard-events-export` 默认最多返回 `export_max_records` 条明细，也可以用 `limit` 为单次导出指定更小上限；JSON 响应会带 `truncated`，CSV/JSONL 响应头会带 `X-Total-Count`、`X-Exported-Count` 和 `X-Export-Truncated`。需要完全不限制时可配置 `export_max_records: 0`，但超大导出会增加 CPA 管理接口内存和响应体压力。
 
-`storage` 字段会返回持久化状态、后台写入队列长度、最近 writer 批次指标、writer 滑动平均和 `write_pressure`、最近和累计清理旧分片数量、待 flush/sync/snapshot 记录数和最近错误；`runtime` 字段会返回摘要缓存命中/未命中、事件缓存命中/未命中、事件索引条目数、条件请求 304 命中率，以及最近 summary/events/api-detail 查询耗时，便于观察看板压力和筛选性能。
+`storage` 字段会返回持久化状态、后台写入队列长度、最近 writer 批次指标、writer 滑动平均、p95/p99 长尾指标和 `write_pressure`、最近和累计清理旧分片数量、待 flush/sync/snapshot 记录数和最近错误；`runtime` 字段会返回摘要缓存命中/未命中、事件缓存命中/未命中、事件索引条目数、条件请求 304 命中率，以及最近 summary/events/api-detail 查询耗时，便于观察看板压力和筛选性能。
 
 ### 数据导出
 

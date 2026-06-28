@@ -416,7 +416,11 @@ type StorageStatus struct {
 	WriteBatchesTotal             int64   `json:"write_batches_total,omitempty"`
 	WriteRecordsTotal             int64   `json:"write_records_total,omitempty"`
 	WriteBatchAvgDurationMs       float64 `json:"write_batch_avg_duration_ms,omitempty"`
+	WriteBatchP95DurationMs       float64 `json:"write_batch_p95_duration_ms,omitempty"`
+	WriteBatchP99DurationMs       float64 `json:"write_batch_p99_duration_ms,omitempty"`
 	WriteQueueWaitAvgMs           float64 `json:"write_queue_wait_avg_ms,omitempty"`
+	WriteQueueWaitP95Ms           float64 `json:"write_queue_wait_p95_ms,omitempty"`
+	WriteQueueWaitP99Ms           float64 `json:"write_queue_wait_p99_ms,omitempty"`
 	WriteQueueWaitMaxMs           float64 `json:"write_queue_wait_max_ms,omitempty"`
 	WritePressure                 string  `json:"write_pressure,omitempty"`
 	LastCompactedShards           int     `json:"last_compacted_shards,omitempty"`

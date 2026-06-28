@@ -530,7 +530,11 @@ test('dashboard shows storage writer batch metrics in title', async () => {
       last_write_batch_duration_ms: 1.6,
       last_write_queue_wait_ms: 3.2,
       write_batch_avg_duration_ms: 2.4,
+      write_batch_p95_duration_ms: 5.6,
+      write_batch_p99_duration_ms: 7.8,
       write_queue_wait_avg_ms: 1.2,
+      write_queue_wait_p95_ms: 8.4,
+      write_queue_wait_p99_ms: 10.2,
       write_pressure: 'normal',
     },
   });
@@ -541,7 +545,9 @@ test('dashboard shows storage writer batch metrics in title', async () => {
   assert.match(el.title, /最近批量写入 12 条/);
   assert.match(el.title, /写入压力：正常/);
   assert.match(el.title, /平均耗时/);
+  assert.match(el.title, /耗时 p95/);
   assert.match(el.title, /最长排队/);
+  assert.match(el.title, /排队 p95/);
 });
 
 test('dashboard warns when storage writer is slow without queue backlog', async () => {
