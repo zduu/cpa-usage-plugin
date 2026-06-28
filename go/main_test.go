@@ -1580,6 +1580,22 @@ func TestDashboardEventsExportSupportsCSVJSONLAndGzip(t *testing.T) {
 	if got := notModified.Headers["Content-Encoding"]; len(got) != 1 || got[0] != "gzip" {
 		t.Fatalf("gzip conditional content encoding = %#v", got)
 	}
+
+	runtime := stats.RuntimeStatus()
+	if runtime.EventsExportRequests != 3 || runtime.EventsExportGzipRequests != 1 || runtime.EventsExportTruncatedTotal != 0 {
+		t.Fatalf("export runtime counters = requests %d gzip %d truncated %d, want 3/1/0",
+			runtime.EventsExportRequests, runtime.EventsExportGzipRequests, runtime.EventsExportTruncatedTotal)
+	}
+	if runtime.LastEventsExportFormat != "csv" || !runtime.LastEventsExportGzip {
+		t.Fatalf("last export format/gzip = %q/%v, want csv/true", runtime.LastEventsExportFormat, runtime.LastEventsExportGzip)
+	}
+	if runtime.LastEventsExportTotal != 2 || runtime.LastEventsExported != 2 || runtime.LastEventsExportTruncated {
+		t.Fatalf("last export rows = total %d exported %d truncated %v, want 2/2/false",
+			runtime.LastEventsExportTotal, runtime.LastEventsExported, runtime.LastEventsExportTruncated)
+	}
+	if runtime.LastEventsExportDurationMs <= 0 || runtime.LastEventsExportRawBytes <= 0 || runtime.LastEventsExportBodyBytes <= 0 {
+		t.Fatalf("last export pressure metrics should be reported: %#v", runtime)
+	}
 }
 
 func TestManagementModelPricesRejectInvalidPrice(t *testing.T) {

@@ -450,26 +450,37 @@ type ModelPriceStorageStatus struct {
 }
 
 type RuntimeStatus struct {
-	StartedAt                 string                              `json:"started_at,omitempty"`
-	LastRecordedAt            string                              `json:"last_recorded_at,omitempty"`
-	SeenCount                 int                                 `json:"seen_count"`
-	SummaryVersion            uint64                              `json:"summary_version,omitempty"`
-	SummaryCacheValid         bool                                `json:"summary_cache_valid"`
-	SummaryCacheHits          int64                               `json:"summary_cache_hits,omitempty"`
-	SummaryCacheMisses        int64                               `json:"summary_cache_misses,omitempty"`
-	LastSummaryDurationMs     float64                             `json:"last_summary_duration_ms,omitempty"`
-	EventCacheEntries         int                                 `json:"event_cache_entries,omitempty"`
-	EventCacheHits            int64                               `json:"event_cache_hits,omitempty"`
-	EventCacheMisses          int64                               `json:"event_cache_misses,omitempty"`
-	LastEventsQueryDurationMs float64                             `json:"last_events_query_duration_ms,omitempty"`
-	LastEventsQueryTotal      int                                 `json:"last_events_query_total,omitempty"`
-	EventIndexVersion         uint64                              `json:"event_index_version,omitempty"`
-	EventIndexEntries         int                                 `json:"event_index_entries,omitempty"`
-	APIDetailQueries          int64                               `json:"api_detail_queries,omitempty"`
-	LastAPIDetailDurationMs   float64                             `json:"last_api_detail_duration_ms,omitempty"`
-	LastAPIDetailTotalEvents  int                                 `json:"last_api_detail_total_events,omitempty"`
-	ConditionalRequests       map[string]ConditionalRequestStatus `json:"conditional_requests,omitempty"`
-	LastImport                *ImportSummary                      `json:"last_import,omitempty"`
+	StartedAt                  string                              `json:"started_at,omitempty"`
+	LastRecordedAt             string                              `json:"last_recorded_at,omitempty"`
+	SeenCount                  int                                 `json:"seen_count"`
+	SummaryVersion             uint64                              `json:"summary_version,omitempty"`
+	SummaryCacheValid          bool                                `json:"summary_cache_valid"`
+	SummaryCacheHits           int64                               `json:"summary_cache_hits,omitempty"`
+	SummaryCacheMisses         int64                               `json:"summary_cache_misses,omitempty"`
+	LastSummaryDurationMs      float64                             `json:"last_summary_duration_ms,omitempty"`
+	EventCacheEntries          int                                 `json:"event_cache_entries,omitempty"`
+	EventCacheHits             int64                               `json:"event_cache_hits,omitempty"`
+	EventCacheMisses           int64                               `json:"event_cache_misses,omitempty"`
+	LastEventsQueryDurationMs  float64                             `json:"last_events_query_duration_ms,omitempty"`
+	LastEventsQueryTotal       int                                 `json:"last_events_query_total,omitempty"`
+	EventIndexVersion          uint64                              `json:"event_index_version,omitempty"`
+	EventIndexEntries          int                                 `json:"event_index_entries,omitempty"`
+	APIDetailQueries           int64                               `json:"api_detail_queries,omitempty"`
+	LastAPIDetailDurationMs    float64                             `json:"last_api_detail_duration_ms,omitempty"`
+	LastAPIDetailTotalEvents   int                                 `json:"last_api_detail_total_events,omitempty"`
+	EventsExportRequests       int64                               `json:"events_export_requests,omitempty"`
+	EventsExportGzipRequests   int64                               `json:"events_export_gzip_requests,omitempty"`
+	EventsExportTruncatedTotal int64                               `json:"events_export_truncated_total,omitempty"`
+	LastEventsExportDurationMs float64                             `json:"last_events_export_duration_ms,omitempty"`
+	LastEventsExportFormat     string                              `json:"last_events_export_format,omitempty"`
+	LastEventsExportGzip       bool                                `json:"last_events_export_gzip,omitempty"`
+	LastEventsExportTotal      int                                 `json:"last_events_export_total,omitempty"`
+	LastEventsExported         int                                 `json:"last_events_exported,omitempty"`
+	LastEventsExportTruncated  bool                                `json:"last_events_export_truncated,omitempty"`
+	LastEventsExportRawBytes   int                                 `json:"last_events_export_raw_bytes,omitempty"`
+	LastEventsExportBodyBytes  int                                 `json:"last_events_export_body_bytes,omitempty"`
+	ConditionalRequests        map[string]ConditionalRequestStatus `json:"conditional_requests,omitempty"`
+	LastImport                 *ImportSummary                      `json:"last_import,omitempty"`
 }
 
 type ConditionalRequestStatus struct {

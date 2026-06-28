@@ -749,6 +749,15 @@ func TestDashboardEventsExportLimitQueryReturnsTruncationHeaders(t *testing.T) {
 	if result.Total != 5 || len(result.Events) != 2 || result.Limit != 2 || !result.Truncated {
 		t.Fatalf("limited management export = total %d len %d limit %d truncated %v, want 5/2/2/true", result.Total, len(result.Events), result.Limit, result.Truncated)
 	}
+
+	runtime := stats.RuntimeStatus()
+	if runtime.EventsExportRequests != 1 || runtime.EventsExportTruncatedTotal != 1 {
+		t.Fatalf("export runtime counters = requests %d truncated %d, want 1/1", runtime.EventsExportRequests, runtime.EventsExportTruncatedTotal)
+	}
+	if runtime.LastEventsExportTotal != 5 || runtime.LastEventsExported != 2 || !runtime.LastEventsExportTruncated {
+		t.Fatalf("last export rows = total %d exported %d truncated %v, want 5/2/true",
+			runtime.LastEventsExportTotal, runtime.LastEventsExported, runtime.LastEventsExportTruncated)
+	}
 }
 
 func TestDashboardEventsExportQueryLimitCannotExceedConfiguredLimit(t *testing.T) {

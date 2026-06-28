@@ -125,17 +125,28 @@ type RequestStatistics struct {
 	eventSourceIndex     map[string][]dashboardEventDetail
 	eventAuthIndex       map[string][]dashboardEventDetail
 
-	summaryCacheHits        int64
-	summaryCacheMisses      int64
-	lastSummaryDuration     time.Duration
-	eventCacheHits          int64
-	eventCacheMisses        int64
-	lastEventsQueryDuration time.Duration
-	lastEventsQueryTotal    int
-	apiDetailQueries        int64
-	lastAPIDetailDuration   time.Duration
-	lastAPIDetailTotal      int
-	conditionalRequests     map[string]conditionalRequestCounter
+	summaryCacheHits           int64
+	summaryCacheMisses         int64
+	lastSummaryDuration        time.Duration
+	eventCacheHits             int64
+	eventCacheMisses           int64
+	lastEventsQueryDuration    time.Duration
+	lastEventsQueryTotal       int
+	apiDetailQueries           int64
+	lastAPIDetailDuration      time.Duration
+	lastAPIDetailTotal         int
+	eventsExportRequests       int64
+	eventsExportGzipRequests   int64
+	eventsExportTruncatedTotal int64
+	lastEventsExportDuration   time.Duration
+	lastEventsExportFormat     string
+	lastEventsExportGzip       bool
+	lastEventsExportTotal      int
+	lastEventsExported         int
+	lastEventsExportTruncated  bool
+	lastEventsExportRawBytes   int
+	lastEventsExportBodyBytes  int
+	conditionalRequests        map[string]conditionalRequestCounter
 }
 
 type apiStats struct {
@@ -3616,6 +3627,38 @@ func (s *RequestStatistics) RecordConditionalRequest(endpoint string, hasValidat
 	s.mu.Unlock()
 }
 
+func (s *RequestStatistics) RecordEventsExport(format string, gzipped bool, result EventsResult, rawBytes int, bodyBytes int, duration time.Duration) {
+	if s == nil {
+		return
+	}
+	if rawBytes < 0 {
+		rawBytes = 0
+	}
+	if bodyBytes < 0 {
+		bodyBytes = 0
+	}
+	if duration < 0 {
+		duration = 0
+	}
+	s.mu.Lock()
+	s.eventsExportRequests++
+	if gzipped {
+		s.eventsExportGzipRequests++
+	}
+	if result.Truncated {
+		s.eventsExportTruncatedTotal++
+	}
+	s.lastEventsExportDuration = duration
+	s.lastEventsExportFormat = strings.TrimSpace(format)
+	s.lastEventsExportGzip = gzipped
+	s.lastEventsExportTotal = result.Total
+	s.lastEventsExported = len(result.Events)
+	s.lastEventsExportTruncated = result.Truncated
+	s.lastEventsExportRawBytes = rawBytes
+	s.lastEventsExportBodyBytes = bodyBytes
+	s.mu.Unlock()
+}
+
 func (s *RequestStatistics) RuntimeStatus() RuntimeStatus {
 	if s == nil {
 		return RuntimeStatus{}
@@ -3623,23 +3666,34 @@ func (s *RequestStatistics) RuntimeStatus() RuntimeStatus {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	status := RuntimeStatus{
-		SeenCount:                 len(s.seen),
-		SummaryVersion:            s.summaryVersion,
-		SummaryCacheValid:         s.summaryCacheValid && s.summaryCacheVersion == s.summaryVersion,
-		SummaryCacheHits:          s.summaryCacheHits,
-		SummaryCacheMisses:        s.summaryCacheMisses,
-		LastSummaryDurationMs:     durationMilliseconds(s.lastSummaryDuration),
-		EventCacheEntries:         len(s.eventQueryCache),
-		EventCacheHits:            s.eventCacheHits,
-		EventCacheMisses:          s.eventCacheMisses,
-		LastEventsQueryDurationMs: durationMilliseconds(s.lastEventsQueryDuration),
-		LastEventsQueryTotal:      s.lastEventsQueryTotal,
-		EventIndexVersion:         s.eventIndexVersion,
-		EventIndexEntries:         len(s.eventIndex),
-		APIDetailQueries:          s.apiDetailQueries,
-		LastAPIDetailDurationMs:   durationMilliseconds(s.lastAPIDetailDuration),
-		LastAPIDetailTotalEvents:  s.lastAPIDetailTotal,
-		ConditionalRequests:       conditionalRequestStatusMap(s.conditionalRequests),
+		SeenCount:                  len(s.seen),
+		SummaryVersion:             s.summaryVersion,
+		SummaryCacheValid:          s.summaryCacheValid && s.summaryCacheVersion == s.summaryVersion,
+		SummaryCacheHits:           s.summaryCacheHits,
+		SummaryCacheMisses:         s.summaryCacheMisses,
+		LastSummaryDurationMs:      durationMilliseconds(s.lastSummaryDuration),
+		EventCacheEntries:          len(s.eventQueryCache),
+		EventCacheHits:             s.eventCacheHits,
+		EventCacheMisses:           s.eventCacheMisses,
+		LastEventsQueryDurationMs:  durationMilliseconds(s.lastEventsQueryDuration),
+		LastEventsQueryTotal:       s.lastEventsQueryTotal,
+		EventIndexVersion:          s.eventIndexVersion,
+		EventIndexEntries:          len(s.eventIndex),
+		APIDetailQueries:           s.apiDetailQueries,
+		LastAPIDetailDurationMs:    durationMilliseconds(s.lastAPIDetailDuration),
+		LastAPIDetailTotalEvents:   s.lastAPIDetailTotal,
+		EventsExportRequests:       s.eventsExportRequests,
+		EventsExportGzipRequests:   s.eventsExportGzipRequests,
+		EventsExportTruncatedTotal: s.eventsExportTruncatedTotal,
+		LastEventsExportDurationMs: durationMilliseconds(s.lastEventsExportDuration),
+		LastEventsExportFormat:     s.lastEventsExportFormat,
+		LastEventsExportGzip:       s.lastEventsExportGzip,
+		LastEventsExportTotal:      s.lastEventsExportTotal,
+		LastEventsExported:         s.lastEventsExported,
+		LastEventsExportTruncated:  s.lastEventsExportTruncated,
+		LastEventsExportRawBytes:   s.lastEventsExportRawBytes,
+		LastEventsExportBodyBytes:  s.lastEventsExportBodyBytes,
+		ConditionalRequests:        conditionalRequestStatusMap(s.conditionalRequests),
 	}
 	if !s.startedAt.IsZero() {
 		status.StartedAt = s.startedAt.UTC().Format(time.RFC3339)

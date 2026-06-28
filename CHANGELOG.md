@@ -21,6 +21,7 @@
 - `/health.storage` 新增 writer 累计批次、累计记录、耗时/排队滑动平均和 `write_pressure` 状态，看板可提示持续写入偏慢。
 - `/health.storage` 新增 writer 最近窗口 p95/p99 批次耗时和排队等待，看板 tooltip 可用于识别长尾磁盘抖动。
 - `/health.runtime` 新增 `conditional_requests`，按端点统计带 `If-None-Match` 请求的 304 命中、未命中和命中率。
+- `/health.runtime` 新增事件导出请求数、gzip 数、截断数、最近导出耗时和响应大小，便于观察大导出压力。
 - 持久化 snapshot 成功后会清理 snapshot 日期之前的旧 JSONL 分片，并在 `/health.storage` 暴露最近和累计清理数量。
 
 ## v1.2.18 - 2026-06-28

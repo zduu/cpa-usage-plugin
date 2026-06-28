@@ -24,6 +24,7 @@
 - `/health.runtime` 暴露摘要缓存、事件缓存、索引规模和最近查询耗时指标。
 - 看板摘要、事件分页、上游详情和事件导出接口支持弱 ETag 与 `If-None-Match` 条件请求，前端轮询会在 304 时复用本地缓存。
 - `/health.runtime.conditional_requests` 按端点统计带 `If-None-Match` 请求的 304 命中、未命中和命中率。
+- `/health.runtime` 暴露事件导出生成次数、gzip 次数、截断次数、最近导出耗时和响应体大小，便于观察大导出压力。
 - 事件导出接口支持 JSON、CSV、JSONL 和可选 gzip；看板 CSV 导出已改为服务端生成，浏览器不再先下载完整 JSON 数组再转换。导出默认受 `export_max_records` 保护，也可用 `limit` 为单次导出设置更小上限，响应会标记总数、导出数和是否截断。
 - 页面会显示持久化状态、后台写入队列积压、最近 writer 批次指标、writer 滑动平均、p95/p99 长尾指标、写入压力状态、待 flush 记录数、最后 flush 时间和最近导入结果。
 
@@ -174,7 +175,7 @@ plugins:
 - 推动管理接口协议支持 chunked streaming，或增加后台导出任务模式。
 - 大导出按筛选条件边扫描边写，不构造完整数组。
 - 为大导出增加强制时间窗口或异步任务状态查询。
-- 为 gzip 导出补充大小/耗时指标。
+- 为大导出补充更细的大小/耗时分布或慢导出告警。
 
 收益：
 
@@ -244,6 +245,7 @@ go test -run '^$' -bench 'BenchmarkSummaryWithoutDetails|BenchmarkQueryEvents|Be
 14. snapshot 成功后清理 snapshot 日期之前的旧 JSONL 分片，减少磁盘占用和下次启动目录扫描范围。
 15. 事件导出支持 `export_max_records` 默认上限和单次 `limit`，JSON/响应头标记截断状态，降低超大导出对管理接口的压力。
 16. 后台 writer 暴露最近窗口 p95/p99 批次耗时和排队等待，看板 tooltip 可量化长尾磁盘抖动。
+17. `/health.runtime` 暴露事件导出次数、gzip 次数、截断次数、最近导出耗时和响应体大小，便于定位大导出压力。
 
 下一步建议：
 

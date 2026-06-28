@@ -192,17 +192,20 @@ func handleDashboardEventsExport(query map[string][]string, headers map[string][
 	if dashboardConditionalMatch("dashboard-events-export", headers, etag) {
 		return dashboardNotModifiedWithHeaders(dashboardExportHeaders(etag, dashboardExportContentType(opts.Format), opts.Gzip))
 	}
+	startedAt := time.Now()
 	result := stats.QueryExportEvents(params, opts.Limit)
 	body, contentType, err := encodeDashboardEventsExport(result, opts)
 	if err != nil {
 		return nil, err
 	}
+	rawBytes := len(body)
 	if opts.Gzip {
 		body, err = gzipBytes(body)
 		if err != nil {
 			return nil, err
 		}
 	}
+	stats.RecordEventsExport(string(opts.Format), opts.Gzip, result, rawBytes, len(body), time.Since(startedAt))
 	resp := ManagementResponse{
 		StatusCode: http.StatusOK,
 		Headers:    dashboardExportResultHeaders(etag, contentType, opts.Gzip, result),
