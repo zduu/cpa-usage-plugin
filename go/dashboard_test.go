@@ -484,6 +484,70 @@ func TestDashboardEventsModelFilter(t *testing.T) {
 	}
 }
 
+func TestDashboardEventsSecondaryIndexesBuildAndInvalidate(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 200, DedupWindowMinutes: 0})
+	base := time.Now().Add(-time.Hour)
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Source:      "openai-prod",
+		Model:       "gpt-4",
+		AuthIndex:   "auth-a",
+		RequestedAt: base,
+		Detail:      UsageDetail{TotalTokens: 100},
+	})
+	stats.Record(UsageRecord{
+		Provider:    "deepseek",
+		Source:      "deepseek-prod",
+		Model:       "deepseek-chat",
+		AuthIndex:   "auth-b",
+		RequestedAt: base.Add(time.Minute),
+		Detail:      UsageDetail{TotalTokens: 50},
+	})
+
+	if result := stats.QueryEvents(EventsQuery{Limit: 50, Model: "gpt-4"}); result.Total != 1 {
+		t.Fatalf("model-filtered total = %d, want 1", result.Total)
+	}
+	if result := stats.QueryEvents(EventsQuery{Limit: 50, Source: "deepseek-prod"}); result.Total != 1 {
+		t.Fatalf("source-filtered total = %d, want 1", result.Total)
+	}
+	if result := stats.QueryEvents(EventsQuery{Limit: 50, AuthIndex: "auth-a"}); result.Total != 1 {
+		t.Fatalf("auth-filtered total = %d, want 1", result.Total)
+	}
+
+	func() {
+		stats.mu.RLock()
+		defer stats.mu.RUnlock()
+		if len(stats.eventModelIndex["gpt-4"]) != 1 {
+			t.Fatalf("model index len = %d, want 1", len(stats.eventModelIndex["gpt-4"]))
+		}
+		if len(stats.eventSourceIndex["deepseek-prod"]) != 1 {
+			t.Fatalf("source index len = %d, want 1", len(stats.eventSourceIndex["deepseek-prod"]))
+		}
+		if len(stats.eventAuthIndex["auth-a"]) != 1 {
+			t.Fatalf("auth index len = %d, want 1", len(stats.eventAuthIndex["auth-a"]))
+		}
+	}()
+
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Source:      "openai-prod",
+		Model:       "gpt-4",
+		AuthIndex:   "auth-a",
+		RequestedAt: base.Add(2 * time.Minute),
+		Detail:      UsageDetail{TotalTokens: 120},
+	})
+
+	stats.mu.RLock()
+	defer stats.mu.RUnlock()
+	if stats.eventIndex != nil || stats.eventModelIndex != nil || stats.eventSourceIndex != nil || stats.eventAuthIndex != nil {
+		t.Fatalf("event indexes should be cleared after record")
+	}
+	if stats.eventIndexVersion != 0 {
+		t.Fatalf("event index version after record = %d, want 0", stats.eventIndexVersion)
+	}
+}
+
 func TestDashboardEventsDefaultLimit(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{MaxDetailsPerModel: 200, DedupWindowMinutes: 0})

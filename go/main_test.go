@@ -1860,6 +1860,9 @@ func clearBenchmarkEventIndex(stats *RequestStatistics) {
 	stats.eventIndexVersion = 0
 	stats.eventIndex = nil
 	stats.eventAPIIndex = nil
+	stats.eventModelIndex = nil
+	stats.eventSourceIndex = nil
+	stats.eventAuthIndex = nil
 	stats.mu.Unlock()
 }
 

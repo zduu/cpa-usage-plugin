@@ -90,6 +90,9 @@ type RequestStatistics struct {
 	eventIndexVersion    uint64
 	eventIndex           []dashboardEventDetail
 	eventAPIIndex        map[string][]dashboardEventDetail
+	eventModelIndex      map[string][]dashboardEventDetail
+	eventSourceIndex     map[string][]dashboardEventDetail
+	eventAuthIndex       map[string][]dashboardEventDetail
 }
 
 type apiStats struct {
@@ -304,6 +307,9 @@ func (s *RequestStatistics) invalidateSummaryLocked() {
 	s.eventIndexVersion = 0
 	s.eventIndex = nil
 	s.eventAPIIndex = nil
+	s.eventModelIndex = nil
+	s.eventSourceIndex = nil
+	s.eventAuthIndex = nil
 }
 
 func (s *RequestStatistics) Record(record UsageRecord) {
@@ -2265,6 +2271,9 @@ func (s *RequestStatistics) dashboardEventIndexLocked(api string) []dashboardEve
 		s.eventIndexVersion = s.summaryVersion
 		s.eventIndex = nil
 		s.eventAPIIndex = nil
+		s.eventModelIndex = nil
+		s.eventSourceIndex = nil
+		s.eventAuthIndex = nil
 	}
 	if api != "" {
 		if s.eventAPIIndex == nil {
@@ -2288,6 +2297,108 @@ func (s *RequestStatistics) dashboardEventIndexLocked(api string) []dashboardEve
 		s.eventIndex = events
 	}
 	return s.eventIndex
+}
+
+func (s *RequestStatistics) dashboardEventQueryIndexLocked(params EventsQuery) []dashboardEventDetail {
+	if s == nil {
+		return nil
+	}
+	if params.API != "" {
+		return s.dashboardEventIndexLocked(params.API)
+	}
+	if params.Model != "" {
+		return s.dashboardEventModelIndexLocked(params.Model)
+	}
+	if params.Source != "" {
+		return s.dashboardEventSourceIndexLocked(params.Source)
+	}
+	if params.AuthIndex != "" {
+		return s.dashboardEventAuthIndexLocked(params.AuthIndex)
+	}
+	return s.dashboardEventIndexLocked("")
+}
+
+func (s *RequestStatistics) dashboardEventModelIndexLocked(model string) []dashboardEventDetail {
+	if s == nil {
+		return nil
+	}
+	index := s.dashboardEventIndexLocked("")
+	if s.eventModelIndex == nil {
+		s.eventModelIndex = make(map[string][]dashboardEventDetail)
+	}
+	if events, ok := s.eventModelIndex[model]; ok {
+		return events
+	}
+	events := make([]dashboardEventDetail, 0)
+	for _, event := range index {
+		if dashboardEventModelKey(event) == model {
+			events = append(events, event)
+		}
+	}
+	s.eventModelIndex[model] = events
+	return events
+}
+
+func (s *RequestStatistics) dashboardEventSourceIndexLocked(source string) []dashboardEventDetail {
+	if s == nil {
+		return nil
+	}
+	index := s.dashboardEventIndexLocked("")
+	if s.eventSourceIndex == nil {
+		s.eventSourceIndex = make(map[string][]dashboardEventDetail)
+	}
+	if events, ok := s.eventSourceIndex[source]; ok {
+		return events
+	}
+	events := make([]dashboardEventDetail, 0)
+	for _, event := range index {
+		if dashboardEventSourceKey(event) == source {
+			events = append(events, event)
+		}
+	}
+	s.eventSourceIndex[source] = events
+	return events
+}
+
+func (s *RequestStatistics) dashboardEventAuthIndexLocked(authIndex string) []dashboardEventDetail {
+	if s == nil {
+		return nil
+	}
+	index := s.dashboardEventIndexLocked("")
+	if s.eventAuthIndex == nil {
+		s.eventAuthIndex = make(map[string][]dashboardEventDetail)
+	}
+	if events, ok := s.eventAuthIndex[authIndex]; ok {
+		return events
+	}
+	events := make([]dashboardEventDetail, 0)
+	for _, event := range index {
+		if dashboardEventAuthKey(event) == authIndex {
+			events = append(events, event)
+		}
+	}
+	s.eventAuthIndex[authIndex] = events
+	return events
+}
+
+func dashboardEventModelKey(event dashboardEventDetail) string {
+	d := event.requestDetail()
+	if d.Model != "" {
+		return d.Model
+	}
+	return event.modelName
+}
+
+func dashboardEventSourceKey(event dashboardEventDetail) string {
+	source := event.requestDetail().Source
+	if source == "" {
+		return "未知来源"
+	}
+	return source
+}
+
+func dashboardEventAuthKey(event dashboardEventDetail) string {
+	return event.requestDetail().AuthIndex
 }
 
 func buildDashboardEventIndexForAPI(apiName string, apiSt *apiStats) []dashboardEventDetail {
@@ -2396,7 +2507,7 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool) Event
 		}
 	}
 
-	index := s.dashboardEventIndexLocked(params.API)
+	index := s.dashboardEventQueryIndexLocked(params)
 	if !dashboardEventQueryHasFilters(params) {
 		total := len(index)
 		if !paginate {
