@@ -111,14 +111,18 @@ function decodeManagementBody(body) {
     return body;
   }
 }
-function unwrapPluginPayload(payload) {
+function unwrapPluginPayloadWithMeta(payload) {
   const unwrapResponse = (value) => {
     if (value && typeof value === 'object' && typeof value.status_code === 'number' && Object.prototype.hasOwnProperty.call(value, 'body')) {
       const bodyText = decodeManagementBody(value.body);
       if (value.status_code >= 400) throw new Error(bodyText || ('请求失败：' + value.status_code));
-      try { return JSON.parse(bodyText) } catch { return bodyText }
+      let body = bodyText;
+      if (bodyText) {
+        try { body = JSON.parse(bodyText) } catch {}
+      }
+      return { data: body, statusCode: value.status_code, headers: value.headers || {} };
     }
-    return value;
+    return { data: value, statusCode: 200, headers: {} };
   };
   if (!payload || typeof payload !== 'object' || !Object.prototype.hasOwnProperty.call(payload, 'ok')) return unwrapResponse(payload);
   if (!payload.ok) {
@@ -131,6 +135,7 @@ function unwrapPluginPayload(payload) {
   }
   return unwrapResponse(result);
 }
+function unwrapPluginPayload(payload) { return unwrapPluginPayloadWithMeta(payload).data }
 async function fetchAllEventPages(fetchPage, baseParams, pageLimit) {
   const limit = Math.max(1, num(pageLimit) || 500);
   const params = new URLSearchParams(baseParams || '');
@@ -153,5 +158,5 @@ async function fetchAllEventPages(fetchPage, baseParams, pageLimit) {
 
 // Export for Node.js test environment
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { esc, num, compact, pct, formatMs, totalTokens, tokenCost, detailCost, aggregateCost, looksLikeKey, looksLikeCredentialId, isCredentialMarker, isCredentialLabel, trimCredentialSuffix, sourceLabel, sourceKey, friendlyApiName, clientApiLabel, clientApiGroupKey, avg, bucketSeries, healthColor, healthCellStyle, timestampMs, pluginEndpoint, managementEndpoint, decodeManagementStorage, parseManagementStorage, currentManagementKey, groupedRows, decodeManagementBody, unwrapPluginPayload, fetchAllEventPages };
+  module.exports = { esc, num, compact, pct, formatMs, totalTokens, tokenCost, detailCost, aggregateCost, looksLikeKey, looksLikeCredentialId, isCredentialMarker, isCredentialLabel, trimCredentialSuffix, sourceLabel, sourceKey, friendlyApiName, clientApiLabel, clientApiGroupKey, avg, bucketSeries, healthColor, healthCellStyle, timestampMs, pluginEndpoint, managementEndpoint, decodeManagementStorage, parseManagementStorage, currentManagementKey, groupedRows, decodeManagementBody, unwrapPluginPayloadWithMeta, unwrapPluginPayload, fetchAllEventPages };
 }

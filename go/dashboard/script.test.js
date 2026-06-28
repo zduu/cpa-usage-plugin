@@ -40,6 +40,8 @@ class FakeElement {
 
 function createDashboardHarness(options = {}) {
   const elements = new Map();
+  const listeners = new Map();
+  let visibilityState = options.visibilityState || 'visible';
   const sortButtons = ['requests', 'tokens', 'cost'].map((name) => {
     const el = new FakeElement('sort-' + name);
     el.dataset.apiSort = name;
@@ -48,9 +50,19 @@ function createDashboardHarness(options = {}) {
   const downloads = [];
   const fetchCalls = [];
   const fetchRequests = [];
+  const timeoutDelays = [];
+  let summaryLastRecordedAt = options.lastRecordedAt || '2023-11-15T06:13:20Z';
   let prices = { 'gpt-4.1': { prompt: 2, completion: 8, cache: 0.5 } };
+  const dashboardEtags = !!options.dashboardEtags;
+  const wrapDashboardResponses = !!options.wrapDashboardResponses;
+  const failDashboardSummary = !!options.failDashboardSummary;
+  const exportJobs = new Map();
+  let exportJobSeq = 0;
 
   const document = {
+    get visibilityState() {
+      return visibilityState;
+    },
     getElementById(id) {
       if (!elements.has(id)) elements.set(id, new FakeElement(id));
       return elements.get(id);
@@ -61,6 +73,11 @@ function createDashboardHarness(options = {}) {
     },
     createElement(tag) {
       return new FakeElement(tag);
+    },
+    addEventListener(type, handler) {
+      const handlers = listeners.get(type) || [];
+      handlers.push(handler);
+      listeners.set(type, handlers);
     },
   };
 
@@ -120,26 +137,128 @@ function createDashboardHarness(options = {}) {
     credential_stats: [],
     client_api_stats: [],
     model_stats: [{ model: 'gpt-4.1', total_requests: 1200, success_count: 1190, failure_count: 10, total_tokens: 24000, input_tokens: 4000, output_tokens: 5000, cached_tokens: 0, reasoning_tokens: 0 }],
-    _meta: {},
+    _meta: {
+      last_recorded_at: summaryLastRecordedAt,
+      storage: { enabled: false, path: 'usage-statistics.jsonl' },
+    },
   };
+  if (options.storage) summary._meta.storage = options.storage;
 
   function eventsPage(url) {
     const parsed = new URL(url, 'http://test.local/v0/management/plugins/usage-statistics/dashboard');
     const offset = Number(parsed.searchParams.get('offset') || 0);
     const limit = Number(parsed.searchParams.get('limit') || 500);
-    const api = parsed.searchParams.get('api');
-    const totalRows = api ? 8 : 1200;
-    const count = Math.min(limit, Math.max(totalRows - offset, 0));
+    const count = Math.min(limit, Math.max(1200 - offset, 0));
     return {
-      total: totalRows,
+      total: 1200,
       limit,
       offset,
       generated_at: new Date().toISOString(),
       events: Array.from({ length: count }, (_, i) => {
         const idx = offset + i;
-        const failed = Boolean(api) && idx === 1;
         return {
           timestamp: new Date(1700000000000 + idx).toISOString(),
+          model: 'gpt-4.1',
+          source: 'openai-prod',
+          provider: 'openai',
+          auth_index: 'auth-1',
+          failed: false,
+          latency_ms: 120,
+          tokens: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+        };
+      }),
+    };
+  }
+
+  function eventsExport(url) {
+    const parsed = new URL(url, 'http://test.local/v0/management/plugins/usage-statistics/dashboard');
+    const api = parsed.searchParams.get('api');
+    const totalRows = api ? 8 : 1200;
+    if (parsed.searchParams.get('format') === 'csv') {
+      return '时间,模型,来源,凭证,结果,延迟毫秒,TTFT毫秒,输入 token,输出 token,思考 token,缓存 token,总 token,状态码,错误\n' +
+        eventsPage('http://test.local/dashboard-events?limit=' + totalRows + '&offset=0').events.slice(0, totalRows)
+          .map((event) => [event.timestamp, event.model, event.source, event.auth_index, event.failed ? '失败' : '成功', event.latency_ms, '', event.tokens.input_tokens, event.tokens.output_tokens, '', '', event.tokens.total_tokens, '', ''].join(','))
+          .join('\n');
+    }
+    return {
+      total: totalRows,
+      limit: totalRows,
+      offset: 0,
+      generated_at: new Date().toISOString(),
+      events: eventsPage('http://test.local/dashboard-events?limit=' + totalRows + '&offset=0').events.slice(0, totalRows),
+    };
+  }
+
+  function exportJobHeaders(payload) {
+    const total = payload && typeof payload === 'object' ? payload.total : 1200;
+    const exported = payload && typeof payload === 'object' && Array.isArray(payload.events) ? payload.events.length : total;
+    return {
+      'Content-Type': [typeof payload === 'string' ? 'text/csv; charset=utf-8' : 'application/json; charset=utf-8'],
+      'X-Total-Count': [String(total)],
+      'X-Exported-Count': [String(exported)],
+      'X-Export-Truncated': ['false'],
+    };
+  }
+
+  function exportJobResponse(job) {
+    return {
+      id: job.id,
+      status: job.status,
+      format: job.format,
+      gzip: false,
+      created_at: new Date().toISOString(),
+      finished_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + 900000).toISOString(),
+      total: job.total,
+      exported: job.exported,
+      truncated: false,
+      body_bytes: typeof job.payload === 'string' ? job.payload.length : JSON.stringify(job.payload).length,
+      content_type: job.headers['Content-Type'][0],
+      download_path: '/dashboard-events-export-download?id=' + job.id,
+    };
+  }
+
+  function createExportJob(url) {
+    const parsed = new URL(url, 'http://test.local/v0/management/plugins/usage-statistics/dashboard');
+    const payload = eventsExport(url);
+    const id = 'job-' + (++exportJobSeq);
+    const job = {
+      id,
+      status: 'succeeded',
+      format: parsed.searchParams.get('format') || 'json',
+      payload,
+      headers: exportJobHeaders(payload),
+      total: payload && typeof payload === 'object' ? payload.total : 1200,
+      exported: payload && typeof payload === 'object' && Array.isArray(payload.events) ? payload.events.length : 1200,
+    };
+    exportJobs.set(id, job);
+    return exportJobResponse(job);
+  }
+
+  function apiDetailPayload() {
+    return {
+      api: 'openai',
+      summary: {
+        total_requests: 8,
+        success_count: 7,
+        failure_count: 1,
+        total_tokens: 105,
+        input_tokens: 70,
+        output_tokens: 35,
+        cached_tokens: 10,
+        reasoning_tokens: 5,
+        avg_latency_ms: 113,
+      },
+      model_stats: [
+        { model: 'gpt-4.1', total_requests: 7, success_count: 7, failure_count: 0, total_tokens: 105, input_tokens: 70, output_tokens: 35, cached_tokens: 10, reasoning_tokens: 5 },
+        { model: 'deepseek-v4-flash-free', total_requests: 1, success_count: 0, failure_count: 1, total_tokens: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, reasoning_tokens: 0 },
+      ],
+      source_stats: [{ source: 'openai-prod', total_requests: 8, success_count: 7, failure_count: 1, total_tokens: 105 }],
+      error_stats: [{ status_code: 401, count: 1, failure: '{"type":"error","error":{"type":"ModelError","message":"Model deepseek-v4-flash-free is not supported"}}' }],
+      recent_events: Array.from({ length: 8 }, (_, i) => {
+        const failed = i === 1;
+        return {
+          timestamp: new Date(1700000008000 - i * 1000).toISOString(),
           model: failed ? 'deepseek-v4-flash-free' : 'gpt-4.1',
           source: 'openai-prod',
           provider: 'openai',
@@ -151,6 +270,131 @@ function createDashboardHarness(options = {}) {
           tokens: failed ? { total_tokens: 0 } : { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
         };
       }),
+      total_events: 8,
+      generated_at: new Date().toISOString(),
+    };
+  }
+
+  function dashboardDataPayload() {
+    const now = Date.now();
+    const details = [
+      {
+        timestamp: new Date(now - 5 * 60 * 1000).toISOString(),
+        model: 'gpt-4.1',
+        source: 'openai-prod',
+        provider: 'openai',
+        auth_index: 'auth-1',
+        failed: false,
+        latency_ms: 120,
+        tokens: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+      },
+      {
+        timestamp: new Date(now - 10 * 60 * 1000).toISOString(),
+        model: 'gpt-4.1',
+        source: 'openai-prod',
+        provider: 'openai',
+        auth_index: 'auth-1',
+        failed: true,
+        status_code: 429,
+        failure: 'rate limited',
+        latency_ms: 80,
+        tokens: { total_tokens: 0 },
+      },
+    ];
+    return {
+      generated_at: new Date(now).toISOString(),
+      usage: {
+        total_requests: 2,
+        success_count: 1,
+        failure_count: 1,
+        total_tokens: 15,
+        requests_by_day: {},
+        requests_by_hour: {},
+        tokens_by_day: {},
+        tokens_by_hour: {},
+        apis: {
+          openai: {
+            total_requests: 2,
+            success_count: 1,
+            failure_count: 1,
+            total_tokens: 15,
+            models: {
+              'gpt-4.1': {
+                total_requests: 2,
+                success_count: 1,
+                failure_count: 1,
+                total_tokens: 15,
+                details,
+              },
+            },
+          },
+        },
+      },
+    };
+  }
+
+  function requestHeaderValue(requestOptions, name) {
+    const headers = requestOptions && requestOptions.headers;
+    if (!headers) return '';
+    if (typeof headers.get === 'function') return headers.get(name) || headers.get(String(name).toLowerCase()) || '';
+    const target = String(name).toLowerCase();
+    for (const [key, value] of Object.entries(headers)) {
+      if (String(key).toLowerCase() === target) return Array.isArray(value) ? String(value[0] || '') : String(value || '');
+    }
+    return '';
+  }
+
+  function dashboardRoute(url) {
+    const text = String(url);
+    if (text.includes('dashboard-summary')) return 'dashboard-summary';
+    if (text.includes('dashboard-api-detail')) return 'dashboard-api-detail';
+    if (text.includes('dashboard-events') && !text.includes('dashboard-events-export')) return 'dashboard-events';
+    return '';
+  }
+
+  function dashboardEtag(route, url) {
+    if (route === 'dashboard-summary') return 'W/"summary-' + summaryLastRecordedAt + '"';
+    return 'W/"' + route + '-' + Buffer.from(String(url)).toString('base64url') + '"';
+  }
+
+  function fetchHeaders(headers) {
+    return {
+      get(name) {
+        const target = String(name).toLowerCase();
+        for (const [key, value] of Object.entries(headers || {})) {
+          if (String(key).toLowerCase() === target) return Array.isArray(value) ? String(value[0] || '') : String(value || '');
+        }
+        return '';
+      },
+    };
+  }
+
+  function fetchResponse(payload, route, url, requestOptions) {
+    let status = 200;
+    const headers = {};
+    if (dashboardEtags && route) {
+      const etag = dashboardEtag(route, url);
+      headers.ETag = [etag];
+      if (requestHeaderValue(requestOptions, 'If-None-Match') === etag) status = 304;
+    }
+    if (wrapDashboardResponses && route) {
+      const result = {
+        status_code: status,
+        headers,
+        body: status === 304 ? null : JSON.stringify(payload),
+      };
+      return {
+        ok: true,
+        status: 200,
+        headers: fetchHeaders({}),
+        text: async () => JSON.stringify({ ok: true, result: JSON.stringify(result) }),
+      };
+    }
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      headers: fetchHeaders(headers),
+      text: async () => status === 304 ? '' : JSON.stringify(payload),
     };
   }
 
@@ -173,13 +417,14 @@ function createDashboardHarness(options = {}) {
     location: { pathname: options.pathname || '/v0/management/plugins/usage-statistics/dashboard', host: 'test.local' },
     navigator: { userAgent: 'node-test' },
     window: { innerWidth: 1200, innerHeight: 800 },
-    setTimeout() { return 1; },
+    setTimeout(_fn, delay) { timeoutDelays.push(delay); return timeoutDelays.length; },
     clearTimeout() {},
     alert(message) { downloads.push({ alert: message }); },
     fetch: async (url, options = {}) => {
       fetchCalls.push(String(url));
       fetchRequests.push({ url: String(url), options });
       let payload;
+      const route = dashboardRoute(url);
       if (String(url).includes('model-prices')) {
         if (options.method === 'PUT') {
           const body = JSON.parse(options.body || '{}');
@@ -189,15 +434,59 @@ function createDashboardHarness(options = {}) {
           delete prices[parsed.searchParams.get('model')];
         }
         payload = { prices, updated_at: new Date().toISOString(), storage: {} };
-      } else if (String(url).includes('dashboard-summary')) payload = summary;
+      } else if (String(url).includes('dashboard-summary')) {
+        if (failDashboardSummary) {
+          return {
+            ok: false,
+            status: 500,
+            headers: fetchHeaders({}),
+            text: async () => 'summary failed',
+          };
+        }
+        summary._meta.last_recorded_at = summaryLastRecordedAt;
+        payload = summary;
+      }
+      else if (String(url).includes('dashboard-api-detail')) payload = apiDetailPayload(String(url));
+      else if (String(url).includes('dashboard-data')) payload = dashboardDataPayload();
+      else if (String(url).includes('dashboard-events-export-download')) {
+        const parsed = new URL(String(url), 'http://test.local/v0/management/plugins/usage-statistics/dashboard');
+        const job = exportJobs.get(parsed.searchParams.get('id'));
+        payload = job ? job.payload : {};
+        if (typeof payload === 'string') {
+          return {
+            ok: true,
+            status: 200,
+            headers: fetchHeaders(job.headers),
+            text: async () => payload,
+          };
+        }
+        return fetchResponse(payload, route, String(url), options);
+      }
+      else if (String(url).includes('dashboard-events-export-jobs')) {
+        const parsed = new URL(String(url), 'http://test.local/v0/management/plugins/usage-statistics/dashboard');
+        if (options.method === 'POST') {
+          payload = createExportJob(String(url));
+        } else if (options.method === 'DELETE') {
+          exportJobs.delete(parsed.searchParams.get('id'));
+          payload = { status: 'deleted' };
+        } else {
+          const job = exportJobs.get(parsed.searchParams.get('id'));
+          payload = job ? exportJobResponse(job) : { error: 'not found' };
+        }
+      }
+      else if (String(url).includes('dashboard-events-export')) payload = eventsExport(String(url));
       else if (String(url).includes('dashboard-events')) payload = eventsPage(String(url));
       else if (String(url).includes('usage/export')) payload = { version: 1, usage: {} };
       else payload = {};
-      return {
-        ok: true,
-        status: 200,
-        text: async () => JSON.stringify(payload),
-      };
+      if (typeof payload === 'string') {
+        return {
+          ok: true,
+          status: 200,
+          headers: fetchHeaders({ 'Content-Type': ['text/csv; charset=utf-8'] }),
+          text: async () => payload,
+        };
+      }
+      return fetchResponse(payload, route, String(url), options);
     },
     Blob: class FakeBlob {
       constructor(parts, options) {
@@ -223,7 +512,15 @@ function createDashboardHarness(options = {}) {
   const script = fs.readFileSync(path.join(__dirname, 'script.js'), 'utf8');
   vm.runInContext(helpers + '\n' + script, context, { filename: 'dashboard-bundle.js' });
 
-  return { context, document, fetchCalls, fetchRequests, downloads };
+  const setVisibility = (state) => {
+    visibilityState = state;
+    (listeners.get('visibilitychange') || []).forEach((handler) => handler());
+  };
+  const setSummaryLastRecordedAt = (value) => {
+    summaryLastRecordedAt = value;
+  };
+
+  return { context, document, fetchCalls, fetchRequests, downloads, timeoutDelays, setVisibility, setSummaryLastRecordedAt };
 }
 
 async function waitFor(fn) {
@@ -234,39 +531,282 @@ async function waitFor(fn) {
   throw new Error('condition not met');
 }
 
-test('dashboard loads summary and export button fetches all event pages', async () => {
-  const { document, fetchCalls, downloads } = createDashboardHarness();
+function optionHeaderValue(options, name) {
+  const headers = options && options.headers;
+  if (!headers) return '';
+  if (typeof headers.get === 'function') return headers.get(name) || headers.get(String(name).toLowerCase()) || '';
+  const target = String(name).toLowerCase();
+  for (const [key, value] of Object.entries(headers)) {
+    if (String(key).toLowerCase() === target) return Array.isArray(value) ? String(value[0] || '') : String(value || '');
+  }
+  return '';
+}
+
+test('dashboard loads summary and export button uses backend event export', async () => {
+  const { document, fetchCalls, fetchRequests, downloads } = createDashboardHarness();
 
   await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-events')));
   assert.strictEqual(document.getElementById('totalRequests').textContent, '1,200');
   assert.strictEqual(document.getElementById('totalCost').textContent, 'US$0.05');
+  assert.strictEqual(document.getElementById('storageStatus').textContent, '未开启持久化');
   const apiDetail = document.getElementById('apiDetail').innerHTML;
   assert.match(apiDetail, /总花费/);
-  assert.match(apiDetail, /US\$0\.05/);
-  assert.match(apiDetail, /总 token 数：24k/);
-  assert.match(apiDetail, /缓存 token：100/);
-  assert.match(apiDetail, /思考 token：50/);
   assert.doesNotMatch(apiDetail, /Token\/请求/);
   await waitFor(() => /ModelError/.test(document.getElementById('apiDetail').innerHTML));
+  const loadedApiDetail = document.getElementById('apiDetail').innerHTML;
+  assert.match(loadedApiDetail, /US\$0\.00/);
+  assert.match(loadedApiDetail, /总 token 数：105/);
+  assert.match(loadedApiDetail, /缓存 token：10/);
+  assert.match(loadedApiDetail, /思考 token：5/);
   assert.match(document.getElementById('apiDetail').innerHTML, /错误统计/);
   assert.match(document.getElementById('apiDetail').innerHTML, /最近请求/);
   assert.match(document.getElementById('apiDetail').innerHTML, /401/);
   assert.match(document.getElementById('apiDetail').innerHTML, /deepseek-v4-flash-free/);
 
-  const beforeExportCallCount = fetchCalls.length;
+  const pagedEventsCount = () => fetchCalls.filter((url) => url.includes('dashboard-events?')).length;
+  const exportJobCreateCount = () => fetchRequests.filter((request) => request.url.includes('dashboard-events-export-jobs') && request.options.method === 'POST').length;
+  const syncExportEventsCount = () => fetchCalls.filter((url) => /dashboard-events-export\?/.test(url)).length;
+  const exportDownloadCount = () => fetchCalls.filter((url) => url.includes('dashboard-events-export-download')).length;
+  const beforePagedEvents = pagedEventsCount();
+  const beforeExportJobs = exportJobCreateCount();
+  const beforeSyncExports = syncExportEventsCount();
+  const beforeExportDownloads = exportDownloadCount();
+  await document.getElementById('exportRowsCsv').onclick();
+  await waitFor(() => downloads.some((d) => d.text && d.text.startsWith('时间,模型')));
   await document.getElementById('exportRowsJson').onclick();
   await waitFor(() => downloads.some((d) => d.text && d.text.startsWith('[')));
 
-  const exportCalls = fetchCalls
-    .filter((url) => url.includes('dashboard-events'))
-    .slice(fetchCalls.filter((url, idx) => idx < beforeExportCallCount && url.includes('dashboard-events')).length)
-    .filter((url) => !new URL(url, 'http://test.local').searchParams.has('api'));
-  assert.deepStrictEqual(
-    exportCalls.map((url) => new URL(url, 'http://test.local').searchParams.get('offset')),
-    ['0', '500', '1000']
-  );
+  assert.strictEqual(pagedEventsCount(), beforePagedEvents);
+  assert.strictEqual(exportJobCreateCount(), beforeExportJobs + 2);
+  assert.strictEqual(syncExportEventsCount(), beforeSyncExports);
+  assert.strictEqual(exportDownloadCount(), beforeExportDownloads + 2);
+  assert.ok(fetchRequests.some((request) => request.url.includes('dashboard-events-export-jobs') && request.options.method === 'POST' && new URL(request.url, 'http://test.local').searchParams.get('format') === 'csv'));
   const exported = JSON.parse(downloads.find((d) => d.text && d.text.startsWith('[')).text);
   assert.strictEqual(exported.length, 1200);
+});
+
+test('dashboard export truncation headers produce a user notice', () => {
+  const { context, downloads } = createDashboardHarness();
+  const info = context.exportTruncationFromHeaders({
+    'X-Export-Truncated': ['true'],
+    'X-Total-Count': ['1200'],
+    'X-Exported-Count': ['500'],
+  });
+
+  context.notifyExportTruncated(info);
+
+  assert.deepStrictEqual(downloads.find((d) => d.alert), { alert: '导出已截断：共 1,200 条，已导出 500 条' });
+});
+
+test('dashboard shows pending storage buffer status', async () => {
+  const { document, fetchCalls } = createDashboardHarness({
+    storage: {
+      enabled: true,
+      path: 'usage-statistics.jsonl',
+      loaded_path: 'usage-statistics/usage-2026-06-28.jsonl',
+      pending_buffered_records: 2,
+    },
+  });
+
+  const el = document.getElementById('storageStatus');
+  await waitFor(() => el.textContent === '持久化待同步');
+  assert.strictEqual(el.textContent, '持久化待同步');
+  assert.match(el.title, /2 条记录/);
+});
+
+test('dashboard shows pending storage write queue status', async () => {
+  const { document } = createDashboardHarness({
+    storage: {
+      enabled: true,
+      path: 'usage-statistics.jsonl',
+      loaded_path: 'usage-statistics/usage-2026-06-28.jsonl',
+      write_queue_length: 5,
+      write_queue_capacity: 4096,
+      pending_buffered_records: 2,
+    },
+  });
+
+  const el = document.getElementById('storageStatus');
+  await waitFor(() => el.textContent === '持久化排队中');
+  assert.strictEqual(el.textContent, '持久化排队中');
+  assert.match(el.title, /5 条记录/);
+  assert.match(el.title, /4,096/);
+});
+
+test('dashboard shows pending storage snapshot status', async () => {
+  const { document } = createDashboardHarness({
+    storage: {
+      enabled: true,
+      path: 'usage-statistics.jsonl',
+      loaded_path: 'usage-statistics/usage-2026-06-28.jsonl',
+      last_flush_at: '2026-06-28T01:00:00Z',
+      pending_snapshot_records: 3,
+    },
+  });
+
+  const el = document.getElementById('storageStatus');
+  await waitFor(() => el.textContent === '快照待更新');
+  assert.strictEqual(el.textContent, '快照待更新');
+  assert.match(el.title, /3 条记录/);
+});
+
+test('dashboard shows pending storage fsync status', async () => {
+  const { document } = createDashboardHarness({
+    storage: {
+      enabled: true,
+      path: 'usage-statistics.jsonl',
+      loaded_path: 'usage-statistics/usage-2026-06-28.jsonl',
+      last_flush_at: '2026-06-28T01:00:00Z',
+      pending_unsynced_records: 4,
+      pending_snapshot_records: 3,
+    },
+  });
+
+  const el = document.getElementById('storageStatus');
+  await waitFor(() => el.textContent === '持久化待落盘');
+  assert.strictEqual(el.textContent, '持久化待落盘');
+  assert.match(el.title, /4 条记录/);
+});
+
+test('dashboard shows storage writer batch metrics in title', async () => {
+  const { document } = createDashboardHarness({
+    storage: {
+      enabled: true,
+      path: 'usage-statistics.jsonl',
+      last_flush_at: '2026-06-28T01:00:00Z',
+      last_write_batch_records: 12,
+      last_write_batch_duration_ms: 1.6,
+      last_write_queue_wait_ms: 3.2,
+      write_batch_avg_duration_ms: 2.4,
+      write_batch_p95_duration_ms: 5.6,
+      write_batch_p99_duration_ms: 7.8,
+      write_queue_wait_avg_ms: 1.2,
+      write_queue_wait_p95_ms: 8.4,
+      write_queue_wait_p99_ms: 10.2,
+      write_pressure: 'normal',
+    },
+  });
+
+  const el = document.getElementById('storageStatus');
+  await waitFor(() => el.textContent === '持久化已同步');
+  assert.strictEqual(el.textContent, '持久化已同步');
+  assert.match(el.title, /最近批量写入 12 条/);
+  assert.match(el.title, /写入压力：正常/);
+  assert.match(el.title, /平均耗时/);
+  assert.match(el.title, /耗时 p95/);
+  assert.match(el.title, /最长排队/);
+  assert.match(el.title, /排队 p95/);
+});
+
+test('dashboard warns when storage writer is slow without queue backlog', async () => {
+  const { document } = createDashboardHarness({
+    storage: {
+      enabled: true,
+      path: 'usage-statistics.jsonl',
+      last_flush_at: '2026-06-28T01:00:00Z',
+      last_write_batch_records: 8,
+      write_queue_wait_avg_ms: 250,
+      write_pressure: 'slow',
+    },
+  });
+
+  const el = document.getElementById('storageStatus');
+  await waitFor(() => el.textContent === '持久化写入偏慢');
+  assert.strictEqual(el.textContent, '持久化写入偏慢');
+  assert.match(el.title, /写入压力：写入偏慢/);
+});
+
+test('dashboard uses a slower polling interval while hidden', async () => {
+  const { fetchCalls, timeoutDelays, setVisibility } = createDashboardHarness({ visibilityState: 'hidden' });
+
+  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-summary')));
+  await waitFor(() => timeoutDelays.includes(300000));
+  assert.notStrictEqual(timeoutDelays[timeoutDelays.length - 1], 30000);
+
+  const beforeVisibleFetches = fetchCalls.length;
+  setVisibility('visible');
+  await waitFor(() => fetchCalls.length > beforeVisibleFetches);
+  await waitFor(() => timeoutDelays.includes(30000));
+});
+
+test('dashboard polling skips detail requests when no new records arrive', async () => {
+  const { document, fetchCalls, setVisibility, setSummaryLastRecordedAt } = createDashboardHarness();
+  const countCalls = (part) => fetchCalls.filter((url) => url.includes(part)).length;
+
+  await waitFor(() => countCalls('dashboard-events') > 0 && countCalls('dashboard-api-detail') > 0);
+  const beforeSummary = countCalls('dashboard-summary');
+  const beforeEvents = countCalls('dashboard-events');
+  const beforeApiDetail = countCalls('dashboard-api-detail');
+
+  setVisibility('visible');
+  await waitFor(() => countCalls('dashboard-summary') > beforeSummary);
+  assert.strictEqual(countCalls('dashboard-events'), beforeEvents);
+  assert.strictEqual(countCalls('dashboard-api-detail'), beforeApiDetail);
+
+  setSummaryLastRecordedAt('2023-11-15T06:14:20Z');
+  const beforeChangedEvents = countCalls('dashboard-events');
+  const beforeChangedApiDetail = countCalls('dashboard-api-detail');
+  setVisibility('visible');
+  await waitFor(() => countCalls('dashboard-events') > beforeChangedEvents && countCalls('dashboard-api-detail') > beforeChangedApiDetail);
+
+  const beforeManualEvents = countCalls('dashboard-events');
+  const beforeManualApiDetail = countCalls('dashboard-api-detail');
+  await document.getElementById('refreshBtn').onclick();
+  assert.ok(countCalls('dashboard-events') > beforeManualEvents);
+  assert.ok(countCalls('dashboard-api-detail') > beforeManualApiDetail);
+});
+
+test('dashboard summary polling reuses cached data on management 304', async () => {
+  const { fetchCalls, fetchRequests, setVisibility } = createDashboardHarness({
+    dashboardEtags: true,
+    wrapDashboardResponses: true,
+  });
+  const summaryRequests = () => fetchRequests.filter((req) => req.url.includes('dashboard-summary'));
+  const countCalls = (part) => fetchCalls.filter((url) => url.includes(part)).length;
+
+  await waitFor(() => summaryRequests().length > 0 && countCalls('dashboard-events?') > 0 && countCalls('dashboard-api-detail') > 0);
+  assert.strictEqual(optionHeaderValue(summaryRequests()[0].options, 'If-None-Match'), '');
+
+  const beforeSummary = summaryRequests().length;
+  const beforeEvents = countCalls('dashboard-events?');
+  const beforeApiDetail = countCalls('dashboard-api-detail');
+  setVisibility('visible');
+
+  await waitFor(() => summaryRequests().length > beforeSummary);
+  const latestSummary = summaryRequests().at(-1);
+  assert.strictEqual(optionHeaderValue(latestSummary.options, 'If-None-Match'), 'W/"summary-2023-11-15T06:13:20Z"');
+  assert.strictEqual(countCalls('dashboard-events?'), beforeEvents);
+  assert.strictEqual(countCalls('dashboard-api-detail'), beforeApiDetail);
+});
+
+test('dashboard fallback keeps health grid visible when summary endpoint fails', async () => {
+  const { document, fetchCalls } = createDashboardHarness({ failDashboardSummary: true });
+  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-data')) && document.getElementById('healthGrid').innerHTML.includes('healthCell'));
+
+  const cells = (document.getElementById('healthGrid').innerHTML.match(/healthCell/g) || []).length;
+  assert.strictEqual(cells, 672);
+  assert.strictEqual(document.getElementById('healthSuccess').textContent, '成功 1');
+  assert.strictEqual(document.getElementById('healthFailure').textContent, '失败 1');
+  assert.match(document.getElementById('updated').textContent, /兼容模式/);
+});
+
+test('dashboard detail refresh sends conditional requests for events and api detail', async () => {
+  const { document, fetchRequests } = createDashboardHarness({
+    dashboardEtags: true,
+    wrapDashboardResponses: true,
+  });
+  const eventRequests = () => fetchRequests.filter((req) => req.url.includes('dashboard-events?'));
+  const apiDetailRequests = () => fetchRequests.filter((req) => req.url.includes('dashboard-api-detail'));
+
+  await waitFor(() => eventRequests().length > 0 && apiDetailRequests().length > 0);
+  const beforeEvents = eventRequests().length;
+  const beforeApiDetail = apiDetailRequests().length;
+  await document.getElementById('refreshBtn').onclick();
+
+  await waitFor(() => eventRequests().length > beforeEvents && apiDetailRequests().length > beforeApiDetail);
+  assert.match(optionHeaderValue(eventRequests().at(-1).options, 'If-None-Match'), /^W\/"dashboard-events-/);
+  assert.match(optionHeaderValue(apiDetailRequests().at(-1).options, 'If-None-Match'), /^W\/"dashboard-api-detail-/);
+  assert.match(document.getElementById('apiDetail').innerHTML, /最近请求/);
 });
 
 test('model price settings are loaded and saved through backend API', async () => {
@@ -301,17 +841,18 @@ test('event list is not implicitly filtered by selected upstream API', async () 
 
   await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-events')));
   const isEventsCall = (url) => url.includes('dashboard-events');
+  const isApiDetailCall = (url) => url.includes('dashboard-api-detail');
   const hasApiFilter = (url) => new URL(url, 'http://test.local').searchParams.has('api');
   const globalEventsCount = () => fetchCalls.filter((url) => isEventsCall(url) && !hasApiFilter(url)).length;
-  const apiDetailEventsCount = () => fetchCalls.filter((url) => isEventsCall(url) && hasApiFilter(url)).length;
+  const apiDetailCount = () => fetchCalls.filter(isApiDetailCall).length;
   const firstEventsCall = fetchCalls.find((url) => isEventsCall(url) && !hasApiFilter(url));
   assert.strictEqual(new URL(firstEventsCall, 'http://test.local').searchParams.get('api'), null);
-  await waitFor(() => apiDetailEventsCount() > 0);
+  await waitFor(() => apiDetailCount() > 0);
 
   const beforeGlobal = globalEventsCount();
-  const beforeApiDetail = apiDetailEventsCount();
+  const beforeApiDetail = apiDetailCount();
   document.getElementById('apiSelect').onchange();
-  await waitFor(() => apiDetailEventsCount() > beforeApiDetail);
+  await waitFor(() => apiDetailCount() > beforeApiDetail);
   assert.strictEqual(
     globalEventsCount(),
     beforeGlobal,

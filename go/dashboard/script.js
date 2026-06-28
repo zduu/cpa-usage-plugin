@@ -10,15 +10,46 @@ let clientApiSort = 'requests';
 let pollTimer = null, pollFailures = 0;
 const eventsLimit = 500;
 const apiDetailRecentLimit = 120;
+const visiblePollDelayMs = 30000;
+const hiddenPollDelayMs = 300000;
 let apiDetailSeq = 0;
+const conditionalPayloadCache = new Map();
 
 // Dom helpers
 const $ = (id) => document.getElementById(id);
 const setText = (id, value) => { $(id).textContent = value };
 
-async function fetchJsonPayload(url, options) {
+function cloneHeaders(headers) {
+  if (!headers) return {};
+  if (Array.isArray(headers)) return Object.fromEntries(headers);
+  if (typeof headers.forEach === 'function') {
+    const cloned = {};
+    headers.forEach((value, key) => { cloned[key] = value });
+    return cloned;
+  }
+  return Object.assign({}, headers);
+}
+
+function headerValue(headers, name) {
+  if (!headers) return '';
+  if (typeof headers.get === 'function') return headers.get(name) || headers.get(String(name).toLowerCase()) || '';
+  const target = String(name).toLowerCase();
+  for (const [key, value] of Object.entries(headers)) {
+    if (String(key).toLowerCase() !== target) continue;
+    return Array.isArray(value) ? String(value[0] || '') : String(value || '');
+  }
+  return '';
+}
+
+async function fetchJsonPayloadWithMeta(url, options) {
   const response = await fetch(url, options);
   const text = await response.text();
+  const responseHeaders = {};
+  const responseEtag = headerValue(response.headers, 'ETag');
+  if (responseEtag) responseHeaders.ETag = [responseEtag];
+  if (response.status === 304) {
+    return { data: '', statusCode: 304, headers: responseHeaders };
+  }
   let payload = null;
   if (text) {
     try { payload = JSON.parse(text) } catch {
@@ -30,7 +61,51 @@ async function fetchJsonPayload(url, options) {
     const message = payload && payload.error && payload.error.message ? payload.error.message : (text || ('请求失败：' + response.status));
     throw new Error(message);
   }
-  return unwrapPluginPayload(payload);
+  const meta = unwrapPluginPayloadWithMeta(payload);
+  meta.headers = Object.assign({}, meta.headers || {});
+  if (responseEtag && !headerValue(meta.headers, 'ETag')) meta.headers.ETag = responseHeaders.ETag;
+  if (!meta.statusCode) meta.statusCode = response.status || 200;
+  return meta;
+}
+
+async function fetchJsonPayload(url, options) {
+  const meta = await fetchJsonPayloadWithMeta(url, options);
+  return meta.data;
+}
+
+async function fetchTextPayload(url, options) {
+  const meta = await fetchTextPayloadWithMeta(url, options);
+  return meta.data;
+}
+
+async function fetchTextPayloadWithMeta(url, options) {
+  const response = await fetch(url, options);
+  const text = await response.text();
+  if (!response.ok) throw new Error(text || ('请求失败：' + response.status));
+  if (!text) return { data: '', statusCode: response.status || 200, headers: {} };
+  let payload = null;
+  try { payload = JSON.parse(text) } catch { return { data: text, statusCode: response.status || 200, headers: {} } }
+  const meta = unwrapPluginPayloadWithMeta(payload);
+  if (meta.data == null) meta.data = '';
+  meta.data = typeof meta.data === 'string' ? meta.data : JSON.stringify(meta.data);
+  return meta;
+}
+
+async function fetchConditionalJsonPayload(cacheKey, url, options) {
+  const cached = conditionalPayloadCache.get(cacheKey);
+  const merged = Object.assign({}, options || {});
+  const headers = cloneHeaders(merged.headers);
+  if (cached && cached.etag && !headerValue(headers, 'If-None-Match')) headers['If-None-Match'] = cached.etag;
+  merged.headers = headers;
+  const meta = await fetchJsonPayloadWithMeta(url, merged);
+  if (meta.statusCode === 304) {
+    if (cached && Object.prototype.hasOwnProperty.call(cached, 'data')) return cached.data;
+    throw new Error('服务端返回 304，但本地没有可复用缓存');
+  }
+  const etag = headerValue(meta.headers, 'ETag');
+  if (etag) conditionalPayloadCache.set(cacheKey, { etag, data: meta.data });
+  else conditionalPayloadCache.delete(cacheKey);
+  return meta.data;
 }
 
 function managementFetchOptions(options) {
@@ -114,9 +189,112 @@ function renderStats() {
   drawSpark('costSpark', reqByHour.length ? reqByHour.map(v => (cost > 0 ? v / Math.max(u.total_requests || 1, 1) * cost : 0)) : [0], '#f59e0b');
 }
 
+function storageBatchTitle(storage) {
+  const records = num(storage && storage.last_write_batch_records);
+  if (records <= 0) return '';
+  const parts = ['最近批量写入 ' + records.toLocaleString() + ' 条'];
+  const duration = num(storage.last_write_batch_duration_ms);
+  if (duration > 0) parts.push('耗时 ' + formatMs(duration));
+  const avgDuration = num(storage.write_batch_avg_duration_ms);
+  if (avgDuration > 0) parts.push('平均耗时 ' + formatMs(avgDuration));
+  const p95Duration = num(storage.write_batch_p95_duration_ms);
+  const p99Duration = num(storage.write_batch_p99_duration_ms);
+  if (p95Duration > 0) parts.push('耗时 p95 ' + formatMs(p95Duration) + (p99Duration > 0 ? ' / p99 ' + formatMs(p99Duration) : ''));
+  const wait = num(storage.last_write_queue_wait_ms);
+  if (wait > 0) parts.push('最长排队 ' + formatMs(wait));
+  const avgWait = num(storage.write_queue_wait_avg_ms);
+  if (avgWait > 0) parts.push('平均排队 ' + formatMs(avgWait));
+  const p95Wait = num(storage.write_queue_wait_p95_ms);
+  const p99Wait = num(storage.write_queue_wait_p99_ms);
+  if (p95Wait > 0) parts.push('排队 p95 ' + formatMs(p95Wait) + (p99Wait > 0 ? ' / p99 ' + formatMs(p99Wait) : ''));
+  return parts.join('，');
+}
+
+function storagePressureLabel(value) {
+  switch (String(value || '')) {
+    case 'full': return '队列已满';
+    case 'backlog': return '队列积压';
+    case 'queued': return '正在排队';
+    case 'slow': return '写入偏慢';
+    case 'normal': return '正常';
+    default: return '';
+  }
+}
+
+function storagePressureTitle(storage) {
+  const label = storagePressureLabel(storage && storage.write_pressure);
+  return label ? '写入压力：' + label : '';
+}
+
+function storageTitle() {
+  return Array.from(arguments).filter(Boolean).join('；');
+}
+
+function renderStorageStatus() {
+  const el = $('storageStatus');
+  if (!el) return;
+  const storage = summaryData && summaryData._meta && summaryData._meta.storage;
+  el.className = 'storageStatus';
+  el.title = '';
+  if (!storage) {
+    el.textContent = '';
+    return;
+  }
+  if (!storage.enabled) {
+    el.textContent = '未开启持久化';
+    el.classList.add('warn');
+    el.title = storage.path || '';
+    return;
+  }
+  if (storage.last_error) {
+    el.textContent = '持久化异常';
+    el.classList.add('bad');
+    el.title = storage.last_error;
+    return;
+  }
+  const queued = num(storage.write_queue_length);
+  if (queued > 0) {
+    el.textContent = '持久化排队中';
+    el.classList.add('warn');
+    const capacity = num(storage.write_queue_capacity);
+    el.title = storageTitle(queued.toLocaleString() + ' 条记录等待后台写入' + (capacity > 0 ? '，队列容量 ' + capacity.toLocaleString() : ''), storagePressureTitle(storage), storageBatchTitle(storage));
+    return;
+  }
+  const pending = num(storage.pending_buffered_records);
+  if (pending > 0) {
+    el.textContent = '持久化待同步';
+    el.classList.add('warn');
+    el.title = storageTitle(pending.toLocaleString() + ' 条记录待刷新到文件', storagePressureTitle(storage), storageBatchTitle(storage));
+    return;
+  }
+  const pendingSync = num(storage.pending_unsynced_records);
+  if (pendingSync > 0) {
+    el.textContent = '持久化待落盘';
+    el.classList.add('warn');
+    el.title = storageTitle(pendingSync.toLocaleString() + ' 条记录待同步到磁盘', storagePressureTitle(storage), storageBatchTitle(storage));
+    return;
+  }
+  const pendingSnapshot = num(storage.pending_snapshot_records);
+  if (pendingSnapshot > 0) {
+    el.textContent = '快照待更新';
+    el.classList.add('warn');
+    el.title = storageTitle(pendingSnapshot.toLocaleString() + ' 条记录待写入快照', storagePressureTitle(storage), storageBatchTitle(storage));
+    return;
+  }
+  if (storage.write_pressure === 'slow') {
+    el.textContent = '持久化写入偏慢';
+    el.classList.add('warn');
+    el.title = storageTitle(storagePressureTitle(storage), storageBatchTitle(storage));
+    return;
+  }
+  el.textContent = storage.last_flush_at ? '持久化已同步' : '持久化已开启';
+  el.classList.add('ok');
+  el.title = storageTitle(storage.last_snapshot_at || storage.loaded_path || storage.path || '', storagePressureTitle(storage), storageBatchTitle(storage));
+}
+
 function renderHealth() {
-  if (!summaryData || !summaryData.health_grid) return;
-  const grid = summaryData.health_grid;
+  if (!summaryData) return;
+  const grid = normalizeHealthGrid(summaryData.health_grid, summaryData.generated_at);
   const count = 672, rows = 7, cols = Math.ceil(count / rows);
   let totalS = 0, totalF = 0;
   const cells = [], tooltips = [];
@@ -149,6 +327,40 @@ function renderHealth() {
   };
   $('healthGrid').onmouseout = function (e) { const t = e.relatedTarget; if (!t || !t.closest('.healthCell')) tip.classList.add('hidden') };
   const total = totalS + totalF; setText('healthRate', total ? pct(totalS / total * 100) : '-'); setText('healthSuccess', '成功 ' + fmt.format(totalS)); setText('healthFailure', '失败 ' + fmt.format(totalF));
+}
+
+const healthGridCount = 672;
+const healthGridStepMs = 15 * 60 * 1000;
+
+function healthGridWindowEnd(value) {
+  const ms = timestampMs(value) || Date.now();
+  return Math.floor(ms / healthGridStepMs) * healthGridStepMs + healthGridStepMs;
+}
+
+function emptyHealthGrid(value) {
+  const end = healthGridWindowEnd(value);
+  const start = end - healthGridCount * healthGridStepMs;
+  return Array.from({ length: healthGridCount }, (_, i) => {
+    const slotStart = start + i * healthGridStepMs;
+    return { slot: i, total: 0, success: 0, failure: 0, start: new Date(slotStart).toISOString(), end: new Date(slotStart + healthGridStepMs).toISOString() };
+  });
+}
+
+function normalizeHealthGrid(grid, generatedAt) {
+  const normalized = emptyHealthGrid(generatedAt);
+  if (!Array.isArray(grid)) return normalized;
+  grid.slice(0, healthGridCount).forEach((slot, i) => {
+    if (!slot || typeof slot !== 'object') return;
+    const success = num(slot.success);
+    const failure = num(slot.failure);
+    normalized[i] = Object.assign({}, normalized[i], slot, {
+      slot: i,
+      success,
+      failure,
+      total: num(slot.total) || success + failure,
+    });
+  });
+  return normalized;
 }
 
 function modelNames() {
@@ -187,7 +399,7 @@ function renderPrices() {
     try {
       await deleteModelPrice(btn.dataset.delPrice);
       if ($('priceModel').value === btn.dataset.delPrice) fillPriceForm('');
-      await rerender();
+      await rerender({ refreshEvents: false, refreshApiDetail: true });
     } catch (e) {
       alert('删除价格失败：' + (e && e.message ? e.message : '未知错误'));
     }
@@ -258,40 +470,22 @@ function normalizeApiDetailEvent(d) {
   });
 }
 
-async function fetchApiDetailEvents(api) {
+async function fetchApiDetailData(api) {
   const params = new URLSearchParams();
   params.set('range', $('range').value);
   params.set('api', api);
-  const data = await fetchAllEventPages(
-    (pageParams) => fetchJsonPayload(pluginEndpoint('dashboard-events') + '?' + pageParams.toString(), { cache: 'no-store' }),
-    params,
-    eventsLimit
-  );
-  return {
-    rows: (data.events || []).map(normalizeApiDetailEvent),
-    total: data.total || 0
-  };
+  params.set('recent_limit', String(apiDetailRecentLimit));
+  const url = pluginEndpoint('dashboard-api-detail') + '?' + params.toString();
+  const data = await fetchConditionalJsonPayload('dashboard-api-detail:' + url, url, { cache: 'no-store' });
+  data.recent_events = (data.recent_events || []).map(normalizeApiDetailEvent);
+  return data;
 }
 
-function apiDetailErrorRows(rows) {
-  const errors = rows.filter((d) => d.failed).reduce((map, d) => {
-    const status = d.status_code || '-';
-    const failure = d.failure || '未返回错误内容';
-    const key = status + '|' + failure;
-    const row = map.get(key) || { status, failure, count: 0 };
-    row.count++;
-    map.set(key, row);
-    return map;
-  }, new Map());
-  return [...errors.values()].sort((a, b) => b.count - a.count);
-}
-
-function apiDetailErrorHtml(rows, loading, error) {
+function apiDetailErrorHtml(errorRows, loading, error) {
   if (loading) return '<div><div class="subtle" style="margin-bottom:8px">错误统计</div><div class="empty">正在加载接口请求明细...</div></div>';
   if (error) return '<div><div class="subtle" style="margin-bottom:8px">错误统计</div><div class="empty">请求明细加载失败：' + esc(error.message || '未知错误') + '</div></div>';
-  const errorRows = apiDetailErrorRows(rows);
   return '<div><div class="subtle" style="margin-bottom:8px">错误统计</div>' +
-    (errorRows.length ? '<div class="tableWrap"><table><thead><tr><th>状态码</th><th>次数</th><th>错误</th></tr></thead><tbody>' + errorRows.slice(0, 10).map((r) => '<tr><td class="bad">' + esc(r.status) + '</td><td>' + fmt.format(r.count) + '</td><td class="errorText">' + esc(r.failure) + '</td></tr>').join('') + '</tbody></table></div>' : '<div class="empty">暂无失败请求</div>') +
+    (errorRows.length ? '<div class="tableWrap"><table><thead><tr><th>状态码</th><th>次数</th><th>错误</th></tr></thead><tbody>' + errorRows.slice(0, 10).map((r) => '<tr><td class="bad">' + esc(r.status_code || '-') + '</td><td>' + fmt.format(r.count) + '</td><td class="errorText">' + esc(r.failure || '未返回错误内容') + '</td></tr>').join('') + '</tbody></table></div>' : '<div class="empty">暂无失败请求</div>') +
     '</div>';
 }
 
@@ -304,27 +498,31 @@ function apiDetailRecentHtml(rows, loading, error) {
 }
 
 function renderApiDetailContent(apiData, detailState) {
-  const rows = (detailState && detailState.rows) || [];
+  const detail = detailState && detailState.detail;
+  const rows = (detail && detail.recent_events) || [];
   const loading = detailState && detailState.loading;
   const error = detailState && detailState.error;
-  const requests = num(apiData.total_requests), success = num(apiData.success_count), failure = num(apiData.failure_count);
+  const summary = (detail && detail.summary) || apiData;
+  const requests = num(summary.total_requests), success = num(summary.success_count), failure = num(summary.failure_count);
   const rate = requests ? success / requests * 100 : 100;
-  const models = Object.entries(apiData.models || {}).map(([name, m]) => ({ name, requests: num(m.total_requests), success: num(m.success_count), failure: num(m.failure_count), tokens: num(m.total_tokens), input_tokens: num(m.input_tokens), output_tokens: num(m.output_tokens), cached_tokens: num(m.cached_tokens), reasoning_tokens: num(m.reasoning_tokens), avgLatency: num(m.avg_latency_ms) })).sort((a, b) => b.requests - a.requests);
-  const sources = rows.length ? groupedRows(rows, sourceKey, sourceLabel) : [];
+  const models = detail ? (detail.model_stats || []).map((m) => ({ name: m.model || 'unknown', requests: num(m.total_requests), success: num(m.success_count), failure: num(m.failure_count), tokens: num(m.total_tokens), input_tokens: num(m.input_tokens), output_tokens: num(m.output_tokens), cached_tokens: num(m.cached_tokens), reasoning_tokens: num(m.reasoning_tokens), avgLatency: num(m.avg_latency_ms) })) : Object.entries(apiData.models || {}).map(([name, m]) => ({ name, requests: num(m.total_requests), success: num(m.success_count), failure: num(m.failure_count), tokens: num(m.total_tokens), input_tokens: num(m.input_tokens), output_tokens: num(m.output_tokens), cached_tokens: num(m.cached_tokens), reasoning_tokens: num(m.reasoning_tokens), avgLatency: num(m.avg_latency_ms) }));
+  models.sort((a, b) => b.requests - a.requests);
+  const sources = detail ? (detail.source_stats || []).map((s) => ({ name: s.source || '未知来源', requests: num(s.total_requests), success: num(s.success_count), failure: num(s.failure_count), tokens: num(s.total_tokens) })) : [];
+  const errorRows = (detail && detail.error_stats) || [];
   const totalCost = models.reduce((s, m) => s + aggregateCost({ model: m.name, input_tokens: m.input_tokens, output_tokens: m.output_tokens, cached_tokens: m.cached_tokens, reasoning_tokens: m.reasoning_tokens }, modelPrices), 0);
   $('apiDetail').innerHTML = '<div class="detailGrid">' +
     metricHtml('请求数', fmt.format(requests), '<span class="ok">成功 ' + fmt.format(success) + '</span><span class="bad">失败 ' + fmt.format(failure) + '</span>') +
     metricHtml('成功率', '<span class="' + (rate >= 95 ? 'ok' : rate >= 80 ? 'neutral' : 'bad') + '">' + pct(rate) + '</span>') +
-    metricHtml('总 token', compact(apiData.total_tokens), '<span>缓存 token：' + compact(apiData.cached_tokens) + '</span><span>思考 token：' + compact(apiData.reasoning_tokens) + '</span>') +
-    metricHtml('平均延迟', formatMs(apiData.avg_latency_ms)) +
-    metricHtml('模型数', fmt.format(models.length), rows.length ? '<span>来源 ' + fmt.format(sources.length) + '</span>' : '') +
-    metricHtml('总花费', money.format(totalCost), '<span>总 token 数：' + compact(apiData.total_tokens) + '</span>') +
+    metricHtml('总 token', compact(summary.total_tokens), '<span>缓存 token：' + compact(summary.cached_tokens) + '</span><span>思考 token：' + compact(summary.reasoning_tokens) + '</span>') +
+    metricHtml('平均延迟', formatMs(summary.avg_latency_ms)) +
+    metricHtml('模型数', fmt.format(models.length), sources.length ? '<span>来源 ' + fmt.format(sources.length) + '</span>' : '') +
+    metricHtml('总花费', money.format(totalCost), '<span>总 token 数：' + compact(summary.total_tokens) + '</span>') +
     '</div>' +
     '<div class="splitGrid">' +
     barsHtml('模型分布', models, requests, '暂无模型数据') +
-    barsHtml('来源分布', sources, rows.length, loading ? '正在加载来源数据...' : '暂无来源数据') +
+    barsHtml('来源分布', sources, requests, loading ? '正在加载来源数据...' : '暂无来源数据') +
     '</div>' +
-    '<div class="splitGrid">' + apiDetailErrorHtml(rows, loading, error) + apiDetailRecentHtml(rows, loading, error) + '</div>';
+    '<div class="splitGrid">' + apiDetailErrorHtml(errorRows, loading, error) + apiDetailRecentHtml(rows, loading, error) + '</div>';
 }
 
 async function renderApiDetail() {
@@ -336,9 +534,9 @@ async function renderApiDetail() {
   setText('apiDetailTitle', friendlyApiName(api));
   renderApiDetailContent(apiData, { loading: true });
   try {
-    const result = await fetchApiDetailEvents(api);
+    const result = await fetchApiDetailData(api);
     if (seq !== apiDetailSeq || api !== selectedApi) return;
-    renderApiDetailContent(apiData, result);
+    renderApiDetailContent(apiData, { detail: result });
   } catch (e) {
     if (seq !== apiDetailSeq || api !== selectedApi) return;
     renderApiDetailContent(apiData, { error: e });
@@ -376,7 +574,8 @@ async function renderEvents() {
   const fs = $('filterSource').value; if (fs) params.set('source', fs);
   const fa = $('filterAuth').value; if (fa) params.set('auth', fa);
   try {
-    eventsData = await fetchJsonPayload(pluginEndpoint('dashboard-events') + '?' + params.toString(), { cache: 'no-store' });
+    const url = pluginEndpoint('dashboard-events') + '?' + params.toString();
+    eventsData = await fetchConditionalJsonPayload('dashboard-events:' + url, url, { cache: 'no-store' });
   } catch (e) {
     eventsData = { events: [], total: 0, limit: eventsLimit, offset: 0 };
   }
@@ -388,6 +587,47 @@ async function renderEvents() {
 }
 
 function download(name, text, type) { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000) }
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function createExportJob(params) {
+  return fetchJsonPayload(pluginEndpoint('dashboard-events-export-jobs') + '?' + params.toString(), { method: 'POST', cache: 'no-store' });
+}
+
+async function getExportJob(id) {
+  return fetchJsonPayload(pluginEndpoint('dashboard-events-export-jobs?id=' + encodeURIComponent(id)), { cache: 'no-store' });
+}
+
+async function deleteExportJob(id) {
+  try {
+    await fetchJsonPayload(pluginEndpoint('dashboard-events-export-jobs?id=' + encodeURIComponent(id)), { method: 'DELETE', cache: 'no-store' });
+  } catch {}
+}
+
+async function waitForExportJob(job) {
+  let current = job;
+  for (let i = 0; i < 120; i++) {
+    if (current && current.status === 'succeeded') return current;
+    if (current && current.status === 'failed') throw new Error(current.error || '导出任务失败');
+    await delay(i < 10 ? 250 : 1000);
+    current = await getExportJob(job.id);
+  }
+  throw new Error('导出任务超时');
+}
+
+async function fetchExportJobResult(params) {
+  const job = await createExportJob(params);
+  if (!job || !job.id) throw new Error('导出任务未返回 ID');
+  try {
+    const completed = await waitForExportJob(job);
+    const downloadPath = completed.download_path || ('dashboard-events-export-download?id=' + encodeURIComponent(job.id));
+    return await fetchTextPayloadWithMeta(pluginEndpoint(downloadPath), { cache: 'no-store' });
+  } finally {
+    await deleteExportJob(job.id);
+  }
+}
 
 function rowsCsv(rows) {
   const head = ['时间', '模型', '来源', '凭证', '结果', '延迟毫秒', 'TTFT毫秒', '输入 token', '输出 token', '思考 token', '缓存 token', '总 token', '状态码', '错误'];
@@ -431,12 +671,14 @@ function buildSummaryFromFullUsage(data) {
   };
   const modelAgg = new Map(), sourceAgg = new Map(), clientAgg = new Map();
   const latency = [];
+  const details = [];
   Object.entries(rawUsage.apis || {}).forEach(([api, a]) => {
     const apiRow = { total_requests: a.total_requests || 0, success_count: a.success_count || 0, failure_count: a.failure_count || 0, total_tokens: a.total_tokens || 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, reasoning_tokens: 0, avg_latency_ms: 0, models: {}, latency: [] };
     Object.entries(a.models || {}).forEach(([model, m]) => {
       const modelRow = makeCounterRow(model);
       (m.details || []).forEach((d) => {
         d.model = d.model || model;
+        details.push(d);
         const tokens = d.tokens || {};
         const cached = Math.max(num(tokens.cached_tokens), num(tokens.cache_tokens));
         addDetailToCounter(modelRow, d);
@@ -471,7 +713,7 @@ function buildSummaryFromFullUsage(data) {
   usage.avg_latency_ms = latency.length ? latency.reduce((a, b) => a + b, 0) / latency.length : 0;
   return {
     usage,
-    health_grid: [],
+    health_grid: buildHealthGridFromDetails(details, data.generated_at),
     source_stats: [...sourceAgg.values()].sort((a, b) => b.total_requests - a.total_requests),
     credential_stats: [],
     client_api_stats: [...clientAgg.values()].map((r) => { r.models = [...r.modelMap.values()].map(finalizeCounterRow).sort((a, b) => b.total_requests - a.total_requests); delete r.modelMap; return r }).sort((a, b) => b.total_requests - a.total_requests),
@@ -481,6 +723,24 @@ function buildSummaryFromFullUsage(data) {
   };
 }
 
+function buildHealthGridFromDetails(details, generatedAt) {
+  const grid = emptyHealthGrid(generatedAt);
+  if (!Array.isArray(details) || !details.length) return grid;
+  const windowStart = timestampMs(grid[0].start);
+  const windowEnd = timestampMs(grid[grid.length - 1].end);
+  details.forEach((detail) => {
+    const ms = timestampMs(detail && detail.timestamp);
+    if (!ms || ms < windowStart || ms >= windowEnd) return;
+    const idx = Math.floor((ms - windowStart) / healthGridStepMs);
+    const slot = grid[idx];
+    if (!slot) return;
+    if (detail.failed) slot.failure++;
+    else slot.success++;
+    slot.total = slot.success + slot.failure;
+  });
+  return grid;
+}
+
 async function exportRows(kind) {
   const params = new URLSearchParams();
   params.set('range', $('range').value);
@@ -488,13 +748,19 @@ async function exportRows(kind) {
   const fs = $('filterSource').value; if (fs) params.set('source', fs);
   const fa = $('filterAuth').value; if (fa) params.set('auth', fa);
   try {
-    const data = await fetchAllEventPages(
-      (pageParams) => fetchJsonPayload(pluginEndpoint('dashboard-events') + '?' + pageParams.toString(), { cache: 'no-store' }),
-      params,
-      eventsLimit
-    );
-    const rows = data.events || [];
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    if (kind === 'csv') {
+      params.set('format', 'csv');
+      const meta = await fetchExportJobResult(params);
+      notifyExportTruncated(exportTruncationFromHeaders(meta.headers));
+      download('usage-events-' + stamp + '.csv', meta.data, 'text/csv;charset=utf-8');
+      return;
+    }
+    params.set('format', 'json');
+    const meta = await fetchExportJobResult(params);
+    const data = typeof meta.data === 'string' ? JSON.parse(meta.data || '{}') : meta.data;
+    const rows = data.events || [];
+    notifyExportTruncated({ truncated: !!data.truncated, total: data.total, exported: rows.length });
     if (kind === 'json') { download('usage-events-' + stamp + '.json', JSON.stringify(rows, null, 2), 'application/json;charset=utf-8'); return }
     download('usage-events-' + stamp + '.csv', rowsCsv(rows), 'text/csv;charset=utf-8');
   } catch (e) { alert('导出失败'); }
@@ -509,56 +775,96 @@ async function exportApiRows(kind) {
   const fa = $('filterAuth').value; if (fa) params.set('auth', fa);
   params.set('api', selectedApi);
   try {
-    const data = await fetchAllEventPages(
-      (pageParams) => fetchJsonPayload(pluginEndpoint('dashboard-events') + '?' + pageParams.toString(), { cache: 'no-store' }),
-      params,
-      eventsLimit
-    );
-    const rows = data.events || [];
-    if (!rows.length) return;
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     const name = (friendlyApiName(selectedApi) || 'api').replace(/[\\/:*?"<>|\s]+/g, '-').slice(0, 80);
+    if (kind === 'csv') {
+      params.set('format', 'csv');
+      const meta = await fetchExportJobResult(params);
+      notifyExportTruncated(exportTruncationFromHeaders(meta.headers));
+      download('usage-api-' + name + '-' + stamp + '.csv', meta.data, 'text/csv;charset=utf-8');
+      return;
+    }
+    params.set('format', 'json');
+    const meta = await fetchExportJobResult(params);
+    const data = typeof meta.data === 'string' ? JSON.parse(meta.data || '{}') : meta.data;
+    const rows = data.events || [];
+    if (!rows.length) return;
+    notifyExportTruncated({ truncated: !!data.truncated, total: data.total, exported: rows.length });
     if (kind === 'json') { download('usage-api-' + name + '-' + stamp + '.json', JSON.stringify(rows, null, 2), 'application/json;charset=utf-8'); return }
     download('usage-api-' + name + '-' + stamp + '.csv', rowsCsv(rows), 'text/csv;charset=utf-8');
   } catch (e) { alert('导出失败'); }
 }
 
-async function rerender() {
+function exportTruncationFromHeaders(headers) {
+  return {
+    truncated: headerValue(headers, 'X-Export-Truncated') === 'true',
+    total: num(headerValue(headers, 'X-Total-Count')),
+    exported: num(headerValue(headers, 'X-Exported-Count')),
+  };
+}
+
+function notifyExportTruncated(info) {
+  if (!info || !info.truncated) return;
+  alert('导出已截断：共 ' + fmt.format(num(info.total)) + ' 条，已导出 ' + fmt.format(num(info.exported)) + ' 条');
+}
+
+function summaryRecordKey(data) {
+  return (data && data._meta && data._meta.last_recorded_at) || '';
+}
+
+function shouldRefreshDetails(previousSummary, nextSummary, forceDetails) {
+  if (forceDetails || !eventsData) return true;
+  const nextKey = summaryRecordKey(nextSummary);
+  if (!nextKey) return true;
+  return nextKey !== summaryRecordKey(previousSummary);
+}
+
+async function rerender(options) {
+  const opts = Object.assign({ refreshEvents: true, refreshApiDetail: true }, options || {});
+  const previousApi = selectedApi;
   renderStats();
+  renderStorageStatus();
   renderHealth();
   renderPrices();
   renderClientApiStats();
   renderApiStats();
   renderModelStats();
-  await renderEvents();
-  await renderApiDetail();
+  if (opts.refreshEvents) await renderEvents();
+  else renderFilters();
+  if (opts.refreshApiDetail || previousApi !== selectedApi) await renderApiDetail();
 }
 
+function pollDelay() { return document.visibilityState === 'hidden' ? hiddenPollDelayMs : visiblePollDelayMs }
 function schedulePoll(delayMs) { if (pollTimer) clearTimeout(pollTimer); pollTimer = setTimeout(load, delayMs) }
 function nextFailureDelay() { return Math.min(300000, [5000, 15000, 45000, 90000, 180000][Math.min(pollFailures - 1, 4)] || 300000) }
 
-async function load() {
+async function load(options) {
+  const forceDetails = options && options.forceDetails;
   try {
+    const previousSummary = summaryData;
     // Try new summary endpoint first
     const [data] = await Promise.all([
-      fetchJsonPayload(pluginEndpoint('dashboard-summary'), { cache: 'no-store' }),
+      fetchConditionalJsonPayload('dashboard-summary', pluginEndpoint('dashboard-summary'), { cache: 'no-store' }),
       loadModelPrices()
     ]);
     summaryData = data;
     setText('updated', '更新于 ' + new Date(data.generated_at || Date.now()).toLocaleTimeString());
-    await rerender();
-    pollFailures = 0; schedulePoll(30000);
+    const refreshDetails = shouldRefreshDetails(previousSummary, summaryData, forceDetails);
+    await rerender({ refreshEvents: refreshDetails, refreshApiDetail: refreshDetails });
+    pollFailures = 0; schedulePoll(pollDelay());
   } catch (error) {
     // Fallback: try old dashboard-data endpoint
     try {
+      const previousSummary = summaryData;
       const [data] = await Promise.all([
         fetchJsonPayload(pluginEndpoint('dashboard-data'), { cache: 'no-store' }),
         loadModelPrices()
       ]);
       summaryData = buildSummaryFromFullUsage(data);
       setText('updated', '更新于 ' + new Date(data.generated_at || Date.now()).toLocaleTimeString() + '（兼容模式）');
-      await rerender();
-      pollFailures = 0; schedulePoll(30000);
+      const refreshDetails = shouldRefreshDetails(previousSummary, summaryData, forceDetails);
+      await rerender({ refreshEvents: refreshDetails, refreshApiDetail: refreshDetails });
+      pollFailures = 0; schedulePoll(pollDelay());
     } catch (fallbackError) {
       setText('updated', (error && error.message) || '加载用量统计失败');
       pollFailures++; schedulePoll(nextFailureDelay());
@@ -566,17 +872,25 @@ async function load() {
   }
 }
 
+function handleVisibilityChange() {
+  if (document.visibilityState === 'visible') {
+    load();
+    return;
+  }
+  schedulePoll(hiddenPollDelayMs);
+}
+
 // Event bindings
 $('range').value = localStorage.getItem(rangeKey) || '24h';
-$('range').onchange = () => { localStorage.setItem(rangeKey, $('range').value); load() };
-$('refreshBtn').onclick = load;
+$('range').onchange = () => { localStorage.setItem(rangeKey, $('range').value); load({ forceDetails: true }) };
+$('refreshBtn').onclick = () => load({ forceDetails: true });
 $('savePrice').onclick = async () => {
   const m = $('priceModel').value.trim(); if (!m) return;
   const prompt = num($('pricePrompt').value), completion = num($('priceCompletion').value), cache = $('priceCache').value === '' ? prompt : num($('priceCache').value);
   try {
     await saveModelPrice(m, { prompt, completion, cache });
     fillPriceForm('');
-    await rerender();
+    await rerender({ refreshEvents: false, refreshApiDetail: true });
   } catch (e) {
     alert('保存价格失败：' + (e && e.message ? e.message : '未知错误'));
   }
@@ -601,11 +915,12 @@ $('importFile').onchange = async (e) => {
     if (!currentManagementKey()) throw new Error('未读取到管理登录状态，请回到管理中心重新登录并勾选记住登录。');
     const result = await fetchManagementJsonPayload('usage/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: text });
     alert('导入完成：新增 ' + (result.added || 0) + '，跳过 ' + (result.skipped || 0) + '，过期忽略 ' + (result.ignored_by_retention || 0));
-    await load();
+    await load({ forceDetails: true });
   } catch (err) {
     alert('导入失败：' + (err && err.message ? err.message : '未知错误'));
   } finally {
     e.target.value = '';
   }
 };
+if (document.addEventListener) document.addEventListener('visibilitychange', handleVisibilityChange);
 load();

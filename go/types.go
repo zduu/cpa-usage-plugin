@@ -6,12 +6,19 @@ import (
 )
 
 const (
-	abiVersion                 uint32 = 1
-	defaultMaxDetailsPerModel         = 5000
-	defaultRetentionDays              = 30
-	defaultDedupWindowMinutes         = 24 * 60
-	defaultStorageFlushSeconds        = 30
-	defaultPriceStoragePath           = "usage-statistics-prices.json"
+	abiVersion                    uint32 = 1
+	defaultMaxDetailsPerModel            = 5000
+	defaultRetentionDays                 = 30
+	defaultDedupWindowMinutes            = 24 * 60
+	defaultStorageFlushSeconds           = 30
+	defaultStorageSnapshotSeconds        = 300
+	defaultStorageSnapshotRecords        = 1000
+	defaultStorageSyncSeconds            = 0
+	defaultStorageSyncRecords            = 0
+	defaultStorageWriteQueueSize         = 4096
+	defaultStorageWriteBatchSize         = 128
+	defaultExportMaxRecords              = 100000
+	defaultPriceStoragePath              = "usage-statistics-prices.json"
 )
 
 type envelope struct {
@@ -26,46 +33,61 @@ type envelopeError struct {
 }
 
 type runtimeConfig struct {
-	MaxDetailsPerModel  int
-	RetentionDays       int
-	DedupWindowMinutes  int
-	LogResponseHeaders  string
-	APIKeyHashSalt      string
-	StorageEnabled      bool
-	StoragePath         string
-	StorageFlushSeconds int
-	PriceStoragePath    string
-	UpdateEnabled       bool
-	UpdateVersion       string
+	MaxDetailsPerModel            int
+	RetentionDays                 int
+	DedupWindowMinutes            int
+	LogResponseHeaders            string
+	APIKeyHashSalt                string
+	StorageEnabled                bool
+	StoragePath                   string
+	StorageFlushSeconds           int
+	StorageSnapshotSeconds        int
+	StorageSnapshotRecordInterval int
+	StorageSyncSeconds            int
+	StorageSyncRecordInterval     int
+	ExportMaxRecords              int
+	PriceStoragePath              string
+	UpdateEnabled                 bool
+	UpdateVersion                 string
 }
 
 type runtimeConfigPatch struct {
-	MaxDetailsPerModel  *int
-	RetentionDays       *int
-	DedupWindowMinutes  *int
-	LogResponseHeaders  *string
-	APIKeyHashSalt      *string
-	StorageEnabled      *bool
-	StoragePath         *string
-	StorageFlushSeconds *int
-	PriceStoragePath    *string
-	UpdateEnabled       *bool
-	UpdateVersion       *string
+	MaxDetailsPerModel            *int
+	RetentionDays                 *int
+	DedupWindowMinutes            *int
+	LogResponseHeaders            *string
+	APIKeyHashSalt                *string
+	StorageEnabled                *bool
+	StoragePath                   *string
+	StorageFlushSeconds           *int
+	StorageSnapshotSeconds        *int
+	StorageSnapshotRecordInterval *int
+	StorageSyncSeconds            *int
+	StorageSyncRecordInterval     *int
+	ExportMaxRecords              *int
+	PriceStoragePath              *string
+	UpdateEnabled                 *bool
+	UpdateVersion                 *string
 }
 
 func defaultRuntimeConfig() runtimeConfig {
 	return runtimeConfig{
-		MaxDetailsPerModel:  defaultMaxDetailsPerModel,
-		RetentionDays:       defaultRetentionDays,
-		DedupWindowMinutes:  defaultDedupWindowMinutes,
-		LogResponseHeaders:  "",
-		APIKeyHashSalt:      "",
-		StorageEnabled:      false,
-		StoragePath:         "usage-statistics.jsonl",
-		StorageFlushSeconds: defaultStorageFlushSeconds,
-		PriceStoragePath:    defaultPriceStoragePath,
-		UpdateEnabled:       false,
-		UpdateVersion:       "latest",
+		MaxDetailsPerModel:            defaultMaxDetailsPerModel,
+		RetentionDays:                 defaultRetentionDays,
+		DedupWindowMinutes:            defaultDedupWindowMinutes,
+		LogResponseHeaders:            "",
+		APIKeyHashSalt:                "",
+		StorageEnabled:                false,
+		StoragePath:                   "usage-statistics.jsonl",
+		StorageFlushSeconds:           defaultStorageFlushSeconds,
+		StorageSnapshotSeconds:        defaultStorageSnapshotSeconds,
+		StorageSnapshotRecordInterval: defaultStorageSnapshotRecords,
+		StorageSyncSeconds:            defaultStorageSyncSeconds,
+		StorageSyncRecordInterval:     defaultStorageSyncRecords,
+		ExportMaxRecords:              defaultExportMaxRecords,
+		PriceStoragePath:              defaultPriceStoragePath,
+		UpdateEnabled:                 false,
+		UpdateVersion:                 "latest",
 	}
 }
 
@@ -359,21 +381,54 @@ type ExportPayload struct {
 }
 
 type ExportConfig struct {
-	RetentionDays      int    `json:"retention_days"`
-	MaxDetailsPerModel int    `json:"max_details_per_model"`
-	DedupWindowMinutes int    `json:"dedup_window_minutes"`
-	LogResponseHeaders string `json:"log_response_headers,omitempty"`
-	StorageEnabled     bool   `json:"storage_enabled"`
-	StoragePath        string `json:"storage_path,omitempty"`
-	PriceStoragePath   string `json:"price_storage_path,omitempty"`
+	RetentionDays                 int    `json:"retention_days"`
+	MaxDetailsPerModel            int    `json:"max_details_per_model"`
+	DedupWindowMinutes            int    `json:"dedup_window_minutes"`
+	LogResponseHeaders            string `json:"log_response_headers,omitempty"`
+	StorageEnabled                bool   `json:"storage_enabled"`
+	StoragePath                   string `json:"storage_path,omitempty"`
+	StorageFlushSeconds           int    `json:"storage_flush_interval_seconds,omitempty"`
+	StorageSnapshotSeconds        int    `json:"storage_snapshot_interval_seconds,omitempty"`
+	StorageSnapshotRecordInterval int    `json:"storage_snapshot_record_interval,omitempty"`
+	StorageSyncSeconds            int    `json:"storage_sync_interval_seconds,omitempty"`
+	StorageSyncRecordInterval     int    `json:"storage_sync_record_interval,omitempty"`
+	ExportMaxRecords              int    `json:"export_max_records,omitempty"`
+	PriceStoragePath              string `json:"price_storage_path,omitempty"`
 }
 
 type StorageStatus struct {
-	Enabled     bool   `json:"enabled"`
-	Path        string `json:"path,omitempty"`
-	LoadedPath  string `json:"loaded_path,omitempty"`
-	LastFlushAt string `json:"last_flush_at,omitempty"`
-	LastError   string `json:"last_error,omitempty"`
+	Enabled                       bool    `json:"enabled"`
+	Path                          string  `json:"path,omitempty"`
+	LoadedPath                    string  `json:"loaded_path,omitempty"`
+	LastFlushAt                   string  `json:"last_flush_at,omitempty"`
+	LastSnapshotAt                string  `json:"last_snapshot_at,omitempty"`
+	LastCompactionAt              string  `json:"last_compaction_at,omitempty"`
+	LastSyncAt                    string  `json:"last_sync_at,omitempty"`
+	LastError                     string  `json:"last_error,omitempty"`
+	PendingBufferedRecords        int64   `json:"pending_buffered_records,omitempty"`
+	PendingSnapshotRecords        int64   `json:"pending_snapshot_records,omitempty"`
+	PendingUnsyncedRecords        int64   `json:"pending_unsynced_records,omitempty"`
+	WriteQueueLength              int     `json:"write_queue_length,omitempty"`
+	WriteQueueCapacity            int     `json:"write_queue_capacity,omitempty"`
+	LastWriteBatchRecords         int     `json:"last_write_batch_records,omitempty"`
+	LastWriteBatchDurationMs      float64 `json:"last_write_batch_duration_ms,omitempty"`
+	LastWriteQueueWaitMs          float64 `json:"last_write_queue_wait_ms,omitempty"`
+	WriteBatchesTotal             int64   `json:"write_batches_total,omitempty"`
+	WriteRecordsTotal             int64   `json:"write_records_total,omitempty"`
+	WriteBatchAvgDurationMs       float64 `json:"write_batch_avg_duration_ms,omitempty"`
+	WriteBatchP95DurationMs       float64 `json:"write_batch_p95_duration_ms,omitempty"`
+	WriteBatchP99DurationMs       float64 `json:"write_batch_p99_duration_ms,omitempty"`
+	WriteQueueWaitAvgMs           float64 `json:"write_queue_wait_avg_ms,omitempty"`
+	WriteQueueWaitP95Ms           float64 `json:"write_queue_wait_p95_ms,omitempty"`
+	WriteQueueWaitP99Ms           float64 `json:"write_queue_wait_p99_ms,omitempty"`
+	WriteQueueWaitMaxMs           float64 `json:"write_queue_wait_max_ms,omitempty"`
+	WritePressure                 string  `json:"write_pressure,omitempty"`
+	LastCompactedShards           int     `json:"last_compacted_shards,omitempty"`
+	CompactedShardsTotal          int64   `json:"compacted_shards_total,omitempty"`
+	SnapshotIntervalSeconds       int     `json:"snapshot_interval_seconds,omitempty"`
+	SnapshotRecordIntervalRecords int     `json:"snapshot_record_interval_records,omitempty"`
+	SyncIntervalSeconds           int     `json:"sync_interval_seconds,omitempty"`
+	SyncRecordIntervalRecords     int     `json:"sync_record_interval_records,omitempty"`
 }
 
 type ModelPrice struct {
@@ -395,10 +450,44 @@ type ModelPriceStorageStatus struct {
 }
 
 type RuntimeStatus struct {
-	StartedAt      string         `json:"started_at,omitempty"`
-	LastRecordedAt string         `json:"last_recorded_at,omitempty"`
-	SeenCount      int            `json:"seen_count"`
-	LastImport     *ImportSummary `json:"last_import,omitempty"`
+	StartedAt                  string                              `json:"started_at,omitempty"`
+	LastRecordedAt             string                              `json:"last_recorded_at,omitempty"`
+	SeenCount                  int                                 `json:"seen_count"`
+	SummaryVersion             uint64                              `json:"summary_version,omitempty"`
+	SummaryCacheValid          bool                                `json:"summary_cache_valid"`
+	SummaryCacheHits           int64                               `json:"summary_cache_hits,omitempty"`
+	SummaryCacheMisses         int64                               `json:"summary_cache_misses,omitempty"`
+	LastSummaryDurationMs      float64                             `json:"last_summary_duration_ms,omitempty"`
+	EventCacheEntries          int                                 `json:"event_cache_entries,omitempty"`
+	EventCacheHits             int64                               `json:"event_cache_hits,omitempty"`
+	EventCacheMisses           int64                               `json:"event_cache_misses,omitempty"`
+	LastEventsQueryDurationMs  float64                             `json:"last_events_query_duration_ms,omitempty"`
+	LastEventsQueryTotal       int                                 `json:"last_events_query_total,omitempty"`
+	EventIndexVersion          uint64                              `json:"event_index_version,omitempty"`
+	EventIndexEntries          int                                 `json:"event_index_entries,omitempty"`
+	APIDetailQueries           int64                               `json:"api_detail_queries,omitempty"`
+	LastAPIDetailDurationMs    float64                             `json:"last_api_detail_duration_ms,omitempty"`
+	LastAPIDetailTotalEvents   int                                 `json:"last_api_detail_total_events,omitempty"`
+	EventsExportRequests       int64                               `json:"events_export_requests,omitempty"`
+	EventsExportGzipRequests   int64                               `json:"events_export_gzip_requests,omitempty"`
+	EventsExportTruncatedTotal int64                               `json:"events_export_truncated_total,omitempty"`
+	LastEventsExportDurationMs float64                             `json:"last_events_export_duration_ms,omitempty"`
+	LastEventsExportFormat     string                              `json:"last_events_export_format,omitempty"`
+	LastEventsExportGzip       bool                                `json:"last_events_export_gzip,omitempty"`
+	LastEventsExportTotal      int                                 `json:"last_events_export_total,omitempty"`
+	LastEventsExported         int                                 `json:"last_events_exported,omitempty"`
+	LastEventsExportTruncated  bool                                `json:"last_events_export_truncated,omitempty"`
+	LastEventsExportRawBytes   int                                 `json:"last_events_export_raw_bytes,omitempty"`
+	LastEventsExportBodyBytes  int                                 `json:"last_events_export_body_bytes,omitempty"`
+	ConditionalRequests        map[string]ConditionalRequestStatus `json:"conditional_requests,omitempty"`
+	LastImport                 *ImportSummary                      `json:"last_import,omitempty"`
+}
+
+type ConditionalRequestStatus struct {
+	Requests    int64   `json:"requests"`
+	NotModified int64   `json:"not_modified"`
+	Misses      int64   `json:"misses"`
+	HitRate     float64 `json:"hit_rate"`
 }
 
 type ImportResponse struct {
@@ -630,6 +719,8 @@ type DashboardMeta struct {
 	RetentionDays      int            `json:"retention_days"`
 	MaxDetailsPerModel int            `json:"max_details_per_model"`
 	CurrentDetailCount int64          `json:"current_detail_count"`
+	LastRecordedAt     string         `json:"last_recorded_at,omitempty"`
+	Storage            StorageStatus  `json:"storage"`
 	LastImport         *ImportSummary `json:"last_import,omitempty"`
 	EvictedTotal       int64          `json:"evicted_total"`
 }
@@ -658,5 +749,38 @@ type EventsResult struct {
 	Total       int             `json:"total"`
 	Limit       int             `json:"limit"`
 	Offset      int             `json:"offset"`
+	Truncated   bool            `json:"truncated,omitempty"`
 	GeneratedAt string          `json:"generated_at"`
+}
+
+// APIDetailSummary is the range-scoped summary for one upstream API.
+type APIDetailSummary struct {
+	TotalRequests   int64   `json:"total_requests"`
+	SuccessCount    int64   `json:"success_count"`
+	FailureCount    int64   `json:"failure_count"`
+	TotalTokens     int64   `json:"total_tokens"`
+	InputTokens     int64   `json:"input_tokens"`
+	OutputTokens    int64   `json:"output_tokens"`
+	CachedTokens    int64   `json:"cached_tokens"`
+	ReasoningTokens int64   `json:"reasoning_tokens"`
+	AvgLatencyMs    float64 `json:"avg_latency_ms"`
+}
+
+// APIDetailErrorStat aggregates failures by status code and redacted body.
+type APIDetailErrorStat struct {
+	StatusCode int    `json:"status_code,omitempty"`
+	Count      int64  `json:"count"`
+	Failure    string `json:"failure"`
+}
+
+// APIDetailResponse is a compact backend-rendered detail payload for one API.
+type APIDetailResponse struct {
+	API          string               `json:"api"`
+	Summary      APIDetailSummary     `json:"summary"`
+	ModelStats   []ModelStat          `json:"model_stats"`
+	SourceStats  []SourceStat         `json:"source_stats"`
+	ErrorStats   []APIDetailErrorStat `json:"error_stats"`
+	RecentEvents []RequestDetail      `json:"recent_events"`
+	TotalEvents  int                  `json:"total_events"`
+	GeneratedAt  string               `json:"generated_at"`
 }

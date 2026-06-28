@@ -14,6 +14,10 @@ h1{margin:0;font-size:22px;line-height:1.2;font-weight:700;letter-spacing:0}
 .btn.primary{background:#262626;color:#fff;border-color:#262626}
 .btn.danger{color:#b42318;border-color:#f1c5bf}
 .updated{color:#9a948d;font-size:12px;white-space:nowrap}
+.storageStatus{display:inline-flex;align-items:center;height:24px;border:1px solid #e0e0e0;border-radius:999px;padding:0 9px;color:#6f6963;background:#fafafa;font-size:12px;font-weight:700;white-space:nowrap}
+.storageStatus.ok{border-color:#bbf7d0;background:#f0fdf4;color:#047857}
+.storageStatus.warn{border-color:#fed7aa;background:#fff7ed;color:#b45309}
+.storageStatus.bad{border-color:#fecaca;background:#fef2f2;color:#b42318}
 .cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:14px}
 .stat{background:#fff;border:1px solid #dedede;border-radius:12px;padding:16px;min-height:130px;box-shadow:0 10px 30px rgba(0,0,0,.04);position:relative;overflow:hidden}
 .stat:before{content:"";position:absolute;left:0;right:0;top:0;height:3px;background:#8b8680}
@@ -83,4 +87,4 @@ tr:last-child td{border-bottom:0}
 .hidden{display:none!important}
 @media(max-width:1120px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.layout{grid-template-columns:1fr}.detailGrid{grid-template-columns:repeat(3,minmax(0,1fr))}.splitGrid{grid-template-columns:1fr}}
 @media(max-width:640px){.shell{padding:14px}h1{font-size:20px}.cards{grid-template-columns:1fr}.value{font-size:24px}.priceGrid{grid-template-columns:1fr}.priceItem{align-items:stretch;flex-direction:column}.priceActions{justify-content:stretch}.priceActions .btn{flex:1 1 120px}.detailGrid{grid-template-columns:1fr}.barItem{grid-template-columns:1fr}.apiCard{grid-template-columns:1fr}.btn,.select,.input{width:100%}.toolbar{width:100%}.toolbar>*{flex:1 1 150px}}
-@media(prefers-color-scheme:dark){:root{background:#111315;color:#f2f2f2}body{background:#111315;color:#f2f2f2}.panel,.stat,th,.btn,.select,.input,.apiCard{background:#181b1f;border-color:#30343a;color:#f2f2f2}.spark,.empty,.metric,.chip{background:#121417;border-color:#30343a}.clickableRow:hover td,.selectedRow td{background:#20242a}.barTrack{background:#2a2f35}.label,th,.subtle,.updated,.neutral,.meta,.legend,.metricLabel,.chip{color:#a8a29b}td{border-color:#30343a}.nameCell,.apiName{color:#f2f2f2}.pill{background:#20242a;border-color:#3a3f46;color:#c9c3bc}.healthCell{background:#2a2f35}.tooltip{background:#f2f2f2;color:#1b1b1b}}
+@media(prefers-color-scheme:dark){:root{background:#111315;color:#f2f2f2}body{background:#111315;color:#f2f2f2}.panel,.stat,th,.btn,.select,.input,.apiCard{background:#181b1f;border-color:#30343a;color:#f2f2f2}.spark,.empty,.metric,.chip{background:#121417;border-color:#30343a}.clickableRow:hover td,.selectedRow td{background:#20242a}.barTrack{background:#2a2f35}.label,th,.subtle,.updated,.neutral,.meta,.legend,.metricLabel,.chip{color:#a8a29b}td{border-color:#30343a}.nameCell,.apiName{color:#f2f2f2}.pill,.storageStatus{background:#20242a;border-color:#3a3f46;color:#c9c3bc}.storageStatus.ok{background:#063820;border-color:#0f6b43;color:#86efac}.storageStatus.warn{background:#3a2512;border-color:#8a541d;color:#fdba74}.storageStatus.bad{background:#3b1818;border-color:#8a2d2d;color:#fca5a5}.healthCell{background:#2a2f35}.tooltip{background:#f2f2f2;color:#1b1b1b}}
