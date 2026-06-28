@@ -328,36 +328,44 @@ func dashboardEventsJSONL(events []RequestDetail) ([]byte, error) {
 func dashboardEventsCSV(events []RequestDetail) ([]byte, error) {
 	var buf bytes.Buffer
 	writer := csv.NewWriter(&buf)
-	if err := writer.Write([]string{"时间", "模型", "来源", "凭证", "结果", "延迟毫秒", "TTFT毫秒", "输入 token", "输出 token", "思考 token", "缓存 token", "总 token", "状态码", "错误"}); err != nil {
+	if err := writer.Write(dashboardEventsCSVHeader()); err != nil {
 		return nil, err
 	}
 	for _, event := range events {
-		tokens := event.Tokens
-		status := "成功"
-		if event.Failed {
-			status = "失败"
-		}
-		if err := writer.Write([]string{
-			event.Timestamp.UTC().Format(time.RFC3339),
-			event.Model,
-			dashboardExportSource(event),
-			event.AuthIndex,
-			status,
-			strconv.FormatInt(event.LatencyMs, 10),
-			strconv.FormatInt(event.TTFTMs, 10),
-			strconv.FormatInt(tokens.InputTokens, 10),
-			strconv.FormatInt(tokens.OutputTokens, 10),
-			strconv.FormatInt(tokens.ReasoningTokens, 10),
-			strconv.FormatInt(normalizedCacheTokens(tokens), 10),
-			strconv.FormatInt(detailTotalTokens(tokens), 10),
-			dashboardExportStatusCode(event),
-			event.Failure,
-		}); err != nil {
+		if err := writer.Write(dashboardEventCSVRecord(event)); err != nil {
 			return nil, err
 		}
 	}
 	writer.Flush()
 	return buf.Bytes(), writer.Error()
+}
+
+func dashboardEventsCSVHeader() []string {
+	return []string{"时间", "模型", "来源", "凭证", "结果", "延迟毫秒", "TTFT毫秒", "输入 token", "输出 token", "思考 token", "缓存 token", "总 token", "状态码", "错误"}
+}
+
+func dashboardEventCSVRecord(event RequestDetail) []string {
+	tokens := event.Tokens
+	status := "成功"
+	if event.Failed {
+		status = "失败"
+	}
+	return []string{
+		event.Timestamp.UTC().Format(time.RFC3339),
+		event.Model,
+		dashboardExportSource(event),
+		event.AuthIndex,
+		status,
+		strconv.FormatInt(event.LatencyMs, 10),
+		strconv.FormatInt(event.TTFTMs, 10),
+		strconv.FormatInt(tokens.InputTokens, 10),
+		strconv.FormatInt(tokens.OutputTokens, 10),
+		strconv.FormatInt(tokens.ReasoningTokens, 10),
+		strconv.FormatInt(normalizedCacheTokens(tokens), 10),
+		strconv.FormatInt(detailTotalTokens(tokens), 10),
+		dashboardExportStatusCode(event),
+		event.Failure,
+	}
 }
 
 func dashboardExportSource(event RequestDetail) string {

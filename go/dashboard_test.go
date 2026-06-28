@@ -710,6 +710,43 @@ func TestDashboardEventsExportLimitKeepsTotalAndMarksTruncated(t *testing.T) {
 	}
 }
 
+func TestDashboardEventsExportPageUsesSnapshotAndLimit(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0})
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < 6; i++ {
+		stats.Record(UsageRecord{
+			Provider:    "openai",
+			Model:       "gpt-4",
+			RequestedAt: base.Add(time.Duration(i) * time.Minute),
+			Detail:      UsageDetail{TotalTokens: int64(10 + i)},
+		})
+	}
+	snapshotAt := base.Add(10 * time.Minute)
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-4",
+		RequestedAt: snapshotAt.Add(time.Minute),
+		Detail:      UsageDetail{TotalTokens: 999},
+	})
+
+	first := stats.QueryExportEventsPage(EventsQuery{}, 0, 2, 3, snapshotAt)
+	if first.Total != 6 || len(first.Events) != 2 || first.Limit != 3 || !first.Truncated {
+		t.Fatalf("first export page = total %d len %d limit %d truncated %v, want 6/2/3/true", first.Total, len(first.Events), first.Limit, first.Truncated)
+	}
+	if first.Events[0].Tokens.TotalTokens != 15 || first.Events[1].Tokens.TotalTokens != 14 {
+		t.Fatalf("first export page should start with newest snapshot rows: %#v", first.Events)
+	}
+
+	second := stats.QueryExportEventsPage(EventsQuery{}, 2, 2, 3, snapshotAt)
+	if second.Total != 6 || len(second.Events) != 1 || second.Limit != 3 || !second.Truncated {
+		t.Fatalf("second export page = total %d len %d limit %d truncated %v, want 6/1/3/true", second.Total, len(second.Events), second.Limit, second.Truncated)
+	}
+	if second.Events[0].Tokens.TotalTokens != 13 {
+		t.Fatalf("second export page should continue after offset: %#v", second.Events)
+	}
+}
+
 func TestDashboardEventsExportLimitQueryReturnsTruncationHeaders(t *testing.T) {
 	previousStats := stats
 	stats = NewRequestStatistics()

@@ -3090,6 +3090,66 @@ func (s *RequestStatistics) QueryExportEvents(params EventsQuery, maxRecords int
 	return s.queryEvents(params, false, maxRecords)
 }
 
+// QueryExportEventsPage returns one page of exportable events while still
+// counting the full match total. snapshotAt freezes the upper time bound so
+// background exports do not shift when new requests arrive while paging.
+func (s *RequestStatistics) QueryExportEventsPage(params EventsQuery, offset int, pageLimit int, maxRecords int, snapshotAt time.Time) EventsResult {
+	if s == nil {
+		return EventsResult{}
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if pageLimit <= 0 {
+		pageLimit = 1000
+	}
+	startedAt := time.Now()
+	params = normalizeEventsQuery(params, false)
+	if snapshotAt.IsZero() {
+		snapshotAt = startedAt
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cutoff := dashboardRangeCutoff(params.Range, snapshotAt)
+	index := s.dashboardEventQueryIndexLocked(params)
+	events := make([]RequestDetail, 0, pageLimit)
+	total := 0
+	for _, dm := range index {
+		d := dm.requestDetail()
+		if !snapshotAt.IsZero() && !d.Timestamp.IsZero() && d.Timestamp.After(snapshotAt) {
+			continue
+		}
+		if dashboardEventPastCutoff(d, cutoff) {
+			break
+		}
+		if !dashboardEventMatches(d, params, cutoff) {
+			continue
+		}
+		matchOffset := total
+		if (maxRecords <= 0 || matchOffset < maxRecords) && matchOffset >= offset && len(events) < pageLimit {
+			events = append(events, d)
+		}
+		total++
+	}
+	limit := exportResultLimit(total, maxRecords)
+	if events == nil {
+		events = []RequestDetail{}
+	}
+	result := EventsResult{
+		Events:      events,
+		Total:       total,
+		Limit:       limit,
+		Offset:      offset,
+		Truncated:   maxRecords > 0 && total > maxRecords,
+		GeneratedAt: snapshotAt.UTC().Format(time.RFC3339),
+	}
+	s.lastEventsQueryDuration = time.Since(startedAt)
+	s.lastEventsQueryTotal = total
+	return result
+}
+
 func normalizeEventsQuery(params EventsQuery, paginate bool) EventsQuery {
 	if paginate {
 		if params.Limit <= 0 || params.Limit > 500 {
@@ -3631,11 +3691,24 @@ func (s *RequestStatistics) RecordEventsExport(format string, gzipped bool, resu
 	if s == nil {
 		return
 	}
+	s.RecordEventsExportSummary(format, gzipped, result.Total, len(result.Events), result.Truncated, rawBytes, bodyBytes, duration)
+}
+
+func (s *RequestStatistics) RecordEventsExportSummary(format string, gzipped bool, total int, exported int, truncated bool, rawBytes int, bodyBytes int, duration time.Duration) {
+	if s == nil {
+		return
+	}
 	if rawBytes < 0 {
 		rawBytes = 0
 	}
 	if bodyBytes < 0 {
 		bodyBytes = 0
+	}
+	if total < 0 {
+		total = 0
+	}
+	if exported < 0 {
+		exported = 0
 	}
 	if duration < 0 {
 		duration = 0
@@ -3645,15 +3718,15 @@ func (s *RequestStatistics) RecordEventsExport(format string, gzipped bool, resu
 	if gzipped {
 		s.eventsExportGzipRequests++
 	}
-	if result.Truncated {
+	if truncated {
 		s.eventsExportTruncatedTotal++
 	}
 	s.lastEventsExportDuration = duration
 	s.lastEventsExportFormat = strings.TrimSpace(format)
 	s.lastEventsExportGzip = gzipped
-	s.lastEventsExportTotal = result.Total
-	s.lastEventsExported = len(result.Events)
-	s.lastEventsExportTruncated = result.Truncated
+	s.lastEventsExportTotal = total
+	s.lastEventsExported = exported
+	s.lastEventsExportTruncated = truncated
 	s.lastEventsExportRawBytes = rawBytes
 	s.lastEventsExportBodyBytes = bodyBytes
 	s.mu.Unlock()
