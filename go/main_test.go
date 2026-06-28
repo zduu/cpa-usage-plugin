@@ -549,6 +549,51 @@ func TestStorageSnapshotWritesByRecordInterval(t *testing.T) {
 	}
 }
 
+func TestStorageSyncsByRecordInterval(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "usage-statistics")
+	cfg := runtimeConfig{
+		MaxDetailsPerModel:        100,
+		RetentionDays:             0,
+		DedupWindowMinutes:        0,
+		StorageEnabled:            true,
+		StoragePath:               dir,
+		StorageFlushSeconds:       3600,
+		StorageSyncRecordInterval: 2,
+	}
+
+	stats := NewRequestStatistics()
+	stats.Configure(cfg)
+	stats.Record(UsageRecord{
+		Provider: "openai",
+		Model:    "gpt-4",
+		Detail:   UsageDetail{TotalTokens: 1},
+	})
+	if status := stats.StorageStatus(); status.PendingUnsyncedRecords != 1 || status.LastSyncAt != "" {
+		t.Fatalf("status after one record = %#v, want one unsynced record and no sync time", status)
+	}
+
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-4",
+		RequestedAt: time.Now().Add(time.Second),
+		Detail:      UsageDetail{TotalTokens: 2},
+	})
+	status := stats.StorageStatus()
+	if status.PendingUnsyncedRecords != 0 {
+		t.Fatalf("pending unsynced records = %d, want 0", status.PendingUnsyncedRecords)
+	}
+	if status.PendingBufferedRecords != 0 {
+		t.Fatalf("pending buffered records = %d, want 0 after sync flush", status.PendingBufferedRecords)
+	}
+	if status.LastSyncAt == "" {
+		t.Fatalf("last sync time should be reported: %#v", status)
+	}
+	if status.SyncRecordIntervalRecords != 2 {
+		t.Fatalf("sync record interval = %d, want 2", status.SyncRecordIntervalRecords)
+	}
+	stats.Close()
+}
+
 func TestStorageReplaySkipsInvalidLines(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "usage-statistics.jsonl")
 	when := time.Now().Add(-time.Minute).UTC()
@@ -915,6 +960,8 @@ configs:
     storage_flush_interval_seconds: 3
     storage_snapshot_interval_seconds: 7
     storage_snapshot_record_interval: 11
+    storage_sync_interval_seconds: 13
+    storage_sync_record_interval: 17
     price_storage_path: "/tmp/usage-statistics-prices.json"
 `)
 	raw := []byte(`{"config_yaml":"` + base64.StdEncoding.EncodeToString(yaml) + `"}`)
@@ -934,6 +981,12 @@ configs:
 	}
 	if cfg.StorageSnapshotRecordInterval != 11 {
 		t.Fatalf("storage_snapshot_record_interval = %d, want 11", cfg.StorageSnapshotRecordInterval)
+	}
+	if cfg.StorageSyncSeconds != 13 {
+		t.Fatalf("storage_sync_interval_seconds = %d, want 13", cfg.StorageSyncSeconds)
+	}
+	if cfg.StorageSyncRecordInterval != 17 {
+		t.Fatalf("storage_sync_record_interval = %d, want 17", cfg.StorageSyncRecordInterval)
 	}
 	if cfg.PriceStoragePath != "/tmp/usage-statistics-prices.json" {
 		t.Fatalf("price_storage_path = %q", cfg.PriceStoragePath)
@@ -974,6 +1027,12 @@ func TestRegisterResponseExposesUpdateConfigFields(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"Name":"storage_snapshot_record_interval"`) {
 		t.Fatalf("register response missing storage_snapshot_record_interval: %s", raw)
+	}
+	if !strings.Contains(string(raw), `"Name":"storage_sync_interval_seconds"`) {
+		t.Fatalf("register response missing storage_sync_interval_seconds: %s", raw)
+	}
+	if !strings.Contains(string(raw), `"Name":"storage_sync_record_interval"`) {
+		t.Fatalf("register response missing storage_sync_record_interval: %s", raw)
 	}
 	if !strings.Contains(string(raw), `"Name":"price_storage_path"`) {
 		t.Fatalf("register response missing price_storage_path: %s", raw)

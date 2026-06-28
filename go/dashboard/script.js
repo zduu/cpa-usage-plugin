@@ -145,6 +145,13 @@ function renderStorageStatus() {
     el.title = pending.toLocaleString() + ' 条记录待刷新到文件';
     return;
   }
+  const pendingSync = num(storage.pending_unsynced_records);
+  if (pendingSync > 0) {
+    el.textContent = '持久化待落盘';
+    el.classList.add('warn');
+    el.title = pendingSync.toLocaleString() + ' 条记录待同步到磁盘';
+    return;
+  }
   const pendingSnapshot = num(storage.pending_snapshot_records);
   if (pendingSnapshot > 0) {
     el.textContent = '快照待更新';

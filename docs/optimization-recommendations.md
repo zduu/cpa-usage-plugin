@@ -17,6 +17,7 @@
 - JSONL 持久化支持 `storage_enabled`、`storage_path`、`storage_flush_interval_seconds`。
 - 新写入数据按日期分片，启动时只 replay 保留窗口内分片。
 - 正常关闭、日期切换、达到时间间隔或记录间隔会写入 `snapshot.json`，下次启动先加载快照再 replay 增量。
+- 可选 `storage_sync_interval_seconds` 和 `storage_sync_record_interval` 可对 JSONL 文件执行周期 fsync。
 - 摘要聚合、健康网格、模型/来源/凭证/客户端 API 统计已增量维护。
 - 事件查询已有版本化缓存和时间倒序索引，当前分支继续补了模型、来源、凭证筛选的按需二级索引。
 - 页面会显示持久化状态、待 flush 记录数、最后 flush 时间和最近导入结果。
@@ -115,15 +116,15 @@ plugins:
 - 快照写入必须继续使用临时文件加 rename。
 - 写快照时不要长时间阻塞记录请求。
 
-### 2. 增加可选 fsync 策略
+### 2. 减少 fsync 对请求路径的影响
 
-当前 flush 主要保证写入用户态缓冲落到文件对象，进程正常退出会 Sync。若需要更强异常断电保护，建议增加：
+当前已支持可选 fsync 策略：
 
 - `storage_sync_interval_seconds`。
 - `storage_sync_record_interval`。
 - 状态中展示 `last_sync_at` 和 `pending_unsynced_records`。
 
-推荐默认仍不要每条请求 fsync，避免磁盘 I/O 放大。
+推荐默认仍不要每条请求 fsync，避免磁盘 I/O 放大。后续应结合后台 writer，把 flush/sync 从统计锁内迁出。
 
 ### 3. 将持久化写入改为后台批量写
 

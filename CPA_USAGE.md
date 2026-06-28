@@ -99,6 +99,10 @@ plugins:
       storage_snapshot_interval_seconds: 300
       # 可选：每新增多少条持久化记录写一次 snapshot。默认 1000，0 表示只按时间触发。
       storage_snapshot_record_interval: 1000
+      # 可选：持久化文件 fsync 最大间隔秒数。默认 0，不按时间强制同步。
+      storage_sync_interval_seconds: 0
+      # 可选：每新增多少条持久化记录执行一次 fsync。默认 0，不按记录数强制同步。
+      storage_sync_record_interval: 0
       # 可选：模型价格表 JSON 文件路径。相对路径基于 CPA 工作目录。
       price_storage_path: usage-statistics-prices.json
       # 可选：允许外部脚本更新插件文件。默认 false。
@@ -152,6 +156,8 @@ plugins:
       storage_flush_interval_seconds: 5
       storage_snapshot_interval_seconds: 300
       storage_snapshot_record_interval: 1000
+      storage_sync_interval_seconds: 0
+      storage_sync_record_interval: 0
 ```
 
 说明：
@@ -164,6 +170,7 @@ plugins:
 - 当 `retention_days` 大于 0 时，保留窗口外的日期分片会被清理；旧单文件不会自动删除。
 - `storage_flush_interval_seconds` 越小，异常退出时最多丢失的数据越少；默认 30 秒，想更稳可以设为 5 或 1。
 - `storage_snapshot_interval_seconds` 和 `storage_snapshot_record_interval` 控制启动恢复成本；默认 300 秒或 1000 条写一次快照，高请求量实例可降低记录间隔，低频实例可保持默认。
+- `storage_sync_interval_seconds` 和 `storage_sync_record_interval` 默认关闭；如果需要更强的异常断电保护，可配置如 `storage_sync_interval_seconds: 30` 或 `storage_sync_record_interval: 1000`，但会增加磁盘 I/O。
 - 如果已经有内存数据，建议先导出；开启持久化并重启后，再把导出的 JSON 导入一次，后续数据才会继续写入持久化文件。
 
 ## 按配置更新插件文件

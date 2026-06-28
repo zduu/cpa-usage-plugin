@@ -13,6 +13,8 @@ const (
 	defaultStorageFlushSeconds           = 30
 	defaultStorageSnapshotSeconds        = 300
 	defaultStorageSnapshotRecords        = 1000
+	defaultStorageSyncSeconds            = 0
+	defaultStorageSyncRecords            = 0
 	defaultPriceStoragePath              = "usage-statistics-prices.json"
 )
 
@@ -38,6 +40,8 @@ type runtimeConfig struct {
 	StorageFlushSeconds           int
 	StorageSnapshotSeconds        int
 	StorageSnapshotRecordInterval int
+	StorageSyncSeconds            int
+	StorageSyncRecordInterval     int
 	PriceStoragePath              string
 	UpdateEnabled                 bool
 	UpdateVersion                 string
@@ -54,6 +58,8 @@ type runtimeConfigPatch struct {
 	StorageFlushSeconds           *int
 	StorageSnapshotSeconds        *int
 	StorageSnapshotRecordInterval *int
+	StorageSyncSeconds            *int
+	StorageSyncRecordInterval     *int
 	PriceStoragePath              *string
 	UpdateEnabled                 *bool
 	UpdateVersion                 *string
@@ -71,6 +77,8 @@ func defaultRuntimeConfig() runtimeConfig {
 		StorageFlushSeconds:           defaultStorageFlushSeconds,
 		StorageSnapshotSeconds:        defaultStorageSnapshotSeconds,
 		StorageSnapshotRecordInterval: defaultStorageSnapshotRecords,
+		StorageSyncSeconds:            defaultStorageSyncSeconds,
+		StorageSyncRecordInterval:     defaultStorageSyncRecords,
 		PriceStoragePath:              defaultPriceStoragePath,
 		UpdateEnabled:                 false,
 		UpdateVersion:                 "latest",
@@ -376,6 +384,8 @@ type ExportConfig struct {
 	StorageFlushSeconds           int    `json:"storage_flush_interval_seconds,omitempty"`
 	StorageSnapshotSeconds        int    `json:"storage_snapshot_interval_seconds,omitempty"`
 	StorageSnapshotRecordInterval int    `json:"storage_snapshot_record_interval,omitempty"`
+	StorageSyncSeconds            int    `json:"storage_sync_interval_seconds,omitempty"`
+	StorageSyncRecordInterval     int    `json:"storage_sync_record_interval,omitempty"`
 	PriceStoragePath              string `json:"price_storage_path,omitempty"`
 }
 
@@ -385,11 +395,15 @@ type StorageStatus struct {
 	LoadedPath                    string `json:"loaded_path,omitempty"`
 	LastFlushAt                   string `json:"last_flush_at,omitempty"`
 	LastSnapshotAt                string `json:"last_snapshot_at,omitempty"`
+	LastSyncAt                    string `json:"last_sync_at,omitempty"`
 	LastError                     string `json:"last_error,omitempty"`
 	PendingBufferedRecords        int64  `json:"pending_buffered_records,omitempty"`
 	PendingSnapshotRecords        int64  `json:"pending_snapshot_records,omitempty"`
+	PendingUnsyncedRecords        int64  `json:"pending_unsynced_records,omitempty"`
 	SnapshotIntervalSeconds       int    `json:"snapshot_interval_seconds,omitempty"`
 	SnapshotRecordIntervalRecords int    `json:"snapshot_record_interval_records,omitempty"`
+	SyncIntervalSeconds           int    `json:"sync_interval_seconds,omitempty"`
+	SyncRecordIntervalRecords     int    `json:"sync_record_interval_records,omitempty"`
 }
 
 type ModelPrice struct {

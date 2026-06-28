@@ -84,6 +84,18 @@ func handleRegister(requestBody []byte) ([]byte, error) {
 					Description: "每新增多少条持久化记录写一次 snapshot，0 表示只按时间触发。",
 				},
 				{
+					Name:        "storage_sync_interval_seconds",
+					Type:        "integer",
+					Default:     defaultStorageSyncSeconds,
+					Description: "持久化文件 fsync 最大间隔秒数，0 表示不按时间强制同步。",
+				},
+				{
+					Name:        "storage_sync_record_interval",
+					Type:        "integer",
+					Default:     defaultStorageSyncRecords,
+					Description: "每新增多少条持久化记录执行一次 fsync，0 表示不按记录数强制同步。",
+				},
+				{
 					Name:        "price_storage_path",
 					Type:        "string",
 					Default:     defaultPriceStoragePath,
@@ -158,6 +170,12 @@ func parseRuntimeConfig(requestBody []byte) runtimeConfig {
 	if patch.StorageSnapshotRecordInterval != nil {
 		cfg.StorageSnapshotRecordInterval = *patch.StorageSnapshotRecordInterval
 	}
+	if patch.StorageSyncSeconds != nil {
+		cfg.StorageSyncSeconds = *patch.StorageSyncSeconds
+	}
+	if patch.StorageSyncRecordInterval != nil {
+		cfg.StorageSyncRecordInterval = *patch.StorageSyncRecordInterval
+	}
 	if patch.PriceStoragePath != nil {
 		cfg.PriceStoragePath = *patch.PriceStoragePath
 	}
@@ -183,6 +201,8 @@ func parseRuntimeConfigPatch(requestBody []byte) runtimeConfigPatch {
 		StorageFlushSeconds:           intPtr(defaults.StorageFlushSeconds),
 		StorageSnapshotSeconds:        intPtr(defaults.StorageSnapshotSeconds),
 		StorageSnapshotRecordInterval: intPtr(defaults.StorageSnapshotRecordInterval),
+		StorageSyncSeconds:            intPtr(defaults.StorageSyncSeconds),
+		StorageSyncRecordInterval:     intPtr(defaults.StorageSyncRecordInterval),
 		PriceStoragePath:              stringPtr(defaults.PriceStoragePath),
 		UpdateEnabled:                 boolPtr(defaults.UpdateEnabled),
 		UpdateVersion:                 stringPtr(defaults.UpdateVersion),
@@ -223,6 +243,12 @@ func parseRuntimeConfigPatch(requestBody []byte) runtimeConfigPatch {
 	}
 	if v, ok := intConfig(values, "storage_snapshot_record_interval"); ok {
 		patch.StorageSnapshotRecordInterval = intPtr(v)
+	}
+	if v, ok := intConfig(values, "storage_sync_interval_seconds"); ok {
+		patch.StorageSyncSeconds = intPtr(v)
+	}
+	if v, ok := intConfig(values, "storage_sync_record_interval"); ok {
+		patch.StorageSyncRecordInterval = intPtr(v)
 	}
 	if s, ok := stringConfig(values, "price_storage_path"); ok {
 		patch.PriceStoragePath = stringPtr(s)

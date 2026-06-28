@@ -378,6 +378,24 @@ test('dashboard shows pending storage snapshot status', async () => {
   assert.match(el.title, /3 条记录/);
 });
 
+test('dashboard shows pending storage fsync status', async () => {
+  const { document } = createDashboardHarness({
+    storage: {
+      enabled: true,
+      path: 'usage-statistics.jsonl',
+      loaded_path: 'usage-statistics/usage-2026-06-28.jsonl',
+      last_flush_at: '2026-06-28T01:00:00Z',
+      pending_unsynced_records: 4,
+      pending_snapshot_records: 3,
+    },
+  });
+
+  const el = document.getElementById('storageStatus');
+  await waitFor(() => el.textContent === '持久化待落盘');
+  assert.strictEqual(el.textContent, '持久化待落盘');
+  assert.match(el.title, /4 条记录/);
+});
+
 test('dashboard uses a slower polling interval while hidden', async () => {
   const { fetchCalls, timeoutDelays, setVisibility } = createDashboardHarness({ visibilityState: 'hidden' });
 

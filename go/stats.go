@@ -68,11 +68,15 @@ type RequestStatistics struct {
 	storageActiveDate             string
 	storageLastFlush              time.Time
 	storageLastSnapshot           time.Time
+	storageLastSync               time.Time
 	storageLastError              string
 	storageBuffered               int64
 	storageSnapshotInterval       time.Duration
 	storageSnapshotRecordInterval int
 	storageSnapshotRecords        int64
+	storageSyncInterval           time.Duration
+	storageSyncRecordInterval     int
+	storageUnsyncedRecords        int64
 
 	priceStoragePath       string
 	priceStorageLoadedPath string
@@ -220,6 +224,8 @@ func NewRequestStatistics() *RequestStatistics {
 		storageFlush:                  time.Duration(defaultStorageFlushSeconds) * time.Second,
 		storageSnapshotInterval:       time.Duration(defaultStorageSnapshotSeconds) * time.Second,
 		storageSnapshotRecordInterval: defaultStorageSnapshotRecords,
+		storageSyncInterval:           time.Duration(defaultStorageSyncSeconds) * time.Second,
+		storageSyncRecordInterval:     defaultStorageSyncRecords,
 		priceStoragePath:              defaultRuntimeConfig().PriceStoragePath,
 		modelPrices:                   make(map[string]ModelPrice),
 		startedAt:                     time.Now(),
@@ -238,6 +244,8 @@ func (s *RequestStatistics) Configure(cfg runtimeConfig) {
 		StorageFlushSeconds:           positiveIntPtr(cfg.StorageFlushSeconds),
 		StorageSnapshotSeconds:        positiveIntPtr(cfg.StorageSnapshotSeconds),
 		StorageSnapshotRecordInterval: positiveIntPtr(cfg.StorageSnapshotRecordInterval),
+		StorageSyncSeconds:            intPtr(cfg.StorageSyncSeconds),
+		StorageSyncRecordInterval:     intPtr(cfg.StorageSyncRecordInterval),
 		PriceStoragePath:              stringPtr(cfg.PriceStoragePath),
 		UpdateEnabled:                 boolPtr(cfg.UpdateEnabled),
 		UpdateVersion:                 stringPtr(cfg.UpdateVersion),
@@ -276,6 +284,12 @@ func (s *RequestStatistics) ConfigurePatch(cfg runtimeConfigPatch) {
 	}
 	if cfg.StorageSnapshotRecordInterval != nil && *cfg.StorageSnapshotRecordInterval >= 0 {
 		s.storageSnapshotRecordInterval = *cfg.StorageSnapshotRecordInterval
+	}
+	if cfg.StorageSyncSeconds != nil && *cfg.StorageSyncSeconds >= 0 {
+		s.storageSyncInterval = time.Duration(*cfg.StorageSyncSeconds) * time.Second
+	}
+	if cfg.StorageSyncRecordInterval != nil && *cfg.StorageSyncRecordInterval >= 0 {
+		s.storageSyncRecordInterval = *cfg.StorageSyncRecordInterval
 	}
 	if cfg.PriceStoragePath != nil && strings.TrimSpace(*cfg.PriceStoragePath) != "" {
 		s.priceStoragePath = strings.TrimSpace(*cfg.PriceStoragePath)
@@ -498,6 +512,7 @@ func (s *RequestStatistics) configureStorageLocked() {
 		s.storageLastSnapshot = time.Time{}
 	}
 	s.storageSnapshotRecords = 0
+	s.storageUnsyncedRecords = 0
 	if err := s.openStorageFileLocked(now); err != nil {
 		s.storageLastError = err.Error()
 		return
@@ -667,6 +682,42 @@ func (s *RequestStatistics) maybeWriteStorageSnapshotLocked(now time.Time) {
 	if err := s.writeStorageSnapshotLocked(now); err != nil {
 		s.storageLastError = err.Error()
 	}
+}
+
+func (s *RequestStatistics) maybeSyncStorageLocked(now time.Time) {
+	if s == nil || !s.storageEnabled || s.storageFile == nil || s.storageUnsyncedRecords <= 0 {
+		return
+	}
+	due := false
+	if s.storageSyncRecordInterval > 0 && s.storageUnsyncedRecords >= int64(s.storageSyncRecordInterval) {
+		due = true
+	}
+	if !due && s.storageSyncInterval > 0 {
+		base := s.storageLastSync
+		if base.IsZero() {
+			base = s.storageLastFlush
+		}
+		if !base.IsZero() && now.Sub(base) >= s.storageSyncInterval {
+			due = true
+		}
+	}
+	if !due {
+		return
+	}
+	if s.storageWriter != nil && s.storageBuffered > 0 {
+		if err := s.storageWriter.Flush(); err != nil {
+			s.storageLastError = err.Error()
+			return
+		}
+		s.storageBuffered = 0
+		s.storageLastFlush = now
+	}
+	if err := s.storageFile.Sync(); err != nil {
+		s.storageLastError = err.Error()
+		return
+	}
+	s.storageUnsyncedRecords = 0
+	s.storageLastSync = now
 }
 
 func syncDir(dir string) error {
@@ -869,6 +920,7 @@ func (s *RequestStatistics) appendDetailLocked(detail persistedDetail) {
 	}
 	s.storageBuffered++
 	s.storageSnapshotRecords++
+	s.storageUnsyncedRecords++
 	now := time.Now()
 	if s.storageFlush <= 0 || s.storageLastFlush.IsZero() || now.Sub(s.storageLastFlush) >= s.storageFlush {
 		if err := s.storageWriter.Flush(); err != nil {
@@ -879,12 +931,14 @@ func (s *RequestStatistics) appendDetailLocked(detail persistedDetail) {
 		s.storageLastFlush = now
 	}
 	s.maybeWriteStorageSnapshotLocked(now)
+	s.maybeSyncStorageLocked(now)
 }
 
 func (s *RequestStatistics) closeStorageLocked() {
 	if s == nil {
 		return
 	}
+	now := time.Now()
 	flushed := false
 	synced := true
 	if s.storageWriter != nil {
@@ -900,6 +954,9 @@ func (s *RequestStatistics) closeStorageLocked() {
 		if err := s.storageFile.Sync(); err != nil {
 			s.storageLastError = err.Error()
 			synced = false
+		} else {
+			s.storageUnsyncedRecords = 0
+			s.storageLastSync = now
 		}
 		if err := s.storageFile.Close(); err != nil {
 			s.storageLastError = err.Error()
@@ -909,10 +966,10 @@ func (s *RequestStatistics) closeStorageLocked() {
 	s.storageLoadedPath = ""
 	s.storageActiveDate = ""
 	if flushed && synced {
-		s.storageLastFlush = time.Now()
+		s.storageLastFlush = now
 	}
 	if s.storageEnabled && strings.TrimSpace(s.storageDir) != "" {
-		if err := s.writeStorageSnapshotLocked(time.Now()); err != nil {
+		if err := s.writeStorageSnapshotLocked(now); err != nil {
 			s.storageLastError = err.Error()
 		}
 	}
@@ -2877,6 +2934,8 @@ func (s *RequestStatistics) ConfigSnapshot() ExportConfig {
 		StorageFlushSeconds:           int(s.storageFlush.Seconds()),
 		StorageSnapshotSeconds:        int(s.storageSnapshotInterval.Seconds()),
 		StorageSnapshotRecordInterval: s.storageSnapshotRecordInterval,
+		StorageSyncSeconds:            int(s.storageSyncInterval.Seconds()),
+		StorageSyncRecordInterval:     s.storageSyncRecordInterval,
 		PriceStoragePath:              s.priceStoragePath,
 	}
 }
@@ -2898,14 +2957,20 @@ func (s *RequestStatistics) storageStatusLocked() StorageStatus {
 		LastError:                     s.storageLastError,
 		PendingBufferedRecords:        s.storageBuffered,
 		PendingSnapshotRecords:        s.storageSnapshotRecords,
+		PendingUnsyncedRecords:        s.storageUnsyncedRecords,
 		SnapshotIntervalSeconds:       int(s.storageSnapshotInterval.Seconds()),
 		SnapshotRecordIntervalRecords: s.storageSnapshotRecordInterval,
+		SyncIntervalSeconds:           int(s.storageSyncInterval.Seconds()),
+		SyncRecordIntervalRecords:     s.storageSyncRecordInterval,
 	}
 	if !s.storageLastFlush.IsZero() {
 		status.LastFlushAt = s.storageLastFlush.UTC().Format(time.RFC3339)
 	}
 	if !s.storageLastSnapshot.IsZero() {
 		status.LastSnapshotAt = s.storageLastSnapshot.UTC().Format(time.RFC3339)
+	}
+	if !s.storageLastSync.IsZero() {
+		status.LastSyncAt = s.storageLastSync.UTC().Format(time.RFC3339)
 	}
 	return status
 }
