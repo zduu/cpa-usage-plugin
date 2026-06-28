@@ -450,13 +450,11 @@ func (s *RequestStatistics) Record(record UsageRecord) {
 		Failure:    trimLong(redactSensitiveText(record.Failure.Body), 500),
 		Headers:    filterHeaders(record.ResponseHeaders, s.logResponseHeaders),
 	}
-	dedup := dedupKey(statsKey, modelName, detail)
-
 	var persistDetail *persistedDetail
 	s.mu.Lock()
 
 	now := time.Now()
-	if s.recordDetailLocked(statsKey, modelName, detail, dedup, now, true) {
+	if s.recordDetailLocked(statsKey, modelName, detail, "", now, false) {
 		if s.storageEnabled {
 			persistDetail = &persistedDetail{API: statsKey, Model: modelName, Detail: detail}
 		}

@@ -102,7 +102,7 @@ plugins:
       max_details_per_model: 5000
       # 内存统计最多保留的天数，0 表示不按时间淘汰。默认 30。
       retention_days: 30
-      # usage 记录去重窗口分钟数，0 表示关闭去重。默认 1440（24小时）。
+      # 持久化重放和导入的去重窗口分钟数，0 表示关闭去重。实时 usage 记录不会去重。默认 1440（24小时）。
       dedup_window_minutes: 1440
       # 可选：允许记录的响应头名称列表（逗号分隔），* 表示全部。留空不记录。
       log_response_headers: ""
@@ -128,7 +128,7 @@ plugins:
       price_storage_path: usage-statistics-prices.json
       # 可选：允许外部脚本更新插件文件。默认 false。
       update_enabled: false
-      # 可选：latest 或指定版本号，例如 v2.0.1。
+      # 可选：latest 或指定版本号，例如 v2.0.2。
       update_version: latest
 ```
 
@@ -143,7 +143,7 @@ docker restart cli-proxy-api
 
 ```text
 pluginhost: plugin loaded plugin_id=usage-statistics path=plugins/usage-statistics.so
-pluginhost: plugin registered plugin_id=usage-statistics plugin_name=用量统计 version=2.0.1
+pluginhost: plugin registered plugin_id=usage-statistics plugin_name=用量统计 version=2.0.2
 ```
 
 ## 数据持久化（可选）
@@ -212,7 +212,7 @@ plugins:
     usage-statistics:
       enabled: true
       update_enabled: true
-      update_version: latest   # 或 v2.0.1
+      update_version: latest   # 或 v2.0.2
 ```
 
 执行更新脚本：

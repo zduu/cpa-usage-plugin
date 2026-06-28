@@ -1159,8 +1159,9 @@ func TestStripCredentialSuffix(t *testing.T) {
 	}
 }
 
-func TestRecordDeduplicatesRepeatedUsageRecords(t *testing.T) {
+func TestRecordCountsRepeatedUsageRecords(t *testing.T) {
 	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{DedupWindowMinutes: 1440})
 	when := time.Now().Add(-time.Hour)
 	record := UsageRecord{
 		Provider:    "deepseek",
@@ -1178,8 +1179,8 @@ func TestRecordDeduplicatesRepeatedUsageRecords(t *testing.T) {
 	stats.Record(record)
 
 	snapshot := stats.Snapshot()
-	if snapshot.TotalRequests != 1 || snapshot.TotalTokens != 15 {
-		t.Fatalf("snapshot = %#v, want one deduplicated request", snapshot)
+	if snapshot.TotalRequests != 2 || snapshot.TotalTokens != 30 {
+		t.Fatalf("snapshot = %#v, want two counted live usage records", snapshot)
 	}
 }
 
