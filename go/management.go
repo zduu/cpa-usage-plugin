@@ -33,13 +33,13 @@ func handleManagement(requestBody []byte) ([]byte, error) {
 	case req.Method == "GET" && tail == "dashboard":
 		return handleDashboardPage()
 	case req.Method == "GET" && tail == "dashboard-summary":
-		return handleDashboardSummary()
+		return handleDashboardSummary(req.Headers)
 	case req.Method == "GET" && tail == "dashboard-events":
-		return handleDashboardEvents(req.Query)
+		return handleDashboardEvents(req.Query, req.Headers)
 	case req.Method == "GET" && tail == "dashboard-events-export":
 		return handleDashboardEventsExport(req.Query)
 	case req.Method == "GET" && tail == "dashboard-api-detail":
-		return handleDashboardAPIDetail(req.Query)
+		return handleDashboardAPIDetail(req.Query, req.Headers)
 	case req.Method == "GET" && tail == "dashboard-data":
 		return handleDashboardData()
 	case req.Method == "GET" && tail == "model-prices":

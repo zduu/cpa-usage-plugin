@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -32,7 +34,11 @@ func init() {
 }
 
 // handleDashboardSummary returns lightweight dashboard data without detail arrays.
-func handleDashboardSummary() ([]byte, error) {
+func handleDashboardSummary(headers map[string][]string) ([]byte, error) {
+	etag := dashboardSummaryETag(time.Now())
+	if dashboardIfNoneMatch(headers, etag) {
+		return dashboardNotModified(etag)
+	}
 	summary := stats.SummaryWithoutDetails()
 	responseJSON, err := json.Marshal(summary)
 	if err != nil {
@@ -40,13 +46,15 @@ func handleDashboardSummary() ([]byte, error) {
 	}
 	resp := ManagementResponse{
 		StatusCode: http.StatusOK,
-		Headers: map[string][]string{
-			"Content-Type":  {"application/json; charset=utf-8"},
-			"Cache-Control": {"no-store"},
-		},
-		Body: responseJSON,
+		Headers:    dashboardJSONHeaders(etag),
+		Body:       responseJSON,
 	}
 	return okEnvelopeJSON(string(mustMarshal(resp)))
+}
+
+func dashboardSummaryETag(now time.Time) string {
+	window := summaryHealthWindow(now).UTC().Format(time.RFC3339)
+	return dashboardWeakETag("summary", strconv.FormatUint(stats.DashboardVersion(), 10), window)
 }
 
 func dashboardEventsQuery(query map[string][]string) EventsQuery {
@@ -83,8 +91,13 @@ func dashboardEventsQuery(query map[string][]string) EventsQuery {
 }
 
 // handleDashboardEvents returns paginated, filtered event details.
-func handleDashboardEvents(query map[string][]string) ([]byte, error) {
+func handleDashboardEvents(query map[string][]string, headers map[string][]string) ([]byte, error) {
 	params := dashboardEventsQuery(query)
+	params = normalizeEventsQuery(params, true)
+	etag := dashboardEventsETag(params, time.Now())
+	if dashboardIfNoneMatch(headers, etag) {
+		return dashboardNotModified(etag)
+	}
 	result := stats.QueryEvents(params)
 	responseJSON, err := json.Marshal(result)
 	if err != nil {
@@ -92,13 +105,26 @@ func handleDashboardEvents(query map[string][]string) ([]byte, error) {
 	}
 	resp := ManagementResponse{
 		StatusCode: http.StatusOK,
-		Headers: map[string][]string{
-			"Content-Type":  {"application/json; charset=utf-8"},
-			"Cache-Control": {"no-store"},
-		},
-		Body: responseJSON,
+		Headers:    dashboardJSONHeaders(etag),
+		Body:       responseJSON,
 	}
 	return okEnvelopeJSON(string(mustMarshal(resp)))
+}
+
+func dashboardEventsETag(params EventsQuery, now time.Time) string {
+	key := dashboardEventCacheKeyFor(params, now)
+	return dashboardWeakETag(
+		"events",
+		strconv.FormatUint(stats.DashboardVersion(), 10),
+		strconv.Itoa(key.limit),
+		strconv.Itoa(key.offset),
+		strconv.FormatInt(key.timeBucket, 10),
+		key.rangeKey,
+		key.model,
+		key.source,
+		key.authIndex,
+		key.api,
+	)
 }
 
 // handleDashboardEventsExport returns all filtered event details for one export.
@@ -121,7 +147,7 @@ func handleDashboardEventsExport(query map[string][]string) ([]byte, error) {
 }
 
 // handleDashboardAPIDetail returns compact per-upstream detail widgets.
-func handleDashboardAPIDetail(query map[string][]string) ([]byte, error) {
+func handleDashboardAPIDetail(query map[string][]string, headers map[string][]string) ([]byte, error) {
 	api := ""
 	if v, ok := query["api"]; ok && len(v) > 0 {
 		api = v[0]
@@ -143,6 +169,10 @@ func handleDashboardAPIDetail(query map[string][]string) ([]byte, error) {
 		}
 	}
 
+	etag := dashboardAPIDetailETag(api, rangeKey, recentLimit, errorLimit, time.Now())
+	if dashboardIfNoneMatch(headers, etag) {
+		return dashboardNotModified(etag)
+	}
 	result := stats.QueryAPIDetail(api, rangeKey, recentLimit, errorLimit)
 	responseJSON, err := json.Marshal(result)
 	if err != nil {
@@ -150,13 +180,67 @@ func handleDashboardAPIDetail(query map[string][]string) ([]byte, error) {
 	}
 	resp := ManagementResponse{
 		StatusCode: http.StatusOK,
-		Headers: map[string][]string{
-			"Content-Type":  {"application/json; charset=utf-8"},
-			"Cache-Control": {"no-store"},
-		},
-		Body: responseJSON,
+		Headers:    dashboardJSONHeaders(etag),
+		Body:       responseJSON,
 	}
 	return okEnvelopeJSON(string(mustMarshal(resp)))
+}
+
+func dashboardAPIDetailETag(api string, rangeKey string, recentLimit int, errorLimit int, now time.Time) string {
+	timeBucket := int64(0)
+	if rangeKey != "" && rangeKey != "all" {
+		timeBucket = now.UTC().Unix()
+	}
+	return dashboardWeakETag(
+		"api-detail",
+		strconv.FormatUint(stats.DashboardVersion(), 10),
+		strconv.FormatInt(timeBucket, 10),
+		api,
+		rangeKey,
+		strconv.Itoa(recentLimit),
+		strconv.Itoa(errorLimit),
+	)
+}
+
+func dashboardWeakETag(parts ...string) string {
+	sum := sha256.Sum224([]byte(strings.Join(parts, "\x00")))
+	return `W/"` + hex.EncodeToString(sum[:]) + `"`
+}
+
+func dashboardJSONHeaders(etag string) map[string][]string {
+	return map[string][]string{
+		"Content-Type":  {"application/json; charset=utf-8"},
+		"Cache-Control": {"private, no-cache"},
+		"ETag":          {etag},
+	}
+}
+
+func dashboardNotModified(etag string) ([]byte, error) {
+	resp := ManagementResponse{
+		StatusCode: http.StatusNotModified,
+		Headers:    dashboardJSONHeaders(etag),
+	}
+	return okEnvelopeJSON(string(mustMarshal(resp)))
+}
+
+func dashboardIfNoneMatch(headers map[string][]string, etag string) bool {
+	if etag == "" {
+		return false
+	}
+	for key, values := range headers {
+		if !strings.EqualFold(key, "If-None-Match") {
+			continue
+		}
+		for _, value := range values {
+			for _, candidate := range strings.Split(value, ",") {
+				candidate = strings.TrimSpace(candidate)
+				if candidate == "*" || candidate == etag {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // handleHealthCheck returns a lightweight health/status endpoint.

@@ -2612,12 +2612,7 @@ func (s *RequestStatistics) QueryAllEvents(params EventsQuery) EventsResult {
 	return s.queryEvents(params, false)
 }
 
-func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool) EventsResult {
-	if s == nil {
-		return EventsResult{}
-	}
-	startedAt := time.Now()
-
+func normalizeEventsQuery(params EventsQuery, paginate bool) EventsQuery {
 	if paginate {
 		if params.Limit <= 0 || params.Limit > 500 {
 			params.Limit = 50
@@ -2625,10 +2620,20 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool) Event
 		if params.Offset < 0 {
 			params.Offset = 0
 		}
-	} else {
-		params.Limit = 0
-		params.Offset = 0
+		return params
 	}
+	params.Limit = 0
+	params.Offset = 0
+	return params
+}
+
+func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool) EventsResult {
+	if s == nil {
+		return EventsResult{}
+	}
+	startedAt := time.Now()
+
+	params = normalizeEventsQuery(params, paginate)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2945,6 +2950,15 @@ func (s *RequestStatistics) EvictedTotal() int64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.evictedTotal
+}
+
+func (s *RequestStatistics) DashboardVersion() uint64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.summaryVersion
 }
 
 func (s *RequestStatistics) Close() {

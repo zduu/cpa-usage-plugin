@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1144,6 +1145,57 @@ func TestManagementModelPricesCRUDAndPersistence(t *testing.T) {
 	}), &deleted)
 	if _, ok := deleted.Prices["gpt-4.1"]; ok {
 		t.Fatalf("deleted price still present: %#v", deleted.Prices)
+	}
+}
+
+func TestDashboardManagementEndpointsReturnNotModifiedForMatchingETag(t *testing.T) {
+	previousStats := stats
+	stats = NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0})
+	t.Cleanup(func() { stats = previousStats })
+
+	stats.Record(UsageRecord{
+		Provider: "openai",
+		Source:   "openai-prod",
+		Model:    "gpt-4",
+		Detail:   UsageDetail{TotalTokens: 11},
+	})
+
+	tests := []ManagementRequest{
+		{Method: "GET", Path: "/v0/management/plugins/usage-statistics/dashboard-summary"},
+		{
+			Method: "GET",
+			Path:   "/v0/management/plugins/usage-statistics/dashboard-events",
+			Query:  map[string][]string{"limit": {"10"}, "offset": {"0"}},
+		},
+		{
+			Method: "GET",
+			Path:   "/v0/management/plugins/usage-statistics/dashboard-api-detail",
+			Query:  map[string][]string{"api": {"openai · openai-prod"}},
+		},
+	}
+
+	for _, req := range tests {
+		first := decodeManagementResponse(t, invokeManagement(t, req), nil)
+		if first.StatusCode != http.StatusOK {
+			t.Fatalf("%s first status = %d, want 200", req.Path, first.StatusCode)
+		}
+		etag := first.Headers["ETag"]
+		if len(etag) != 1 || etag[0] == "" {
+			t.Fatalf("%s missing ETag header: %#v", req.Path, first.Headers)
+		}
+
+		req.Headers = map[string][]string{"if-none-match": {etag[0]}}
+		second := decodeManagementResponse(t, invokeManagement(t, req), nil)
+		if second.StatusCode != http.StatusNotModified {
+			t.Fatalf("%s conditional status = %d, want 304", req.Path, second.StatusCode)
+		}
+		if len(second.Body) != 0 {
+			t.Fatalf("%s conditional body len = %d, want 0", req.Path, len(second.Body))
+		}
+		if got := second.Headers["ETag"]; len(got) != 1 || got[0] != etag[0] {
+			t.Fatalf("%s conditional ETag = %#v, want %q", req.Path, got, etag[0])
+		}
 	}
 }
 
