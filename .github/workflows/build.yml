@@ -207,6 +207,9 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
@@ -216,6 +219,9 @@ jobs:
 
       - name: Add legacy amd64 asset alias
         run: cp dist/usage-statistics-linux-amd64.so dist/usage-statistics.so
+
+      - name: Prepare release notes
+        run: sh scripts/extract-release-notes.sh "$GITHUB_REF_NAME" CHANGELOG.md dist/release-notes.md
 
       - name: Create Release
         uses: softprops/action-gh-release@v3
@@ -229,6 +235,7 @@ jobs:
             dist/usage-statistics-windows-amd64.dll
           draft: false
           prerelease: false
+          body_path: dist/release-notes.md
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
