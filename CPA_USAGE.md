@@ -95,6 +95,10 @@ plugins:
       storage_path: usage-statistics.jsonl
       # 可选：持久化 flush 间隔秒数。默认 30。
       storage_flush_interval_seconds: 30
+      # 可选：持久化 snapshot 最大写入间隔秒数。默认 300，0 表示只按记录数触发。
+      storage_snapshot_interval_seconds: 300
+      # 可选：每新增多少条持久化记录写一次 snapshot。默认 1000，0 表示只按时间触发。
+      storage_snapshot_record_interval: 1000
       # 可选：模型价格表 JSON 文件路径。相对路径基于 CPA 工作目录。
       price_storage_path: usage-statistics-prices.json
       # 可选：允许外部脚本更新插件文件。默认 false。
@@ -146,6 +150,8 @@ plugins:
       storage_enabled: true
       storage_path: data/usage-statistics.jsonl
       storage_flush_interval_seconds: 5
+      storage_snapshot_interval_seconds: 300
+      storage_snapshot_record_interval: 1000
 ```
 
 说明：
@@ -153,10 +159,11 @@ plugins:
 - 不配置或保持 `storage_enabled: false` 时，就是原来的内存模式，重启清零。
 - 开启后每条新请求会追加写入日期分片，例如 `data/usage-statistics/usage-2026-06-28.jsonl`；插件启动时只 replay 保留窗口内的日期分片。
 - 如果 `storage_path` 配置为历史单文件路径（如 `data/usage-statistics.jsonl`），插件会继续读取该旧文件作为兼容输入，新数据会写入同名目录 `data/usage-statistics/` 下的日期分片。
-- 插件正常关闭或日期分片切换时会写入 `snapshot.json`；下次启动会先加载 snapshot，再 replay snapshot 当天及之后的分片增量。
+- 插件正常关闭、日期分片切换、达到 `storage_snapshot_interval_seconds` 或达到 `storage_snapshot_record_interval` 时会写入 `snapshot.json`；下次启动会先加载 snapshot，再 replay snapshot 当天及之后的分片增量。
 - `storage_path` 是相对 CPA 工作目录的路径；Docker 中建议放到已挂载的 `/CLIProxyAPI/data` 或其他宿主机 volume。
 - 当 `retention_days` 大于 0 时，保留窗口外的日期分片会被清理；旧单文件不会自动删除。
 - `storage_flush_interval_seconds` 越小，异常退出时最多丢失的数据越少；默认 30 秒，想更稳可以设为 5 或 1。
+- `storage_snapshot_interval_seconds` 和 `storage_snapshot_record_interval` 控制启动恢复成本；默认 300 秒或 1000 条写一次快照，高请求量实例可降低记录间隔，低频实例可保持默认。
 - 如果已经有内存数据，建议先导出；开启持久化并重启后，再把导出的 JSON 导入一次，后续数据才会继续写入持久化文件。
 
 ## 按配置更新插件文件

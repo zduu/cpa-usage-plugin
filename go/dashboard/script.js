@@ -145,9 +145,16 @@ function renderStorageStatus() {
     el.title = pending.toLocaleString() + ' 条记录待刷新到文件';
     return;
   }
+  const pendingSnapshot = num(storage.pending_snapshot_records);
+  if (pendingSnapshot > 0) {
+    el.textContent = '快照待更新';
+    el.classList.add('warn');
+    el.title = pendingSnapshot.toLocaleString() + ' 条记录待写入快照';
+    return;
+  }
   el.textContent = storage.last_flush_at ? '持久化已同步' : '持久化已开启';
   el.classList.add('ok');
-  el.title = storage.loaded_path || storage.path || '';
+  el.title = storage.last_snapshot_at || storage.loaded_path || storage.path || '';
 }
 
 function renderHealth() {

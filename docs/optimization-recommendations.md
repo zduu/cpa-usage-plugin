@@ -16,7 +16,7 @@
 - 上游详情使用 `/dashboard-api-detail` 返回聚合、错误统计和最近请求，避免前端自己分页拼全量。
 - JSONL 持久化支持 `storage_enabled`、`storage_path`、`storage_flush_interval_seconds`。
 - 新写入数据按日期分片，启动时只 replay 保留窗口内分片。
-- 正常关闭或日期切换会写入 `snapshot.json`，下次启动先加载快照再 replay 增量。
+- 正常关闭、日期切换、达到时间间隔或记录间隔会写入 `snapshot.json`，下次启动先加载快照再 replay 增量。
 - 摘要聚合、健康网格、模型/来源/凭证/客户端 API 统计已增量维护。
 - 事件查询已有版本化缓存和时间倒序索引，当前分支继续补了模型、来源、凭证筛选的按需二级索引。
 - 页面会显示持久化状态、待 flush 记录数、最后 flush 时间和最近导入结果。
@@ -99,12 +99,10 @@ plugins:
 
 ## P1 建议
 
-### 1. 增加周期性快照和压缩策略
+### 1. 增加快照压缩策略
 
-当前 snapshot 主要依赖正常关闭或日期切换。建议增加：
+当前已支持按 `storage_snapshot_interval_seconds` 和 `storage_snapshot_record_interval` 周期写入 snapshot。后续建议继续增加：
 
-- `storage_snapshot_interval_seconds`，例如默认 300 秒。
-- `storage_snapshot_record_interval`，例如每新增 1000 条写一次。
 - 快照成功后，可选择压缩或标记老分片，减少下次启动 replay 范围。
 
 收益：

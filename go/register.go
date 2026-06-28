@@ -72,6 +72,18 @@ func handleRegister(requestBody []byte) ([]byte, error) {
 					Description: "持久化文件 flush 间隔秒数。",
 				},
 				{
+					Name:        "storage_snapshot_interval_seconds",
+					Type:        "integer",
+					Default:     defaultStorageSnapshotSeconds,
+					Description: "持久化快照最大写入间隔秒数，0 表示只按记录数触发。",
+				},
+				{
+					Name:        "storage_snapshot_record_interval",
+					Type:        "integer",
+					Default:     defaultStorageSnapshotRecords,
+					Description: "每新增多少条持久化记录写一次 snapshot，0 表示只按时间触发。",
+				},
+				{
 					Name:        "price_storage_path",
 					Type:        "string",
 					Default:     defaultPriceStoragePath,
@@ -140,6 +152,12 @@ func parseRuntimeConfig(requestBody []byte) runtimeConfig {
 	if patch.StorageFlushSeconds != nil {
 		cfg.StorageFlushSeconds = *patch.StorageFlushSeconds
 	}
+	if patch.StorageSnapshotSeconds != nil {
+		cfg.StorageSnapshotSeconds = *patch.StorageSnapshotSeconds
+	}
+	if patch.StorageSnapshotRecordInterval != nil {
+		cfg.StorageSnapshotRecordInterval = *patch.StorageSnapshotRecordInterval
+	}
 	if patch.PriceStoragePath != nil {
 		cfg.PriceStoragePath = *patch.PriceStoragePath
 	}
@@ -155,17 +173,19 @@ func parseRuntimeConfig(requestBody []byte) runtimeConfig {
 func parseRuntimeConfigPatch(requestBody []byte) runtimeConfigPatch {
 	defaults := defaultRuntimeConfig()
 	patch := runtimeConfigPatch{
-		MaxDetailsPerModel:  intPtr(defaults.MaxDetailsPerModel),
-		RetentionDays:       intPtr(defaults.RetentionDays),
-		DedupWindowMinutes:  intPtr(defaults.DedupWindowMinutes),
-		LogResponseHeaders:  stringPtr(defaults.LogResponseHeaders),
-		APIKeyHashSalt:      stringPtr(defaults.APIKeyHashSalt),
-		StorageEnabled:      boolPtr(defaults.StorageEnabled),
-		StoragePath:         stringPtr(defaults.StoragePath),
-		StorageFlushSeconds: intPtr(defaults.StorageFlushSeconds),
-		PriceStoragePath:    stringPtr(defaults.PriceStoragePath),
-		UpdateEnabled:       boolPtr(defaults.UpdateEnabled),
-		UpdateVersion:       stringPtr(defaults.UpdateVersion),
+		MaxDetailsPerModel:            intPtr(defaults.MaxDetailsPerModel),
+		RetentionDays:                 intPtr(defaults.RetentionDays),
+		DedupWindowMinutes:            intPtr(defaults.DedupWindowMinutes),
+		LogResponseHeaders:            stringPtr(defaults.LogResponseHeaders),
+		APIKeyHashSalt:                stringPtr(defaults.APIKeyHashSalt),
+		StorageEnabled:                boolPtr(defaults.StorageEnabled),
+		StoragePath:                   stringPtr(defaults.StoragePath),
+		StorageFlushSeconds:           intPtr(defaults.StorageFlushSeconds),
+		StorageSnapshotSeconds:        intPtr(defaults.StorageSnapshotSeconds),
+		StorageSnapshotRecordInterval: intPtr(defaults.StorageSnapshotRecordInterval),
+		PriceStoragePath:              stringPtr(defaults.PriceStoragePath),
+		UpdateEnabled:                 boolPtr(defaults.UpdateEnabled),
+		UpdateVersion:                 stringPtr(defaults.UpdateVersion),
 	}
 	var req struct {
 		ConfigYAML []byte `json:"config_yaml"`
@@ -197,6 +217,12 @@ func parseRuntimeConfigPatch(requestBody []byte) runtimeConfigPatch {
 	}
 	if v, ok := intConfig(values, "storage_flush_interval_seconds"); ok {
 		patch.StorageFlushSeconds = intPtr(v)
+	}
+	if v, ok := intConfig(values, "storage_snapshot_interval_seconds"); ok {
+		patch.StorageSnapshotSeconds = intPtr(v)
+	}
+	if v, ok := intConfig(values, "storage_snapshot_record_interval"); ok {
+		patch.StorageSnapshotRecordInterval = intPtr(v)
 	}
 	if s, ok := stringConfig(values, "price_storage_path"); ok {
 		patch.PriceStoragePath = stringPtr(s)

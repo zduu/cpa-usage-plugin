@@ -494,6 +494,61 @@ func TestStorageStatusReportsPendingBufferedRecords(t *testing.T) {
 	}
 }
 
+func TestStorageSnapshotWritesByRecordInterval(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "usage-statistics")
+	cfg := runtimeConfig{
+		MaxDetailsPerModel:            100,
+		RetentionDays:                 0,
+		DedupWindowMinutes:            0,
+		StorageEnabled:                true,
+		StoragePath:                   dir,
+		StorageFlushSeconds:           3600,
+		StorageSnapshotSeconds:        3600,
+		StorageSnapshotRecordInterval: 2,
+	}
+
+	stats := NewRequestStatistics()
+	stats.Configure(cfg)
+	snapshotPath := storageSnapshotPath(dir)
+
+	stats.Record(UsageRecord{
+		Provider: "openai",
+		Model:    "gpt-4",
+		Detail:   UsageDetail{TotalTokens: 1},
+	})
+	if _, err := os.Stat(snapshotPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("snapshot should not exist after one record, stat err = %v", err)
+	}
+
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-4",
+		RequestedAt: time.Now().Add(time.Second),
+		Detail:      UsageDetail{TotalTokens: 2},
+	})
+	status := stats.StorageStatus()
+	if _, err := os.Stat(snapshotPath); err != nil {
+		t.Fatalf("snapshot should be written after record interval: %v", err)
+	}
+	if status.LastSnapshotAt == "" {
+		t.Fatalf("last snapshot time should be reported: %#v", status)
+	}
+	if status.PendingSnapshotRecords != 0 {
+		t.Fatalf("pending snapshot records = %d, want 0", status.PendingSnapshotRecords)
+	}
+	if status.SnapshotRecordIntervalRecords != 2 {
+		t.Fatalf("snapshot record interval = %d, want 2", status.SnapshotRecordIntervalRecords)
+	}
+	stats.Close()
+
+	reloaded := NewRequestStatistics()
+	reloaded.Configure(cfg)
+	defer reloaded.Close()
+	if got := reloaded.Snapshot().TotalRequests; got != 2 {
+		t.Fatalf("reloaded requests = %d, want 2", got)
+	}
+}
+
 func TestStorageReplaySkipsInvalidLines(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "usage-statistics.jsonl")
 	when := time.Now().Add(-time.Minute).UTC()
@@ -858,6 +913,8 @@ configs:
     storage_enabled: true
     storage_path: "/tmp/usage-statistics.jsonl"
     storage_flush_interval_seconds: 3
+    storage_snapshot_interval_seconds: 7
+    storage_snapshot_record_interval: 11
     price_storage_path: "/tmp/usage-statistics-prices.json"
 `)
 	raw := []byte(`{"config_yaml":"` + base64.StdEncoding.EncodeToString(yaml) + `"}`)
@@ -871,6 +928,12 @@ configs:
 	}
 	if cfg.StorageFlushSeconds != 3 {
 		t.Fatalf("storage_flush_interval_seconds = %d, want 3", cfg.StorageFlushSeconds)
+	}
+	if cfg.StorageSnapshotSeconds != 7 {
+		t.Fatalf("storage_snapshot_interval_seconds = %d, want 7", cfg.StorageSnapshotSeconds)
+	}
+	if cfg.StorageSnapshotRecordInterval != 11 {
+		t.Fatalf("storage_snapshot_record_interval = %d, want 11", cfg.StorageSnapshotRecordInterval)
 	}
 	if cfg.PriceStoragePath != "/tmp/usage-statistics-prices.json" {
 		t.Fatalf("price_storage_path = %q", cfg.PriceStoragePath)
@@ -905,6 +968,12 @@ func TestRegisterResponseExposesUpdateConfigFields(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"Name":"storage_enabled"`) {
 		t.Fatalf("register response missing storage_enabled: %s", raw)
+	}
+	if !strings.Contains(string(raw), `"Name":"storage_snapshot_interval_seconds"`) {
+		t.Fatalf("register response missing storage_snapshot_interval_seconds: %s", raw)
+	}
+	if !strings.Contains(string(raw), `"Name":"storage_snapshot_record_interval"`) {
+		t.Fatalf("register response missing storage_snapshot_record_interval: %s", raw)
 	}
 	if !strings.Contains(string(raw), `"Name":"price_storage_path"`) {
 		t.Fatalf("register response missing price_storage_path: %s", raw)

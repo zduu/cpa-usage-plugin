@@ -6,12 +6,14 @@ import (
 )
 
 const (
-	abiVersion                 uint32 = 1
-	defaultMaxDetailsPerModel         = 5000
-	defaultRetentionDays              = 30
-	defaultDedupWindowMinutes         = 24 * 60
-	defaultStorageFlushSeconds        = 30
-	defaultPriceStoragePath           = "usage-statistics-prices.json"
+	abiVersion                    uint32 = 1
+	defaultMaxDetailsPerModel            = 5000
+	defaultRetentionDays                 = 30
+	defaultDedupWindowMinutes            = 24 * 60
+	defaultStorageFlushSeconds           = 30
+	defaultStorageSnapshotSeconds        = 300
+	defaultStorageSnapshotRecords        = 1000
+	defaultPriceStoragePath              = "usage-statistics-prices.json"
 )
 
 type envelope struct {
@@ -26,46 +28,52 @@ type envelopeError struct {
 }
 
 type runtimeConfig struct {
-	MaxDetailsPerModel  int
-	RetentionDays       int
-	DedupWindowMinutes  int
-	LogResponseHeaders  string
-	APIKeyHashSalt      string
-	StorageEnabled      bool
-	StoragePath         string
-	StorageFlushSeconds int
-	PriceStoragePath    string
-	UpdateEnabled       bool
-	UpdateVersion       string
+	MaxDetailsPerModel            int
+	RetentionDays                 int
+	DedupWindowMinutes            int
+	LogResponseHeaders            string
+	APIKeyHashSalt                string
+	StorageEnabled                bool
+	StoragePath                   string
+	StorageFlushSeconds           int
+	StorageSnapshotSeconds        int
+	StorageSnapshotRecordInterval int
+	PriceStoragePath              string
+	UpdateEnabled                 bool
+	UpdateVersion                 string
 }
 
 type runtimeConfigPatch struct {
-	MaxDetailsPerModel  *int
-	RetentionDays       *int
-	DedupWindowMinutes  *int
-	LogResponseHeaders  *string
-	APIKeyHashSalt      *string
-	StorageEnabled      *bool
-	StoragePath         *string
-	StorageFlushSeconds *int
-	PriceStoragePath    *string
-	UpdateEnabled       *bool
-	UpdateVersion       *string
+	MaxDetailsPerModel            *int
+	RetentionDays                 *int
+	DedupWindowMinutes            *int
+	LogResponseHeaders            *string
+	APIKeyHashSalt                *string
+	StorageEnabled                *bool
+	StoragePath                   *string
+	StorageFlushSeconds           *int
+	StorageSnapshotSeconds        *int
+	StorageSnapshotRecordInterval *int
+	PriceStoragePath              *string
+	UpdateEnabled                 *bool
+	UpdateVersion                 *string
 }
 
 func defaultRuntimeConfig() runtimeConfig {
 	return runtimeConfig{
-		MaxDetailsPerModel:  defaultMaxDetailsPerModel,
-		RetentionDays:       defaultRetentionDays,
-		DedupWindowMinutes:  defaultDedupWindowMinutes,
-		LogResponseHeaders:  "",
-		APIKeyHashSalt:      "",
-		StorageEnabled:      false,
-		StoragePath:         "usage-statistics.jsonl",
-		StorageFlushSeconds: defaultStorageFlushSeconds,
-		PriceStoragePath:    defaultPriceStoragePath,
-		UpdateEnabled:       false,
-		UpdateVersion:       "latest",
+		MaxDetailsPerModel:            defaultMaxDetailsPerModel,
+		RetentionDays:                 defaultRetentionDays,
+		DedupWindowMinutes:            defaultDedupWindowMinutes,
+		LogResponseHeaders:            "",
+		APIKeyHashSalt:                "",
+		StorageEnabled:                false,
+		StoragePath:                   "usage-statistics.jsonl",
+		StorageFlushSeconds:           defaultStorageFlushSeconds,
+		StorageSnapshotSeconds:        defaultStorageSnapshotSeconds,
+		StorageSnapshotRecordInterval: defaultStorageSnapshotRecords,
+		PriceStoragePath:              defaultPriceStoragePath,
+		UpdateEnabled:                 false,
+		UpdateVersion:                 "latest",
 	}
 }
 
@@ -359,22 +367,29 @@ type ExportPayload struct {
 }
 
 type ExportConfig struct {
-	RetentionDays      int    `json:"retention_days"`
-	MaxDetailsPerModel int    `json:"max_details_per_model"`
-	DedupWindowMinutes int    `json:"dedup_window_minutes"`
-	LogResponseHeaders string `json:"log_response_headers,omitempty"`
-	StorageEnabled     bool   `json:"storage_enabled"`
-	StoragePath        string `json:"storage_path,omitempty"`
-	PriceStoragePath   string `json:"price_storage_path,omitempty"`
+	RetentionDays                 int    `json:"retention_days"`
+	MaxDetailsPerModel            int    `json:"max_details_per_model"`
+	DedupWindowMinutes            int    `json:"dedup_window_minutes"`
+	LogResponseHeaders            string `json:"log_response_headers,omitempty"`
+	StorageEnabled                bool   `json:"storage_enabled"`
+	StoragePath                   string `json:"storage_path,omitempty"`
+	StorageFlushSeconds           int    `json:"storage_flush_interval_seconds,omitempty"`
+	StorageSnapshotSeconds        int    `json:"storage_snapshot_interval_seconds,omitempty"`
+	StorageSnapshotRecordInterval int    `json:"storage_snapshot_record_interval,omitempty"`
+	PriceStoragePath              string `json:"price_storage_path,omitempty"`
 }
 
 type StorageStatus struct {
-	Enabled                bool   `json:"enabled"`
-	Path                   string `json:"path,omitempty"`
-	LoadedPath             string `json:"loaded_path,omitempty"`
-	LastFlushAt            string `json:"last_flush_at,omitempty"`
-	LastError              string `json:"last_error,omitempty"`
-	PendingBufferedRecords int64  `json:"pending_buffered_records,omitempty"`
+	Enabled                       bool   `json:"enabled"`
+	Path                          string `json:"path,omitempty"`
+	LoadedPath                    string `json:"loaded_path,omitempty"`
+	LastFlushAt                   string `json:"last_flush_at,omitempty"`
+	LastSnapshotAt                string `json:"last_snapshot_at,omitempty"`
+	LastError                     string `json:"last_error,omitempty"`
+	PendingBufferedRecords        int64  `json:"pending_buffered_records,omitempty"`
+	PendingSnapshotRecords        int64  `json:"pending_snapshot_records,omitempty"`
+	SnapshotIntervalSeconds       int    `json:"snapshot_interval_seconds,omitempty"`
+	SnapshotRecordIntervalRecords int    `json:"snapshot_record_interval_records,omitempty"`
 }
 
 type ModelPrice struct {

@@ -56,19 +56,23 @@ type RequestStatistics struct {
 	credentialStats   map[string]*CredentialStat
 	clientAPIStats    map[string]*clientAPIStatAccumulator
 
-	logResponseHeaders headerWhitelist
-	storageEnabled     bool
-	storagePath        string
-	storageFlush       time.Duration
-	storageFile        *os.File
-	storageWriter      *bufio.Writer
-	storageDir         string
-	storageLegacyPath  string
-	storageLoadedPath  string
-	storageActiveDate  string
-	storageLastFlush   time.Time
-	storageLastError   string
-	storageBuffered    int64
+	logResponseHeaders            headerWhitelist
+	storageEnabled                bool
+	storagePath                   string
+	storageFlush                  time.Duration
+	storageFile                   *os.File
+	storageWriter                 *bufio.Writer
+	storageDir                    string
+	storageLegacyPath             string
+	storageLoadedPath             string
+	storageActiveDate             string
+	storageLastFlush              time.Time
+	storageLastSnapshot           time.Time
+	storageLastError              string
+	storageBuffered               int64
+	storageSnapshotInterval       time.Duration
+	storageSnapshotRecordInterval int
+	storageSnapshotRecords        int64
 
 	priceStoragePath       string
 	priceStorageLoadedPath string
@@ -198,41 +202,45 @@ var stats = NewRequestStatistics()
 
 func NewRequestStatistics() *RequestStatistics {
 	return &RequestStatistics{
-		maxDetailsPerModel: defaultMaxDetailsPerModel,
-		retention:          time.Duration(defaultRetentionDays) * 24 * time.Hour,
-		dedupWindow:        time.Duration(defaultDedupWindowMinutes) * time.Minute,
-		seen:               make(map[string]time.Time),
-		apis:               make(map[string]*apiStats),
-		requestsByDay:      make(map[string]int64),
-		requestsByHour:     make(map[int]int64),
-		tokensByDay:        make(map[string]int64),
-		tokensByHour:       make(map[int]int64),
-		healthBuckets:      make(map[int64]healthBucket),
-		modelSummaryStats:  make(map[string]*ModelStat),
-		sourceStats:        make(map[string]*sourceStatAccumulator),
-		credentialStats:    make(map[string]*CredentialStat),
-		clientAPIStats:     make(map[string]*clientAPIStatAccumulator),
-		storagePath:        defaultRuntimeConfig().StoragePath,
-		storageFlush:       time.Duration(defaultStorageFlushSeconds) * time.Second,
-		priceStoragePath:   defaultRuntimeConfig().PriceStoragePath,
-		modelPrices:        make(map[string]ModelPrice),
-		startedAt:          time.Now(),
+		maxDetailsPerModel:            defaultMaxDetailsPerModel,
+		retention:                     time.Duration(defaultRetentionDays) * 24 * time.Hour,
+		dedupWindow:                   time.Duration(defaultDedupWindowMinutes) * time.Minute,
+		seen:                          make(map[string]time.Time),
+		apis:                          make(map[string]*apiStats),
+		requestsByDay:                 make(map[string]int64),
+		requestsByHour:                make(map[int]int64),
+		tokensByDay:                   make(map[string]int64),
+		tokensByHour:                  make(map[int]int64),
+		healthBuckets:                 make(map[int64]healthBucket),
+		modelSummaryStats:             make(map[string]*ModelStat),
+		sourceStats:                   make(map[string]*sourceStatAccumulator),
+		credentialStats:               make(map[string]*CredentialStat),
+		clientAPIStats:                make(map[string]*clientAPIStatAccumulator),
+		storagePath:                   defaultRuntimeConfig().StoragePath,
+		storageFlush:                  time.Duration(defaultStorageFlushSeconds) * time.Second,
+		storageSnapshotInterval:       time.Duration(defaultStorageSnapshotSeconds) * time.Second,
+		storageSnapshotRecordInterval: defaultStorageSnapshotRecords,
+		priceStoragePath:              defaultRuntimeConfig().PriceStoragePath,
+		modelPrices:                   make(map[string]ModelPrice),
+		startedAt:                     time.Now(),
 	}
 }
 
 func (s *RequestStatistics) Configure(cfg runtimeConfig) {
 	s.ConfigurePatch(runtimeConfigPatch{
-		MaxDetailsPerModel:  positiveIntPtr(cfg.MaxDetailsPerModel),
-		RetentionDays:       intPtr(cfg.RetentionDays),
-		DedupWindowMinutes:  intPtr(cfg.DedupWindowMinutes),
-		LogResponseHeaders:  stringPtr(cfg.LogResponseHeaders),
-		APIKeyHashSalt:      stringPtr(cfg.APIKeyHashSalt),
-		StorageEnabled:      boolPtr(cfg.StorageEnabled),
-		StoragePath:         stringPtr(cfg.StoragePath),
-		StorageFlushSeconds: positiveIntPtr(cfg.StorageFlushSeconds),
-		PriceStoragePath:    stringPtr(cfg.PriceStoragePath),
-		UpdateEnabled:       boolPtr(cfg.UpdateEnabled),
-		UpdateVersion:       stringPtr(cfg.UpdateVersion),
+		MaxDetailsPerModel:            positiveIntPtr(cfg.MaxDetailsPerModel),
+		RetentionDays:                 intPtr(cfg.RetentionDays),
+		DedupWindowMinutes:            intPtr(cfg.DedupWindowMinutes),
+		LogResponseHeaders:            stringPtr(cfg.LogResponseHeaders),
+		APIKeyHashSalt:                stringPtr(cfg.APIKeyHashSalt),
+		StorageEnabled:                boolPtr(cfg.StorageEnabled),
+		StoragePath:                   stringPtr(cfg.StoragePath),
+		StorageFlushSeconds:           positiveIntPtr(cfg.StorageFlushSeconds),
+		StorageSnapshotSeconds:        positiveIntPtr(cfg.StorageSnapshotSeconds),
+		StorageSnapshotRecordInterval: positiveIntPtr(cfg.StorageSnapshotRecordInterval),
+		PriceStoragePath:              stringPtr(cfg.PriceStoragePath),
+		UpdateEnabled:                 boolPtr(cfg.UpdateEnabled),
+		UpdateVersion:                 stringPtr(cfg.UpdateVersion),
 	})
 }
 
@@ -262,6 +270,12 @@ func (s *RequestStatistics) ConfigurePatch(cfg runtimeConfigPatch) {
 	}
 	if cfg.StorageFlushSeconds != nil && *cfg.StorageFlushSeconds > 0 {
 		s.storageFlush = time.Duration(*cfg.StorageFlushSeconds) * time.Second
+	}
+	if cfg.StorageSnapshotSeconds != nil && *cfg.StorageSnapshotSeconds >= 0 {
+		s.storageSnapshotInterval = time.Duration(*cfg.StorageSnapshotSeconds) * time.Second
+	}
+	if cfg.StorageSnapshotRecordInterval != nil && *cfg.StorageSnapshotRecordInterval >= 0 {
+		s.storageSnapshotRecordInterval = *cfg.StorageSnapshotRecordInterval
 	}
 	if cfg.PriceStoragePath != nil && strings.TrimSpace(*cfg.PriceStoragePath) != "" {
 		s.priceStoragePath = strings.TrimSpace(*cfg.PriceStoragePath)
@@ -478,6 +492,12 @@ func (s *RequestStatistics) configureStorageLocked() {
 	s.storagePath = path
 	s.storageDir = dir
 	s.storageLegacyPath = legacyPath
+	if !snapshotAt.IsZero() {
+		s.storageLastSnapshot = snapshotAt
+	} else {
+		s.storageLastSnapshot = time.Time{}
+	}
+	s.storageSnapshotRecords = 0
 	if err := s.openStorageFileLocked(now); err != nil {
 		s.storageLastError = err.Error()
 		return
@@ -538,7 +558,9 @@ func (s *RequestStatistics) openStorageFileLocked(now time.Time) error {
 	if s.storageFile != nil && s.storageLoadedPath == path {
 		return nil
 	}
-	s.closeStorageLocked()
+	if s.storageWriter != nil || s.storageFile != nil {
+		s.closeStorageLocked()
+	}
 	if err := os.MkdirAll(s.storageDir, 0o755); err != nil {
 		return err
 	}
@@ -577,6 +599,9 @@ func (s *RequestStatistics) writeStorageSnapshotLocked(now time.Time) error {
 	if s == nil || strings.TrimSpace(s.storageDir) == "" {
 		return nil
 	}
+	if now.IsZero() {
+		now = time.Now()
+	}
 	if err := os.MkdirAll(s.storageDir, 0o755); err != nil {
 		return err
 	}
@@ -614,7 +639,34 @@ func (s *RequestStatistics) writeStorageSnapshotLocked(now time.Time) error {
 		return err
 	}
 	_ = syncDir(s.storageDir)
+	s.storageLastSnapshot = now
+	s.storageSnapshotRecords = 0
 	return nil
+}
+
+func (s *RequestStatistics) maybeWriteStorageSnapshotLocked(now time.Time) {
+	if s == nil || !s.storageEnabled || strings.TrimSpace(s.storageDir) == "" {
+		return
+	}
+	due := false
+	if s.storageSnapshotRecordInterval > 0 && s.storageSnapshotRecords >= int64(s.storageSnapshotRecordInterval) {
+		due = true
+	}
+	if !due && s.storageSnapshotInterval > 0 {
+		base := s.storageLastSnapshot
+		if base.IsZero() {
+			base = s.storageLastFlush
+		}
+		if !base.IsZero() && now.Sub(base) >= s.storageSnapshotInterval {
+			due = true
+		}
+	}
+	if !due {
+		return
+	}
+	if err := s.writeStorageSnapshotLocked(now); err != nil {
+		s.storageLastError = err.Error()
+	}
 }
 
 func syncDir(dir string) error {
@@ -816,14 +868,17 @@ func (s *RequestStatistics) appendDetailLocked(detail persistedDetail) {
 		return
 	}
 	s.storageBuffered++
-	if s.storageFlush <= 0 || time.Since(s.storageLastFlush) >= s.storageFlush {
+	s.storageSnapshotRecords++
+	now := time.Now()
+	if s.storageFlush <= 0 || s.storageLastFlush.IsZero() || now.Sub(s.storageLastFlush) >= s.storageFlush {
 		if err := s.storageWriter.Flush(); err != nil {
 			s.storageLastError = err.Error()
 			return
 		}
 		s.storageBuffered = 0
-		s.storageLastFlush = time.Now()
+		s.storageLastFlush = now
 	}
+	s.maybeWriteStorageSnapshotLocked(now)
 }
 
 func (s *RequestStatistics) closeStorageLocked() {
@@ -2813,13 +2868,16 @@ func (s *RequestStatistics) ConfigSnapshot() ExportConfig {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return ExportConfig{
-		RetentionDays:      int(s.retention.Hours() / 24),
-		MaxDetailsPerModel: s.maxDetailsPerModel,
-		DedupWindowMinutes: int(s.dedupWindow.Minutes()),
-		LogResponseHeaders: s.logResponseHeaders.String(),
-		StorageEnabled:     s.storageEnabled,
-		StoragePath:        s.storagePath,
-		PriceStoragePath:   s.priceStoragePath,
+		RetentionDays:                 int(s.retention.Hours() / 24),
+		MaxDetailsPerModel:            s.maxDetailsPerModel,
+		DedupWindowMinutes:            int(s.dedupWindow.Minutes()),
+		LogResponseHeaders:            s.logResponseHeaders.String(),
+		StorageEnabled:                s.storageEnabled,
+		StoragePath:                   s.storagePath,
+		StorageFlushSeconds:           int(s.storageFlush.Seconds()),
+		StorageSnapshotSeconds:        int(s.storageSnapshotInterval.Seconds()),
+		StorageSnapshotRecordInterval: s.storageSnapshotRecordInterval,
+		PriceStoragePath:              s.priceStoragePath,
 	}
 }
 
@@ -2834,14 +2892,20 @@ func (s *RequestStatistics) StorageStatus() StorageStatus {
 
 func (s *RequestStatistics) storageStatusLocked() StorageStatus {
 	status := StorageStatus{
-		Enabled:                s.storageEnabled,
-		Path:                   s.storagePath,
-		LoadedPath:             s.storageLoadedPath,
-		LastError:              s.storageLastError,
-		PendingBufferedRecords: s.storageBuffered,
+		Enabled:                       s.storageEnabled,
+		Path:                          s.storagePath,
+		LoadedPath:                    s.storageLoadedPath,
+		LastError:                     s.storageLastError,
+		PendingBufferedRecords:        s.storageBuffered,
+		PendingSnapshotRecords:        s.storageSnapshotRecords,
+		SnapshotIntervalSeconds:       int(s.storageSnapshotInterval.Seconds()),
+		SnapshotRecordIntervalRecords: s.storageSnapshotRecordInterval,
 	}
 	if !s.storageLastFlush.IsZero() {
 		status.LastFlushAt = s.storageLastFlush.UTC().Format(time.RFC3339)
+	}
+	if !s.storageLastSnapshot.IsZero() {
+		status.LastSnapshotAt = s.storageLastSnapshot.UTC().Format(time.RFC3339)
 	}
 	return status
 }
