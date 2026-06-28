@@ -281,14 +281,21 @@ func dashboardExportContentType(format dashboardExportFormat) string {
 	}
 }
 
+func dashboardExportResponseContentType(contentType string, gzipped bool) string {
+	if gzipped {
+		return "application/gzip"
+	}
+	return contentType
+}
+
 func dashboardExportHeaders(etag string, contentType string, gzipped bool) map[string][]string {
 	headers := map[string][]string{
-		"Content-Type":  {contentType},
+		"Content-Type":  {dashboardExportResponseContentType(contentType, gzipped)},
 		"Cache-Control": {"private, no-cache"},
 		"ETag":          {etag},
 	}
 	if gzipped {
-		headers["Content-Encoding"] = []string{"gzip"}
+		headers["X-Export-Content-Type"] = []string{contentType}
 	}
 	return headers
 }

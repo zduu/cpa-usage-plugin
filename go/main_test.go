@@ -1663,8 +1663,14 @@ func TestDashboardEventsExportSupportsCSVJSONLAndGzip(t *testing.T) {
 		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export",
 		Query:  map[string][]string{"format": {"csv"}, "gzip": {"1"}},
 	}), nil)
-	if got := gzipResp.Headers["Content-Encoding"]; len(got) != 1 || got[0] != "gzip" {
-		t.Fatalf("gzip content encoding = %#v", got)
+	if got := gzipResp.Headers["Content-Type"]; len(got) != 1 || got[0] != "application/gzip" {
+		t.Fatalf("gzip content type = %#v", got)
+	}
+	if got := gzipResp.Headers["X-Export-Content-Type"]; len(got) != 1 || !strings.HasPrefix(got[0], "text/csv") {
+		t.Fatalf("gzip original content type = %#v", got)
+	}
+	if got := gzipResp.Headers["Content-Encoding"]; len(got) != 0 {
+		t.Fatalf("gzip content encoding = %#v, want none", got)
 	}
 	reader, err := gzip.NewReader(bytes.NewReader(gzipResp.Body))
 	if err != nil {
@@ -1694,8 +1700,14 @@ func TestDashboardEventsExportSupportsCSVJSONLAndGzip(t *testing.T) {
 	if notModified.StatusCode != http.StatusNotModified {
 		t.Fatalf("gzip conditional status = %d, want 304", notModified.StatusCode)
 	}
-	if got := notModified.Headers["Content-Encoding"]; len(got) != 1 || got[0] != "gzip" {
-		t.Fatalf("gzip conditional content encoding = %#v", got)
+	if got := notModified.Headers["Content-Type"]; len(got) != 1 || got[0] != "application/gzip" {
+		t.Fatalf("gzip conditional content type = %#v", got)
+	}
+	if got := notModified.Headers["X-Export-Content-Type"]; len(got) != 1 || !strings.HasPrefix(got[0], "text/csv") {
+		t.Fatalf("gzip conditional original content type = %#v", got)
+	}
+	if got := notModified.Headers["Content-Encoding"]; len(got) != 0 {
+		t.Fatalf("gzip conditional content encoding = %#v, want none", got)
 	}
 
 	runtime := stats.RuntimeStatus()
@@ -1796,6 +1808,73 @@ func TestDashboardEventsExportAsyncJobLifecycle(t *testing.T) {
 	}), nil)
 	if deleteResp.StatusCode != http.StatusOK {
 		t.Fatalf("delete status = %d, want 200", deleteResp.StatusCode)
+	}
+
+	var gzipCreated dashboardExportJobResponse
+	gzipCreateResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "POST",
+		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export-jobs",
+		Query:  map[string][]string{"format": {"csv"}, "gzip": {"1"}},
+	}), &gzipCreated)
+	if gzipCreateResp.StatusCode != http.StatusAccepted || gzipCreated.ID == "" {
+		t.Fatalf("created gzip async export = status %d body %#v, want 202 with job id", gzipCreateResp.StatusCode, gzipCreated)
+	}
+
+	var gzipStatus dashboardExportJobResponse
+	waitForTestCondition(t, func() bool {
+		decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+			Method: "GET",
+			Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export-jobs",
+			Query:  map[string][]string{"id": {gzipCreated.ID}},
+		}), &gzipStatus)
+		return gzipStatus.Status == dashboardExportJobSucceeded
+	})
+	if gzipStatus.BodyBytes <= 0 || gzipStatus.RawBytes <= 0 || !strings.HasSuffix(gzipStatus.DownloadPath, gzipCreated.ID) {
+		t.Fatalf("completed gzip async export status = %#v, want ready download", gzipStatus)
+	}
+
+	gzipDownloadResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "GET",
+		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export-download",
+		Query:  map[string][]string{"id": {gzipCreated.ID}},
+	}), nil)
+	if gzipDownloadResp.StatusCode != http.StatusOK {
+		t.Fatalf("gzip download status = %d, want 200", gzipDownloadResp.StatusCode)
+	}
+	if got := gzipDownloadResp.Headers["Content-Type"]; len(got) != 1 || got[0] != "application/gzip" {
+		t.Fatalf("gzip download content type = %#v", got)
+	}
+	if got := gzipDownloadResp.Headers["X-Export-Content-Type"]; len(got) != 1 || !strings.HasPrefix(got[0], "text/csv") {
+		t.Fatalf("gzip download original content type = %#v", got)
+	}
+	if got := gzipDownloadResp.Headers["Content-Encoding"]; len(got) != 0 {
+		t.Fatalf("gzip download content encoding = %#v, want none", got)
+	}
+	if got := gzipDownloadResp.Headers["Content-Disposition"]; len(got) != 1 || !strings.Contains(got[0], ".csv.gz") {
+		t.Fatalf("gzip download disposition = %#v, want .csv.gz filename", got)
+	}
+	gzipReader, err := gzip.NewReader(bytes.NewReader(gzipDownloadResp.Body))
+	if err != nil {
+		t.Fatalf("new async gzip reader: %v", err)
+	}
+	gzipDecompressed, err := io.ReadAll(gzipReader)
+	if closeErr := gzipReader.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("read async gzip body: %v", err)
+	}
+	if !strings.HasPrefix(string(gzipDecompressed), "时间,模型,来源") || !strings.Contains(string(gzipDecompressed), "rate limited") {
+		t.Fatalf("async gzip decompressed body missing expected CSV content: %q", string(gzipDecompressed))
+	}
+
+	gzipDeleteResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "DELETE",
+		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export-jobs",
+		Query:  map[string][]string{"id": {gzipCreated.ID}},
+	}), nil)
+	if gzipDeleteResp.StatusCode != http.StatusOK {
+		t.Fatalf("gzip delete status = %d, want 200", gzipDeleteResp.StatusCode)
 	}
 }
 

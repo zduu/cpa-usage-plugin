@@ -17,7 +17,7 @@
 - JSONL 持久化支持日期分片、周期 snapshot、旧分片清理、可选 fsync。
 - 持久化写入已改为后台有界队列和批量 writer，请求记录路径不直接执行 JSON marshal、文件写入、flush、fsync 和 snapshot。
 - 看板摘要、事件分页、上游详情和事件导出支持弱 ETag 与 `If-None-Match`。
-- 事件导出支持 JSON、CSV、JSONL、gzip、默认最大导出条数和单次 `limit`。
+- 事件导出支持 JSON、CSV、JSONL、gzip 文件内容、默认最大导出条数和单次 `limit`。
 - 看板导出使用后台导出任务，生成阶段按页扫描并写入临时文件，避免构造完整事件数组。
 - `/health` 已暴露持久化状态、writer 队列、批次耗时、p95/p99、导出压力、条件请求命中率和结构化 `alerts`。
 - release workflow 已从 `CHANGELOG.md` 抽取版本说明，避免新 release 没有人工说明。
