@@ -425,10 +425,25 @@ type ModelPriceStorageStatus struct {
 }
 
 type RuntimeStatus struct {
-	StartedAt      string         `json:"started_at,omitempty"`
-	LastRecordedAt string         `json:"last_recorded_at,omitempty"`
-	SeenCount      int            `json:"seen_count"`
-	LastImport     *ImportSummary `json:"last_import,omitempty"`
+	StartedAt                 string         `json:"started_at,omitempty"`
+	LastRecordedAt            string         `json:"last_recorded_at,omitempty"`
+	SeenCount                 int            `json:"seen_count"`
+	SummaryVersion            uint64         `json:"summary_version,omitempty"`
+	SummaryCacheValid         bool           `json:"summary_cache_valid"`
+	SummaryCacheHits          int64          `json:"summary_cache_hits,omitempty"`
+	SummaryCacheMisses        int64          `json:"summary_cache_misses,omitempty"`
+	LastSummaryDurationMs     float64        `json:"last_summary_duration_ms,omitempty"`
+	EventCacheEntries         int            `json:"event_cache_entries,omitempty"`
+	EventCacheHits            int64          `json:"event_cache_hits,omitempty"`
+	EventCacheMisses          int64          `json:"event_cache_misses,omitempty"`
+	LastEventsQueryDurationMs float64        `json:"last_events_query_duration_ms,omitempty"`
+	LastEventsQueryTotal      int            `json:"last_events_query_total,omitempty"`
+	EventIndexVersion         uint64         `json:"event_index_version,omitempty"`
+	EventIndexEntries         int            `json:"event_index_entries,omitempty"`
+	APIDetailQueries          int64          `json:"api_detail_queries,omitempty"`
+	LastAPIDetailDurationMs   float64        `json:"last_api_detail_duration_ms,omitempty"`
+	LastAPIDetailTotalEvents  int            `json:"last_api_detail_total_events,omitempty"`
+	LastImport                *ImportSummary `json:"last_import,omitempty"`
 }
 
 type ImportResponse struct {

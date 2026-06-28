@@ -308,6 +308,8 @@ curl http://127.0.0.1:8317/v0/management/plugins/usage-statistics/health \
   -H 'x-management-key: <你的管理密钥>'
 ```
 
+`runtime` 字段会返回摘要缓存命中/未命中、事件缓存命中/未命中、事件索引条目数，以及最近 summary/events/api-detail 查询耗时，便于观察看板压力和筛选性能。
+
 ### 数据导出
 
 ```bash

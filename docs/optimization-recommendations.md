@@ -20,6 +20,7 @@
 - 可选 `storage_sync_interval_seconds` 和 `storage_sync_record_interval` 可对 JSONL 文件执行周期 fsync。
 - 摘要聚合、健康网格、模型/来源/凭证/客户端 API 统计已增量维护。
 - 事件查询已有版本化缓存和时间倒序索引，当前分支继续补了模型、来源、凭证筛选的按需二级索引。
+- `/health.runtime` 暴露摘要缓存、事件缓存、索引规模和最近查询耗时指标。
 - 页面会显示持久化状态、待 flush 记录数、最后 flush 时间和最近导入结果。
 
 ## P0 建议
@@ -196,17 +197,15 @@ plugins:
 - 长期统计能力和服务压力解耦。
 - 明细上限更容易控制。
 
-### 3. 增加运行指标和压测基线
+### 3. 增加压测基线
 
-建议 `/health` 或新 `/metrics` 暴露：
+当前 `/health.runtime` 已暴露：
 
-- 当前明细数、淘汰数。
 - 摘要版本号。
 - 事件缓存命中/未命中次数。
-- 持久化队列长度、pending flush/sync 数。
 - 最近一次 summary、events、api-detail 查询耗时。
 
-建议 CI 增加固定 benchmark：
+后续建议 CI 增加固定 benchmark：
 
 ```bash
 cd go

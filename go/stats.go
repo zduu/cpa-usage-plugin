@@ -101,6 +101,17 @@ type RequestStatistics struct {
 	eventModelIndex      map[string][]dashboardEventDetail
 	eventSourceIndex     map[string][]dashboardEventDetail
 	eventAuthIndex       map[string][]dashboardEventDetail
+
+	summaryCacheHits        int64
+	summaryCacheMisses      int64
+	lastSummaryDuration     time.Duration
+	eventCacheHits          int64
+	eventCacheMisses        int64
+	lastEventsQueryDuration time.Duration
+	lastEventsQueryTotal    int
+	apiDetailQueries        int64
+	lastAPIDetailDuration   time.Duration
+	lastAPIDetailTotal      int
 }
 
 type apiStats struct {
@@ -1891,6 +1902,13 @@ func nonNegativeInt64(value int64) int64 {
 	return value
 }
 
+func durationMilliseconds(value time.Duration) float64 {
+	if value <= 0 {
+		return 0
+	}
+	return float64(value) / float64(time.Millisecond)
+}
+
 func normalizeModelName(model string) string {
 	model = strings.TrimSpace(model)
 	if model == "" {
@@ -1967,21 +1985,26 @@ func (s *RequestStatistics) SummaryWithoutDetails() DashboardSummary {
 		return DashboardSummary{}
 	}
 
-	now := time.Now()
+	startedAt := time.Now()
+	now := startedAt
 	healthWindow := summaryHealthWindow(now)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.summaryCacheValid && s.summaryCacheVersion == s.summaryVersion && s.summaryCacheWindow.Equal(healthWindow) {
+		s.summaryCacheHits++
+		s.lastSummaryDuration = time.Since(startedAt)
 		return cloneDashboardSummaryWithGeneratedAt(s.summaryCache, now)
 	}
 
+	s.summaryCacheMisses++
 	summary := s.buildSummaryWithoutDetailsLocked(now, healthWindow)
 	s.summaryCache = cloneDashboardSummary(summary)
 	s.summaryCacheValid = true
 	s.summaryCacheVersion = s.summaryVersion
 	s.summaryCacheWindow = healthWindow
+	s.lastSummaryDuration = time.Since(startedAt)
 	return summary
 }
 
@@ -2593,6 +2616,7 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool) Event
 	if s == nil {
 		return EventsResult{}
 	}
+	startedAt := time.Now()
 
 	if paginate {
 		if params.Limit <= 0 || params.Limit > 500 {
@@ -2608,6 +2632,11 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool) Event
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	finish := func(result EventsResult) EventsResult {
+		s.lastEventsQueryDuration = time.Since(startedAt)
+		s.lastEventsQueryTotal = result.Total
+		return result
+	}
 
 	now := time.Now()
 	cutoff := dashboardRangeCutoff(params.Range, now)
@@ -2615,21 +2644,23 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool) Event
 	if paginate {
 		cacheKey = dashboardEventCacheKeyFor(params, now)
 		if cached, ok := s.eventQueryCache[cacheKey]; ok {
-			return cloneEventsResult(cached, now)
+			s.eventCacheHits++
+			return finish(cloneEventsResult(cached, now))
 		}
+		s.eventCacheMisses++
 	}
 
 	index := s.dashboardEventQueryIndexLocked(params)
 	if !dashboardEventQueryHasFilters(params) {
 		total := len(index)
 		if !paginate {
-			return EventsResult{
+			return finish(EventsResult{
 				Events:      requestDetailsFromDashboardEvents(index),
 				Total:       total,
 				Limit:       total,
 				Offset:      0,
 				GeneratedAt: now.UTC().Format(time.RFC3339),
-			}
+			})
 		}
 		if params.Offset >= total {
 			result := EventsResult{
@@ -2640,7 +2671,7 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool) Event
 				GeneratedAt: now.UTC().Format(time.RFC3339),
 			}
 			s.cacheDashboardEventsLocked(cacheKey, result)
-			return result
+			return finish(result)
 		}
 		end := params.Offset + params.Limit
 		if end > total {
@@ -2654,7 +2685,7 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool) Event
 			GeneratedAt: now.UTC().Format(time.RFC3339),
 		}
 		s.cacheDashboardEventsLocked(cacheKey, result)
-		return result
+		return finish(result)
 	}
 
 	var events []RequestDetail
@@ -2677,13 +2708,13 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool) Event
 		if events == nil {
 			events = []RequestDetail{}
 		}
-		return EventsResult{
+		return finish(EventsResult{
 			Events:      events,
 			Total:       total,
 			Limit:       total,
 			Offset:      0,
 			GeneratedAt: now.UTC().Format(time.RFC3339),
-		}
+		})
 	}
 
 	if params.Offset >= total {
@@ -2695,7 +2726,7 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool) Event
 			GeneratedAt: now.UTC().Format(time.RFC3339),
 		}
 		s.cacheDashboardEventsLocked(cacheKey, result)
-		return result
+		return finish(result)
 	}
 
 	result := EventsResult{
@@ -2706,15 +2737,16 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool) Event
 		GeneratedAt: now.UTC().Format(time.RFC3339),
 	}
 	s.cacheDashboardEventsLocked(cacheKey, result)
-	return result
+	return finish(result)
 }
 
 // QueryAPIDetail returns range-scoped aggregates and recent events for one API
 // without making the browser page through every matching event.
 func (s *RequestStatistics) QueryAPIDetail(api string, rangeKey string, recentLimit int, errorLimit int) APIDetailResponse {
+	startedAt := time.Now()
 	result := APIDetailResponse{
 		API:         api,
-		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		GeneratedAt: startedAt.UTC().Format(time.RFC3339),
 	}
 	if s == nil {
 		return result
@@ -2731,11 +2763,17 @@ func (s *RequestStatistics) QueryAPIDetail(api string, rangeKey string, recentLi
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	finish := func(result APIDetailResponse) APIDetailResponse {
+		s.apiDetailQueries++
+		s.lastAPIDetailDuration = time.Since(startedAt)
+		s.lastAPIDetailTotal = result.TotalEvents
+		return result
+	}
 
 	index := s.dashboardEventIndexLocked(api)
 	if len(index) == 0 {
 		result.GeneratedAt = now.UTC().Format(time.RFC3339)
-		return result
+		return finish(result)
 	}
 
 	modelAgg := make(map[string]*ModelStat)
@@ -2878,7 +2916,7 @@ func (s *RequestStatistics) QueryAPIDetail(api string, rangeKey string, recentLi
 		result.RecentEvents[i] = dm.requestDetail()
 	}
 	result.GeneratedAt = now.UTC().Format(time.RFC3339)
-	return result
+	return finish(result)
 }
 
 func (s *RequestStatistics) countDetailsLocked() int64 {
@@ -2982,7 +3020,22 @@ func (s *RequestStatistics) RuntimeStatus() RuntimeStatus {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	status := RuntimeStatus{
-		SeenCount: len(s.seen),
+		SeenCount:                 len(s.seen),
+		SummaryVersion:            s.summaryVersion,
+		SummaryCacheValid:         s.summaryCacheValid && s.summaryCacheVersion == s.summaryVersion,
+		SummaryCacheHits:          s.summaryCacheHits,
+		SummaryCacheMisses:        s.summaryCacheMisses,
+		LastSummaryDurationMs:     durationMilliseconds(s.lastSummaryDuration),
+		EventCacheEntries:         len(s.eventQueryCache),
+		EventCacheHits:            s.eventCacheHits,
+		EventCacheMisses:          s.eventCacheMisses,
+		LastEventsQueryDurationMs: durationMilliseconds(s.lastEventsQueryDuration),
+		LastEventsQueryTotal:      s.lastEventsQueryTotal,
+		EventIndexVersion:         s.eventIndexVersion,
+		EventIndexEntries:         len(s.eventIndex),
+		APIDetailQueries:          s.apiDetailQueries,
+		LastAPIDetailDurationMs:   durationMilliseconds(s.lastAPIDetailDuration),
+		LastAPIDetailTotalEvents:  s.lastAPIDetailTotal,
 	}
 	if !s.startedAt.IsZero() {
 		status.StartedAt = s.startedAt.UTC().Format(time.RFC3339)

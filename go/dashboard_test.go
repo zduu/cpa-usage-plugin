@@ -458,6 +458,50 @@ func TestDashboardEventsCacheReturnsCopyAndInvalidates(t *testing.T) {
 	}
 }
 
+func TestRuntimeStatusReportsDashboardMetrics(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 200, DedupWindowMinutes: 0})
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < 2; i++ {
+		stats.Record(UsageRecord{
+			Provider:    "openai",
+			Model:       "gpt-4",
+			RequestedAt: base.Add(time.Duration(i) * time.Minute),
+			Detail:      UsageDetail{TotalTokens: int64(10 + i)},
+		})
+	}
+
+	_ = stats.SummaryWithoutDetails()
+	_ = stats.SummaryWithoutDetails()
+	params := EventsQuery{Limit: 2, Offset: 0}
+	_ = stats.QueryEvents(params)
+	_ = stats.QueryEvents(params)
+	_ = stats.QueryAPIDetail("openai", "24h", 10, 10)
+
+	status := stats.RuntimeStatus()
+	if status.SummaryCacheMisses != 1 || status.SummaryCacheHits != 1 {
+		t.Fatalf("summary cache metrics = hits %d misses %d, want 1/1", status.SummaryCacheHits, status.SummaryCacheMisses)
+	}
+	if !status.SummaryCacheValid || status.SummaryVersion == 0 {
+		t.Fatalf("summary cache status = valid %v version %d", status.SummaryCacheValid, status.SummaryVersion)
+	}
+	if status.EventCacheMisses != 1 || status.EventCacheHits != 1 || status.EventCacheEntries != 1 {
+		t.Fatalf("event cache metrics = hits %d misses %d entries %d, want 1/1/1",
+			status.EventCacheHits, status.EventCacheMisses, status.EventCacheEntries)
+	}
+	if status.LastEventsQueryTotal != 2 || status.EventIndexEntries != 2 {
+		t.Fatalf("event query metrics = total %d index entries %d, want 2/2",
+			status.LastEventsQueryTotal, status.EventIndexEntries)
+	}
+	if status.APIDetailQueries != 1 || status.LastAPIDetailTotalEvents != 2 {
+		t.Fatalf("api detail metrics = queries %d total %d, want 1/2",
+			status.APIDetailQueries, status.LastAPIDetailTotalEvents)
+	}
+	if status.LastSummaryDurationMs <= 0 || status.LastEventsQueryDurationMs <= 0 || status.LastAPIDetailDurationMs <= 0 {
+		t.Fatalf("query durations should be reported: %#v", status)
+	}
+}
+
 func TestDashboardEventsModelFilter(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{MaxDetailsPerModel: 200, DedupWindowMinutes: 0})
