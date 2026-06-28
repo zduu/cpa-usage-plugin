@@ -28,6 +28,12 @@ var dashboardPageJS string
 
 var completeDashboardHTML string
 
+type HealthAlert struct {
+	Severity string `json:"severity"`
+	Code     string `json:"code"`
+	Message  string `json:"message"`
+}
+
 func init() {
 	h := strings.Replace(dashboardPageHTML, "</head>",
 		"<style>\n"+dashboardPageCSS+"\n</style></head>", 1)
@@ -491,6 +497,7 @@ func dashboardIfNoneMatch(headers map[string][]string, etag string) bool {
 func handleHealthCheck() ([]byte, error) {
 	type HealthResponse struct {
 		Status        string        `json:"status"`
+		Alerts        []HealthAlert `json:"alerts,omitempty"`
 		DetailCount   int64         `json:"detail_count"`
 		TotalRequests int64         `json:"total_requests"`
 		EvictedTotal  int64         `json:"evicted_total"`
@@ -503,15 +510,19 @@ func handleHealthCheck() ([]byte, error) {
 	detailCount := stats.DetailCount()
 	evicted := stats.EvictedTotal()
 	summary := stats.SummaryWithoutDetails()
+	storage := stats.StorageStatus()
+	runtime := stats.RuntimeStatus()
+	alerts := healthAlerts(storage, runtime)
 
 	health := HealthResponse{
-		Status:        "ok",
+		Status:        healthStatus(alerts),
+		Alerts:        alerts,
 		DetailCount:   detailCount,
 		TotalRequests: summary.Usage.TotalRequests,
 		EvictedTotal:  evicted,
 		Config:        stats.ConfigSnapshot(),
-		Storage:       stats.StorageStatus(),
-		Runtime:       stats.RuntimeStatus(),
+		Storage:       storage,
+		Runtime:       runtime,
 		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
 	}
 	responseJSON, err := json.Marshal(health)
@@ -526,4 +537,56 @@ func handleHealthCheck() ([]byte, error) {
 		Body: responseJSON,
 	}
 	return okEnvelopeJSON(string(mustMarshal(resp)))
+}
+
+func healthStatus(alerts []HealthAlert) string {
+	status := "ok"
+	for _, alert := range alerts {
+		if alert.Severity == "error" {
+			return "error"
+		}
+		if alert.Severity == "warn" {
+			status = "warn"
+		}
+	}
+	return status
+}
+
+func healthAlerts(storage StorageStatus, runtime RuntimeStatus) []HealthAlert {
+	var alerts []HealthAlert
+	if storage.LastError != "" {
+		alerts = append(alerts, HealthAlert{
+			Severity: "error",
+			Code:     "storage_error",
+			Message:  storage.LastError,
+		})
+	}
+	switch storage.WritePressure {
+	case "full":
+		alerts = append(alerts, HealthAlert{
+			Severity: "error",
+			Code:     "storage_writer_full",
+			Message:  "持久化写入队列已满",
+		})
+	case "backlog":
+		alerts = append(alerts, HealthAlert{
+			Severity: "warn",
+			Code:     "storage_writer_backlog",
+			Message:  "持久化写入队列积压",
+		})
+	case "slow":
+		alerts = append(alerts, HealthAlert{
+			Severity: "warn",
+			Code:     "storage_writer_slow",
+			Message:  "持久化写入偏慢",
+		})
+	}
+	if runtime.LastEventsExportTruncated {
+		alerts = append(alerts, HealthAlert{
+			Severity: "warn",
+			Code:     "events_export_truncated",
+			Message:  "最近一次事件导出被上限截断",
+		})
+	}
+	return alerts
 }

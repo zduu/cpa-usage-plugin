@@ -311,6 +311,59 @@ func TestExportUsageIncludesMetadata(t *testing.T) {
 	}
 }
 
+func TestHealthCheckReportsAlertsForRuntimePressure(t *testing.T) {
+	previousStats := stats
+	stats = NewRequestStatistics()
+	t.Cleanup(func() { stats = previousStats })
+
+	stats.RecordEventsExport("json", false, EventsResult{
+		Events:    []RequestDetail{{Model: "gpt-4"}},
+		Total:     10,
+		Limit:     1,
+		Truncated: true,
+	}, 1024, 512, 25*time.Millisecond)
+
+	var health struct {
+		Status  string        `json:"status"`
+		Alerts  []HealthAlert `json:"alerts"`
+		Runtime RuntimeStatus `json:"runtime"`
+	}
+	resp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "GET",
+		Path:   "/v0/management/plugins/usage-statistics/health",
+	}), &health)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("health status code = %d, want 200", resp.StatusCode)
+	}
+	if health.Status != "warn" {
+		t.Fatalf("health status = %q, want warn", health.Status)
+	}
+	if len(health.Alerts) != 1 || health.Alerts[0].Code != "events_export_truncated" || health.Alerts[0].Severity != "warn" {
+		t.Fatalf("health alerts = %#v, want events_export_truncated warning", health.Alerts)
+	}
+	if health.Runtime.EventsExportRequests != 1 || !health.Runtime.LastEventsExportTruncated {
+		t.Fatalf("health runtime export metrics = %#v", health.Runtime)
+	}
+}
+
+func TestHealthAlertsClassifyStoragePressure(t *testing.T) {
+	alerts := healthAlerts(StorageStatus{WritePressure: "slow"}, RuntimeStatus{})
+	if healthStatus(alerts) != "warn" || len(alerts) != 1 || alerts[0].Code != "storage_writer_slow" {
+		t.Fatalf("slow storage alerts = status %q alerts %#v, want warn/storage_writer_slow", healthStatus(alerts), alerts)
+	}
+
+	alerts = healthAlerts(StorageStatus{WritePressure: "full"}, RuntimeStatus{})
+	if healthStatus(alerts) != "error" || len(alerts) != 1 || alerts[0].Code != "storage_writer_full" {
+		t.Fatalf("full storage alerts = status %q alerts %#v, want error/storage_writer_full", healthStatus(alerts), alerts)
+	}
+
+	alerts = healthAlerts(StorageStatus{LastError: "disk full"}, RuntimeStatus{})
+	if healthStatus(alerts) != "error" || len(alerts) != 1 || alerts[0].Code != "storage_error" {
+		t.Fatalf("storage error alerts = status %q alerts %#v, want error/storage_error", healthStatus(alerts), alerts)
+	}
+}
+
 func TestRecordStoresMaskedClientAPIKeyAndCleanSource(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Record(UsageRecord{

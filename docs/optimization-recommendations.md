@@ -25,6 +25,7 @@
 - 看板摘要、事件分页、上游详情和事件导出接口支持弱 ETag 与 `If-None-Match` 条件请求，前端轮询会在 304 时复用本地缓存。
 - `/health.runtime.conditional_requests` 按端点统计带 `If-None-Match` 请求的 304 命中、未命中和命中率。
 - `/health.runtime` 暴露事件导出生成次数、gzip 次数、截断次数、最近导出耗时和响应体大小，便于观察大导出压力。
+- `/health` 顶层 `alerts` 会把持久化写入压力、持久化错误和最近导出截断聚合成 `warn`/`error`，便于外部告警。
 - 事件导出接口支持 JSON、CSV、JSONL 和可选 gzip；看板 CSV 导出已改为服务端生成，浏览器不再先下载完整 JSON 数组再转换。导出默认受 `export_max_records` 保护，也可用 `limit` 为单次导出设置更小上限，响应会标记总数、导出数和是否截断。
 - 页面会显示持久化状态、后台写入队列积压、最近 writer 批次指标、writer 滑动平均、p95/p99 长尾指标、写入压力状态、待 flush 记录数、最后 flush 时间和最近导入结果。
 
@@ -145,10 +146,6 @@ plugins:
 - `/health.storage` 暴露最近 writer 批次的 `last_write_batch_records`、`last_write_batch_duration_ms` 和 `last_write_queue_wait_ms`，看板底部状态 tooltip 也会显示这些指标。
 - `/health.storage` 暴露 writer 累计批次/记录、批次耗时 EWMA、最近窗口 p95/p99、队列等待 EWMA、队列等待 p95/p99、最长等待和 `write_pressure`，看板可在无明显积压但持续写入偏慢时提示。
 
-后续可以继续补：
-
-- 将 `write_pressure` 接到外部告警或管理端全局健康提示。
-
 收益：
 
 - 请求记录路径不被磁盘波动放大。
@@ -246,12 +243,13 @@ go test -run '^$' -bench 'BenchmarkSummaryWithoutDetails|BenchmarkQueryEvents|Be
 15. 事件导出支持 `export_max_records` 默认上限和单次 `limit`，JSON/响应头标记截断状态，降低超大导出对管理接口的压力。
 16. 后台 writer 暴露最近窗口 p95/p99 批次耗时和排队等待，看板 tooltip 可量化长尾磁盘抖动。
 17. `/health.runtime` 暴露事件导出次数、gzip 次数、截断次数、最近导出耗时和响应体大小，便于定位大导出压力。
+18. `/health` 顶层 `alerts` 聚合持久化写入压力、持久化错误和导出截断，便于外部监控直接告警。
 
 下一步建议：
 
 1. 生产配置默认开启持久化，文档强调 volume、flush、retention 和升级前导出。
 2. 推动管理接口支持真流式导出，或增加后台导出任务模式，进一步降低超大导出的内存峰值。
-3. 将 `write_pressure`、writer p95/p99 和导出截断指标接到外部告警，便于识别长尾磁盘压力。
+3. 给顶层 `alerts` 增加更多阈值项，例如慢导出、writer p99 过高或条件请求命中率过低。
 4. 大数据量场景再评估 SQLite、bbolt 或 daily aggregate 归档。
 
 ## 发布前检查清单
