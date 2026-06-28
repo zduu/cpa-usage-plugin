@@ -57,6 +57,9 @@ function createDashboardHarness(options = {}) {
   const dashboardEtags = !!options.dashboardEtags;
   const wrapDashboardResponses = !!options.wrapDashboardResponses;
   const failDashboardSummary = !!options.failDashboardSummary;
+  const nullDashboardSummary = !!options.nullDashboardSummary;
+  const nullDashboardData = !!options.nullDashboardData;
+  const nullDashboardApiDetail = !!options.nullDashboardApiDetail;
   const exportJobs = new Map();
   let exportJobSeq = 0;
 
@@ -451,10 +454,10 @@ function createDashboardHarness(options = {}) {
         }
         summary._meta.last_recorded_at = summaryLastRecordedAt;
         summary._meta.summary_version = summaryVersion;
-        payload = summary;
+        payload = nullDashboardSummary ? null : summary;
       }
-      else if (String(url).includes('dashboard-api-detail')) payload = apiDetailPayload(String(url));
-      else if (String(url).includes('dashboard-data')) payload = dashboardDataPayload();
+      else if (String(url).includes('dashboard-api-detail')) payload = nullDashboardApiDetail ? null : apiDetailPayload(String(url));
+      else if (String(url).includes('dashboard-data')) payload = nullDashboardData ? null : dashboardDataPayload();
       else if (String(url).includes('dashboard-events-export-download')) {
         const parsed = new URL(String(url), 'http://test.local/v0/management/plugins/usage-statistics/dashboard');
         const job = exportJobs.get(parsed.searchParams.get('id'));
@@ -827,6 +830,14 @@ test('dashboard api detail uses the same full-range scope as upstream stats', as
   assert.strictEqual(new URL(apiDetailRequests().at(-1).url, 'http://test.local').searchParams.get('range'), 'all');
 });
 
+test('dashboard api detail reports null payload without reading recent events', async () => {
+  const { document, fetchCalls } = createDashboardHarness({ nullDashboardApiDetail: true });
+
+  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-api-detail')) && document.getElementById('apiDetail').innerHTML.includes('dashboard-api-detail 返回空数据'));
+
+  assert.match(document.getElementById('apiDetail').innerHTML, /请求明细加载失败：dashboard-api-detail 返回空数据/);
+});
+
 test('dashboard fallback keeps health grid visible when summary endpoint fails', async () => {
   const { document, fetchCalls } = createDashboardHarness({ failDashboardSummary: true });
   await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-data')) && document.getElementById('healthGrid').innerHTML.includes('healthCell'));
@@ -836,6 +847,22 @@ test('dashboard fallback keeps health grid visible when summary endpoint fails',
   assert.strictEqual(document.getElementById('healthSuccess').textContent, '成功 1');
   assert.strictEqual(document.getElementById('healthFailure').textContent, '失败 1');
   assert.match(document.getElementById('updated').textContent, /兼容模式/);
+});
+
+test('dashboard fallback handles null summary payload', async () => {
+  const { document, fetchCalls } = createDashboardHarness({ nullDashboardSummary: true });
+  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-data')) && document.getElementById('healthGrid').innerHTML.includes('healthCell'));
+
+  const cells = (document.getElementById('healthGrid').innerHTML.match(/healthCell/g) || []).length;
+  assert.strictEqual(cells, 672);
+  assert.match(document.getElementById('updated').textContent, /兼容模式/);
+});
+
+test('dashboard load reports null fallback payload without throwing', async () => {
+  const { document, fetchCalls } = createDashboardHarness({ failDashboardSummary: true, nullDashboardData: true });
+  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-data')) && document.getElementById('updated').textContent.includes('dashboard-data 返回空数据'));
+
+  assert.strictEqual(document.getElementById('updated').textContent, 'dashboard-data 返回空数据');
 });
 
 test('dashboard fallback keeps upstream aggregates when details are trimmed', async () => {

@@ -109,6 +109,13 @@ async function fetchConditionalJsonPayload(cacheKey, url, options) {
   return meta.data;
 }
 
+function requireObjectPayload(data, label) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error(label + ' 返回空数据');
+  }
+  return data;
+}
+
 function managementFetchOptions(options) {
   const merged = Object.assign({}, options || {});
   const headers = Object.assign({}, merged.headers || {});
@@ -460,7 +467,7 @@ async function fetchApiDetailData(api) {
   params.set('api', api);
   params.set('recent_limit', String(apiDetailRecentLimit));
   const url = pluginEndpoint('dashboard-api-detail') + '?' + params.toString();
-  const data = await fetchConditionalJsonPayload('dashboard-api-detail:' + url, url, { cache: 'no-store' });
+  const data = requireObjectPayload(await fetchConditionalJsonPayload('dashboard-api-detail:' + url, url, { cache: 'no-store' }), 'dashboard-api-detail');
   data.recent_events = (data.recent_events || []).map(normalizeApiDetailEvent);
   return data;
 }
@@ -661,6 +668,7 @@ function mergeCounterRow(target, row) {
   return target;
 }
 function buildSummaryFromFullUsage(data) {
+  data = requireObjectPayload(data, 'dashboard-data');
   const rawUsage = data.usage || {};
   const usage = {
     total_requests: rawUsage.total_requests || 0,
@@ -867,7 +875,7 @@ async function load(options) {
       fetchConditionalJsonPayload('dashboard-summary', pluginEndpoint('dashboard-summary'), { cache: 'no-store' }),
       loadModelPrices()
     ]);
-    summaryData = data;
+    summaryData = requireObjectPayload(data, 'dashboard-summary');
     setText('updated', '更新于 ' + new Date(data.generated_at || Date.now()).toLocaleTimeString());
     const refreshDetails = shouldRefreshDetails(previousSummary, summaryData, forceDetails);
     await rerender({ refreshEvents: refreshDetails, refreshApiDetail: refreshDetails });
@@ -886,7 +894,7 @@ async function load(options) {
       await rerender({ refreshEvents: refreshDetails, refreshApiDetail: refreshDetails });
       pollFailures = 0; schedulePoll(pollDelay());
     } catch (fallbackError) {
-      setText('updated', (error && error.message) || '加载用量统计失败');
+      setText('updated', (fallbackError && fallbackError.message) || (error && error.message) || '加载用量统计失败');
       pollFailures++; schedulePoll(nextFailureDelay());
     }
   }
