@@ -55,6 +55,7 @@ function createDashboardHarness(options = {}) {
   let prices = { 'gpt-4.1': { prompt: 2, completion: 8, cache: 0.5 } };
   const dashboardEtags = !!options.dashboardEtags;
   const wrapDashboardResponses = !!options.wrapDashboardResponses;
+  const failDashboardSummary = !!options.failDashboardSummary;
   const exportJobs = new Map();
   let exportJobSeq = 0;
 
@@ -274,6 +275,64 @@ function createDashboardHarness(options = {}) {
     };
   }
 
+  function dashboardDataPayload() {
+    const now = Date.now();
+    const details = [
+      {
+        timestamp: new Date(now - 5 * 60 * 1000).toISOString(),
+        model: 'gpt-4.1',
+        source: 'openai-prod',
+        provider: 'openai',
+        auth_index: 'auth-1',
+        failed: false,
+        latency_ms: 120,
+        tokens: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+      },
+      {
+        timestamp: new Date(now - 10 * 60 * 1000).toISOString(),
+        model: 'gpt-4.1',
+        source: 'openai-prod',
+        provider: 'openai',
+        auth_index: 'auth-1',
+        failed: true,
+        status_code: 429,
+        failure: 'rate limited',
+        latency_ms: 80,
+        tokens: { total_tokens: 0 },
+      },
+    ];
+    return {
+      generated_at: new Date(now).toISOString(),
+      usage: {
+        total_requests: 2,
+        success_count: 1,
+        failure_count: 1,
+        total_tokens: 15,
+        requests_by_day: {},
+        requests_by_hour: {},
+        tokens_by_day: {},
+        tokens_by_hour: {},
+        apis: {
+          openai: {
+            total_requests: 2,
+            success_count: 1,
+            failure_count: 1,
+            total_tokens: 15,
+            models: {
+              'gpt-4.1': {
+                total_requests: 2,
+                success_count: 1,
+                failure_count: 1,
+                total_tokens: 15,
+                details,
+              },
+            },
+          },
+        },
+      },
+    };
+  }
+
   function requestHeaderValue(requestOptions, name) {
     const headers = requestOptions && requestOptions.headers;
     if (!headers) return '';
@@ -376,10 +435,19 @@ function createDashboardHarness(options = {}) {
         }
         payload = { prices, updated_at: new Date().toISOString(), storage: {} };
       } else if (String(url).includes('dashboard-summary')) {
+        if (failDashboardSummary) {
+          return {
+            ok: false,
+            status: 500,
+            headers: fetchHeaders({}),
+            text: async () => 'summary failed',
+          };
+        }
         summary._meta.last_recorded_at = summaryLastRecordedAt;
         payload = summary;
       }
       else if (String(url).includes('dashboard-api-detail')) payload = apiDetailPayload(String(url));
+      else if (String(url).includes('dashboard-data')) payload = dashboardDataPayload();
       else if (String(url).includes('dashboard-events-export-download')) {
         const parsed = new URL(String(url), 'http://test.local/v0/management/plugins/usage-statistics/dashboard');
         const job = exportJobs.get(parsed.searchParams.get('id'));
@@ -709,6 +777,17 @@ test('dashboard summary polling reuses cached data on management 304', async () 
   assert.strictEqual(optionHeaderValue(latestSummary.options, 'If-None-Match'), 'W/"summary-2023-11-15T06:13:20Z"');
   assert.strictEqual(countCalls('dashboard-events?'), beforeEvents);
   assert.strictEqual(countCalls('dashboard-api-detail'), beforeApiDetail);
+});
+
+test('dashboard fallback keeps health grid visible when summary endpoint fails', async () => {
+  const { document, fetchCalls } = createDashboardHarness({ failDashboardSummary: true });
+  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-data')) && document.getElementById('healthGrid').innerHTML.includes('healthCell'));
+
+  const cells = (document.getElementById('healthGrid').innerHTML.match(/healthCell/g) || []).length;
+  assert.strictEqual(cells, 672);
+  assert.strictEqual(document.getElementById('healthSuccess').textContent, '成功 1');
+  assert.strictEqual(document.getElementById('healthFailure').textContent, '失败 1');
+  assert.match(document.getElementById('updated').textContent, /兼容模式/);
 });
 
 test('dashboard detail refresh sends conditional requests for events and api detail', async () => {

@@ -293,8 +293,8 @@ function renderStorageStatus() {
 }
 
 function renderHealth() {
-  if (!summaryData || !summaryData.health_grid) return;
-  const grid = summaryData.health_grid;
+  if (!summaryData) return;
+  const grid = normalizeHealthGrid(summaryData.health_grid, summaryData.generated_at);
   const count = 672, rows = 7, cols = Math.ceil(count / rows);
   let totalS = 0, totalF = 0;
   const cells = [], tooltips = [];
@@ -327,6 +327,40 @@ function renderHealth() {
   };
   $('healthGrid').onmouseout = function (e) { const t = e.relatedTarget; if (!t || !t.closest('.healthCell')) tip.classList.add('hidden') };
   const total = totalS + totalF; setText('healthRate', total ? pct(totalS / total * 100) : '-'); setText('healthSuccess', '成功 ' + fmt.format(totalS)); setText('healthFailure', '失败 ' + fmt.format(totalF));
+}
+
+const healthGridCount = 672;
+const healthGridStepMs = 15 * 60 * 1000;
+
+function healthGridWindowEnd(value) {
+  const ms = timestampMs(value) || Date.now();
+  return Math.floor(ms / healthGridStepMs) * healthGridStepMs + healthGridStepMs;
+}
+
+function emptyHealthGrid(value) {
+  const end = healthGridWindowEnd(value);
+  const start = end - healthGridCount * healthGridStepMs;
+  return Array.from({ length: healthGridCount }, (_, i) => {
+    const slotStart = start + i * healthGridStepMs;
+    return { slot: i, total: 0, success: 0, failure: 0, start: new Date(slotStart).toISOString(), end: new Date(slotStart + healthGridStepMs).toISOString() };
+  });
+}
+
+function normalizeHealthGrid(grid, generatedAt) {
+  const normalized = emptyHealthGrid(generatedAt);
+  if (!Array.isArray(grid)) return normalized;
+  grid.slice(0, healthGridCount).forEach((slot, i) => {
+    if (!slot || typeof slot !== 'object') return;
+    const success = num(slot.success);
+    const failure = num(slot.failure);
+    normalized[i] = Object.assign({}, normalized[i], slot, {
+      slot: i,
+      success,
+      failure,
+      total: num(slot.total) || success + failure,
+    });
+  });
+  return normalized;
 }
 
 function modelNames() {
@@ -637,12 +671,14 @@ function buildSummaryFromFullUsage(data) {
   };
   const modelAgg = new Map(), sourceAgg = new Map(), clientAgg = new Map();
   const latency = [];
+  const details = [];
   Object.entries(rawUsage.apis || {}).forEach(([api, a]) => {
     const apiRow = { total_requests: a.total_requests || 0, success_count: a.success_count || 0, failure_count: a.failure_count || 0, total_tokens: a.total_tokens || 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, reasoning_tokens: 0, avg_latency_ms: 0, models: {}, latency: [] };
     Object.entries(a.models || {}).forEach(([model, m]) => {
       const modelRow = makeCounterRow(model);
       (m.details || []).forEach((d) => {
         d.model = d.model || model;
+        details.push(d);
         const tokens = d.tokens || {};
         const cached = Math.max(num(tokens.cached_tokens), num(tokens.cache_tokens));
         addDetailToCounter(modelRow, d);
@@ -677,7 +713,7 @@ function buildSummaryFromFullUsage(data) {
   usage.avg_latency_ms = latency.length ? latency.reduce((a, b) => a + b, 0) / latency.length : 0;
   return {
     usage,
-    health_grid: [],
+    health_grid: buildHealthGridFromDetails(details, data.generated_at),
     source_stats: [...sourceAgg.values()].sort((a, b) => b.total_requests - a.total_requests),
     credential_stats: [],
     client_api_stats: [...clientAgg.values()].map((r) => { r.models = [...r.modelMap.values()].map(finalizeCounterRow).sort((a, b) => b.total_requests - a.total_requests); delete r.modelMap; return r }).sort((a, b) => b.total_requests - a.total_requests),
@@ -685,6 +721,24 @@ function buildSummaryFromFullUsage(data) {
     generated_at: data.generated_at || new Date().toISOString(),
     _meta: {}
   };
+}
+
+function buildHealthGridFromDetails(details, generatedAt) {
+  const grid = emptyHealthGrid(generatedAt);
+  if (!Array.isArray(details) || !details.length) return grid;
+  const windowStart = timestampMs(grid[0].start);
+  const windowEnd = timestampMs(grid[grid.length - 1].end);
+  details.forEach((detail) => {
+    const ms = timestampMs(detail && detail.timestamp);
+    if (!ms || ms < windowStart || ms >= windowEnd) return;
+    const idx = Math.floor((ms - windowStart) / healthGridStepMs);
+    const slot = grid[idx];
+    if (!slot) return;
+    if (detail.failed) slot.failure++;
+    else slot.success++;
+    slot.total = slot.success + slot.failure;
+  });
+  return grid;
 }
 
 async function exportRows(kind) {
