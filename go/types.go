@@ -15,6 +15,7 @@ const (
 	defaultStorageSnapshotRecords        = 1000
 	defaultStorageSyncSeconds            = 0
 	defaultStorageSyncRecords            = 0
+	defaultStorageWriteQueueSize         = 4096
 	defaultPriceStoragePath              = "usage-statistics-prices.json"
 )
 
@@ -400,6 +401,8 @@ type StorageStatus struct {
 	PendingBufferedRecords        int64  `json:"pending_buffered_records,omitempty"`
 	PendingSnapshotRecords        int64  `json:"pending_snapshot_records,omitempty"`
 	PendingUnsyncedRecords        int64  `json:"pending_unsynced_records,omitempty"`
+	WriteQueueLength              int    `json:"write_queue_length,omitempty"`
+	WriteQueueCapacity            int    `json:"write_queue_capacity,omitempty"`
 	SnapshotIntervalSeconds       int    `json:"snapshot_interval_seconds,omitempty"`
 	SnapshotRecordIntervalRecords int    `json:"snapshot_record_interval_records,omitempty"`
 	SyncIntervalSeconds           int    `json:"sync_interval_seconds,omitempty"`

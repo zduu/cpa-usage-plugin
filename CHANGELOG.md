@@ -9,6 +9,7 @@
 - 发布 workflow 将强制读取对应版本 changelog 作为 release body，避免 release 缺少人工说明。
 - 持久化新增周期 snapshot 配置，支持按时间或新增记录数写入 `snapshot.json`，降低异常重启后的 replay 成本。
 - 持久化新增可选 fsync 配置和状态展示，便于在可靠性和磁盘 I/O 之间按部署环境取舍。
+- 持久化写入改为后台有界队列，JSON marshal、文件写入、flush、fsync 和 snapshot 不再占用请求统计锁。
 - `/health.runtime` 新增摘要缓存、事件缓存、索引规模和最近查询耗时指标，用于观察看板压力和调优效果。
 - CI benchmark 覆盖摘要、事件查询和上游详情查询关键路径，降低后续性能回退风险。
 - 看板摘要、事件分页和上游详情接口支持弱 ETag 与 `If-None-Match`，未变化时可返回 304。

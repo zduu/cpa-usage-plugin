@@ -436,6 +436,25 @@ test('dashboard shows pending storage buffer status', async () => {
   assert.match(el.title, /2 条记录/);
 });
 
+test('dashboard shows pending storage write queue status', async () => {
+  const { document } = createDashboardHarness({
+    storage: {
+      enabled: true,
+      path: 'usage-statistics.jsonl',
+      loaded_path: 'usage-statistics/usage-2026-06-28.jsonl',
+      write_queue_length: 5,
+      write_queue_capacity: 4096,
+      pending_buffered_records: 2,
+    },
+  });
+
+  const el = document.getElementById('storageStatus');
+  await waitFor(() => el.textContent === '持久化排队中');
+  assert.strictEqual(el.textContent, '持久化排队中');
+  assert.match(el.title, /5 条记录/);
+  assert.match(el.title, /4,096/);
+});
+
 test('dashboard shows pending storage snapshot status', async () => {
   const { document } = createDashboardHarness({
     storage: {

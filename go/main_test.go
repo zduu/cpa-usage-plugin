@@ -37,6 +37,20 @@ func decodeManagementResponse(t *testing.T, raw []byte, target interface{}) Mana
 	return resp
 }
 
+func waitForTestCondition(t *testing.T, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !condition() {
+		t.Fatal("condition not met before timeout")
+	}
+}
+
 func invokeManagement(t *testing.T, req ManagementRequest) []byte {
 	t.Helper()
 	reqBody, err := json.Marshal(req)
@@ -474,6 +488,7 @@ func TestStorageStatusReportsPendingBufferedRecords(t *testing.T) {
 		StoragePath:         path,
 		StorageFlushSeconds: 3600,
 	})
+	defer stats.Close()
 
 	stats.Record(UsageRecord{
 		Provider: "openai",
@@ -486,8 +501,9 @@ func TestStorageStatusReportsPendingBufferedRecords(t *testing.T) {
 		Detail:   UsageDetail{TotalTokens: 2},
 	})
 
-	if status := stats.StorageStatus(); status.PendingBufferedRecords != 1 {
-		t.Fatalf("pending buffered records = %d, want 1", status.PendingBufferedRecords)
+	waitForTestCondition(t, func() bool { return stats.StorageStatus().PendingBufferedRecords == 1 })
+	if status := stats.StorageStatus(); status.WriteQueueCapacity != defaultStorageWriteQueueSize {
+		t.Fatalf("write queue capacity = %d, want %d", status.WriteQueueCapacity, defaultStorageWriteQueueSize)
 	}
 	stats.Close()
 	if status := stats.StorageStatus(); status.PendingBufferedRecords != 0 {
@@ -510,6 +526,7 @@ func TestStorageSnapshotWritesByRecordInterval(t *testing.T) {
 
 	stats := NewRequestStatistics()
 	stats.Configure(cfg)
+	defer stats.Close()
 	snapshotPath := storageSnapshotPath(dir)
 
 	stats.Record(UsageRecord{
@@ -527,10 +544,11 @@ func TestStorageSnapshotWritesByRecordInterval(t *testing.T) {
 		RequestedAt: time.Now().Add(time.Second),
 		Detail:      UsageDetail{TotalTokens: 2},
 	})
+	waitForTestCondition(t, func() bool {
+		_, err := os.Stat(snapshotPath)
+		return err == nil
+	})
 	status := stats.StorageStatus()
-	if _, err := os.Stat(snapshotPath); err != nil {
-		t.Fatalf("snapshot should be written after record interval: %v", err)
-	}
 	if status.LastSnapshotAt == "" {
 		t.Fatalf("last snapshot time should be reported: %#v", status)
 	}
@@ -564,20 +582,26 @@ func TestStorageSyncsByRecordInterval(t *testing.T) {
 
 	stats := NewRequestStatistics()
 	stats.Configure(cfg)
+	defer stats.Close()
 	stats.Record(UsageRecord{
 		Provider: "openai",
 		Model:    "gpt-4",
 		Detail:   UsageDetail{TotalTokens: 1},
 	})
-	if status := stats.StorageStatus(); status.PendingUnsyncedRecords != 1 || status.LastSyncAt != "" {
-		t.Fatalf("status after one record = %#v, want one unsynced record and no sync time", status)
-	}
+	waitForTestCondition(t, func() bool {
+		status := stats.StorageStatus()
+		return status.PendingUnsyncedRecords == 1 && status.LastSyncAt == ""
+	})
 
 	stats.Record(UsageRecord{
 		Provider:    "openai",
 		Model:       "gpt-4",
 		RequestedAt: time.Now().Add(time.Second),
 		Detail:      UsageDetail{TotalTokens: 2},
+	})
+	waitForTestCondition(t, func() bool {
+		status := stats.StorageStatus()
+		return status.PendingUnsyncedRecords == 0 && status.PendingBufferedRecords == 0 && status.LastSyncAt != ""
 	})
 	status := stats.StorageStatus()
 	if status.PendingUnsyncedRecords != 0 {
@@ -593,6 +617,52 @@ func TestStorageSyncsByRecordInterval(t *testing.T) {
 		t.Fatalf("sync record interval = %d, want 2", status.SyncRecordIntervalRecords)
 	}
 	stats.Close()
+}
+
+func TestStoragePersistsImportedSnapshotThroughBackgroundWriter(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "usage-statistics")
+	cfg := runtimeConfig{
+		MaxDetailsPerModel:  100,
+		RetentionDays:       0,
+		DedupWindowMinutes:  0,
+		StorageEnabled:      true,
+		StoragePath:         dir,
+		StorageFlushSeconds: 3600,
+	}
+	when := time.Now().Add(-time.Minute).UTC()
+	imported := StatisticsSnapshot{
+		APIs: map[string]APISnapshot{
+			"openai": {
+				Models: map[string]ModelSnapshot{
+					"gpt-4": {
+						Details: []RequestDetail{{
+							Model:     "gpt-4",
+							Timestamp: when,
+							Source:    "openai-prod",
+							Provider:  "openai",
+							Tokens:    TokenStats{TotalTokens: 7},
+						}},
+					},
+				},
+			},
+		},
+	}
+
+	stats := NewRequestStatistics()
+	stats.Configure(cfg)
+	result := stats.MergeSnapshot(imported)
+	if result.Added != 1 {
+		t.Fatalf("import added = %d, want 1", result.Added)
+	}
+	stats.Close()
+
+	reloaded := NewRequestStatistics()
+	reloaded.Configure(cfg)
+	defer reloaded.Close()
+	snapshot := reloaded.Snapshot()
+	if snapshot.TotalRequests != 1 || snapshot.TotalTokens != 7 {
+		t.Fatalf("replayed imported snapshot = requests %d tokens %d, want 1/7", snapshot.TotalRequests, snapshot.TotalTokens)
+	}
 }
 
 func TestStorageReplaySkipsInvalidLines(t *testing.T) {

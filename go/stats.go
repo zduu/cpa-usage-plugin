@@ -25,6 +25,9 @@ import (
 type RequestStatistics struct {
 	mu sync.RWMutex
 
+	storageControlMu sync.Mutex
+	storageEnqueueWG sync.WaitGroup
+
 	maxDetailsPerModel int
 	retention          time.Duration
 	dedupWindow        time.Duration
@@ -60,8 +63,6 @@ type RequestStatistics struct {
 	storageEnabled                bool
 	storagePath                   string
 	storageFlush                  time.Duration
-	storageFile                   *os.File
-	storageWriter                 *bufio.Writer
 	storageDir                    string
 	storageLegacyPath             string
 	storageLoadedPath             string
@@ -77,6 +78,13 @@ type RequestStatistics struct {
 	storageSyncInterval           time.Duration
 	storageSyncRecordInterval     int
 	storageUnsyncedRecords        int64
+	storageWriteQueueCapacity     int
+	storageWriteQueueLength       int
+	storageWorkerRunning          bool
+	storageQueue                  chan persistedDetail
+	storageStop                   chan struct{}
+	storageDone                   chan struct{}
+	storageStopping               bool
 
 	priceStoragePath       string
 	priceStorageLoadedPath string
@@ -237,6 +245,7 @@ func NewRequestStatistics() *RequestStatistics {
 		storageSnapshotRecordInterval: defaultStorageSnapshotRecords,
 		storageSyncInterval:           time.Duration(defaultStorageSyncSeconds) * time.Second,
 		storageSyncRecordInterval:     defaultStorageSyncRecords,
+		storageWriteQueueCapacity:     defaultStorageWriteQueueSize,
 		priceStoragePath:              defaultRuntimeConfig().PriceStoragePath,
 		modelPrices:                   make(map[string]ModelPrice),
 		startedAt:                     time.Now(),
@@ -266,6 +275,16 @@ func (s *RequestStatistics) Configure(cfg runtimeConfig) {
 func (s *RequestStatistics) ConfigurePatch(cfg runtimeConfigPatch) {
 	if s == nil {
 		return
+	}
+	storageConfigTouched := cfg.StorageEnabled != nil ||
+		cfg.StoragePath != nil ||
+		cfg.StorageFlushSeconds != nil ||
+		cfg.StorageSnapshotSeconds != nil ||
+		cfg.StorageSnapshotRecordInterval != nil ||
+		cfg.StorageSyncSeconds != nil ||
+		cfg.StorageSyncRecordInterval != nil
+	if storageConfigTouched {
+		s.stopStorageWorker()
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -399,14 +418,20 @@ func (s *RequestStatistics) Record(record UsageRecord) {
 	}
 	dedup := dedupKey(statsKey, modelName, detail)
 
+	var persistDetail *persistedDetail
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	now := time.Now()
 	if s.recordDetailLocked(statsKey, modelName, detail, dedup, now, true) {
-		s.appendDetailLocked(persistedDetail{API: statsKey, Model: modelName, Detail: detail})
+		if s.storageEnabled {
+			persistDetail = &persistedDetail{API: statsKey, Model: modelName, Detail: detail}
+		}
 		s.pruneLocked(now, false)
 		s.pruneSeenLocked(now)
+	}
+	s.mu.Unlock()
+	if persistDetail != nil {
+		s.enqueueStorageDetail(*persistDetail)
 	}
 }
 
@@ -420,6 +445,381 @@ type persistedStorageSnapshot struct {
 	Version     int                `json:"version"`
 	GeneratedAt string             `json:"generated_at"`
 	Usage       StatisticsSnapshot `json:"usage"`
+}
+
+type storageWorkerConfig struct {
+	dir                    string
+	flushInterval          time.Duration
+	snapshotInterval       time.Duration
+	snapshotRecordInterval int
+	syncInterval           time.Duration
+	syncRecordInterval     int
+	lastSnapshot           time.Time
+}
+
+type storageWorkerState struct {
+	cfg             storageWorkerConfig
+	file            *os.File
+	writer          *bufio.Writer
+	loadedPath      string
+	activeDate      string
+	lastFlush       time.Time
+	lastSnapshot    time.Time
+	lastSync        time.Time
+	buffered        int64
+	snapshotRecords int64
+	unsyncedRecords int64
+}
+
+func (s *RequestStatistics) startStorageWorkerLocked() {
+	if s == nil || !s.storageEnabled || strings.TrimSpace(s.storageDir) == "" {
+		return
+	}
+	capacity := s.storageWriteQueueCapacity
+	if capacity <= 0 {
+		capacity = defaultStorageWriteQueueSize
+		s.storageWriteQueueCapacity = capacity
+	}
+	queue := make(chan persistedDetail, capacity)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	s.storageWriteQueueLength = 0
+	s.storageWorkerRunning = true
+	s.storageControlMu.Lock()
+	s.storageQueue = queue
+	s.storageStop = stop
+	s.storageDone = done
+	s.storageStopping = false
+	s.storageControlMu.Unlock()
+
+	cfg := storageWorkerConfig{
+		dir:                    s.storageDir,
+		flushInterval:          s.storageFlush,
+		snapshotInterval:       s.storageSnapshotInterval,
+		snapshotRecordInterval: s.storageSnapshotRecordInterval,
+		syncInterval:           s.storageSyncInterval,
+		syncRecordInterval:     s.storageSyncRecordInterval,
+		lastSnapshot:           s.storageLastSnapshot,
+	}
+	go s.storageWorkerLoop(cfg, queue, stop, done)
+}
+
+func (s *RequestStatistics) stopStorageWorker() {
+	if s == nil {
+		return
+	}
+	s.storageControlMu.Lock()
+	done := s.storageDone
+	if done == nil {
+		s.storageControlMu.Unlock()
+		return
+	}
+	if !s.storageStopping {
+		s.storageStopping = true
+		if s.storageStop != nil {
+			close(s.storageStop)
+		}
+	}
+	s.storageControlMu.Unlock()
+
+	s.storageEnqueueWG.Wait()
+	<-done
+
+	s.storageControlMu.Lock()
+	if s.storageDone == done {
+		s.storageQueue = nil
+		s.storageStop = nil
+		s.storageDone = nil
+		s.storageStopping = false
+	}
+	s.storageControlMu.Unlock()
+}
+
+func (s *RequestStatistics) enqueueStorageDetail(detail persistedDetail) {
+	if s == nil {
+		return
+	}
+	s.storageControlMu.Lock()
+	if s.storageQueue == nil || s.storageStopping {
+		s.storageControlMu.Unlock()
+		return
+	}
+	s.storageEnqueueWG.Add(1)
+	queue := s.storageQueue
+	stop := s.storageStop
+	s.storageControlMu.Unlock()
+	defer s.storageEnqueueWG.Done()
+
+	select {
+	case queue <- detail:
+		s.updateStorageQueueLength(len(queue))
+	case <-stop:
+	}
+}
+
+func (s *RequestStatistics) updateStorageQueueLength(length int) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.storageWriteQueueLength = length
+	s.mu.Unlock()
+}
+
+func (s *RequestStatistics) storageWorkerLoop(cfg storageWorkerConfig, queue <-chan persistedDetail, stop <-chan struct{}, done chan<- struct{}) {
+	state := &storageWorkerState{cfg: cfg, lastSnapshot: cfg.lastSnapshot}
+	defer close(done)
+	defer func() {
+		state.close(s)
+		s.mu.Lock()
+		s.storageWorkerRunning = false
+		s.storageWriteQueueLength = 0
+		s.storageBuffered = 0
+		s.storageUnsyncedRecords = 0
+		s.storageLoadedPath = ""
+		s.storageActiveDate = ""
+		s.mu.Unlock()
+	}()
+
+	for {
+		select {
+		case detail := <-queue:
+			s.updateStorageQueueLength(len(queue))
+			state.append(s, detail)
+		case <-stop:
+			for {
+				select {
+				case detail := <-queue:
+					s.updateStorageQueueLength(len(queue))
+					state.append(s, detail)
+				default:
+					return
+				}
+			}
+		}
+	}
+}
+
+func (w *storageWorkerState) append(s *RequestStatistics, detail persistedDetail) {
+	now := time.Now()
+	if err := w.open(s, now); err != nil {
+		s.setStorageLastError(err)
+		return
+	}
+	raw, err := json.Marshal(detail)
+	if err != nil {
+		s.setStorageLastError(err)
+		return
+	}
+	if _, err := w.writer.Write(raw); err != nil {
+		s.setStorageLastError(err)
+		return
+	}
+	if err := w.writer.WriteByte('\n'); err != nil {
+		s.setStorageLastError(err)
+		return
+	}
+	w.buffered++
+	w.snapshotRecords++
+	w.unsyncedRecords++
+	w.report(s)
+	if w.flushDue(now) {
+		w.flush(s, now)
+	}
+	if w.syncDue(now) {
+		w.sync(s, now)
+	}
+	if w.snapshotDue(now) {
+		w.writeSnapshot(s, now)
+	}
+}
+
+func (w *storageWorkerState) open(s *RequestStatistics, now time.Time) error {
+	if w == nil {
+		return nil
+	}
+	date := storageDate(now)
+	path := filepath.Join(w.cfg.dir, storageFileName(date))
+	if w.file != nil && w.loadedPath == path {
+		return nil
+	}
+	if w.file != nil {
+		w.closeFile(s, now, true)
+		if w.snapshotRecords > 0 {
+			w.writeSnapshot(s, now)
+		}
+	}
+	if err := os.MkdirAll(w.cfg.dir, 0o755); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	w.file = file
+	w.writer = bufio.NewWriter(file)
+	w.loadedPath = path
+	w.activeDate = date
+	w.report(s)
+	return nil
+}
+
+func (w *storageWorkerState) flushDue(now time.Time) bool {
+	if w == nil || w.writer == nil || w.buffered <= 0 {
+		return false
+	}
+	return w.cfg.flushInterval <= 0 || w.lastFlush.IsZero() || now.Sub(w.lastFlush) >= w.cfg.flushInterval
+}
+
+func (w *storageWorkerState) syncDue(now time.Time) bool {
+	if w == nil || w.file == nil || w.unsyncedRecords <= 0 {
+		return false
+	}
+	if w.cfg.syncRecordInterval > 0 && w.unsyncedRecords >= int64(w.cfg.syncRecordInterval) {
+		return true
+	}
+	if w.cfg.syncInterval <= 0 {
+		return false
+	}
+	base := w.lastSync
+	if base.IsZero() {
+		base = w.lastFlush
+	}
+	return !base.IsZero() && now.Sub(base) >= w.cfg.syncInterval
+}
+
+func (w *storageWorkerState) snapshotDue(now time.Time) bool {
+	if w == nil || w.snapshotRecords <= 0 {
+		return false
+	}
+	if w.cfg.snapshotRecordInterval > 0 && w.snapshotRecords >= int64(w.cfg.snapshotRecordInterval) {
+		return true
+	}
+	if w.cfg.snapshotInterval <= 0 {
+		return false
+	}
+	base := w.lastSnapshot
+	if base.IsZero() {
+		base = w.lastFlush
+	}
+	return !base.IsZero() && now.Sub(base) >= w.cfg.snapshotInterval
+}
+
+func (w *storageWorkerState) flush(s *RequestStatistics, now time.Time) bool {
+	if w == nil || w.writer == nil || w.buffered <= 0 {
+		return true
+	}
+	if err := w.writer.Flush(); err != nil {
+		s.setStorageLastError(err)
+		return false
+	}
+	w.buffered = 0
+	w.lastFlush = now
+	w.report(s)
+	return true
+}
+
+func (w *storageWorkerState) sync(s *RequestStatistics, now time.Time) bool {
+	if w == nil || w.file == nil || w.unsyncedRecords <= 0 {
+		return true
+	}
+	if !w.flush(s, now) {
+		return false
+	}
+	if err := w.file.Sync(); err != nil {
+		s.setStorageLastError(err)
+		return false
+	}
+	w.unsyncedRecords = 0
+	w.lastSync = now
+	w.report(s)
+	return true
+}
+
+func (w *storageWorkerState) writeSnapshot(s *RequestStatistics, now time.Time) bool {
+	if w == nil || strings.TrimSpace(w.cfg.dir) == "" {
+		return true
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	snapshot := s.Snapshot()
+	if err := writeStorageSnapshotFile(w.cfg.dir, snapshot, now); err != nil {
+		s.setStorageLastError(err)
+		return false
+	}
+	w.lastSnapshot = now
+	w.snapshotRecords = 0
+	w.report(s)
+	return true
+}
+
+func (w *storageWorkerState) close(s *RequestStatistics) {
+	if w == nil {
+		return
+	}
+	now := time.Now()
+	w.closeFile(s, now, true)
+	if strings.TrimSpace(w.cfg.dir) != "" {
+		w.writeSnapshot(s, now)
+	}
+}
+
+func (w *storageWorkerState) closeFile(s *RequestStatistics, now time.Time, syncFile bool) {
+	if w == nil {
+		return
+	}
+	if w.writer != nil {
+		if err := w.writer.Flush(); err != nil {
+			s.setStorageLastError(err)
+		} else {
+			w.buffered = 0
+			w.lastFlush = now
+		}
+		w.writer = nil
+	}
+	if w.file != nil {
+		if syncFile {
+			if err := w.file.Sync(); err != nil {
+				s.setStorageLastError(err)
+			} else {
+				w.unsyncedRecords = 0
+				w.lastSync = now
+			}
+		}
+		if err := w.file.Close(); err != nil {
+			s.setStorageLastError(err)
+		}
+		w.file = nil
+	}
+	w.loadedPath = ""
+	w.activeDate = ""
+	w.report(s)
+}
+
+func (w *storageWorkerState) report(s *RequestStatistics) {
+	if s == nil || w == nil {
+		return
+	}
+	s.mu.Lock()
+	s.storageLoadedPath = w.loadedPath
+	s.storageActiveDate = w.activeDate
+	s.storageLastFlush = w.lastFlush
+	s.storageLastSnapshot = w.lastSnapshot
+	s.storageLastSync = w.lastSync
+	s.storageBuffered = w.buffered
+	s.storageSnapshotRecords = w.snapshotRecords
+	s.storageUnsyncedRecords = w.unsyncedRecords
+	s.mu.Unlock()
+}
+
+func (s *RequestStatistics) setStorageLastError(err error) {
+	if s == nil || err == nil {
+		return
+	}
+	s.mu.Lock()
+	s.storageLastError = err.Error()
+	s.mu.Unlock()
 }
 
 func (s *RequestStatistics) recordDetailLocked(apiName, modelName string, detail RequestDetail, dedup string, now time.Time, useDedupWindow bool) bool {
@@ -494,12 +894,6 @@ func (s *RequestStatistics) configureStorageLocked() {
 		return
 	}
 	dir, legacyPath := storageLayout(abs)
-	if s.storageFile != nil && s.storageDir == dir && s.storageLegacyPath == legacyPath {
-		if err := s.cleanupStorageFilesLocked(time.Now()); err != nil {
-			s.storageLastError = err.Error()
-		}
-		return
-	}
 	s.closeStorageLocked()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		s.storageLastError = err.Error()
@@ -517,6 +911,8 @@ func (s *RequestStatistics) configureStorageLocked() {
 	s.storagePath = path
 	s.storageDir = dir
 	s.storageLegacyPath = legacyPath
+	s.storageLoadedPath = filepath.Join(dir, storageFileName(storageDate(now)))
+	s.storageActiveDate = storageDate(now)
 	if !snapshotAt.IsZero() {
 		s.storageLastSnapshot = snapshotAt
 	} else {
@@ -524,10 +920,7 @@ func (s *RequestStatistics) configureStorageLocked() {
 	}
 	s.storageSnapshotRecords = 0
 	s.storageUnsyncedRecords = 0
-	if err := s.openStorageFileLocked(now); err != nil {
-		s.storageLastError = err.Error()
-		return
-	}
+	s.storageBuffered = 0
 	if err := s.cleanupStorageFilesLocked(now); err != nil {
 		warnings = append(warnings, err.Error())
 	}
@@ -536,6 +929,7 @@ func (s *RequestStatistics) configureStorageLocked() {
 	} else {
 		s.storageLastError = ""
 	}
+	s.startStorageWorkerLocked()
 }
 
 func storageLayout(absPath string) (string, string) {
@@ -572,35 +966,6 @@ func parseStorageFileDate(name string) (time.Time, bool) {
 	return t, true
 }
 
-func (s *RequestStatistics) openStorageFileLocked(now time.Time) error {
-	if s == nil {
-		return nil
-	}
-	if strings.TrimSpace(s.storageDir) == "" {
-		return errors.New("storage directory is not configured")
-	}
-	date := storageDate(now)
-	path := filepath.Join(s.storageDir, storageFileName(date))
-	if s.storageFile != nil && s.storageLoadedPath == path {
-		return nil
-	}
-	if s.storageWriter != nil || s.storageFile != nil {
-		s.closeStorageLocked()
-	}
-	if err := os.MkdirAll(s.storageDir, 0o755); err != nil {
-		return err
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	s.storageFile = file
-	s.storageWriter = bufio.NewWriter(file)
-	s.storageLoadedPath = path
-	s.storageActiveDate = date
-	return nil
-}
-
 func (s *RequestStatistics) loadStorageSnapshotLocked(dir string, now time.Time) (time.Time, error) {
 	raw, err := os.ReadFile(storageSnapshotPath(dir))
 	if err != nil {
@@ -613,7 +978,7 @@ func (s *RequestStatistics) loadStorageSnapshotLocked(dir string, now time.Time)
 	if err := json.Unmarshal(raw, &persisted); err != nil {
 		return time.Time{}, fmt.Errorf("load storage snapshot: %w", err)
 	}
-	s.mergeSnapshotLocked(persisted.Usage, false, now)
+	_, _ = s.mergeSnapshotLocked(persisted.Usage, false, now)
 	generatedAt, err := time.Parse(time.RFC3339, persisted.GeneratedAt)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("parse storage snapshot time: %w", err)
@@ -628,19 +993,31 @@ func (s *RequestStatistics) writeStorageSnapshotLocked(now time.Time) error {
 	if now.IsZero() {
 		now = time.Now()
 	}
-	if err := os.MkdirAll(s.storageDir, 0o755); err != nil {
+	if err := writeStorageSnapshotFile(s.storageDir, s.snapshotLocked(), now); err != nil {
+		return err
+	}
+	s.storageLastSnapshot = now
+	s.storageSnapshotRecords = 0
+	return nil
+}
+
+func writeStorageSnapshotFile(dir string, snapshot StatisticsSnapshot, now time.Time) error {
+	if strings.TrimSpace(dir) == "" {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	payload := persistedStorageSnapshot{
 		Version:     1,
 		GeneratedAt: now.UTC().Format(time.RFC3339),
-		Usage:       s.snapshotLocked(),
+		Usage:       snapshot,
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	target := storageSnapshotPath(s.storageDir)
+	target := storageSnapshotPath(dir)
 	tmp := target + ".tmp"
 	file, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -664,71 +1041,8 @@ func (s *RequestStatistics) writeStorageSnapshotLocked(now time.Time) error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	_ = syncDir(s.storageDir)
-	s.storageLastSnapshot = now
-	s.storageSnapshotRecords = 0
+	_ = syncDir(dir)
 	return nil
-}
-
-func (s *RequestStatistics) maybeWriteStorageSnapshotLocked(now time.Time) {
-	if s == nil || !s.storageEnabled || strings.TrimSpace(s.storageDir) == "" {
-		return
-	}
-	due := false
-	if s.storageSnapshotRecordInterval > 0 && s.storageSnapshotRecords >= int64(s.storageSnapshotRecordInterval) {
-		due = true
-	}
-	if !due && s.storageSnapshotInterval > 0 {
-		base := s.storageLastSnapshot
-		if base.IsZero() {
-			base = s.storageLastFlush
-		}
-		if !base.IsZero() && now.Sub(base) >= s.storageSnapshotInterval {
-			due = true
-		}
-	}
-	if !due {
-		return
-	}
-	if err := s.writeStorageSnapshotLocked(now); err != nil {
-		s.storageLastError = err.Error()
-	}
-}
-
-func (s *RequestStatistics) maybeSyncStorageLocked(now time.Time) {
-	if s == nil || !s.storageEnabled || s.storageFile == nil || s.storageUnsyncedRecords <= 0 {
-		return
-	}
-	due := false
-	if s.storageSyncRecordInterval > 0 && s.storageUnsyncedRecords >= int64(s.storageSyncRecordInterval) {
-		due = true
-	}
-	if !due && s.storageSyncInterval > 0 {
-		base := s.storageLastSync
-		if base.IsZero() {
-			base = s.storageLastFlush
-		}
-		if !base.IsZero() && now.Sub(base) >= s.storageSyncInterval {
-			due = true
-		}
-	}
-	if !due {
-		return
-	}
-	if s.storageWriter != nil && s.storageBuffered > 0 {
-		if err := s.storageWriter.Flush(); err != nil {
-			s.storageLastError = err.Error()
-			return
-		}
-		s.storageBuffered = 0
-		s.storageLastFlush = now
-	}
-	if err := s.storageFile.Sync(); err != nil {
-		s.storageLastError = err.Error()
-		return
-	}
-	s.storageUnsyncedRecords = 0
-	s.storageLastSync = now
 }
 
 func syncDir(dir string) error {
@@ -908,77 +1222,17 @@ func (s *RequestStatistics) detailKeysLocked() map[string]struct{} {
 	return keys
 }
 
-func (s *RequestStatistics) appendDetailLocked(detail persistedDetail) {
-	if s == nil || !s.storageEnabled {
-		return
-	}
-	if err := s.openStorageFileLocked(time.Now()); err != nil {
-		s.storageLastError = err.Error()
-		return
-	}
-	raw, err := json.Marshal(detail)
-	if err != nil {
-		s.storageLastError = err.Error()
-		return
-	}
-	if _, err := s.storageWriter.Write(raw); err != nil {
-		s.storageLastError = err.Error()
-		return
-	}
-	if err := s.storageWriter.WriteByte('\n'); err != nil {
-		s.storageLastError = err.Error()
-		return
-	}
-	s.storageBuffered++
-	s.storageSnapshotRecords++
-	s.storageUnsyncedRecords++
-	now := time.Now()
-	if s.storageFlush <= 0 || s.storageLastFlush.IsZero() || now.Sub(s.storageLastFlush) >= s.storageFlush {
-		if err := s.storageWriter.Flush(); err != nil {
-			s.storageLastError = err.Error()
-			return
-		}
-		s.storageBuffered = 0
-		s.storageLastFlush = now
-	}
-	s.maybeWriteStorageSnapshotLocked(now)
-	s.maybeSyncStorageLocked(now)
-}
-
 func (s *RequestStatistics) closeStorageLocked() {
 	if s == nil {
 		return
 	}
 	now := time.Now()
-	flushed := false
-	synced := true
-	if s.storageWriter != nil {
-		if err := s.storageWriter.Flush(); err != nil {
-			s.storageLastError = err.Error()
-		} else {
-			flushed = true
-			s.storageBuffered = 0
-		}
-		s.storageWriter = nil
-	}
-	if s.storageFile != nil {
-		if err := s.storageFile.Sync(); err != nil {
-			s.storageLastError = err.Error()
-			synced = false
-		} else {
-			s.storageUnsyncedRecords = 0
-			s.storageLastSync = now
-		}
-		if err := s.storageFile.Close(); err != nil {
-			s.storageLastError = err.Error()
-		}
-		s.storageFile = nil
-	}
 	s.storageLoadedPath = ""
 	s.storageActiveDate = ""
-	if flushed && synced {
-		s.storageLastFlush = now
-	}
+	s.storageBuffered = 0
+	s.storageUnsyncedRecords = 0
+	s.storageWriteQueueLength = 0
+	s.storageWorkerRunning = false
 	if s.storageEnabled && strings.TrimSpace(s.storageDir) != "" {
 		if err := s.writeStorageSnapshotLocked(now); err != nil {
 			s.storageLastError = err.Error()
@@ -1754,12 +2008,17 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.mergeSnapshotLocked(snapshot, true, time.Now())
+	result, persisted := s.mergeSnapshotLocked(snapshot, true, time.Now())
+	s.mu.Unlock()
+	for _, detail := range persisted {
+		s.enqueueStorageDetail(detail)
+	}
+	return result
 }
 
-func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, persist bool, now time.Time) MergeResult {
+func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, persist bool, now time.Time) (MergeResult, []persistedDetail) {
 	result := MergeResult{}
+	var persisted []persistedDetail
 	var cutoff time.Time
 	if s.retention > 0 {
 		cutoff = now.Add(-s.retention)
@@ -1818,8 +2077,12 @@ func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, per
 				}
 				seen[key] = struct{}{}
 
-				s.recordImported(importAPIName, importModelName, detail, persist, now)
-				result.Added++
+				if s.recordImported(importAPIName, importModelName, detail, now) {
+					if persist && s.storageEnabled {
+						persisted = append(persisted, persistedDetail{API: importAPIName, Model: importModelName, Detail: detail})
+					}
+					result.Added++
+				}
 			}
 		}
 	}
@@ -1827,15 +2090,11 @@ func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, per
 	s.pruneLocked(now, true)
 	s.rebuildAggregatesLocked()
 	s.rebuildSeenLocked(now)
-	return result
+	return result, persisted
 }
 
-func (s *RequestStatistics) recordImported(apiName, modelName string, detail RequestDetail, persist bool, now time.Time) {
-	if s.recordDetailLocked(apiName, modelName, detail, dedupKey(apiName, modelName, detail), now, false) {
-		if persist {
-			s.appendDetailLocked(persistedDetail{API: apiName, Model: modelName, Detail: detail})
-		}
-	}
+func (s *RequestStatistics) recordImported(apiName, modelName string, detail RequestDetail, now time.Time) bool {
+	return s.recordDetailLocked(apiName, modelName, detail, dedupKey(apiName, modelName, detail), now, false)
 }
 
 func usageDetailTotalTokens(detail UsageDetail) int64 {
@@ -2965,6 +3224,7 @@ func (s *RequestStatistics) Close() {
 	if s == nil {
 		return
 	}
+	s.stopStorageWorker()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closeStorageLocked()
@@ -3002,6 +3262,11 @@ func (s *RequestStatistics) StorageStatus() StorageStatus {
 }
 
 func (s *RequestStatistics) storageStatusLocked() StorageStatus {
+	queueLength, queueCapacity := 0, 0
+	if s.storageEnabled {
+		queueLength = s.storageWriteQueueLength
+		queueCapacity = s.storageWriteQueueCapacity
+	}
 	status := StorageStatus{
 		Enabled:                       s.storageEnabled,
 		Path:                          s.storagePath,
@@ -3010,6 +3275,8 @@ func (s *RequestStatistics) storageStatusLocked() StorageStatus {
 		PendingBufferedRecords:        s.storageBuffered,
 		PendingSnapshotRecords:        s.storageSnapshotRecords,
 		PendingUnsyncedRecords:        s.storageUnsyncedRecords,
+		WriteQueueLength:              queueLength,
+		WriteQueueCapacity:            queueCapacity,
 		SnapshotIntervalSeconds:       int(s.storageSnapshotInterval.Seconds()),
 		SnapshotRecordIntervalRecords: s.storageSnapshotRecordInterval,
 		SyncIntervalSeconds:           int(s.storageSyncInterval.Seconds()),

@@ -193,6 +193,14 @@ function renderStorageStatus() {
     el.title = storage.last_error;
     return;
   }
+  const queued = num(storage.write_queue_length);
+  if (queued > 0) {
+    el.textContent = '持久化排队中';
+    el.classList.add('warn');
+    const capacity = num(storage.write_queue_capacity);
+    el.title = queued.toLocaleString() + ' 条记录等待后台写入' + (capacity > 0 ? '，队列容量 ' + capacity.toLocaleString() : '');
+    return;
+  }
   const pending = num(storage.pending_buffered_records);
   if (pending > 0) {
     el.textContent = '持久化待同步';

@@ -18,11 +18,12 @@
 - 新写入数据按日期分片，启动时只 replay 保留窗口内分片。
 - 正常关闭、日期切换、达到时间间隔或记录间隔会写入 `snapshot.json`，下次启动先加载快照再 replay 增量。
 - 可选 `storage_sync_interval_seconds` 和 `storage_sync_record_interval` 可对 JSONL 文件执行周期 fsync。
+- JSON marshal、文件写入、flush、fsync 和 snapshot 已由后台有界队列 worker 处理，请求记录路径只同步更新内存统计并排队持久化事件。
 - 摘要聚合、健康网格、模型/来源/凭证/客户端 API 统计已增量维护。
 - 事件查询已有版本化缓存和时间倒序索引，当前分支继续补了模型、来源、凭证筛选的按需二级索引。
 - `/health.runtime` 暴露摘要缓存、事件缓存、索引规模和最近查询耗时指标。
 - 看板摘要、事件分页、上游详情和事件导出接口支持弱 ETag 与 `If-None-Match` 条件请求，前端轮询会在 304 时复用本地缓存。
-- 页面会显示持久化状态、待 flush 记录数、最后 flush 时间和最近导入结果。
+- 页面会显示持久化状态、后台写入队列积压、待 flush 记录数、最后 flush 时间和最近导入结果。
 
 ## P0 建议
 
@@ -126,17 +127,22 @@ plugins:
 - `storage_sync_record_interval`。
 - 状态中展示 `last_sync_at` 和 `pending_unsynced_records`。
 
-推荐默认仍不要每条请求 fsync，避免磁盘 I/O 放大。后续应结合后台 writer，把 flush/sync 从统计锁内迁出。
+推荐默认仍不要每条请求 fsync，避免磁盘 I/O 放大。当前 flush/sync 已在后台 writer 中执行，不再占用请求统计锁。
 
 ### 3. 将持久化写入改为后台批量写
 
-当前记录路径会在统计锁内完成 JSON marshal、文件打开、写入和可能 flush。高并发下建议：
+当前分支已将记录路径改为后台有界队列：
 
 - 统计更新仍同步完成。
 - 持久化事件进入有界队列。
-- 单独 writer goroutine 批量 marshal、写入、flush、sync。
-- 队列满时采用明确策略：阻塞、降级为同步写、或拒绝并记录错误，不建议静默丢弃。
-- `/health` 暴露队列长度、最近错误、最后成功写入时间。
+- 单独 writer goroutine 负责 JSON marshal、写入、flush、sync 和 snapshot。
+- 队列满时阻塞在统计锁外，不静默丢弃。
+- `/health.storage` 暴露 `write_queue_length`、`write_queue_capacity`、最近错误、待 flush/sync/snapshot 记录数。
+
+后续可以继续补：
+
+- 批量从队列取多条记录后一次性写入，进一步减少 goroutine 调度和 writer 调用次数。
+- 队列等待时长和写入批次耗时指标。
 
 收益：
 
@@ -224,12 +230,13 @@ go test -run '^$' -bench 'BenchmarkSummaryWithoutDetails|BenchmarkQueryEvents|Be
 6. 给摘要、事件分页、上游详情接口补 ETag/304，并在 `/health.runtime` 暴露缓存、索引和查询耗时。
 7. 前端轮询接入 ETag 缓存，服务端返回 304 时复用本地数据。
 8. 事件导出接口支持 ETag/304，外部脚本重复导出相同筛选条件时可跳过响应体传输。
+9. 持久化写入改为后台有界队列，磁盘写入、flush、fsync 和 snapshot 不再占用请求统计锁。
 
 下一步建议：
 
 1. 生产配置默认开启持久化，文档强调 volume、flush、retention 和升级前导出。
-2. 把持久化写入从统计锁中移到后台有界队列，减少磁盘抖动对请求路径的影响。
-3. 导出接口增加流式 JSONL/CSV 和可选 gzip，避免大导出占用过多内存。
+2. 导出接口增加流式 JSONL/CSV 和可选 gzip，避免大导出占用过多内存。
+3. 给后台 writer 增加批量写入耗时和队列等待指标。
 4. 大数据量场景再评估 SQLite、bbolt 或 daily aggregate 归档。
 
 ## 发布前检查清单
