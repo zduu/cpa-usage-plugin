@@ -253,44 +253,27 @@ function renderStorageStatus() {
     el.title = storage.last_error;
     return;
   }
+  const titleParts = [storage.last_snapshot_at || storage.loaded_path || storage.path || ''];
   const queued = num(storage.write_queue_length);
   if (queued > 0) {
-    el.textContent = '持久化排队中';
-    el.classList.add('warn');
     const capacity = num(storage.write_queue_capacity);
-    el.title = storageTitle(queued.toLocaleString() + ' 条记录等待后台写入' + (capacity > 0 ? '，队列容量 ' + capacity.toLocaleString() : ''), storagePressureTitle(storage), storageBatchTitle(storage));
-    return;
+    titleParts.push(queued.toLocaleString() + ' 条记录等待后台写入' + (capacity > 0 ? '，队列容量 ' + capacity.toLocaleString() : ''));
   }
   const pending = num(storage.pending_buffered_records);
   if (pending > 0) {
-    el.textContent = '持久化待同步';
-    el.classList.add('warn');
-    el.title = storageTitle(pending.toLocaleString() + ' 条记录待刷新到文件', storagePressureTitle(storage), storageBatchTitle(storage));
-    return;
+    titleParts.push(pending.toLocaleString() + ' 条记录待刷新到文件');
   }
   const pendingSync = num(storage.pending_unsynced_records);
   if (pendingSync > 0) {
-    el.textContent = '持久化待落盘';
-    el.classList.add('warn');
-    el.title = storageTitle(pendingSync.toLocaleString() + ' 条记录待同步到磁盘', storagePressureTitle(storage), storageBatchTitle(storage));
-    return;
+    titleParts.push(pendingSync.toLocaleString() + ' 条记录待同步到磁盘');
   }
   const pendingSnapshot = num(storage.pending_snapshot_records);
   if (pendingSnapshot > 0) {
-    el.textContent = '快照待更新';
-    el.classList.add('warn');
-    el.title = storageTitle(pendingSnapshot.toLocaleString() + ' 条记录待写入快照', storagePressureTitle(storage), storageBatchTitle(storage));
-    return;
+    titleParts.push(pendingSnapshot.toLocaleString() + ' 条记录待写入快照');
   }
-  if (storage.write_pressure === 'slow') {
-    el.textContent = '持久化写入偏慢';
-    el.classList.add('warn');
-    el.title = storageTitle(storagePressureTitle(storage), storageBatchTitle(storage));
-    return;
-  }
-  el.textContent = storage.last_flush_at ? '持久化已同步' : '持久化已开启';
+  el.textContent = '持久化已开启';
   el.classList.add('ok');
-  el.title = storageTitle(storage.last_snapshot_at || storage.loaded_path || storage.path || '', storagePressureTitle(storage), storageBatchTitle(storage));
+  el.title = storageTitle(...titleParts, storagePressureTitle(storage), storageBatchTitle(storage));
 }
 
 function renderHealth() {

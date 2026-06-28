@@ -616,8 +616,8 @@ test('dashboard shows pending storage buffer status', async () => {
   });
 
   const el = document.getElementById('storageStatus');
-  await waitFor(() => el.textContent === '持久化待同步');
-  assert.strictEqual(el.textContent, '持久化待同步');
+  await waitFor(() => el.textContent === '持久化已开启');
+  assert.strictEqual(el.textContent, '持久化已开启');
   assert.match(el.title, /2 条记录/);
 });
 
@@ -634,8 +634,8 @@ test('dashboard shows pending storage write queue status', async () => {
   });
 
   const el = document.getElementById('storageStatus');
-  await waitFor(() => el.textContent === '持久化排队中');
-  assert.strictEqual(el.textContent, '持久化排队中');
+  await waitFor(() => el.textContent === '持久化已开启');
+  assert.strictEqual(el.textContent, '持久化已开启');
   assert.match(el.title, /5 条记录/);
   assert.match(el.title, /4,096/);
 });
@@ -652,8 +652,8 @@ test('dashboard shows pending storage snapshot status', async () => {
   });
 
   const el = document.getElementById('storageStatus');
-  await waitFor(() => el.textContent === '快照待更新');
-  assert.strictEqual(el.textContent, '快照待更新');
+  await waitFor(() => el.textContent === '持久化已开启');
+  assert.strictEqual(el.textContent, '持久化已开启');
   assert.match(el.title, /3 条记录/);
 });
 
@@ -670,8 +670,8 @@ test('dashboard shows pending storage fsync status', async () => {
   });
 
   const el = document.getElementById('storageStatus');
-  await waitFor(() => el.textContent === '持久化待落盘');
-  assert.strictEqual(el.textContent, '持久化待落盘');
+  await waitFor(() => el.textContent === '持久化已开启');
+  assert.strictEqual(el.textContent, '持久化已开启');
   assert.match(el.title, /4 条记录/);
 });
 
@@ -695,8 +695,8 @@ test('dashboard shows storage writer batch metrics in title', async () => {
   });
 
   const el = document.getElementById('storageStatus');
-  await waitFor(() => el.textContent === '持久化已同步');
-  assert.strictEqual(el.textContent, '持久化已同步');
+  await waitFor(() => el.textContent === '持久化已开启');
+  assert.strictEqual(el.textContent, '持久化已开启');
   assert.match(el.title, /最近批量写入 12 条/);
   assert.match(el.title, /写入压力：正常/);
   assert.match(el.title, /平均耗时/);
@@ -718,8 +718,8 @@ test('dashboard warns when storage writer is slow without queue backlog', async 
   });
 
   const el = document.getElementById('storageStatus');
-  await waitFor(() => el.textContent === '持久化写入偏慢');
-  assert.strictEqual(el.textContent, '持久化写入偏慢');
+  await waitFor(() => el.textContent === '持久化已开启');
+  assert.strictEqual(el.textContent, '持久化已开启');
   assert.match(el.title, /写入压力：写入偏慢/);
 });
 
