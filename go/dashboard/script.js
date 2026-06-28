@@ -13,6 +13,7 @@ const apiDetailRecentLimit = 120;
 const visiblePollDelayMs = 30000;
 const hiddenPollDelayMs = 300000;
 let apiDetailSeq = 0;
+const apiDetailCache = new Map();
 const conditionalPayloadCache = new Map();
 
 // Dom helpers
@@ -481,17 +482,21 @@ async function fetchApiDetailData(api) {
   return data;
 }
 
+function apiDetailCacheKey(api) {
+  return $('range').value + '\x00' + api;
+}
+
 function apiDetailErrorHtml(errorRows, loading, error) {
-  if (loading) return '<div><div class="subtle" style="margin-bottom:8px">错误统计</div><div class="empty">正在加载接口请求明细...</div></div>';
-  if (error) return '<div><div class="subtle" style="margin-bottom:8px">错误统计</div><div class="empty">请求明细加载失败：' + esc(error.message || '未知错误') + '</div></div>';
+  if (loading && !errorRows.length) return '<div><div class="subtle" style="margin-bottom:8px">错误统计</div><div class="empty">正在加载接口请求明细...</div></div>';
+  if (error && !errorRows.length) return '<div><div class="subtle" style="margin-bottom:8px">错误统计</div><div class="empty">请求明细加载失败：' + esc(error.message || '未知错误') + '</div></div>';
   return '<div><div class="subtle" style="margin-bottom:8px">错误统计</div>' +
     (errorRows.length ? '<div class="tableWrap"><table><thead><tr><th>状态码</th><th>次数</th><th>错误</th></tr></thead><tbody>' + errorRows.slice(0, 10).map((r) => '<tr><td class="bad">' + esc(r.status_code || '-') + '</td><td>' + fmt.format(r.count) + '</td><td class="errorText">' + esc(r.failure || '未返回错误内容') + '</td></tr>').join('') + '</tbody></table></div>' : '<div class="empty">暂无失败请求</div>') +
     '</div>';
 }
 
 function apiDetailRecentHtml(rows, loading, error) {
-  if (loading) return '<div><div class="subtle" style="margin-bottom:8px">最近请求</div><div class="empty">正在加载接口请求明细...</div></div>';
-  if (error) return '<div><div class="subtle" style="margin-bottom:8px">最近请求</div><div class="empty">请求明细加载失败</div></div>';
+  if (loading && !rows.length) return '<div><div class="subtle" style="margin-bottom:8px">最近请求</div><div class="empty">正在加载接口请求明细...</div></div>';
+  if (error && !rows.length) return '<div><div class="subtle" style="margin-bottom:8px">最近请求</div><div class="empty">请求明细加载失败</div></div>';
   return '<div><div class="subtle" style="margin-bottom:8px">最近请求</div>' +
     (rows.length ? '<div class="tableWrap"><table><thead><tr><th>时间</th><th>模型</th><th>结果</th><th>延迟</th><th>token</th><th>来源</th></tr></thead><tbody>' + rows.slice(0, apiDetailRecentLimit).map((d) => '<tr><td>' + new Date(d.timestamp_ms).toLocaleString() + '</td><td class="nameCell">' + esc(d.model) + '</td><td class="' + (d.failed ? 'bad' : 'ok') + '">' + (d.failed ? '失败' : '成功') + '</td><td>' + formatMs(num(d.latency_ms)) + '</td><td>' + fmt.format(d.total_tokens) + '</td><td>' + esc(sourceLabel(d)) + '</td></tr>').join('') + '</tbody></table></div>' : '<div class="empty">暂无请求明细</div>') +
     '</div>';
@@ -531,15 +536,18 @@ async function renderApiDetail() {
   if (!apiData) { apiDetailSeq++; setText('apiDetailTitle', '选择一个上游接口查看模型、来源、错误和最近请求。'); $('apiDetail').innerHTML = '<div class="empty">暂无接口详情</div>'; return }
   const api = selectedApi;
   const seq = ++apiDetailSeq;
+  const cacheKey = apiDetailCacheKey(api);
+  const cached = apiDetailCache.get(cacheKey);
   setText('apiDetailTitle', friendlyApiName(api));
-  renderApiDetailContent(apiData, { loading: true });
+  renderApiDetailContent(apiData, cached ? { detail: cached, loading: true } : { loading: true });
   try {
     const result = await fetchApiDetailData(api);
     if (seq !== apiDetailSeq || api !== selectedApi) return;
+    apiDetailCache.set(cacheKey, result);
     renderApiDetailContent(apiData, { detail: result });
   } catch (e) {
     if (seq !== apiDetailSeq || api !== selectedApi) return;
-    renderApiDetailContent(apiData, { error: e });
+    renderApiDetailContent(apiData, cached ? { detail: cached, error: e } : { error: e });
   }
 }
 
@@ -809,7 +817,16 @@ function notifyExportTruncated(info) {
 }
 
 function summaryRecordKey(data) {
-  return (data && data._meta && data._meta.last_recorded_at) || '';
+  if (!data) return '';
+  const meta = data._meta || {};
+  const usage = data.usage || {};
+  return [
+    meta.summary_version || '',
+    meta.last_recorded_at || '',
+    usage.total_requests || '',
+    meta.current_detail_count || '',
+    meta.evicted_total || '',
+  ].join('|');
 }
 
 function shouldRefreshDetails(previousSummary, nextSummary, forceDetails) {

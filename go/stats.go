@@ -2683,6 +2683,7 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsLocked(now time.Time, heal
 	summary.Meta.MaxDetailsPerModel = s.maxDetailsPerModel
 	summary.Meta.CurrentDetailCount = s.countDetailsLocked()
 	summary.Meta.EvictedTotal = s.evictedTotal
+	summary.Meta.SummaryVersion = s.summaryVersion
 	summary.Meta.Storage = s.storageStatusLocked()
 	if !s.lastRecordedAt.IsZero() {
 		summary.Meta.LastRecordedAt = s.lastRecordedAt.UTC().Format(time.RFC3339)

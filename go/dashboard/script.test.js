@@ -52,6 +52,7 @@ function createDashboardHarness(options = {}) {
   const fetchRequests = [];
   const timeoutDelays = [];
   let summaryLastRecordedAt = options.lastRecordedAt || '2023-11-15T06:13:20Z';
+  let summaryVersion = options.summaryVersion || 1;
   let prices = { 'gpt-4.1': { prompt: 2, completion: 8, cache: 0.5 } };
   const dashboardEtags = !!options.dashboardEtags;
   const wrapDashboardResponses = !!options.wrapDashboardResponses;
@@ -139,6 +140,8 @@ function createDashboardHarness(options = {}) {
     model_stats: [{ model: 'gpt-4.1', total_requests: 1200, success_count: 1190, failure_count: 10, total_tokens: 24000, input_tokens: 4000, output_tokens: 5000, cached_tokens: 0, reasoning_tokens: 0 }],
     _meta: {
       last_recorded_at: summaryLastRecordedAt,
+      summary_version: summaryVersion,
+      current_detail_count: 1200,
       storage: { enabled: false, path: 'usage-statistics.jsonl' },
     },
   };
@@ -444,6 +447,7 @@ function createDashboardHarness(options = {}) {
           };
         }
         summary._meta.last_recorded_at = summaryLastRecordedAt;
+        summary._meta.summary_version = summaryVersion;
         payload = summary;
       }
       else if (String(url).includes('dashboard-api-detail')) payload = apiDetailPayload(String(url));
@@ -519,8 +523,11 @@ function createDashboardHarness(options = {}) {
   const setSummaryLastRecordedAt = (value) => {
     summaryLastRecordedAt = value;
   };
+  const setSummaryVersion = (value) => {
+    summaryVersion = value;
+  };
 
-  return { context, document, fetchCalls, fetchRequests, downloads, timeoutDelays, setVisibility, setSummaryLastRecordedAt };
+  return { context, document, fetchCalls, fetchRequests, downloads, timeoutDelays, setVisibility, setSummaryLastRecordedAt, setSummaryVersion };
 }
 
 async function waitFor(fn) {
@@ -756,6 +763,19 @@ test('dashboard polling skips detail requests when no new records arrive', async
   assert.ok(countCalls('dashboard-api-detail') > beforeManualApiDetail);
 });
 
+test('dashboard polling refreshes details when summary version changes within the same second', async () => {
+  const { fetchCalls, setVisibility, setSummaryVersion } = createDashboardHarness();
+  const countCalls = (part) => fetchCalls.filter((url) => url.includes(part)).length;
+
+  await waitFor(() => countCalls('dashboard-events') > 0 && countCalls('dashboard-api-detail') > 0);
+  const beforeEvents = countCalls('dashboard-events');
+  const beforeApiDetail = countCalls('dashboard-api-detail');
+
+  setSummaryVersion(2);
+  setVisibility('visible');
+  await waitFor(() => countCalls('dashboard-events') > beforeEvents && countCalls('dashboard-api-detail') > beforeApiDetail);
+});
+
 test('dashboard summary polling reuses cached data on management 304', async () => {
   const { fetchCalls, fetchRequests, setVisibility } = createDashboardHarness({
     dashboardEtags: true,
@@ -777,6 +797,17 @@ test('dashboard summary polling reuses cached data on management 304', async () 
   assert.strictEqual(optionHeaderValue(latestSummary.options, 'If-None-Match'), 'W/"summary-2023-11-15T06:13:20Z"');
   assert.strictEqual(countCalls('dashboard-events?'), beforeEvents);
   assert.strictEqual(countCalls('dashboard-api-detail'), beforeApiDetail);
+});
+
+test('dashboard api detail refresh keeps cached content while loading', async () => {
+  const { context, document } = createDashboardHarness();
+
+  await waitFor(() => document.getElementById('apiDetail').innerHTML.includes('deepseek-v4-flash-free'));
+  const promise = context.renderApiDetail();
+
+  assert.match(document.getElementById('apiDetail').innerHTML, /deepseek-v4-flash-free/);
+  assert.doesNotMatch(document.getElementById('apiDetail').innerHTML, /正在加载接口请求明细/);
+  await promise;
 });
 
 test('dashboard fallback keeps health grid visible when summary endpoint fails', async () => {

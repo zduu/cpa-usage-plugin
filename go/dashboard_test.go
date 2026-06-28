@@ -339,6 +339,9 @@ func TestDashboardSummaryHasMetadata(t *testing.T) {
 	if summary.Meta.CurrentDetailCount != 1 {
 		t.Fatalf("detail_count = %d, want 1", summary.Meta.CurrentDetailCount)
 	}
+	if summary.Meta.SummaryVersion == 0 {
+		t.Fatal("summary_version should be populated after recording a request")
+	}
 	if summary.Meta.Storage.Enabled {
 		t.Fatal("storage should be disabled in this test configuration")
 	}
