@@ -507,6 +507,25 @@ test('dashboard shows pending storage fsync status', async () => {
   assert.match(el.title, /4 条记录/);
 });
 
+test('dashboard shows storage writer batch metrics in title', async () => {
+  const { document } = createDashboardHarness({
+    storage: {
+      enabled: true,
+      path: 'usage-statistics.jsonl',
+      last_flush_at: '2026-06-28T01:00:00Z',
+      last_write_batch_records: 12,
+      last_write_batch_duration_ms: 1.6,
+      last_write_queue_wait_ms: 3.2,
+    },
+  });
+
+  const el = document.getElementById('storageStatus');
+  await waitFor(() => el.textContent === '持久化已同步');
+  assert.strictEqual(el.textContent, '持久化已同步');
+  assert.match(el.title, /最近批量写入 12 条/);
+  assert.match(el.title, /最长排队/);
+});
+
 test('dashboard uses a slower polling interval while hidden', async () => {
   const { fetchCalls, timeoutDelays, setVisibility } = createDashboardHarness({ visibilityState: 'hidden' });
 

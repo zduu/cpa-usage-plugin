@@ -183,6 +183,21 @@ function renderStats() {
   drawSpark('costSpark', reqByHour.length ? reqByHour.map(v => (cost > 0 ? v / Math.max(u.total_requests || 1, 1) * cost : 0)) : [0], '#f59e0b');
 }
 
+function storageBatchTitle(storage) {
+  const records = num(storage && storage.last_write_batch_records);
+  if (records <= 0) return '';
+  const parts = ['最近批量写入 ' + records.toLocaleString() + ' 条'];
+  const duration = num(storage.last_write_batch_duration_ms);
+  if (duration > 0) parts.push('耗时 ' + formatMs(duration));
+  const wait = num(storage.last_write_queue_wait_ms);
+  if (wait > 0) parts.push('最长排队 ' + formatMs(wait));
+  return parts.join('，');
+}
+
+function storageTitle() {
+  return Array.from(arguments).filter(Boolean).join('；');
+}
+
 function renderStorageStatus() {
   const el = $('storageStatus');
   if (!el) return;
@@ -210,33 +225,33 @@ function renderStorageStatus() {
     el.textContent = '持久化排队中';
     el.classList.add('warn');
     const capacity = num(storage.write_queue_capacity);
-    el.title = queued.toLocaleString() + ' 条记录等待后台写入' + (capacity > 0 ? '，队列容量 ' + capacity.toLocaleString() : '');
+    el.title = storageTitle(queued.toLocaleString() + ' 条记录等待后台写入' + (capacity > 0 ? '，队列容量 ' + capacity.toLocaleString() : ''), storageBatchTitle(storage));
     return;
   }
   const pending = num(storage.pending_buffered_records);
   if (pending > 0) {
     el.textContent = '持久化待同步';
     el.classList.add('warn');
-    el.title = pending.toLocaleString() + ' 条记录待刷新到文件';
+    el.title = storageTitle(pending.toLocaleString() + ' 条记录待刷新到文件', storageBatchTitle(storage));
     return;
   }
   const pendingSync = num(storage.pending_unsynced_records);
   if (pendingSync > 0) {
     el.textContent = '持久化待落盘';
     el.classList.add('warn');
-    el.title = pendingSync.toLocaleString() + ' 条记录待同步到磁盘';
+    el.title = storageTitle(pendingSync.toLocaleString() + ' 条记录待同步到磁盘', storageBatchTitle(storage));
     return;
   }
   const pendingSnapshot = num(storage.pending_snapshot_records);
   if (pendingSnapshot > 0) {
     el.textContent = '快照待更新';
     el.classList.add('warn');
-    el.title = pendingSnapshot.toLocaleString() + ' 条记录待写入快照';
+    el.title = storageTitle(pendingSnapshot.toLocaleString() + ' 条记录待写入快照', storageBatchTitle(storage));
     return;
   }
   el.textContent = storage.last_flush_at ? '持久化已同步' : '持久化已开启';
   el.classList.add('ok');
-  el.title = storage.last_snapshot_at || storage.loaded_path || storage.path || '';
+  el.title = storageTitle(storage.last_snapshot_at || storage.loaded_path || storage.path || '', storageBatchTitle(storage));
 }
 
 function renderHealth() {

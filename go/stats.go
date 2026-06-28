@@ -80,6 +80,9 @@ type RequestStatistics struct {
 	storageUnsyncedRecords        int64
 	storageWriteQueueCapacity     int
 	storageWriteQueueLength       int
+	storageLastWriteBatchRecords  int
+	storageLastWriteBatchDuration time.Duration
+	storageLastWriteQueueWait     time.Duration
 	storageWorkerRunning          bool
 	storageQueue                  chan persistedDetail
 	storageStop                   chan struct{}
@@ -436,9 +439,10 @@ func (s *RequestStatistics) Record(record UsageRecord) {
 }
 
 type persistedDetail struct {
-	API    string        `json:"api"`
-	Model  string        `json:"model"`
-	Detail RequestDetail `json:"detail"`
+	API        string        `json:"api"`
+	Model      string        `json:"model"`
+	Detail     RequestDetail `json:"detail"`
+	enqueuedAt time.Time     `json:"-"`
 }
 
 type persistedStorageSnapshot struct {
@@ -550,6 +554,7 @@ func (s *RequestStatistics) enqueueStorageDetail(detail persistedDetail) {
 	s.storageControlMu.Unlock()
 	defer s.storageEnqueueWG.Done()
 
+	detail.enqueuedAt = time.Now()
 	select {
 	case queue <- detail:
 		s.updateStorageQueueLength(len(queue))
@@ -584,14 +589,16 @@ func (s *RequestStatistics) storageWorkerLoop(cfg storageWorkerConfig, queue <-c
 	for {
 		select {
 		case detail := <-queue:
+			batch := collectStorageBatch(queue, detail)
 			s.updateStorageQueueLength(len(queue))
-			state.append(s, detail)
+			state.appendBatch(s, batch)
 		case <-stop:
 			for {
 				select {
 				case detail := <-queue:
+					batch := collectStorageBatch(queue, detail)
 					s.updateStorageQueueLength(len(queue))
-					state.append(s, detail)
+					state.appendBatch(s, batch)
 				default:
 					return
 				}
@@ -600,38 +607,96 @@ func (s *RequestStatistics) storageWorkerLoop(cfg storageWorkerConfig, queue <-c
 	}
 }
 
-func (w *storageWorkerState) append(s *RequestStatistics, detail persistedDetail) {
-	now := time.Now()
-	if err := w.open(s, now); err != nil {
+func collectStorageBatch(queue <-chan persistedDetail, first persistedDetail) []persistedDetail {
+	capacity := len(queue) + 1
+	if capacity > defaultStorageWriteBatchSize {
+		capacity = defaultStorageWriteBatchSize
+	}
+	if capacity <= 0 {
+		capacity = 1
+	}
+	batch := make([]persistedDetail, 0, capacity)
+	batch = append(batch, first)
+	for len(batch) < defaultStorageWriteBatchSize {
+		select {
+		case detail := <-queue:
+			batch = append(batch, detail)
+		default:
+			return batch
+		}
+	}
+	return batch
+}
+
+func (w *storageWorkerState) appendBatch(s *RequestStatistics, batch []persistedDetail) {
+	if len(batch) == 0 {
+		return
+	}
+	started := time.Now()
+	if err := w.open(s, started); err != nil {
 		s.setStorageLastError(err)
 		return
 	}
-	raw, err := json.Marshal(detail)
-	if err != nil {
-		s.setStorageLastError(err)
+	records := 0
+	for _, detail := range batch {
+		raw, err := json.Marshal(detail)
+		if err != nil {
+			s.setStorageLastError(err)
+			continue
+		}
+		if _, err := w.writer.Write(raw); err != nil {
+			s.setStorageLastError(err)
+			continue
+		}
+		if err := w.writer.WriteByte('\n'); err != nil {
+			s.setStorageLastError(err)
+			continue
+		}
+		records++
+	}
+	if records == 0 {
 		return
 	}
-	if _, err := w.writer.Write(raw); err != nil {
-		s.setStorageLastError(err)
-		return
-	}
-	if err := w.writer.WriteByte('\n'); err != nil {
-		s.setStorageLastError(err)
-		return
-	}
-	w.buffered++
-	w.snapshotRecords++
-	w.unsyncedRecords++
+	w.buffered += int64(records)
+	w.snapshotRecords += int64(records)
+	w.unsyncedRecords += int64(records)
+	finished := time.Now()
 	w.report(s)
-	if w.flushDue(now) {
-		w.flush(s, now)
+	s.updateStorageWriteBatchMetrics(records, finished.Sub(started), storageBatchQueueWait(started, batch))
+	if w.flushDue(finished) {
+		w.flush(s, finished)
 	}
-	if w.syncDue(now) {
-		w.sync(s, now)
+	if w.syncDue(finished) {
+		w.sync(s, finished)
 	}
-	if w.snapshotDue(now) {
-		w.writeSnapshot(s, now)
+	if w.snapshotDue(finished) {
+		w.writeSnapshot(s, finished)
 	}
+}
+
+func storageBatchQueueWait(started time.Time, batch []persistedDetail) time.Duration {
+	var maxWait time.Duration
+	for _, detail := range batch {
+		if detail.enqueuedAt.IsZero() {
+			continue
+		}
+		wait := started.Sub(detail.enqueuedAt)
+		if wait > maxWait {
+			maxWait = wait
+		}
+	}
+	return maxWait
+}
+
+func (s *RequestStatistics) updateStorageWriteBatchMetrics(records int, duration time.Duration, queueWait time.Duration) {
+	if s == nil || records <= 0 {
+		return
+	}
+	s.mu.Lock()
+	s.storageLastWriteBatchRecords = records
+	s.storageLastWriteBatchDuration = duration
+	s.storageLastWriteQueueWait = queueWait
+	s.mu.Unlock()
 }
 
 func (w *storageWorkerState) open(s *RequestStatistics, now time.Time) error {
@@ -1232,6 +1297,9 @@ func (s *RequestStatistics) closeStorageLocked() {
 	s.storageBuffered = 0
 	s.storageUnsyncedRecords = 0
 	s.storageWriteQueueLength = 0
+	s.storageLastWriteBatchRecords = 0
+	s.storageLastWriteBatchDuration = 0
+	s.storageLastWriteQueueWait = 0
 	s.storageWorkerRunning = false
 	if s.storageEnabled && strings.TrimSpace(s.storageDir) != "" {
 		if err := s.writeStorageSnapshotLocked(now); err != nil {
@@ -3277,6 +3345,9 @@ func (s *RequestStatistics) storageStatusLocked() StorageStatus {
 		PendingUnsyncedRecords:        s.storageUnsyncedRecords,
 		WriteQueueLength:              queueLength,
 		WriteQueueCapacity:            queueCapacity,
+		LastWriteBatchRecords:         s.storageLastWriteBatchRecords,
+		LastWriteBatchDurationMs:      storageDurationMilliseconds(s.storageLastWriteBatchDuration),
+		LastWriteQueueWaitMs:          storageDurationMilliseconds(s.storageLastWriteQueueWait),
 		SnapshotIntervalSeconds:       int(s.storageSnapshotInterval.Seconds()),
 		SnapshotRecordIntervalRecords: s.storageSnapshotRecordInterval,
 		SyncIntervalSeconds:           int(s.storageSyncInterval.Seconds()),
@@ -3292,6 +3363,13 @@ func (s *RequestStatistics) storageStatusLocked() StorageStatus {
 		status.LastSyncAt = s.storageLastSync.UTC().Format(time.RFC3339)
 	}
 	return status
+}
+
+func storageDurationMilliseconds(duration time.Duration) float64 {
+	if duration <= 0 {
+		return 0
+	}
+	return float64(duration) / float64(time.Millisecond)
 }
 
 func (s *RequestStatistics) RuntimeStatus() RuntimeStatus {

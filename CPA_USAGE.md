@@ -163,7 +163,7 @@ plugins:
 说明：
 
 - 不配置或保持 `storage_enabled: false` 时，就是原来的内存模式，重启清零。
-- 开启后每条新请求会进入后台写入队列，再追加写入日期分片，例如 `data/usage-statistics/usage-2026-06-28.jsonl`；插件启动时只 replay 保留窗口内的日期分片。
+- 开启后每条新请求会进入后台写入队列，由后台 writer 批量追加写入日期分片，例如 `data/usage-statistics/usage-2026-06-28.jsonl`；插件启动时只 replay 保留窗口内的日期分片。
 - 如果 `storage_path` 配置为历史单文件路径（如 `data/usage-statistics.jsonl`），插件会继续读取该旧文件作为兼容输入，新数据会写入同名目录 `data/usage-statistics/` 下的日期分片。
 - 插件正常关闭、日期分片切换、达到 `storage_snapshot_interval_seconds` 或达到 `storage_snapshot_record_interval` 时会写入 `snapshot.json`；下次启动会先加载 snapshot，再 replay snapshot 当天及之后的分片增量。
 - `storage_path` 是相对 CPA 工作目录的路径；Docker 中建议放到已挂载的 `/CLIProxyAPI/data` 或其他宿主机 volume。
@@ -171,7 +171,7 @@ plugins:
 - `storage_flush_interval_seconds` 越小，异常退出时最多丢失的数据越少；默认 30 秒，想更稳可以设为 5 或 1。
 - `storage_snapshot_interval_seconds` 和 `storage_snapshot_record_interval` 控制启动恢复成本；默认 300 秒或 1000 条写一次快照，高请求量实例可降低记录间隔，低频实例可保持默认。
 - `storage_sync_interval_seconds` 和 `storage_sync_record_interval` 默认关闭；如果需要更强的异常断电保护，可配置如 `storage_sync_interval_seconds: 30` 或 `storage_sync_record_interval: 1000`，但会增加磁盘 I/O。
-- `/health` 的 `storage.write_queue_length` 和 `storage.write_queue_capacity` 可观察后台写入队列积压；看板底部出现“持久化排队中”时，说明磁盘写入速度短时间低于请求记录速度。
+- `/health` 的 `storage.write_queue_length` 和 `storage.write_queue_capacity` 可观察后台写入队列积压；`storage.last_write_batch_records`、`storage.last_write_batch_duration_ms`、`storage.last_write_queue_wait_ms` 可观察最近 writer 批次规模、写入耗时和最长排队时长。看板底部出现“持久化排队中”时，说明磁盘写入速度短时间低于请求记录速度。
 - 如果已经有内存数据，建议先导出；开启持久化并重启后，再把导出的 JSON 导入一次，后续数据才会继续写入持久化文件。
 
 ## 按配置更新插件文件
@@ -327,7 +327,7 @@ curl http://127.0.0.1:8317/v0/management/plugins/usage-statistics/health \
   -H 'x-management-key: <你的管理密钥>'
 ```
 
-`storage` 字段会返回持久化状态、后台写入队列长度、待 flush/sync/snapshot 记录数和最近错误；`runtime` 字段会返回摘要缓存命中/未命中、事件缓存命中/未命中、事件索引条目数，以及最近 summary/events/api-detail 查询耗时，便于观察看板压力和筛选性能。
+`storage` 字段会返回持久化状态、后台写入队列长度、最近 writer 批次指标、待 flush/sync/snapshot 记录数和最近错误；`runtime` 字段会返回摘要缓存命中/未命中、事件缓存命中/未命中、事件索引条目数，以及最近 summary/events/api-detail 查询耗时，便于观察看板压力和筛选性能。
 
 ### 数据导出
 

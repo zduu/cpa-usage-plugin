@@ -498,6 +498,7 @@ func TestStorageStatusReportsPendingBufferedRecords(t *testing.T) {
 		Model:    "gpt-4",
 		Detail:   UsageDetail{TotalTokens: 1},
 	})
+	waitForTestCondition(t, func() bool { return stats.StorageStatus().LastFlushAt != "" })
 	stats.Record(UsageRecord{
 		Provider: "openai",
 		Model:    "gpt-4",
@@ -511,6 +512,64 @@ func TestStorageStatusReportsPendingBufferedRecords(t *testing.T) {
 	stats.Close()
 	if status := stats.StorageStatus(); status.PendingBufferedRecords != 0 {
 		t.Fatalf("pending buffered records after close = %d, want 0", status.PendingBufferedRecords)
+	}
+}
+
+func TestStorageWorkerCollectsQueuedBatches(t *testing.T) {
+	queue := make(chan persistedDetail, defaultStorageWriteBatchSize+4)
+	first := persistedDetail{API: "api-0", Model: "gpt-4"}
+	for i := 1; i < defaultStorageWriteBatchSize+4; i++ {
+		queue <- persistedDetail{API: fmt.Sprintf("api-%d", i), Model: "gpt-4"}
+	}
+
+	batch := collectStorageBatch(queue, first)
+	if len(batch) != defaultStorageWriteBatchSize {
+		t.Fatalf("batch size = %d, want %d", len(batch), defaultStorageWriteBatchSize)
+	}
+	if batch[0].API != "api-0" {
+		t.Fatalf("first batch item = %q, want api-0", batch[0].API)
+	}
+	wantLast := fmt.Sprintf("api-%d", defaultStorageWriteBatchSize-1)
+	if batch[len(batch)-1].API != wantLast {
+		t.Fatalf("last batch item = %q, want %s", batch[len(batch)-1].API, wantLast)
+	}
+	if remaining := len(queue); remaining != 4 {
+		t.Fatalf("remaining queue length = %d, want 4", remaining)
+	}
+}
+
+func TestStorageStatusReportsWriteBatchMetrics(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage-statistics.jsonl")
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		MaxDetailsPerModel:  100,
+		RetentionDays:       0,
+		DedupWindowMinutes:  0,
+		StorageEnabled:      true,
+		StoragePath:         path,
+		StorageFlushSeconds: 3600,
+	})
+	defer stats.Close()
+
+	for i := 0; i < 16; i++ {
+		stats.Record(UsageRecord{
+			Provider:    "openai",
+			Model:       "gpt-4",
+			RequestedAt: time.Now().Add(time.Duration(i) * time.Millisecond),
+			Detail:      UsageDetail{TotalTokens: int64(i + 1)},
+		})
+	}
+
+	waitForTestCondition(t, func() bool { return stats.StorageStatus().LastWriteBatchRecords > 0 })
+	status := stats.StorageStatus()
+	if status.LastWriteBatchRecords <= 0 {
+		t.Fatalf("last write batch records = %d, want > 0", status.LastWriteBatchRecords)
+	}
+	if status.LastWriteBatchDurationMs <= 0 {
+		t.Fatalf("last write batch duration = %f, want > 0", status.LastWriteBatchDurationMs)
+	}
+	if status.LastWriteQueueWaitMs < 0 {
+		t.Fatalf("last write queue wait = %f, want >= 0", status.LastWriteQueueWaitMs)
 	}
 }
 

@@ -16,6 +16,7 @@ const (
 	defaultStorageSyncSeconds            = 0
 	defaultStorageSyncRecords            = 0
 	defaultStorageWriteQueueSize         = 4096
+	defaultStorageWriteBatchSize         = 128
 	defaultPriceStoragePath              = "usage-statistics-prices.json"
 )
 
@@ -391,22 +392,25 @@ type ExportConfig struct {
 }
 
 type StorageStatus struct {
-	Enabled                       bool   `json:"enabled"`
-	Path                          string `json:"path,omitempty"`
-	LoadedPath                    string `json:"loaded_path,omitempty"`
-	LastFlushAt                   string `json:"last_flush_at,omitempty"`
-	LastSnapshotAt                string `json:"last_snapshot_at,omitempty"`
-	LastSyncAt                    string `json:"last_sync_at,omitempty"`
-	LastError                     string `json:"last_error,omitempty"`
-	PendingBufferedRecords        int64  `json:"pending_buffered_records,omitempty"`
-	PendingSnapshotRecords        int64  `json:"pending_snapshot_records,omitempty"`
-	PendingUnsyncedRecords        int64  `json:"pending_unsynced_records,omitempty"`
-	WriteQueueLength              int    `json:"write_queue_length,omitempty"`
-	WriteQueueCapacity            int    `json:"write_queue_capacity,omitempty"`
-	SnapshotIntervalSeconds       int    `json:"snapshot_interval_seconds,omitempty"`
-	SnapshotRecordIntervalRecords int    `json:"snapshot_record_interval_records,omitempty"`
-	SyncIntervalSeconds           int    `json:"sync_interval_seconds,omitempty"`
-	SyncRecordIntervalRecords     int    `json:"sync_record_interval_records,omitempty"`
+	Enabled                       bool    `json:"enabled"`
+	Path                          string  `json:"path,omitempty"`
+	LoadedPath                    string  `json:"loaded_path,omitempty"`
+	LastFlushAt                   string  `json:"last_flush_at,omitempty"`
+	LastSnapshotAt                string  `json:"last_snapshot_at,omitempty"`
+	LastSyncAt                    string  `json:"last_sync_at,omitempty"`
+	LastError                     string  `json:"last_error,omitempty"`
+	PendingBufferedRecords        int64   `json:"pending_buffered_records,omitempty"`
+	PendingSnapshotRecords        int64   `json:"pending_snapshot_records,omitempty"`
+	PendingUnsyncedRecords        int64   `json:"pending_unsynced_records,omitempty"`
+	WriteQueueLength              int     `json:"write_queue_length,omitempty"`
+	WriteQueueCapacity            int     `json:"write_queue_capacity,omitempty"`
+	LastWriteBatchRecords         int     `json:"last_write_batch_records,omitempty"`
+	LastWriteBatchDurationMs      float64 `json:"last_write_batch_duration_ms,omitempty"`
+	LastWriteQueueWaitMs          float64 `json:"last_write_queue_wait_ms,omitempty"`
+	SnapshotIntervalSeconds       int     `json:"snapshot_interval_seconds,omitempty"`
+	SnapshotRecordIntervalRecords int     `json:"snapshot_record_interval_records,omitempty"`
+	SyncIntervalSeconds           int     `json:"sync_interval_seconds,omitempty"`
+	SyncRecordIntervalRecords     int     `json:"sync_record_interval_records,omitempty"`
 }
 
 type ModelPrice struct {
