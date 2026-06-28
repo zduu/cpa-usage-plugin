@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -161,6 +162,7 @@ type apiStats struct {
 	latencySum      int64
 	latencyN        int64
 	Models          map[string]*modelStats
+	Sources         map[string]*sourceStatAccumulator
 }
 
 type modelStats struct {
@@ -364,7 +366,6 @@ func (s *RequestStatistics) ConfigurePatch(cfg runtimeConfigPatch) {
 	s.configureStorageLocked()
 	s.loadModelPricesLocked()
 	s.pruneLocked(time.Now(), true)
-	s.rebuildAggregatesLocked()
 	s.rebuildSeenLocked(time.Now())
 	s.invalidateSummaryLocked()
 }
@@ -450,13 +451,11 @@ func (s *RequestStatistics) Record(record UsageRecord) {
 		Failure:    trimLong(redactSensitiveText(record.Failure.Body), 500),
 		Headers:    filterHeaders(record.ResponseHeaders, s.logResponseHeaders),
 	}
-	dedup := dedupKey(statsKey, modelName, detail)
-
 	var persistDetail *persistedDetail
 	s.mu.Lock()
 
 	now := time.Now()
-	if s.recordDetailLocked(statsKey, modelName, detail, dedup, now, true) {
+	if s.recordDetailLocked(statsKey, modelName, detail, "", now, false) {
 		if s.storageEnabled {
 			persistDetail = &persistedDetail{API: statsKey, Model: modelName, Detail: detail}
 		}
@@ -994,11 +993,12 @@ func (s *RequestStatistics) recordDetailLocked(apiName, modelName string, detail
 
 	apiSt, ok := s.apis[apiName]
 	if !ok {
-		apiSt = &apiStats{Models: make(map[string]*modelStats)}
+		apiSt = &apiStats{Models: make(map[string]*modelStats), Sources: make(map[string]*sourceStatAccumulator)}
 		s.apis[apiName] = apiSt
 	}
 
 	totals := s.updateAPIStats(apiSt, modelName, detail)
+	incrementAPISourceStats(apiSt, detail, totals)
 
 	s.totalRequests++
 	if detail.Failed {
@@ -1131,12 +1131,163 @@ func (s *RequestStatistics) loadStorageSnapshotLocked(dir string, now time.Time)
 	if err := json.Unmarshal(raw, &persisted); err != nil {
 		return time.Time{}, fmt.Errorf("load storage snapshot: %w", err)
 	}
-	_, _ = s.mergeSnapshotLocked(persisted.Usage, false, now)
+	if s.hasRecordsLocked() {
+		_, _ = s.mergeSnapshotLocked(persisted.Usage, false, now)
+	} else {
+		s.restoreStorageSnapshotLocked(persisted.Usage, now)
+	}
 	generatedAt, err := time.Parse(time.RFC3339, persisted.GeneratedAt)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("parse storage snapshot time: %w", err)
 	}
 	return generatedAt, nil
+}
+
+func (s *RequestStatistics) hasRecordsLocked() bool {
+	return s != nil && (s.totalRequests != 0 || len(s.apis) != 0)
+}
+
+func (s *RequestStatistics) restoreStorageSnapshotLocked(snapshot StatisticsSnapshot, now time.Time) {
+	if s == nil {
+		return
+	}
+	s.totalRequests = nonNegativeInt64(snapshot.TotalRequests)
+	s.successCount = nonNegativeInt64(snapshot.SuccessCount)
+	s.failureCount = nonNegativeInt64(snapshot.FailureCount)
+	s.totalTokens = nonNegativeInt64(snapshot.TotalTokens)
+	s.inputTokens = 0
+	s.outputTokens = 0
+	s.cachedTokens = 0
+	s.reasoningTokens = 0
+	s.latencySum = 0
+	s.latencyN = 0
+	s.apis = make(map[string]*apiStats, len(snapshot.APIs))
+	s.requestsByDay = copyStringInt64Map(snapshot.RequestsByDay)
+	s.requestsByHour = hourStringMapToIntMap(snapshot.RequestsByHour)
+	s.tokensByDay = copyStringInt64Map(snapshot.TokensByDay)
+	s.tokensByHour = hourStringMapToIntMap(snapshot.TokensByHour)
+	s.healthBuckets = make(map[int64]healthBucket)
+	s.modelSummaryStats = make(map[string]*ModelStat)
+	s.sourceStats = make(map[string]*sourceStatAccumulator)
+	s.credentialStats = make(map[string]*CredentialStat)
+	s.clientAPIStats = make(map[string]*clientAPIStatAccumulator)
+
+	var restoredDetails int64
+	for apiName, apiSnapshot := range snapshot.APIs {
+		apiName = strings.TrimSpace(apiName)
+		if apiName == "" {
+			continue
+		}
+		apiName = storageSnapshotAPIName(apiName, apiSnapshot)
+		apiSt := &apiStats{
+			TotalRequests: nonNegativeInt64(apiSnapshot.TotalRequests),
+			SuccessCount:  nonNegativeInt64(apiSnapshot.SuccessCount),
+			FailureCount:  nonNegativeInt64(apiSnapshot.FailureCount),
+			TotalTokens:   nonNegativeInt64(apiSnapshot.TotalTokens),
+			Models:        make(map[string]*modelStats, len(apiSnapshot.Models)),
+			Sources:       make(map[string]*sourceStatAccumulator),
+		}
+		for modelName, modelSnapshot := range apiSnapshot.Models {
+			modelName = normalizeModelName(modelName)
+			modelSt := &modelStats{
+				TotalRequests: nonNegativeInt64(modelSnapshot.TotalRequests),
+				SuccessCount:  nonNegativeInt64(modelSnapshot.SuccessCount),
+				FailureCount:  nonNegativeInt64(modelSnapshot.FailureCount),
+				TotalTokens:   nonNegativeInt64(modelSnapshot.TotalTokens),
+				Details:       make([]RequestDetail, 0, len(modelSnapshot.Details)),
+			}
+			for _, detail := range modelSnapshot.Details {
+				if detail.Model == "" {
+					detail.Model = modelName
+				}
+				if detail.Timestamp.IsZero() {
+					detail.Timestamp = now
+				}
+				if detail.LatencyMs < 0 {
+					detail.LatencyMs = 0
+				}
+				if detail.TTFTMs < 0 {
+					detail.TTFTMs = 0
+				}
+				detail.Tokens.TotalTokens = detailTotalTokens(detail.Tokens)
+				modelSt.Details = append(modelSt.Details, detail)
+				restoredDetails++
+
+				totals := detailTotalsFromRequest(detail)
+				incrementAPISourceStats(apiSt, detail, totals)
+				s.incrementSummaryDimensionStatsLocked(modelName, detail, totals)
+				s.incrementHealthBucketLocked(detail)
+				if detail.Timestamp.After(s.lastRecordedAt) {
+					s.lastRecordedAt = detail.Timestamp
+				}
+			}
+			apiSt.Models[modelName] = modelSt
+			s.mergeModelSummaryAggregateLocked(modelName, modelSt)
+		}
+		s.apis[apiName] = apiSt
+	}
+	if s.totalRequests == 0 && restoredDetails > 0 {
+		s.rebuildAggregatesLocked()
+	}
+}
+
+func storageSnapshotAPIName(apiName string, apiSnapshot APISnapshot) string {
+	for _, modelSnapshot := range apiSnapshot.Models {
+		for _, detail := range modelSnapshot.Details {
+			if key := usageGroupKeyFromDetail(apiName, detail); strings.TrimSpace(key) != "" {
+				return key
+			}
+		}
+	}
+	return apiName
+}
+
+func (s *RequestStatistics) mergeModelSummaryAggregateLocked(modelName string, modelSt *modelStats) {
+	if s == nil || modelSt == nil {
+		return
+	}
+	if s.modelSummaryStats == nil {
+		s.modelSummaryStats = make(map[string]*ModelStat)
+	}
+	modelName = normalizeModelName(modelName)
+	stat, ok := s.modelSummaryStats[modelName]
+	if !ok {
+		stat = &ModelStat{Model: modelName}
+		s.modelSummaryStats[modelName] = stat
+	}
+	stat.TotalRequests += modelSt.TotalRequests
+	stat.SuccessCount += modelSt.SuccessCount
+	stat.FailureCount += modelSt.FailureCount
+	stat.TotalTokens += modelSt.TotalTokens
+	stat.InputTokens += modelSt.InputTokens
+	stat.OutputTokens += modelSt.OutputTokens
+	stat.CachedTokens += modelSt.CachedTokens
+	stat.ReasoningTokens += modelSt.ReasoningTokens
+	stat.latencySum += modelSt.latencySum
+	stat.latencyN += modelSt.latencyN
+}
+
+func copyStringInt64Map(values map[string]int64) map[string]int64 {
+	if values == nil {
+		return make(map[string]int64)
+	}
+	copied := make(map[string]int64, len(values))
+	for key, value := range values {
+		copied[key] = value
+	}
+	return copied
+}
+
+func hourStringMapToIntMap(values map[string]int64) map[int]int64 {
+	result := make(map[int]int64, len(values))
+	for key, value := range values {
+		hour, err := strconv.Atoi(key)
+		if err != nil || hour < 0 || hour >= 24 {
+			continue
+		}
+		result[hour] = value
+	}
+	return result
 }
 
 func (s *RequestStatistics) writeStorageSnapshotLocked(now time.Time) error {
@@ -1389,7 +1540,7 @@ func (s *RequestStatistics) replayStorageLocked(path string) error {
 		if _, ok := existing[key]; ok {
 			continue
 		}
-		if s.recordDetailLocked(apiName, modelName, detail, key, now, true) {
+		if s.recordDetailLocked(apiName, modelName, detail, key, now, false) {
 			existing[key] = struct{}{}
 		}
 	}
@@ -1684,6 +1835,69 @@ func (s *RequestStatistics) updateAPIStats(apiSt *apiStats, model string, detail
 	return totals
 }
 
+func incrementAPISourceStats(apiSt *apiStats, detail RequestDetail, totals detailTotals) {
+	if apiSt == nil {
+		return
+	}
+	if apiSt.Sources == nil {
+		apiSt.Sources = make(map[string]*sourceStatAccumulator)
+	}
+	source := summarySourceKey(detail)
+	sourceAgg, ok := apiSt.Sources[source]
+	if !ok {
+		sourceAgg = &sourceStatAccumulator{
+			stat:      SourceStat{Source: source, Provider: detail.Provider},
+			providers: make(map[string]int64),
+		}
+		apiSt.Sources[source] = sourceAgg
+	}
+	if sourceAgg.stat.Provider == "" {
+		sourceAgg.stat.Provider = detail.Provider
+	}
+	sourceAgg.providers[detail.Provider]++
+	sourceAgg.stat.TotalRequests++
+	if detail.Failed {
+		sourceAgg.stat.FailureCount++
+	} else {
+		sourceAgg.stat.SuccessCount++
+	}
+	sourceAgg.stat.TotalTokens += totals.totalTokens
+}
+
+func decrementAPISourceStats(apiSt *apiStats, detail RequestDetail, totals detailTotals) {
+	if apiSt == nil || apiSt.Sources == nil {
+		return
+	}
+	source := summarySourceKey(detail)
+	sourceAgg, ok := apiSt.Sources[source]
+	if !ok {
+		return
+	}
+	sourceAgg.stat.TotalRequests--
+	if detail.Failed {
+		sourceAgg.stat.FailureCount--
+	} else {
+		sourceAgg.stat.SuccessCount--
+	}
+	sourceAgg.stat.TotalTokens -= totals.totalTokens
+	if sourceAgg.providers != nil {
+		sourceAgg.providers[detail.Provider]--
+		if sourceAgg.providers[detail.Provider] <= 0 {
+			delete(sourceAgg.providers, detail.Provider)
+		}
+		if sourceAgg.stat.Provider == detail.Provider {
+			sourceAgg.stat.Provider = ""
+			for provider := range sourceAgg.providers {
+				sourceAgg.stat.Provider = provider
+				break
+			}
+		}
+	}
+	if sourceAgg.stat.TotalRequests <= 0 {
+		delete(apiSt.Sources, source)
+	}
+}
+
 func (s *RequestStatistics) incrementModelSummaryStatsLocked(modelName string, detail RequestDetail, totals detailTotals) {
 	if s.modelSummaryStats == nil {
 		s.modelSummaryStats = make(map[string]*ModelStat)
@@ -1974,19 +2188,16 @@ func (s *RequestStatistics) pruneLocked(now time.Time, sortNeeded bool) {
 			if s.maxDetailsPerModel >= 0 && len(details) > s.maxDetailsPerModel {
 				keep := s.maxDetailsPerModel
 				removed := details[:len(details)-keep]
-				for _, d := range removed {
-					s.decrementCounters(d, apiSt, modelSt, modelName)
-					s.evictedTotal++
-					changed = true
-				}
+				s.evictedTotal += int64(len(removed))
+				changed = true
 				details = append([]RequestDetail(nil), details[len(details)-keep:]...)
 			}
 			modelSt.Details = details
-			if len(modelSt.Details) == 0 {
+			if len(modelSt.Details) == 0 && modelSt.TotalRequests <= 0 {
 				delete(apiSt.Models, modelName)
 			}
 		}
-		if len(apiSt.Models) == 0 {
+		if len(apiSt.Models) == 0 && apiSt.TotalRequests <= 0 {
 			delete(s.apis, apiName)
 		}
 	}
@@ -2024,6 +2235,7 @@ func (s *RequestStatistics) decrementCounters(d RequestDetail, apiSt *apiStats, 
 	apiSt.ReasoningTokens -= totals.reasoningTokens
 	apiSt.latencySum -= totals.latencySum
 	apiSt.latencyN -= totals.latencyN
+	decrementAPISourceStats(apiSt, d, totals)
 
 	modelSt.TotalRequests--
 	if d.Failed {
@@ -2084,6 +2296,7 @@ func (s *RequestStatistics) rebuildAggregatesLocked() {
 		apiSt.ReasoningTokens = 0
 		apiSt.latencySum = 0
 		apiSt.latencyN = 0
+		apiSt.Sources = make(map[string]*sourceStatAccumulator)
 		for modelName, modelSt := range apiSt.Models {
 			modelSt.TotalRequests = 0
 			modelSt.SuccessCount = 0
@@ -2123,6 +2336,7 @@ func (s *RequestStatistics) rebuildAggregatesLocked() {
 				apiSt.ReasoningTokens += totals.reasoningTokens
 				apiSt.latencySum += totals.latencySum
 				apiSt.latencyN += totals.latencyN
+				incrementAPISourceStats(apiSt, detail, totals)
 				modelSt.TotalTokens += totals.totalTokens
 				modelSt.InputTokens += totals.inputTokens
 				modelSt.OutputTokens += totals.outputTokens
@@ -2301,7 +2515,6 @@ func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, per
 	}
 
 	s.pruneLocked(now, true)
-	s.rebuildAggregatesLocked()
 	s.rebuildSeenLocked(now)
 	return result, persisted
 }
@@ -2372,6 +2585,17 @@ func nonNegativeInt64(value int64) int64 {
 		return 0
 	}
 	return value
+}
+
+func nonNegativeIntFromInt64(value int64) int {
+	if value <= 0 {
+		return 0
+	}
+	maxInt := int64(^uint(0) >> 1)
+	if value > maxInt {
+		return int(maxInt)
+	}
+	return int(value)
 }
 
 func durationMilliseconds(value time.Duration) float64 {
@@ -2683,6 +2907,7 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsLocked(now time.Time, heal
 	summary.Meta.MaxDetailsPerModel = s.maxDetailsPerModel
 	summary.Meta.CurrentDetailCount = s.countDetailsLocked()
 	summary.Meta.EvictedTotal = s.evictedTotal
+	summary.Meta.SummaryVersion = s.summaryVersion
 	summary.Meta.Storage = s.storageStatusLocked()
 	if !s.lastRecordedAt.IsZero() {
 		summary.Meta.LastRecordedAt = s.lastRecordedAt.UTC().Format(time.RFC3339)
@@ -3334,6 +3559,15 @@ func (s *RequestStatistics) QueryAPIDetail(api string, rangeKey string, recentLi
 		return result
 	}
 
+	apiSt := s.apis[api]
+	aggregateScope := cutoff.IsZero()
+	if aggregateScope {
+		result.Summary = apiDetailSummaryFromAPIStats(apiSt)
+		result.ModelStats = apiDetailModelStatsFromAPIStats(apiSt)
+		result.SourceStats = apiDetailSourceStatsFromAPIStats(apiSt)
+		result.TotalEvents = nonNegativeIntFromInt64(result.Summary.TotalRequests)
+	}
+
 	index := s.dashboardEventIndexLocked(api)
 	if len(index) == 0 {
 		result.GeneratedAt = now.UTC().Format(time.RFC3339)
@@ -3360,64 +3594,66 @@ func (s *RequestStatistics) QueryAPIDetail(api string, rangeKey string, recentLi
 		reasoningTokens := nonNegativeInt64(d.Tokens.ReasoningTokens)
 		cachedTokens := normalizedCacheTokens(d.Tokens)
 
-		result.TotalEvents++
-		result.Summary.TotalRequests++
-		if d.Failed {
-			result.Summary.FailureCount++
-		} else {
-			result.Summary.SuccessCount++
-		}
-		result.Summary.TotalTokens += totalTokens
-		result.Summary.InputTokens += inputTokens
-		result.Summary.OutputTokens += outputTokens
-		result.Summary.CachedTokens += cachedTokens
-		result.Summary.ReasoningTokens += reasoningTokens
-		if d.LatencyMs > 0 {
-			latencySum += d.LatencyMs
-			latencyN++
-		}
+		if !aggregateScope {
+			result.TotalEvents++
+			result.Summary.TotalRequests++
+			if d.Failed {
+				result.Summary.FailureCount++
+			} else {
+				result.Summary.SuccessCount++
+			}
+			result.Summary.TotalTokens += totalTokens
+			result.Summary.InputTokens += inputTokens
+			result.Summary.OutputTokens += outputTokens
+			result.Summary.CachedTokens += cachedTokens
+			result.Summary.ReasoningTokens += reasoningTokens
+			if d.LatencyMs > 0 {
+				latencySum += d.LatencyMs
+				latencyN++
+			}
 
-		modelLabel := normalizeModelName(dm.modelName)
-		if d.Model != "" {
-			modelLabel = d.Model
-		}
-		ms, ok := modelAgg[modelLabel]
-		if !ok {
-			ms = &ModelStat{Model: modelLabel}
-			modelAgg[modelLabel] = ms
-		}
-		ms.TotalRequests++
-		if d.Failed {
-			ms.FailureCount++
-		} else {
-			ms.SuccessCount++
-		}
-		ms.TotalTokens += totalTokens
-		ms.InputTokens += inputTokens
-		ms.OutputTokens += outputTokens
-		ms.CachedTokens += cachedTokens
-		ms.ReasoningTokens += reasoningTokens
-		if d.LatencyMs > 0 {
-			ms.latencySum += d.LatencyMs
-			ms.latencyN++
-		}
+			modelLabel := normalizeModelName(dm.modelName)
+			if d.Model != "" {
+				modelLabel = d.Model
+			}
+			ms, ok := modelAgg[modelLabel]
+			if !ok {
+				ms = &ModelStat{Model: modelLabel}
+				modelAgg[modelLabel] = ms
+			}
+			ms.TotalRequests++
+			if d.Failed {
+				ms.FailureCount++
+			} else {
+				ms.SuccessCount++
+			}
+			ms.TotalTokens += totalTokens
+			ms.InputTokens += inputTokens
+			ms.OutputTokens += outputTokens
+			ms.CachedTokens += cachedTokens
+			ms.ReasoningTokens += reasoningTokens
+			if d.LatencyMs > 0 {
+				ms.latencySum += d.LatencyMs
+				ms.latencyN++
+			}
 
-		source := strings.TrimSpace(d.Source)
-		if source == "" {
-			source = "未知来源"
+			source := strings.TrimSpace(d.Source)
+			if source == "" {
+				source = "未知来源"
+			}
+			ss, ok := sourceAgg[source]
+			if !ok {
+				ss = &SourceStat{Source: source, Provider: d.Provider}
+				sourceAgg[source] = ss
+			}
+			ss.TotalRequests++
+			if d.Failed {
+				ss.FailureCount++
+			} else {
+				ss.SuccessCount++
+			}
+			ss.TotalTokens += totalTokens
 		}
-		ss, ok := sourceAgg[source]
-		if !ok {
-			ss = &SourceStat{Source: source, Provider: d.Provider}
-			sourceAgg[source] = ss
-		}
-		ss.TotalRequests++
-		if d.Failed {
-			ss.FailureCount++
-		} else {
-			ss.SuccessCount++
-		}
-		ss.TotalTokens += totalTokens
 
 		if d.Failed {
 			failure := strings.TrimSpace(d.Failure)
@@ -3437,29 +3673,31 @@ func (s *RequestStatistics) QueryAPIDetail(api string, rangeKey string, recentLi
 		sequence++
 	}
 
-	if latencyN > 0 {
-		result.Summary.AvgLatencyMs = float64(latencySum) / float64(latencyN)
-	}
-	result.ModelStats = make([]ModelStat, 0, len(modelAgg))
-	for _, ms := range modelAgg {
-		if ms.latencyN > 0 {
-			ms.AvgLatencyMs = float64(ms.latencySum) / float64(ms.latencyN)
+	if !aggregateScope {
+		if latencyN > 0 {
+			result.Summary.AvgLatencyMs = float64(latencySum) / float64(latencyN)
 		}
-		ms.latencySum = 0
-		ms.latencyN = 0
-		result.ModelStats = append(result.ModelStats, *ms)
-	}
-	sort.SliceStable(result.ModelStats, func(i, j int) bool {
-		return result.ModelStats[i].TotalRequests > result.ModelStats[j].TotalRequests
-	})
+		result.ModelStats = make([]ModelStat, 0, len(modelAgg))
+		for _, ms := range modelAgg {
+			if ms.latencyN > 0 {
+				ms.AvgLatencyMs = float64(ms.latencySum) / float64(ms.latencyN)
+			}
+			ms.latencySum = 0
+			ms.latencyN = 0
+			result.ModelStats = append(result.ModelStats, *ms)
+		}
+		sort.SliceStable(result.ModelStats, func(i, j int) bool {
+			return result.ModelStats[i].TotalRequests > result.ModelStats[j].TotalRequests
+		})
 
-	result.SourceStats = make([]SourceStat, 0, len(sourceAgg))
-	for _, ss := range sourceAgg {
-		result.SourceStats = append(result.SourceStats, *ss)
+		result.SourceStats = make([]SourceStat, 0, len(sourceAgg))
+		for _, ss := range sourceAgg {
+			result.SourceStats = append(result.SourceStats, *ss)
+		}
+		sort.SliceStable(result.SourceStats, func(i, j int) bool {
+			return result.SourceStats[i].TotalRequests > result.SourceStats[j].TotalRequests
+		})
 	}
-	sort.SliceStable(result.SourceStats, func(i, j int) bool {
-		return result.SourceStats[i].TotalRequests > result.SourceStats[j].TotalRequests
-	})
 
 	result.ErrorStats = make([]APIDetailErrorStat, 0, len(errorAgg))
 	for _, es := range errorAgg {
@@ -3481,6 +3719,74 @@ func (s *RequestStatistics) QueryAPIDetail(api string, rangeKey string, recentLi
 	}
 	result.GeneratedAt = now.UTC().Format(time.RFC3339)
 	return finish(result)
+}
+
+func apiDetailSummaryFromAPIStats(apiSt *apiStats) APIDetailSummary {
+	if apiSt == nil {
+		return APIDetailSummary{}
+	}
+	summary := APIDetailSummary{
+		TotalRequests:   apiSt.TotalRequests,
+		SuccessCount:    apiSt.SuccessCount,
+		FailureCount:    apiSt.FailureCount,
+		TotalTokens:     apiSt.TotalTokens,
+		InputTokens:     apiSt.InputTokens,
+		OutputTokens:    apiSt.OutputTokens,
+		CachedTokens:    apiSt.CachedTokens,
+		ReasoningTokens: apiSt.ReasoningTokens,
+	}
+	if apiSt.latencyN > 0 {
+		summary.AvgLatencyMs = float64(apiSt.latencySum) / float64(apiSt.latencyN)
+	}
+	return summary
+}
+
+func apiDetailModelStatsFromAPIStats(apiSt *apiStats) []ModelStat {
+	if apiSt == nil || len(apiSt.Models) == 0 {
+		return nil
+	}
+	stats := make([]ModelStat, 0, len(apiSt.Models))
+	for modelName, modelSt := range apiSt.Models {
+		if modelSt == nil {
+			continue
+		}
+		stat := ModelStat{
+			Model:           modelName,
+			TotalRequests:   modelSt.TotalRequests,
+			SuccessCount:    modelSt.SuccessCount,
+			FailureCount:    modelSt.FailureCount,
+			TotalTokens:     modelSt.TotalTokens,
+			InputTokens:     modelSt.InputTokens,
+			OutputTokens:    modelSt.OutputTokens,
+			CachedTokens:    modelSt.CachedTokens,
+			ReasoningTokens: modelSt.ReasoningTokens,
+		}
+		if modelSt.latencyN > 0 {
+			stat.AvgLatencyMs = float64(modelSt.latencySum) / float64(modelSt.latencyN)
+		}
+		stats = append(stats, stat)
+	}
+	sort.SliceStable(stats, func(i, j int) bool {
+		return stats[i].TotalRequests > stats[j].TotalRequests
+	})
+	return stats
+}
+
+func apiDetailSourceStatsFromAPIStats(apiSt *apiStats) []SourceStat {
+	if apiSt == nil || len(apiSt.Sources) == 0 {
+		return nil
+	}
+	stats := make([]SourceStat, 0, len(apiSt.Sources))
+	for _, sourceAgg := range apiSt.Sources {
+		if sourceAgg == nil {
+			continue
+		}
+		stats = append(stats, sourceAgg.stat)
+	}
+	sort.SliceStable(stats, func(i, j int) bool {
+		return stats[i].TotalRequests > stats[j].TotalRequests
+	})
+	return stats
 }
 
 func (s *RequestStatistics) countDetailsLocked() int64 {

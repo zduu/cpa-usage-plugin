@@ -13,6 +13,7 @@ const apiDetailRecentLimit = 120;
 const visiblePollDelayMs = 30000;
 const hiddenPollDelayMs = 300000;
 let apiDetailSeq = 0;
+const apiDetailCache = new Map();
 const conditionalPayloadCache = new Map();
 
 // Dom helpers
@@ -106,6 +107,13 @@ async function fetchConditionalJsonPayload(cacheKey, url, options) {
   if (etag) conditionalPayloadCache.set(cacheKey, { etag, data: meta.data });
   else conditionalPayloadCache.delete(cacheKey);
   return meta.data;
+}
+
+function requireObjectPayload(data, label) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error(label + ' 返回空数据');
+  }
+  return data;
 }
 
 function managementFetchOptions(options) {
@@ -252,44 +260,27 @@ function renderStorageStatus() {
     el.title = storage.last_error;
     return;
   }
+  const titleParts = [storage.last_snapshot_at || storage.loaded_path || storage.path || ''];
   const queued = num(storage.write_queue_length);
   if (queued > 0) {
-    el.textContent = '持久化排队中';
-    el.classList.add('warn');
     const capacity = num(storage.write_queue_capacity);
-    el.title = storageTitle(queued.toLocaleString() + ' 条记录等待后台写入' + (capacity > 0 ? '，队列容量 ' + capacity.toLocaleString() : ''), storagePressureTitle(storage), storageBatchTitle(storage));
-    return;
+    titleParts.push(queued.toLocaleString() + ' 条记录等待后台写入' + (capacity > 0 ? '，队列容量 ' + capacity.toLocaleString() : ''));
   }
   const pending = num(storage.pending_buffered_records);
   if (pending > 0) {
-    el.textContent = '持久化待同步';
-    el.classList.add('warn');
-    el.title = storageTitle(pending.toLocaleString() + ' 条记录待刷新到文件', storagePressureTitle(storage), storageBatchTitle(storage));
-    return;
+    titleParts.push(pending.toLocaleString() + ' 条记录待刷新到文件');
   }
   const pendingSync = num(storage.pending_unsynced_records);
   if (pendingSync > 0) {
-    el.textContent = '持久化待落盘';
-    el.classList.add('warn');
-    el.title = storageTitle(pendingSync.toLocaleString() + ' 条记录待同步到磁盘', storagePressureTitle(storage), storageBatchTitle(storage));
-    return;
+    titleParts.push(pendingSync.toLocaleString() + ' 条记录待同步到磁盘');
   }
   const pendingSnapshot = num(storage.pending_snapshot_records);
   if (pendingSnapshot > 0) {
-    el.textContent = '快照待更新';
-    el.classList.add('warn');
-    el.title = storageTitle(pendingSnapshot.toLocaleString() + ' 条记录待写入快照', storagePressureTitle(storage), storageBatchTitle(storage));
-    return;
+    titleParts.push(pendingSnapshot.toLocaleString() + ' 条记录待写入快照');
   }
-  if (storage.write_pressure === 'slow') {
-    el.textContent = '持久化写入偏慢';
-    el.classList.add('warn');
-    el.title = storageTitle(storagePressureTitle(storage), storageBatchTitle(storage));
-    return;
-  }
-  el.textContent = storage.last_flush_at ? '持久化已同步' : '持久化已开启';
+  el.textContent = '持久化已开启';
   el.classList.add('ok');
-  el.title = storageTitle(storage.last_snapshot_at || storage.loaded_path || storage.path || '', storagePressureTitle(storage), storageBatchTitle(storage));
+  el.title = storageTitle(...titleParts, storagePressureTitle(storage), storageBatchTitle(storage));
 }
 
 function renderHealth() {
@@ -472,26 +463,30 @@ function normalizeApiDetailEvent(d) {
 
 async function fetchApiDetailData(api) {
   const params = new URLSearchParams();
-  params.set('range', $('range').value);
+  params.set('range', 'all');
   params.set('api', api);
   params.set('recent_limit', String(apiDetailRecentLimit));
   const url = pluginEndpoint('dashboard-api-detail') + '?' + params.toString();
-  const data = await fetchConditionalJsonPayload('dashboard-api-detail:' + url, url, { cache: 'no-store' });
+  const data = requireObjectPayload(await fetchConditionalJsonPayload('dashboard-api-detail:' + url, url, { cache: 'no-store' }), 'dashboard-api-detail');
   data.recent_events = (data.recent_events || []).map(normalizeApiDetailEvent);
   return data;
 }
 
+function apiDetailCacheKey(api) {
+  return api;
+}
+
 function apiDetailErrorHtml(errorRows, loading, error) {
-  if (loading) return '<div><div class="subtle" style="margin-bottom:8px">错误统计</div><div class="empty">正在加载接口请求明细...</div></div>';
-  if (error) return '<div><div class="subtle" style="margin-bottom:8px">错误统计</div><div class="empty">请求明细加载失败：' + esc(error.message || '未知错误') + '</div></div>';
+  if (loading && !errorRows.length) return '<div><div class="subtle" style="margin-bottom:8px">错误统计</div><div class="empty">正在加载接口请求明细...</div></div>';
+  if (error && !errorRows.length) return '<div><div class="subtle" style="margin-bottom:8px">错误统计</div><div class="empty">请求明细加载失败：' + esc(error.message || '未知错误') + '</div></div>';
   return '<div><div class="subtle" style="margin-bottom:8px">错误统计</div>' +
     (errorRows.length ? '<div class="tableWrap"><table><thead><tr><th>状态码</th><th>次数</th><th>错误</th></tr></thead><tbody>' + errorRows.slice(0, 10).map((r) => '<tr><td class="bad">' + esc(r.status_code || '-') + '</td><td>' + fmt.format(r.count) + '</td><td class="errorText">' + esc(r.failure || '未返回错误内容') + '</td></tr>').join('') + '</tbody></table></div>' : '<div class="empty">暂无失败请求</div>') +
     '</div>';
 }
 
 function apiDetailRecentHtml(rows, loading, error) {
-  if (loading) return '<div><div class="subtle" style="margin-bottom:8px">最近请求</div><div class="empty">正在加载接口请求明细...</div></div>';
-  if (error) return '<div><div class="subtle" style="margin-bottom:8px">最近请求</div><div class="empty">请求明细加载失败</div></div>';
+  if (loading && !rows.length) return '<div><div class="subtle" style="margin-bottom:8px">最近请求</div><div class="empty">正在加载接口请求明细...</div></div>';
+  if (error && !rows.length) return '<div><div class="subtle" style="margin-bottom:8px">最近请求</div><div class="empty">请求明细加载失败</div></div>';
   return '<div><div class="subtle" style="margin-bottom:8px">最近请求</div>' +
     (rows.length ? '<div class="tableWrap"><table><thead><tr><th>时间</th><th>模型</th><th>结果</th><th>延迟</th><th>token</th><th>来源</th></tr></thead><tbody>' + rows.slice(0, apiDetailRecentLimit).map((d) => '<tr><td>' + new Date(d.timestamp_ms).toLocaleString() + '</td><td class="nameCell">' + esc(d.model) + '</td><td class="' + (d.failed ? 'bad' : 'ok') + '">' + (d.failed ? '失败' : '成功') + '</td><td>' + formatMs(num(d.latency_ms)) + '</td><td>' + fmt.format(d.total_tokens) + '</td><td>' + esc(sourceLabel(d)) + '</td></tr>').join('') + '</tbody></table></div>' : '<div class="empty">暂无请求明细</div>') +
     '</div>';
@@ -531,15 +526,18 @@ async function renderApiDetail() {
   if (!apiData) { apiDetailSeq++; setText('apiDetailTitle', '选择一个上游接口查看模型、来源、错误和最近请求。'); $('apiDetail').innerHTML = '<div class="empty">暂无接口详情</div>'; return }
   const api = selectedApi;
   const seq = ++apiDetailSeq;
+  const cacheKey = apiDetailCacheKey(api);
+  const cached = apiDetailCache.get(cacheKey);
   setText('apiDetailTitle', friendlyApiName(api));
-  renderApiDetailContent(apiData, { loading: true });
+  renderApiDetailContent(apiData, cached ? { detail: cached, loading: true } : { loading: true });
   try {
     const result = await fetchApiDetailData(api);
     if (seq !== apiDetailSeq || api !== selectedApi) return;
+    apiDetailCache.set(cacheKey, result);
     renderApiDetailContent(apiData, { detail: result });
   } catch (e) {
     if (seq !== apiDetailSeq || api !== selectedApi) return;
-    renderApiDetailContent(apiData, { error: e });
+    renderApiDetailContent(apiData, cached ? { detail: cached, error: e } : { error: e });
   }
 }
 
@@ -651,7 +649,26 @@ function finalizeCounterRow(row) {
   delete row.latency;
   return row;
 }
+function applySnapshotCounter(row, raw) {
+  if (!raw || typeof raw !== 'object') return row;
+  ['total_requests', 'success_count', 'failure_count', 'total_tokens', 'input_tokens', 'output_tokens', 'cached_tokens', 'reasoning_tokens', 'avg_latency_ms'].forEach((field) => {
+    if (Object.prototype.hasOwnProperty.call(raw, field)) row[field] = num(raw[field]);
+  });
+  return row;
+}
+function mergeCounterRow(target, row) {
+  target.total_requests += num(row.total_requests);
+  target.success_count += num(row.success_count);
+  target.failure_count += num(row.failure_count);
+  target.total_tokens += num(row.total_tokens);
+  target.input_tokens += num(row.input_tokens);
+  target.output_tokens += num(row.output_tokens);
+  target.cached_tokens += num(row.cached_tokens);
+  target.reasoning_tokens += num(row.reasoning_tokens);
+  return target;
+}
 function buildSummaryFromFullUsage(data) {
+  data = requireObjectPayload(data, 'dashboard-data');
   const rawUsage = data.usage || {};
   const usage = {
     total_requests: rawUsage.total_requests || 0,
@@ -673,7 +690,7 @@ function buildSummaryFromFullUsage(data) {
   const latency = [];
   const details = [];
   Object.entries(rawUsage.apis || {}).forEach(([api, a]) => {
-    const apiRow = { total_requests: a.total_requests || 0, success_count: a.success_count || 0, failure_count: a.failure_count || 0, total_tokens: a.total_tokens || 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, reasoning_tokens: 0, avg_latency_ms: 0, models: {}, latency: [] };
+    const apiRow = { total_requests: 0, success_count: 0, failure_count: 0, total_tokens: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, reasoning_tokens: 0, avg_latency_ms: 0, models: {}, latency: [] };
     Object.entries(a.models || {}).forEach(([model, m]) => {
       const modelRow = makeCounterRow(model);
       (m.details || []).forEach((d) => {
@@ -689,10 +706,6 @@ function buildSummaryFromFullUsage(data) {
         usage.reasoning_tokens += num(tokens.reasoning_tokens);
         if (num(d.latency_ms) > 0) latency.push(num(d.latency_ms));
 
-        const globalModel = modelAgg.get(d.model) || makeCounterRow(d.model);
-        addDetailToCounter(globalModel, d);
-        modelAgg.set(d.model, globalModel);
-
         const src = sourceLabel(d);
         const sourceRow = sourceAgg.get(src) || { source: src, provider: d.provider || '', total_requests: 0, success_count: 0, failure_count: 0, total_tokens: 0 };
         sourceRow.total_requests++; d.failed ? sourceRow.failure_count++ : sourceRow.success_count++; sourceRow.total_tokens += totalTokens(d);
@@ -706,11 +719,17 @@ function buildSummaryFromFullUsage(data) {
         clientRow.modelMap.set(d.model, clientModel);
         clientAgg.set(clientKey, clientRow);
       });
-      apiRow.models[model] = finalizeCounterRow(modelRow);
+      const finalizedModel = finalizeCounterRow(applySnapshotCounter(modelRow, m));
+      apiRow.models[model] = finalizedModel;
+      const globalModel = modelAgg.get(model) || makeCounterRow(model);
+      mergeCounterRow(globalModel, finalizedModel);
+      modelAgg.set(model, globalModel);
     });
-    usage.apis[api] = finalizeCounterRow(apiRow);
+    usage.apis[api] = finalizeCounterRow(applySnapshotCounter(apiRow, a));
   });
+  applySnapshotCounter(usage, rawUsage);
   usage.avg_latency_ms = latency.length ? latency.reduce((a, b) => a + b, 0) / latency.length : 0;
+  if (Object.prototype.hasOwnProperty.call(rawUsage, 'avg_latency_ms')) usage.avg_latency_ms = num(rawUsage.avg_latency_ms);
   return {
     usage,
     health_grid: buildHealthGridFromDetails(details, data.generated_at),
@@ -809,7 +828,16 @@ function notifyExportTruncated(info) {
 }
 
 function summaryRecordKey(data) {
-  return (data && data._meta && data._meta.last_recorded_at) || '';
+  if (!data) return '';
+  const meta = data._meta || {};
+  const usage = data.usage || {};
+  return [
+    meta.summary_version || '',
+    meta.last_recorded_at || '',
+    usage.total_requests || '',
+    meta.current_detail_count || '',
+    meta.evicted_total || '',
+  ].join('|');
 }
 
 function shouldRefreshDetails(previousSummary, nextSummary, forceDetails) {
@@ -847,7 +875,7 @@ async function load(options) {
       fetchConditionalJsonPayload('dashboard-summary', pluginEndpoint('dashboard-summary'), { cache: 'no-store' }),
       loadModelPrices()
     ]);
-    summaryData = data;
+    summaryData = requireObjectPayload(data, 'dashboard-summary');
     setText('updated', '更新于 ' + new Date(data.generated_at || Date.now()).toLocaleTimeString());
     const refreshDetails = shouldRefreshDetails(previousSummary, summaryData, forceDetails);
     await rerender({ refreshEvents: refreshDetails, refreshApiDetail: refreshDetails });
@@ -866,7 +894,7 @@ async function load(options) {
       await rerender({ refreshEvents: refreshDetails, refreshApiDetail: refreshDetails });
       pollFailures = 0; schedulePoll(pollDelay());
     } catch (fallbackError) {
-      setText('updated', (error && error.message) || '加载用量统计失败');
+      setText('updated', (fallbackError && fallbackError.message) || (error && error.message) || '加载用量统计失败');
       pollFailures++; schedulePoll(nextFailureDelay());
     }
   }

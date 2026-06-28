@@ -102,7 +102,7 @@ plugins:
       max_details_per_model: 5000
       # 内存统计最多保留的天数，0 表示不按时间淘汰。默认 30。
       retention_days: 30
-      # usage 记录去重窗口分钟数，0 表示关闭去重。默认 1440（24小时）。
+      # 兼容旧配置；导入会跳过精确重复记录，实时 usage 记录和持久化重放不会按窗口去重。默认 1440（24小时）。
       dedup_window_minutes: 1440
       # 可选：允许记录的响应头名称列表（逗号分隔），* 表示全部。留空不记录。
       log_response_headers: ""
@@ -128,7 +128,7 @@ plugins:
       price_storage_path: usage-statistics-prices.json
       # 可选：允许外部脚本更新插件文件。默认 false。
       update_enabled: false
-      # 可选：latest 或指定版本号，例如 v1.2.18。
+      # 可选：latest 或指定版本号，例如 v2.0.0。
       update_version: latest
 ```
 
@@ -143,7 +143,7 @@ docker restart cli-proxy-api
 
 ```text
 pluginhost: plugin loaded plugin_id=usage-statistics path=plugins/usage-statistics.so
-pluginhost: plugin registered plugin_id=usage-statistics plugin_name=用量统计 version=1.2.18
+pluginhost: plugin registered plugin_id=usage-statistics plugin_name=用量统计 version=2.0.0
 ```
 
 ## 数据持久化（可选）
@@ -212,7 +212,7 @@ plugins:
     usage-statistics:
       enabled: true
       update_enabled: true
-      update_version: latest   # 或 v1.2.18
+      update_version: latest   # 或 v2.0.0
 ```
 
 执行更新脚本：
@@ -297,7 +297,7 @@ bash update-usage-statistics.sh --force --restart
 
 - 看板首页使用 `/dashboard-summary` 端点，**不传输请求明细**，首包体积极小，即使存储数十万条记录也能快速打开。
 - 事件明细表格通过 `/dashboard-events` 加载，页面以滚动表格展示，单次最多 500 条。
-- 保留策略（`retention_days` + `max_details_per_model`）自动淘汰过期和超量记录。
+- 保留策略自动控制内存占用：`retention_days` 定义统计保留窗口，`max_details_per_model` 只限制每个上游接口/模型保留的最近请求明细数量。
 - 可选 JSONL 持久化通过 `storage_enabled` 开启，重启后会 replay 持久化事件并继续应用保留策略。
 - 页面底部 `_meta` 区域可见当前保留配置、已存储明细数和累积淘汰数。
 
@@ -411,5 +411,5 @@ curl -X POST http://127.0.0.1:8317/v0/management/plugins/usage-statistics/usage/
 - 默认仅使用插件进程内存；如需 CPA 重启后自动恢复统计，请开启 `storage_enabled` 并将 `storage_path` 放在持久化目录。未开启持久化时，重启前请先导出数据。
 - 多实例部署时，每个实例独立统计。
 - token 是否完整取决于上游返回的 usage 信息；CPA 主程序需向插件传递 snake_case usage 字段。
-- 明细记录受 `max_details_per_model` 和 `retention_days` 限制，超出部分自动淘汰并更新计数器。
+- 实时请求不会被去重窗口合并；`max_details_per_model` 只裁剪请求明细，不会扣减总请求、token、成功率等累计统计。`retention_days` 超出窗口的记录会被淘汰并从窗口统计中扣除。
 - `api_key_hash_salt` 只影响新记录的 `api_key_hash`。客户端 API 统计优先按脱敏后的 `api_key` 展示值聚合，缺失时再使用 hash；hash 仅用于分组/排查，不能反推原始 key。

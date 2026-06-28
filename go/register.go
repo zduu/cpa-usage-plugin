@@ -9,7 +9,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const pluginVersion = "1.2.18"
+const pluginVersion = "2.0.0"
 
 func handleRegister(requestBody []byte) ([]byte, error) {
 	applyRuntimeConfig(requestBody)
@@ -39,7 +39,7 @@ func handleRegister(requestBody []byte) ([]byte, error) {
 					Name:        "dedup_window_minutes",
 					Type:        "integer",
 					Default:     defaultDedupWindowMinutes,
-					Description: "usage 记录去重窗口分钟数，0 表示关闭去重。",
+					Description: "兼容旧配置；导入会跳过精确重复记录，实时 usage 记录和持久化重放不会按窗口去重。",
 				},
 				{
 					Name:        "log_response_headers",

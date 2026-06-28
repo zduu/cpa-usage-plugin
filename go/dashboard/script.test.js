@@ -52,10 +52,14 @@ function createDashboardHarness(options = {}) {
   const fetchRequests = [];
   const timeoutDelays = [];
   let summaryLastRecordedAt = options.lastRecordedAt || '2023-11-15T06:13:20Z';
+  let summaryVersion = options.summaryVersion || 1;
   let prices = { 'gpt-4.1': { prompt: 2, completion: 8, cache: 0.5 } };
   const dashboardEtags = !!options.dashboardEtags;
   const wrapDashboardResponses = !!options.wrapDashboardResponses;
   const failDashboardSummary = !!options.failDashboardSummary;
+  const nullDashboardSummary = !!options.nullDashboardSummary;
+  const nullDashboardData = !!options.nullDashboardData;
+  const nullDashboardApiDetail = !!options.nullDashboardApiDetail;
   const exportJobs = new Map();
   let exportJobSeq = 0;
 
@@ -139,6 +143,8 @@ function createDashboardHarness(options = {}) {
     model_stats: [{ model: 'gpt-4.1', total_requests: 1200, success_count: 1190, failure_count: 10, total_tokens: 24000, input_tokens: 4000, output_tokens: 5000, cached_tokens: 0, reasoning_tokens: 0 }],
     _meta: {
       last_recorded_at: summaryLastRecordedAt,
+      summary_version: summaryVersion,
+      current_detail_count: 1200,
       storage: { enabled: false, path: 'usage-statistics.jsonl' },
     },
   };
@@ -277,6 +283,9 @@ function createDashboardHarness(options = {}) {
 
   function dashboardDataPayload() {
     const now = Date.now();
+    const aggregateRequests = options.trimmedDashboardData ? 4 : 2;
+    const aggregateSuccess = options.trimmedDashboardData ? 3 : 1;
+    const aggregateTokens = options.trimmedDashboardData ? 45 : 15;
     const details = [
       {
         timestamp: new Date(now - 5 * 60 * 1000).toISOString(),
@@ -304,26 +313,26 @@ function createDashboardHarness(options = {}) {
     return {
       generated_at: new Date(now).toISOString(),
       usage: {
-        total_requests: 2,
-        success_count: 1,
+        total_requests: aggregateRequests,
+        success_count: aggregateSuccess,
         failure_count: 1,
-        total_tokens: 15,
+        total_tokens: aggregateTokens,
         requests_by_day: {},
         requests_by_hour: {},
         tokens_by_day: {},
         tokens_by_hour: {},
         apis: {
           openai: {
-            total_requests: 2,
-            success_count: 1,
+            total_requests: aggregateRequests,
+            success_count: aggregateSuccess,
             failure_count: 1,
-            total_tokens: 15,
+            total_tokens: aggregateTokens,
             models: {
               'gpt-4.1': {
-                total_requests: 2,
-                success_count: 1,
+                total_requests: aggregateRequests,
+                success_count: aggregateSuccess,
                 failure_count: 1,
-                total_tokens: 15,
+                total_tokens: aggregateTokens,
                 details,
               },
             },
@@ -444,10 +453,11 @@ function createDashboardHarness(options = {}) {
           };
         }
         summary._meta.last_recorded_at = summaryLastRecordedAt;
-        payload = summary;
+        summary._meta.summary_version = summaryVersion;
+        payload = nullDashboardSummary ? null : summary;
       }
-      else if (String(url).includes('dashboard-api-detail')) payload = apiDetailPayload(String(url));
-      else if (String(url).includes('dashboard-data')) payload = dashboardDataPayload();
+      else if (String(url).includes('dashboard-api-detail')) payload = nullDashboardApiDetail ? null : apiDetailPayload(String(url));
+      else if (String(url).includes('dashboard-data')) payload = nullDashboardData ? null : dashboardDataPayload();
       else if (String(url).includes('dashboard-events-export-download')) {
         const parsed = new URL(String(url), 'http://test.local/v0/management/plugins/usage-statistics/dashboard');
         const job = exportJobs.get(parsed.searchParams.get('id'));
@@ -519,8 +529,11 @@ function createDashboardHarness(options = {}) {
   const setSummaryLastRecordedAt = (value) => {
     summaryLastRecordedAt = value;
   };
+  const setSummaryVersion = (value) => {
+    summaryVersion = value;
+  };
 
-  return { context, document, fetchCalls, fetchRequests, downloads, timeoutDelays, setVisibility, setSummaryLastRecordedAt };
+  return { context, document, fetchCalls, fetchRequests, downloads, timeoutDelays, setVisibility, setSummaryLastRecordedAt, setSummaryVersion };
 }
 
 async function waitFor(fn) {
@@ -609,8 +622,8 @@ test('dashboard shows pending storage buffer status', async () => {
   });
 
   const el = document.getElementById('storageStatus');
-  await waitFor(() => el.textContent === '持久化待同步');
-  assert.strictEqual(el.textContent, '持久化待同步');
+  await waitFor(() => el.textContent === '持久化已开启');
+  assert.strictEqual(el.textContent, '持久化已开启');
   assert.match(el.title, /2 条记录/);
 });
 
@@ -627,8 +640,8 @@ test('dashboard shows pending storage write queue status', async () => {
   });
 
   const el = document.getElementById('storageStatus');
-  await waitFor(() => el.textContent === '持久化排队中');
-  assert.strictEqual(el.textContent, '持久化排队中');
+  await waitFor(() => el.textContent === '持久化已开启');
+  assert.strictEqual(el.textContent, '持久化已开启');
   assert.match(el.title, /5 条记录/);
   assert.match(el.title, /4,096/);
 });
@@ -645,8 +658,8 @@ test('dashboard shows pending storage snapshot status', async () => {
   });
 
   const el = document.getElementById('storageStatus');
-  await waitFor(() => el.textContent === '快照待更新');
-  assert.strictEqual(el.textContent, '快照待更新');
+  await waitFor(() => el.textContent === '持久化已开启');
+  assert.strictEqual(el.textContent, '持久化已开启');
   assert.match(el.title, /3 条记录/);
 });
 
@@ -663,8 +676,8 @@ test('dashboard shows pending storage fsync status', async () => {
   });
 
   const el = document.getElementById('storageStatus');
-  await waitFor(() => el.textContent === '持久化待落盘');
-  assert.strictEqual(el.textContent, '持久化待落盘');
+  await waitFor(() => el.textContent === '持久化已开启');
+  assert.strictEqual(el.textContent, '持久化已开启');
   assert.match(el.title, /4 条记录/);
 });
 
@@ -688,8 +701,8 @@ test('dashboard shows storage writer batch metrics in title', async () => {
   });
 
   const el = document.getElementById('storageStatus');
-  await waitFor(() => el.textContent === '持久化已同步');
-  assert.strictEqual(el.textContent, '持久化已同步');
+  await waitFor(() => el.textContent === '持久化已开启');
+  assert.strictEqual(el.textContent, '持久化已开启');
   assert.match(el.title, /最近批量写入 12 条/);
   assert.match(el.title, /写入压力：正常/);
   assert.match(el.title, /平均耗时/);
@@ -711,8 +724,8 @@ test('dashboard warns when storage writer is slow without queue backlog', async 
   });
 
   const el = document.getElementById('storageStatus');
-  await waitFor(() => el.textContent === '持久化写入偏慢');
-  assert.strictEqual(el.textContent, '持久化写入偏慢');
+  await waitFor(() => el.textContent === '持久化已开启');
+  assert.strictEqual(el.textContent, '持久化已开启');
   assert.match(el.title, /写入压力：写入偏慢/);
 });
 
@@ -756,6 +769,19 @@ test('dashboard polling skips detail requests when no new records arrive', async
   assert.ok(countCalls('dashboard-api-detail') > beforeManualApiDetail);
 });
 
+test('dashboard polling refreshes details when summary version changes within the same second', async () => {
+  const { fetchCalls, setVisibility, setSummaryVersion } = createDashboardHarness();
+  const countCalls = (part) => fetchCalls.filter((url) => url.includes(part)).length;
+
+  await waitFor(() => countCalls('dashboard-events') > 0 && countCalls('dashboard-api-detail') > 0);
+  const beforeEvents = countCalls('dashboard-events');
+  const beforeApiDetail = countCalls('dashboard-api-detail');
+
+  setSummaryVersion(2);
+  setVisibility('visible');
+  await waitFor(() => countCalls('dashboard-events') > beforeEvents && countCalls('dashboard-api-detail') > beforeApiDetail);
+});
+
 test('dashboard summary polling reuses cached data on management 304', async () => {
   const { fetchCalls, fetchRequests, setVisibility } = createDashboardHarness({
     dashboardEtags: true,
@@ -779,6 +805,39 @@ test('dashboard summary polling reuses cached data on management 304', async () 
   assert.strictEqual(countCalls('dashboard-api-detail'), beforeApiDetail);
 });
 
+test('dashboard api detail refresh keeps cached content while loading', async () => {
+  const { context, document } = createDashboardHarness();
+
+  await waitFor(() => document.getElementById('apiDetail').innerHTML.includes('deepseek-v4-flash-free'));
+  const promise = context.renderApiDetail();
+
+  assert.match(document.getElementById('apiDetail').innerHTML, /deepseek-v4-flash-free/);
+  assert.doesNotMatch(document.getElementById('apiDetail').innerHTML, /正在加载接口请求明细/);
+  await promise;
+});
+
+test('dashboard api detail uses the same full-range scope as upstream stats', async () => {
+  const { document, fetchRequests } = createDashboardHarness();
+  const apiDetailRequests = () => fetchRequests.filter((req) => req.url.includes('dashboard-api-detail'));
+
+  await waitFor(() => apiDetailRequests().length > 0);
+  assert.strictEqual(new URL(apiDetailRequests().at(-1).url, 'http://test.local').searchParams.get('range'), 'all');
+
+  document.getElementById('range').value = '7d';
+  await document.getElementById('range').onchange();
+
+  await waitFor(() => apiDetailRequests().length > 1);
+  assert.strictEqual(new URL(apiDetailRequests().at(-1).url, 'http://test.local').searchParams.get('range'), 'all');
+});
+
+test('dashboard api detail reports null payload without reading recent events', async () => {
+  const { document, fetchCalls } = createDashboardHarness({ nullDashboardApiDetail: true });
+
+  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-api-detail')) && document.getElementById('apiDetail').innerHTML.includes('dashboard-api-detail 返回空数据'));
+
+  assert.match(document.getElementById('apiDetail').innerHTML, /请求明细加载失败：dashboard-api-detail 返回空数据/);
+});
+
 test('dashboard fallback keeps health grid visible when summary endpoint fails', async () => {
   const { document, fetchCalls } = createDashboardHarness({ failDashboardSummary: true });
   await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-data')) && document.getElementById('healthGrid').innerHTML.includes('healthCell'));
@@ -788,6 +847,31 @@ test('dashboard fallback keeps health grid visible when summary endpoint fails',
   assert.strictEqual(document.getElementById('healthSuccess').textContent, '成功 1');
   assert.strictEqual(document.getElementById('healthFailure').textContent, '失败 1');
   assert.match(document.getElementById('updated').textContent, /兼容模式/);
+});
+
+test('dashboard fallback handles null summary payload', async () => {
+  const { document, fetchCalls } = createDashboardHarness({ nullDashboardSummary: true });
+  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-data')) && document.getElementById('healthGrid').innerHTML.includes('healthCell'));
+
+  const cells = (document.getElementById('healthGrid').innerHTML.match(/healthCell/g) || []).length;
+  assert.strictEqual(cells, 672);
+  assert.match(document.getElementById('updated').textContent, /兼容模式/);
+});
+
+test('dashboard load reports null fallback payload without throwing', async () => {
+  const { document, fetchCalls } = createDashboardHarness({ failDashboardSummary: true, nullDashboardData: true });
+  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-data')) && document.getElementById('updated').textContent.includes('dashboard-data 返回空数据'));
+
+  assert.strictEqual(document.getElementById('updated').textContent, 'dashboard-data 返回空数据');
+});
+
+test('dashboard fallback keeps upstream aggregates when details are trimmed', async () => {
+  const { document, fetchCalls } = createDashboardHarness({ failDashboardSummary: true, trimmedDashboardData: true });
+
+  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-data')) && document.getElementById('apiStats').innerHTML.includes('openai'));
+
+  assert.strictEqual(document.getElementById('totalRequests').textContent, '4');
+  assert.match(document.getElementById('apiStats').innerHTML, /4 <span class="ok">\(3<\/span> <span class="bad">1\)<\/span>/);
 });
 
 test('dashboard detail refresh sends conditional requests for events and api detail', async () => {
