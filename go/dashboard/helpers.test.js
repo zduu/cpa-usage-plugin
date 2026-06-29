@@ -29,10 +29,10 @@ test('pct formats percentage', () => {
 });
 
 test('formatMs formats milliseconds', () => {
-  assert.strictEqual(helpers.formatMs(500), '500毫秒');
-  assert.strictEqual(helpers.formatMs(113.25), '113.25毫秒');
-  assert.strictEqual(helpers.formatMs(1500), '1秒500毫秒');
-  assert.strictEqual(helpers.formatMs(1500.5), '1秒500.5毫秒');
+  assert.strictEqual(helpers.formatMs(500), '500ms');
+  assert.strictEqual(helpers.formatMs(113.25), '113.25ms');
+  assert.strictEqual(helpers.formatMs(1500), '1s500ms');
+  assert.strictEqual(helpers.formatMs(1500.5), '1s500.5ms');
   assert.strictEqual(helpers.formatMs(0), '-');
   assert.strictEqual(helpers.formatMs(-1), '-');
 });

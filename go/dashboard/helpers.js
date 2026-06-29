@@ -6,11 +6,11 @@ const pct = (value) => Number.isFinite(value) ? value.toFixed(1) + '%' : '-';
 const trimFixed = (value, digits) => Number(value).toFixed(digits).replace(/\.0+$|(\.\d*?[1-9])0+$/, '$1');
 const formatMs = (value) => {
   if (!(Number.isFinite(value) && value > 0)) return '-';
-  if (value < 1000) return trimFixed(value, 2) + '毫秒';
+  if (value < 1000) return trimFixed(value, 2) + 'ms';
   const seconds = Math.floor(value / 1000);
   const milliseconds = value - seconds * 1000;
-  if (milliseconds < 0.005) return seconds + '秒';
-  return seconds + '秒' + trimFixed(milliseconds, 2) + '毫秒';
+  if (milliseconds < 0.005) return seconds + 's';
+  return seconds + 's' + trimFixed(milliseconds, 2) + 'ms';
 };
 const money2 = new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const money6 = new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 6 });
