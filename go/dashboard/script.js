@@ -481,8 +481,9 @@ function apiDetailCacheKey(api) {
   return api;
 }
 
-function apiDetailErrorHtml(errorRows, loading, error) {
+function apiDetailErrorHtml(errorRows, loading, error, knownFailureCount) {
   if (loading && !errorRows.length) return '<div><div class="subtle" style="margin-bottom:8px">错误统计</div><div class="empty">正在加载接口请求明细...</div></div>';
+  if (error && !errorRows.length && num(knownFailureCount) === 0) return '<div><div class="subtle" style="margin-bottom:8px">错误统计</div><div class="empty">暂无失败请求</div></div>';
   if (error && !errorRows.length) return '<div><div class="subtle" style="margin-bottom:8px">错误统计</div><div class="empty">请求明细加载失败：' + esc(error.message || '未知错误') + '</div></div>';
   return '<div><div class="subtle" style="margin-bottom:8px">错误统计</div>' +
     (errorRows.length ? '<div class="tableWrap"><table><thead><tr><th>状态码</th><th>次数</th><th>错误</th></tr></thead><tbody>' + errorRows.slice(0, 10).map((r) => '<tr><td class="bad">' + esc(r.status_code || '-') + '</td><td>' + fmt.format(r.count) + '</td><td><span class="errorText">' + esc(r.failure || '未返回错误内容') + '</span></td></tr>').join('') + '</tbody></table></div>' : '<div class="empty">暂无失败请求</div>') +
@@ -504,6 +505,7 @@ function renderApiDetailContent(apiData, detailState) {
   const error = detailState && detailState.error;
   const summary = (detail && detail.summary) || apiData;
   const requests = num(summary.total_requests), success = num(summary.success_count), failure = num(summary.failure_count);
+  const knownFailureCount = num(apiData && apiData.failure_count);
   const rate = requests ? success / requests * 100 : 100;
   const models = detail ? (detail.model_stats || []).map((m) => ({ name: m.model || 'unknown', requests: num(m.total_requests), success: num(m.success_count), failure: num(m.failure_count), tokens: num(m.total_tokens), input_tokens: num(m.input_tokens), output_tokens: num(m.output_tokens), cached_tokens: num(m.cached_tokens), reasoning_tokens: num(m.reasoning_tokens), avgLatency: num(m.avg_latency_ms) })) : Object.entries(apiData.models || {}).map(([name, m]) => ({ name, requests: num(m.total_requests), success: num(m.success_count), failure: num(m.failure_count), tokens: num(m.total_tokens), input_tokens: num(m.input_tokens), output_tokens: num(m.output_tokens), cached_tokens: num(m.cached_tokens), reasoning_tokens: num(m.reasoning_tokens), avgLatency: num(m.avg_latency_ms) }));
   models.sort((a, b) => b.requests - a.requests);
@@ -522,7 +524,7 @@ function renderApiDetailContent(apiData, detailState) {
     barsHtml('模型分布', models, requests, '暂无模型数据') +
     barsHtml('来源分布', sources, requests, loading ? '正在加载来源数据...' : '暂无来源数据') +
     '</div>' +
-    '<div class="splitGrid">' + apiDetailErrorHtml(errorRows, loading, error) + apiDetailRecentHtml(rows, loading, error) + '</div>';
+    '<div class="splitGrid">' + apiDetailErrorHtml(errorRows, loading, error, knownFailureCount) + apiDetailRecentHtml(rows, loading, error) + '</div>';
 }
 
 async function renderApiDetail() {

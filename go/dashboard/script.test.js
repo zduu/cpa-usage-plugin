@@ -61,6 +61,7 @@ function createDashboardHarness(options = {}) {
   const nullDashboardSummary = !!options.nullDashboardSummary;
   const nullDashboardData = !!options.nullDashboardData;
   const nullDashboardApiDetail = !!options.nullDashboardApiDetail;
+  const apiFailureCount = Number.isFinite(Number(options.apiFailureCount)) ? Number(options.apiFailureCount) : 10;
   const exportJobs = new Map();
   let exportJobSeq = 0;
 
@@ -149,6 +150,14 @@ function createDashboardHarness(options = {}) {
       storage: { enabled: false, path: 'usage-statistics.jsonl' },
     },
   };
+  summary.usage.failure_count = apiFailureCount;
+  summary.usage.success_count = summary.usage.total_requests - apiFailureCount;
+  summary.usage.apis.openai.failure_count = apiFailureCount;
+  summary.usage.apis.openai.success_count = summary.usage.apis.openai.total_requests - apiFailureCount;
+  summary.source_stats[0].failure_count = apiFailureCount;
+  summary.source_stats[0].success_count = summary.source_stats[0].total_requests - apiFailureCount;
+  summary.model_stats[0].failure_count = apiFailureCount;
+  summary.model_stats[0].success_count = summary.model_stats[0].total_requests - apiFailureCount;
   if (options.storage) summary._meta.storage = options.storage;
 
   function eventsPage(url) {
@@ -880,12 +889,17 @@ test('dashboard api detail uses the same full-range scope as upstream stats', as
   assert.strictEqual(new URL(apiDetailRequests().at(-1).url, 'http://test.local').searchParams.get('range'), 'all');
 });
 
-test('dashboard api detail reports null payload without reading recent events', async () => {
-  const { document, fetchCalls } = createDashboardHarness({ nullDashboardApiDetail: true });
+test('dashboard api detail uses summary failure count when backend returns null payload', async () => {
+  const { document, fetchCalls } = createDashboardHarness({ nullDashboardApiDetail: true, apiFailureCount: 0 });
 
-  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-api-detail')) && document.getElementById('apiDetail').innerHTML.includes('dashboard-api-detail 返回空数据'));
+  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-api-detail')) && document.getElementById('apiDetail').innerHTML.includes('暂无失败请求'));
 
-  assert.match(document.getElementById('apiDetail').innerHTML, /请求明细加载失败：dashboard-api-detail 返回空数据/);
+  const html = document.getElementById('apiDetail').innerHTML;
+  assert.match(html, /暂无失败请求/);
+  assert.match(html, /失败 0/);
+  assert.match(html, /metricValue">1,200</);
+  assert.match(html, /请求明细加载失败/);
+  assert.doesNotMatch(html, /请求明细加载失败：dashboard-api-detail 返回空数据/);
 });
 
 test('dashboard fallback keeps health grid visible when summary endpoint fails', async () => {
