@@ -30,9 +30,18 @@ test('pct formats percentage', () => {
 
 test('formatMs formats milliseconds', () => {
   assert.strictEqual(helpers.formatMs(500), '500毫秒');
-  assert.strictEqual(helpers.formatMs(1500), '1.50秒');
+  assert.strictEqual(helpers.formatMs(113.25), '113.25毫秒');
+  assert.strictEqual(helpers.formatMs(1500), '1秒500毫秒');
+  assert.strictEqual(helpers.formatMs(1500.5), '1秒500.5毫秒');
   assert.strictEqual(helpers.formatMs(0), '-');
   assert.strictEqual(helpers.formatMs(-1), '-');
+});
+
+test('formatUsd preserves small non-zero costs', () => {
+  assert.strictEqual(helpers.formatUsd(1.2345), 'US$1.23');
+  assert.strictEqual(helpers.formatUsd(0.000445), 'US$0.000445');
+  assert.strictEqual(helpers.formatUsd(0.0000004), '<US$0.000001');
+  assert.strictEqual(helpers.formatUsd(0), 'US$0.00');
 });
 
 test('totalTokens computes token sum', () => {

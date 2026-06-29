@@ -286,6 +286,11 @@ function createDashboardHarness(options = {}) {
     const aggregateRequests = options.trimmedDashboardData ? 4 : 2;
     const aggregateSuccess = options.trimmedDashboardData ? 3 : 1;
     const aggregateTokens = options.trimmedDashboardData ? 45 : 15;
+    const aggregateInput = options.trimmedDashboardData ? 30 : 10;
+    const aggregateOutput = options.trimmedDashboardData ? 15 : 5;
+    const aggregateCached = options.trimmedDashboardData ? 2 : 0;
+    const aggregateReasoning = options.trimmedDashboardData ? 4 : 0;
+    const aggregateLatency = options.trimmedDashboardData ? 110 : 100;
     const details = [
       {
         timestamp: new Date(now - 5 * 60 * 1000).toISOString(),
@@ -317,6 +322,11 @@ function createDashboardHarness(options = {}) {
         success_count: aggregateSuccess,
         failure_count: 1,
         total_tokens: aggregateTokens,
+        input_tokens: aggregateInput,
+        output_tokens: aggregateOutput,
+        cached_tokens: aggregateCached,
+        reasoning_tokens: aggregateReasoning,
+        avg_latency_ms: aggregateLatency,
         requests_by_day: {},
         requests_by_hour: {},
         tokens_by_day: {},
@@ -327,12 +337,22 @@ function createDashboardHarness(options = {}) {
             success_count: aggregateSuccess,
             failure_count: 1,
             total_tokens: aggregateTokens,
+            input_tokens: aggregateInput,
+            output_tokens: aggregateOutput,
+            cached_tokens: aggregateCached,
+            reasoning_tokens: aggregateReasoning,
+            avg_latency_ms: aggregateLatency,
             models: {
               'gpt-4.1': {
                 total_requests: aggregateRequests,
                 success_count: aggregateSuccess,
                 failure_count: 1,
                 total_tokens: aggregateTokens,
+                input_tokens: aggregateInput,
+                output_tokens: aggregateOutput,
+                cached_tokens: aggregateCached,
+                reasoning_tokens: aggregateReasoning,
+                avg_latency_ms: aggregateLatency,
                 details,
               },
             },
@@ -567,7 +587,7 @@ test('dashboard loads summary and export button uses backend event export', asyn
   assert.doesNotMatch(apiDetail, /Token\/请求/);
   await waitFor(() => /ModelError/.test(document.getElementById('apiDetail').innerHTML));
   const loadedApiDetail = document.getElementById('apiDetail').innerHTML;
-  assert.match(loadedApiDetail, /US\$0\.00/);
+  assert.match(loadedApiDetail, /US\$0\.000445/);
   assert.match(loadedApiDetail, /总 token 数：105/);
   assert.match(loadedApiDetail, /缓存 token：10/);
   assert.match(loadedApiDetail, /思考 token：5/);
@@ -871,6 +891,7 @@ test('dashboard fallback keeps upstream aggregates when details are trimmed', as
   await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-data')) && document.getElementById('apiStats').innerHTML.includes('openai'));
 
   assert.strictEqual(document.getElementById('totalRequests').textContent, '4');
+  assert.strictEqual(document.getElementById('totalCost').textContent, 'US$0.000209');
   assert.match(document.getElementById('apiStats').innerHTML, /4 <span class="ok">\(3<\/span> <span class="bad">1\)<\/span>/);
 });
 

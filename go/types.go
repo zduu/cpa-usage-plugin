@@ -543,10 +543,15 @@ type UsageThinking struct {
 }
 
 type StatisticsSnapshot struct {
-	TotalRequests int64 `json:"total_requests"`
-	SuccessCount  int64 `json:"success_count"`
-	FailureCount  int64 `json:"failure_count"`
-	TotalTokens   int64 `json:"total_tokens"`
+	TotalRequests   int64   `json:"total_requests"`
+	SuccessCount    int64   `json:"success_count"`
+	FailureCount    int64   `json:"failure_count"`
+	TotalTokens     int64   `json:"total_tokens"`
+	InputTokens     int64   `json:"input_tokens,omitempty"`
+	OutputTokens    int64   `json:"output_tokens,omitempty"`
+	CachedTokens    int64   `json:"cached_tokens,omitempty"`
+	ReasoningTokens int64   `json:"reasoning_tokens,omitempty"`
+	AvgLatencyMs    float64 `json:"avg_latency_ms,omitempty"`
 
 	APIs map[string]APISnapshot `json:"apis"`
 
@@ -557,19 +562,29 @@ type StatisticsSnapshot struct {
 }
 
 type APISnapshot struct {
-	TotalRequests int64                    `json:"total_requests"`
-	SuccessCount  int64                    `json:"success_count"`
-	FailureCount  int64                    `json:"failure_count"`
-	TotalTokens   int64                    `json:"total_tokens"`
-	Models        map[string]ModelSnapshot `json:"models"`
+	TotalRequests   int64                    `json:"total_requests"`
+	SuccessCount    int64                    `json:"success_count"`
+	FailureCount    int64                    `json:"failure_count"`
+	TotalTokens     int64                    `json:"total_tokens"`
+	InputTokens     int64                    `json:"input_tokens,omitempty"`
+	OutputTokens    int64                    `json:"output_tokens,omitempty"`
+	CachedTokens    int64                    `json:"cached_tokens,omitempty"`
+	ReasoningTokens int64                    `json:"reasoning_tokens,omitempty"`
+	AvgLatencyMs    float64                  `json:"avg_latency_ms,omitempty"`
+	Models          map[string]ModelSnapshot `json:"models"`
 }
 
 type ModelSnapshot struct {
-	TotalRequests int64           `json:"total_requests"`
-	SuccessCount  int64           `json:"success_count"`
-	FailureCount  int64           `json:"failure_count"`
-	TotalTokens   int64           `json:"total_tokens"`
-	Details       []RequestDetail `json:"details"`
+	TotalRequests   int64           `json:"total_requests"`
+	SuccessCount    int64           `json:"success_count"`
+	FailureCount    int64           `json:"failure_count"`
+	TotalTokens     int64           `json:"total_tokens"`
+	InputTokens     int64           `json:"input_tokens,omitempty"`
+	OutputTokens    int64           `json:"output_tokens,omitempty"`
+	CachedTokens    int64           `json:"cached_tokens,omitempty"`
+	ReasoningTokens int64           `json:"reasoning_tokens,omitempty"`
+	AvgLatencyMs    float64         `json:"avg_latency_ms,omitempty"`
+	Details         []RequestDetail `json:"details"`
 }
 
 type MergeResult struct {

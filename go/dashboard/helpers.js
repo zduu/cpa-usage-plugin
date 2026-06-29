@@ -3,7 +3,26 @@ const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '
 const num = (value) => Number.isFinite(Number(value)) ? Number(value) : 0;
 function compact(value) { const n = num(value), abs = Math.abs(n); const trim = (v) => v.toFixed(1).replace(/\.0$/, ''); if (abs >= 1e6) return trim(n / 1e6) + 'M'; if (abs >= 1e3) return trim(n / 1e3) + 'k'; return fmt.format(n) }
 const pct = (value) => Number.isFinite(value) ? value.toFixed(1) + '%' : '-';
-const formatMs = (value) => Number.isFinite(value) && value > 0 ? (value >= 1000 ? (value / 1000).toFixed(2) + '秒' : Math.round(value) + '毫秒') : '-';
+const trimFixed = (value, digits) => Number(value).toFixed(digits).replace(/\.0+$|(\.\d*?[1-9])0+$/, '$1');
+const formatMs = (value) => {
+  if (!(Number.isFinite(value) && value > 0)) return '-';
+  if (value < 1000) return trimFixed(value, 2) + '毫秒';
+  const seconds = Math.floor(value / 1000);
+  const milliseconds = value - seconds * 1000;
+  if (milliseconds < 0.005) return seconds + '秒';
+  return seconds + '秒' + trimFixed(milliseconds, 2) + '毫秒';
+};
+const money2 = new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const money6 = new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 6 });
+const money6Fixed = new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'USD', minimumFractionDigits: 6, maximumFractionDigits: 6 });
+function formatUsd(value) {
+  if (!Number.isFinite(value)) return '-';
+  const abs = Math.abs(value);
+  if (abs === 0) return money2.format(0);
+  if (abs < 0.000001) return '<' + money6Fixed.format(0.000001);
+  if (abs < 0.01) return money6.format(value);
+  return money2.format(value);
+}
 function totalTokens(detail) { const t = detail.tokens || {}; return num(t.total_tokens) || num(t.input_tokens) + num(t.output_tokens) + num(t.reasoning_tokens) }
 function tokenCost(model, inputTokens, outputTokens, cachedTokens, reasoningTokens, prices) { const p = prices && prices[model]; if (!p) return 0; const cached = Math.max(num(cachedTokens), 0); const input = Math.max(num(inputTokens) - cached, 0); const output = Math.max(num(outputTokens), 0) + Math.max(num(reasoningTokens), 0); return input / 1e6 * num(p.prompt) + output / 1e6 * num(p.completion) + cached / 1e6 * num(p.cache) }
 function detailCost(detail, prices) { const t = detail.tokens || {}; return tokenCost(detail.model, t.input_tokens, t.output_tokens, Math.max(num(t.cached_tokens), num(t.cache_tokens)), t.reasoning_tokens, prices) }
@@ -158,5 +177,5 @@ async function fetchAllEventPages(fetchPage, baseParams, pageLimit) {
 
 // Export for Node.js test environment
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { esc, num, compact, pct, formatMs, totalTokens, tokenCost, detailCost, aggregateCost, looksLikeKey, looksLikeCredentialId, isCredentialMarker, isCredentialLabel, trimCredentialSuffix, sourceLabel, sourceKey, friendlyApiName, clientApiLabel, clientApiGroupKey, avg, bucketSeries, healthColor, healthCellStyle, timestampMs, pluginEndpoint, managementEndpoint, decodeManagementStorage, parseManagementStorage, currentManagementKey, groupedRows, decodeManagementBody, unwrapPluginPayloadWithMeta, unwrapPluginPayload, fetchAllEventPages };
+  module.exports = { esc, num, compact, pct, formatMs, formatUsd, totalTokens, tokenCost, detailCost, aggregateCost, looksLikeKey, looksLikeCredentialId, isCredentialMarker, isCredentialLabel, trimCredentialSuffix, sourceLabel, sourceKey, friendlyApiName, clientApiLabel, clientApiGroupKey, avg, bucketSeries, healthColor, healthCellStyle, timestampMs, pluginEndpoint, managementEndpoint, decodeManagementStorage, parseManagementStorage, currentManagementKey, groupedRows, decodeManagementBody, unwrapPluginPayloadWithMeta, unwrapPluginPayload, fetchAllEventPages };
 }

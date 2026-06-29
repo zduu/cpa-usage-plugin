@@ -1083,6 +1083,77 @@ func TestDashboardDataBackwardCompatible(t *testing.T) {
 	}
 }
 
+func TestDashboardDataIncludesAggregateTokenParts(t *testing.T) {
+	stats = NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 2, RetentionDays: 0, DedupWindowMinutes: 0})
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < 3; i++ {
+		stats.Record(UsageRecord{
+			Provider:    "openai",
+			Model:       "gpt-4.1",
+			RequestedAt: base.Add(time.Duration(i) * time.Minute),
+			Latency:     time.Duration((i+1)*10) * time.Millisecond,
+			Detail: UsageDetail{
+				InputTokens:     int64(i + 1),
+				OutputTokens:    int64((i + 1) * 10),
+				ReasoningTokens: int64((i + 1) * 100),
+				CachedTokens:    int64(i + 5),
+			},
+		})
+	}
+
+	raw, err := handleDashboardData()
+	if err != nil {
+		t.Fatalf("handleDashboardData() error = %v", err)
+	}
+
+	var env envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("failed to unmarshal envelope: %v", err)
+	}
+	if !env.OK {
+		t.Fatal("envelope not ok")
+	}
+
+	var resp ManagementResponse
+	if err := json.Unmarshal(env.Result, &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	var data struct {
+		Usage StatisticsSnapshot `json:"usage"`
+	}
+	if err := json.Unmarshal(resp.Body, &data); err != nil {
+		t.Fatalf("failed to unmarshal body: %v", err)
+	}
+
+	if data.Usage.TotalRequests != 3 || data.Usage.TotalTokens != 666 {
+		t.Fatalf("usage totals = requests %d tokens %d, want 3/666", data.Usage.TotalRequests, data.Usage.TotalTokens)
+	}
+	if data.Usage.InputTokens != 6 || data.Usage.OutputTokens != 60 ||
+		data.Usage.ReasoningTokens != 600 || data.Usage.CachedTokens != 18 {
+		t.Fatalf("usage token parts = %#v", data.Usage)
+	}
+	if data.Usage.AvgLatencyMs != 20 {
+		t.Fatalf("usage avg latency = %v, want 20", data.Usage.AvgLatencyMs)
+	}
+
+	api := data.Usage.APIs["openai"]
+	if api.InputTokens != 6 || api.OutputTokens != 60 || api.ReasoningTokens != 600 ||
+		api.CachedTokens != 18 || api.AvgLatencyMs != 20 {
+		t.Fatalf("api aggregate = %#v", api)
+	}
+
+	model := api.Models["gpt-4.1"]
+	if model.InputTokens != 6 || model.OutputTokens != 60 || model.ReasoningTokens != 600 ||
+		model.CachedTokens != 18 || model.AvgLatencyMs != 20 {
+		t.Fatalf("model aggregate = %#v", model)
+	}
+	if len(model.Details) != 2 {
+		t.Fatalf("trimmed details len = %d, want 2", len(model.Details))
+	}
+}
+
 func TestRequestDetailHasModelField(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0})

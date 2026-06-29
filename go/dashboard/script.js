@@ -1,7 +1,6 @@
 // cpausage dashboard — main logic. Uses helpers from helpers.js.
 const rangeKey = 'cpa-usage-range-v1';
 const fmt = new Intl.NumberFormat('zh-CN');
-const money = new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 });
 let summaryData = null;         // DashboardSummary from /dashboard-summary
 let eventsData = null;          // EventsResult from /dashboard-events
 let modelPrices = {};
@@ -180,7 +179,7 @@ function renderStats() {
   setText('rpm', (recentReq / 60).toFixed(2));
   setText('rpmMeta', '最近1小时请求：' + fmt.format(recentReq));
   const cost = (summaryData.model_stats || []).reduce((s, m) => s + aggregateCost(m, modelPrices), 0);
-  setText('totalCost', money.format(cost));
+  setText('totalCost', formatUsd(cost));
   setText('costMeta', '总 token 数：' + compact(u.total_tokens));
   // Sparklines from hourly data
   const reqByHour = Array.from({ length: 24 }, (_, i) => {
@@ -412,7 +411,7 @@ function renderClientApiStats() {
   else if (clientApiSort === 'cost') rows.sort((a, b) => b.cost - a.cost);
   else rows.sort((a, b) => b.requests - a.requests);
   document.querySelectorAll('[data-api-sort]').forEach((btn) => btn.classList.toggle('active', btn.dataset.apiSort === clientApiSort));
-  $('clientApiStats').innerHTML = rows.length ? '<div class="apiCardGrid">' + rows.map((r) => '<div class="apiCard"><div><div class="apiName">' + esc(r.name) + '</div><div class="apiChips"><span class="chip">请求次数: ' + fmt.format(r.requests) + '（<span class="ok">' + fmt.format(r.success) + '</span> <span class="bad">' + fmt.format(r.failure) + '</span>）</span><span class="chip">Token数量: ' + compact(r.tokens) + '</span><span class="chip">总花费: ' + money.format(r.cost) + '</span></div></div><div class="apiArrow">▶</div></div>').join('') + '</div>' : '<div class="empty">暂无 API key 请求数据</div>';
+  $('clientApiStats').innerHTML = rows.length ? '<div class="apiCardGrid">' + rows.map((r) => '<div class="apiCard"><div><div class="apiName">' + esc(r.name) + '</div><div class="apiChips"><span class="chip">请求次数: ' + fmt.format(r.requests) + '（<span class="ok">' + fmt.format(r.success) + '</span> <span class="bad">' + fmt.format(r.failure) + '</span>）</span><span class="chip">Token数量: ' + compact(r.tokens) + '</span><span class="chip">总花费: ' + formatUsd(r.cost) + '</span></div></div><div class="apiArrow">▶</div></div>').join('') + '</div>' : '<div class="empty">暂无 API key 请求数据</div>';
 }
 
 function renderApiStats() {
@@ -511,7 +510,7 @@ function renderApiDetailContent(apiData, detailState) {
     metricHtml('总 token', compact(summary.total_tokens), '<span>缓存 token：' + compact(summary.cached_tokens) + '</span><span>思考 token：' + compact(summary.reasoning_tokens) + '</span>') +
     metricHtml('平均延迟', formatMs(summary.avg_latency_ms)) +
     metricHtml('模型数', fmt.format(models.length), sources.length ? '<span>来源 ' + fmt.format(sources.length) + '</span>' : '') +
-    metricHtml('总花费', money.format(totalCost), '<span>总 token 数：' + compact(summary.total_tokens) + '</span>') +
+    metricHtml('总花费', formatUsd(totalCost), '<span>总 token 数：' + compact(summary.total_tokens) + '</span>') +
     '</div>' +
     '<div class="splitGrid">' +
     barsHtml('模型分布', models, requests, '暂无模型数据') +
@@ -547,7 +546,7 @@ function renderModelStats() {
   $('modelStats').innerHTML = rows.length ? '<table><thead><tr><th>模型</th><th>请求</th><th>token</th><th>平均延迟</th><th>成功率</th><th>花费</th></tr></thead><tbody>' + rows.map((r) => {
     const rate = r.total_requests ? r.success_count / r.total_requests * 100 : 100;
     const cost = aggregateCost(r, modelPrices);
-    return '<tr><td class="nameCell">' + esc(r.model) + '</td><td>' + fmt.format(r.total_requests) + ' <span class="ok">(' + fmt.format(r.success_count) + '</span> <span class="bad">' + fmt.format(r.failure_count) + ')</span></td><td>' + compact(r.total_tokens) + '</td><td>' + formatMs(r.avg_latency_ms) + '</td><td class="' + (rate >= 95 ? 'ok' : rate >= 80 ? 'neutral' : 'bad') + '">' + pct(rate) + '</td><td>' + money.format(cost) + '</td></tr>'
+    return '<tr><td class="nameCell">' + esc(r.model) + '</td><td>' + fmt.format(r.total_requests) + ' <span class="ok">(' + fmt.format(r.success_count) + '</span> <span class="bad">' + fmt.format(r.failure_count) + ')</span></td><td>' + compact(r.total_tokens) + '</td><td>' + formatMs(r.avg_latency_ms) + '</td><td class="' + (rate >= 95 ? 'ok' : rate >= 80 ? 'neutral' : 'bad') + '">' + pct(rate) + '</td><td>' + formatUsd(cost) + '</td></tr>'
   }).join('') + '</tbody></table>' : '<div class="empty">暂无模型数据</div>';
 }
 

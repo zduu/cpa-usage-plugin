@@ -2376,25 +2376,48 @@ func (s *RequestStatistics) snapshotLocked() StatisticsSnapshot {
 	result.SuccessCount = s.successCount
 	result.FailureCount = s.failureCount
 	result.TotalTokens = s.totalTokens
+	result.InputTokens = s.inputTokens
+	result.OutputTokens = s.outputTokens
+	result.CachedTokens = s.cachedTokens
+	result.ReasoningTokens = s.reasoningTokens
+	if s.latencyN > 0 {
+		result.AvgLatencyMs = float64(s.latencySum) / float64(s.latencyN)
+	}
 
 	result.APIs = make(map[string]APISnapshot, len(s.apis))
 	for apiName, apiSt := range s.apis {
 		apiSnapshot := APISnapshot{
-			TotalRequests: apiSt.TotalRequests,
-			SuccessCount:  apiSt.SuccessCount,
-			FailureCount:  apiSt.FailureCount,
-			TotalTokens:   apiSt.TotalTokens,
-			Models:        make(map[string]ModelSnapshot, len(apiSt.Models)),
+			TotalRequests:   apiSt.TotalRequests,
+			SuccessCount:    apiSt.SuccessCount,
+			FailureCount:    apiSt.FailureCount,
+			TotalTokens:     apiSt.TotalTokens,
+			InputTokens:     apiSt.InputTokens,
+			OutputTokens:    apiSt.OutputTokens,
+			CachedTokens:    apiSt.CachedTokens,
+			ReasoningTokens: apiSt.ReasoningTokens,
+			Models:          make(map[string]ModelSnapshot, len(apiSt.Models)),
+		}
+		if apiSt.latencyN > 0 {
+			apiSnapshot.AvgLatencyMs = float64(apiSt.latencySum) / float64(apiSt.latencyN)
 		}
 		for modelName, modelSt := range apiSt.Models {
 			details := make([]RequestDetail, len(modelSt.Details))
 			copy(details, modelSt.Details)
 			apiSnapshot.Models[modelName] = ModelSnapshot{
-				TotalRequests: modelSt.TotalRequests,
-				SuccessCount:  modelSt.SuccessCount,
-				FailureCount:  modelSt.FailureCount,
-				TotalTokens:   modelSt.TotalTokens,
-				Details:       details,
+				TotalRequests:   modelSt.TotalRequests,
+				SuccessCount:    modelSt.SuccessCount,
+				FailureCount:    modelSt.FailureCount,
+				TotalTokens:     modelSt.TotalTokens,
+				InputTokens:     modelSt.InputTokens,
+				OutputTokens:    modelSt.OutputTokens,
+				CachedTokens:    modelSt.CachedTokens,
+				ReasoningTokens: modelSt.ReasoningTokens,
+				Details:         details,
+			}
+			if modelSt.latencyN > 0 {
+				modelSnapshot := apiSnapshot.Models[modelName]
+				modelSnapshot.AvgLatencyMs = float64(modelSt.latencySum) / float64(modelSt.latencyN)
+				apiSnapshot.Models[modelName] = modelSnapshot
 			}
 		}
 		result.APIs[apiName] = apiSnapshot
