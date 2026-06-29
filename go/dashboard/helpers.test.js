@@ -61,11 +61,11 @@ test('detailCost computes cost', () => {
     tokens: { input_tokens: 1000000, output_tokens: 500000, reasoning_tokens: 100000, cached_tokens: 200000, cache_tokens: 0, total_tokens: 1600000 }
   };
   // input: (1000000 - 200000) = 800000 / 1e6 * 30 = 24
-  // output + reasoning: 600000 / 1e6 * 60 = 36
+  // output: 500000 / 1e6 * 60 = 30
   // cached: 200000 / 1e6 * 15 = 3
-  // total: 63
+  // total: 57
   const cost = helpers.detailCost(detail, prices);
-  assert.ok(Math.abs(cost - 63) < 0.01, 'cost should be ~63, got ' + cost);
+  assert.ok(Math.abs(cost - 57) < 0.01, 'cost should be ~57, got ' + cost);
 });
 
 test('detailCost returns 0 for unknown model', () => {
@@ -87,7 +87,7 @@ test('aggregateCost uses the original model key, not an alias', () => {
     cached_tokens: 100000,
   };
   const cost = helpers.aggregateCost(row, prices);
-  assert.ok(Math.abs(cost - 49.1) < 0.01, 'cost should use gpt-4 pricing, got ' + cost);
+  assert.ok(Math.abs(cost - 29.1) < 0.01, 'cost should use gpt-4 pricing, got ' + cost);
 });
 
 test('looksLikeKey detects API key patterns', () => {

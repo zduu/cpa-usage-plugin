@@ -587,7 +587,7 @@ test('dashboard loads summary and export button uses backend event export', asyn
   assert.doesNotMatch(apiDetail, /Token\/请求/);
   await waitFor(() => /ModelError/.test(document.getElementById('apiDetail').innerHTML));
   const loadedApiDetail = document.getElementById('apiDetail').innerHTML;
-  assert.match(loadedApiDetail, /US\$0\.000445/);
+  assert.match(loadedApiDetail, /US\$0\.000405/);
   assert.match(loadedApiDetail, /总 token 数：105/);
   assert.match(loadedApiDetail, /缓存 token：10/);
   assert.match(loadedApiDetail, /思考 token：5/);
@@ -891,7 +891,7 @@ test('dashboard fallback keeps upstream aggregates when details are trimmed', as
   await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-data')) && document.getElementById('apiStats').innerHTML.includes('openai'));
 
   assert.strictEqual(document.getElementById('totalRequests').textContent, '4');
-  assert.strictEqual(document.getElementById('totalCost').textContent, 'US$0.000209');
+  assert.strictEqual(document.getElementById('totalCost').textContent, 'US$0.000177');
   assert.match(document.getElementById('apiStats').innerHTML, /4 <span class="ok">\(3<\/span> <span class="bad">1\)<\/span>/);
 });
 
