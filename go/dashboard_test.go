@@ -1127,8 +1127,8 @@ func TestDashboardDataIncludesAggregateTokenParts(t *testing.T) {
 		t.Fatalf("failed to unmarshal body: %v", err)
 	}
 
-	if data.Usage.TotalRequests != 3 || data.Usage.TotalTokens != 666 {
-		t.Fatalf("usage totals = requests %d tokens %d, want 3/666", data.Usage.TotalRequests, data.Usage.TotalTokens)
+	if data.Usage.TotalRequests != 3 || data.Usage.TotalTokens != 66 {
+		t.Fatalf("usage totals = requests %d tokens %d, want 3/66", data.Usage.TotalRequests, data.Usage.TotalTokens)
 	}
 	if data.Usage.InputTokens != 6 || data.Usage.OutputTokens != 60 ||
 		data.Usage.ReasoningTokens != 600 || data.Usage.CachedTokens != 18 {
@@ -1236,8 +1236,8 @@ func TestSummaryWithoutDetailsKeepsAggregatesAfterDetailTrim(t *testing.T) {
 	}
 
 	assertSummary := func(label string, summary DashboardSummary) {
-		if summary.Usage.TotalRequests != 3 || summary.Usage.TotalTokens != 666 {
-			t.Fatalf("%s usage totals = requests %d tokens %d, want 3/666", label, summary.Usage.TotalRequests, summary.Usage.TotalTokens)
+		if summary.Usage.TotalRequests != 3 || summary.Usage.TotalTokens != 66 {
+			t.Fatalf("%s usage totals = requests %d tokens %d, want 3/66", label, summary.Usage.TotalRequests, summary.Usage.TotalTokens)
 		}
 		if summary.Usage.InputTokens != 6 || summary.Usage.OutputTokens != 60 ||
 			summary.Usage.ReasoningTokens != 600 || summary.Usage.CachedTokens != 18 {
@@ -1267,14 +1267,14 @@ func TestSummaryWithoutDetailsKeepsAggregatesAfterDetailTrim(t *testing.T) {
 			t.Fatalf("%s model stats = %#v", label, summary.ModelStats)
 		}
 		if len(summary.SourceStats) != 1 || summary.SourceStats[0].Source != "source-shared" ||
-			summary.SourceStats[0].TotalRequests != 3 || summary.SourceStats[0].TotalTokens != 666 {
+			summary.SourceStats[0].TotalRequests != 3 || summary.SourceStats[0].TotalTokens != 66 {
 			t.Fatalf("%s source stats = %#v", label, summary.SourceStats)
 		}
 		if len(summary.CredentialStats) != 2 {
 			t.Fatalf("%s credential stats = %#v", label, summary.CredentialStats)
 		}
 		if len(summary.ClientAPIStats) != 1 || summary.ClientAPIStats[0].TotalRequests != 3 ||
-			summary.ClientAPIStats[0].TotalTokens != 666 || len(summary.ClientAPIStats[0].Models) != 1 ||
+			summary.ClientAPIStats[0].TotalTokens != 66 || len(summary.ClientAPIStats[0].Models) != 1 ||
 			summary.ClientAPIStats[0].Models[0].TotalRequests != 3 {
 			t.Fatalf("%s client api stats = %#v", label, summary.ClientAPIStats)
 		}

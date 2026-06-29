@@ -23,7 +23,7 @@ function formatUsd(value) {
   if (abs < 0.01) return money6.format(value);
   return money2.format(value);
 }
-function totalTokens(detail) { const t = detail.tokens || {}; return num(t.total_tokens) || num(t.input_tokens) + num(t.output_tokens) + num(t.reasoning_tokens) }
+function totalTokens(detail) { const t = detail.tokens || {}; return num(t.total_tokens) || num(t.input_tokens) + num(t.output_tokens) }
 function tokenCost(model, inputTokens, outputTokens, cachedTokens, reasoningTokens, prices) { const p = prices && prices[model]; if (!p) return 0; const cached = Math.max(num(cachedTokens), 0); const input = Math.max(num(inputTokens) - cached, 0); return input / 1e6 * num(p.prompt) + Math.max(num(outputTokens), 0) / 1e6 * num(p.completion) + cached / 1e6 * num(p.cache) }
 function detailCost(detail, prices) { const t = detail.tokens || {}; return tokenCost(detail.model, t.input_tokens, t.output_tokens, Math.max(num(t.cached_tokens), num(t.cache_tokens)), t.reasoning_tokens, prices) }
 function aggregateCost(row, prices) { return tokenCost(row.model, row.input_tokens, row.output_tokens, row.cached_tokens, row.reasoning_tokens, prices) }

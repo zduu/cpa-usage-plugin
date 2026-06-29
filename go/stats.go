@@ -2549,7 +2549,7 @@ func (s *RequestStatistics) recordImported(apiName, modelName string, detail Req
 func usageDetailTotalTokens(detail UsageDetail) int64 {
 	totalTokens := detail.TotalTokens
 	if totalTokens == 0 {
-		totalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
+		totalTokens = detail.InputTokens + detail.OutputTokens
 	}
 	return nonNegativeInt64(totalTokens)
 }
@@ -2557,7 +2557,7 @@ func usageDetailTotalTokens(detail UsageDetail) int64 {
 func detailTotalTokens(tokens TokenStats) int64 {
 	totalTokens := tokens.TotalTokens
 	if totalTokens == 0 {
-		totalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens
+		totalTokens = tokens.InputTokens + tokens.OutputTokens
 	}
 	return nonNegativeInt64(totalTokens)
 }
