@@ -485,7 +485,7 @@ function apiDetailErrorHtml(errorRows, loading, error) {
   if (loading && !errorRows.length) return '<div><div class="subtle" style="margin-bottom:8px">错误统计</div><div class="empty">正在加载接口请求明细...</div></div>';
   if (error && !errorRows.length) return '<div><div class="subtle" style="margin-bottom:8px">错误统计</div><div class="empty">请求明细加载失败：' + esc(error.message || '未知错误') + '</div></div>';
   return '<div><div class="subtle" style="margin-bottom:8px">错误统计</div>' +
-    (errorRows.length ? '<div class="tableWrap"><table><thead><tr><th>状态码</th><th>次数</th><th>错误</th></tr></thead><tbody>' + errorRows.slice(0, 10).map((r) => '<tr><td class="bad">' + esc(r.status_code || '-') + '</td><td>' + fmt.format(r.count) + '</td><td class="errorText">' + esc(r.failure || '未返回错误内容') + '</td></tr>').join('') + '</tbody></table></div>' : '<div class="empty">暂无失败请求</div>') +
+    (errorRows.length ? '<div class="tableWrap"><table><thead><tr><th>状态码</th><th>次数</th><th>错误</th></tr></thead><tbody>' + errorRows.slice(0, 10).map((r) => '<tr><td class="bad">' + esc(r.status_code || '-') + '</td><td>' + fmt.format(r.count) + '</td><td><span class="errorText">' + esc(r.failure || '未返回错误内容') + '</span></td></tr>').join('') + '</tbody></table></div>' : '<div class="empty">暂无失败请求</div>') +
     '</div>';
 }
 
@@ -493,7 +493,7 @@ function apiDetailRecentHtml(rows, loading, error) {
   if (loading && !rows.length) return '<div><div class="subtle" style="margin-bottom:8px">最近请求</div><div class="empty">正在加载接口请求明细...</div></div>';
   if (error && !rows.length) return '<div><div class="subtle" style="margin-bottom:8px">最近请求</div><div class="empty">请求明细加载失败</div></div>';
   return '<div><div class="subtle" style="margin-bottom:8px">最近请求</div>' +
-    (rows.length ? '<div class="tableWrap"><table><thead><tr><th>时间</th><th>模型</th><th>结果</th><th>延迟</th><th>token</th><th>来源</th></tr></thead><tbody>' + rows.slice(0, apiDetailRecentLimit).map((d) => '<tr><td>' + new Date(d.timestamp_ms).toLocaleString() + '</td><td class="nameCell">' + esc(d.model) + '</td><td class="' + (d.failed ? 'bad' : 'ok') + '">' + (d.failed ? '失败' : '成功') + '</td><td>' + formatMs(num(d.latency_ms)) + '</td><td>' + fmt.format(d.total_tokens) + '</td><td>' + esc(sourceLabel(d)) + '</td></tr>').join('') + '</tbody></table></div>' : '<div class="empty">暂无请求明细</div>') +
+    (rows.length ? '<div class="tableWrap"><table><thead><tr><th>时间</th><th>模型</th><th>结果</th><th>延迟</th><th>token</th><th>来源</th></tr></thead><tbody>' + rows.slice(0, apiDetailRecentLimit).map((d) => '<tr><td>' + new Date(d.timestamp_ms).toLocaleString() + '</td><td class="nameCell">' + esc(d.model) + '</td><td class="' + (d.failed ? 'bad' : 'ok') + '">' + (d.failed ? '失败' : '成功') + '</td><td>' + formatMs(num(d.latency_ms)) + '</td><td>' + fmt.format(d.total_tokens) + '</td><td class="nameCell">' + esc(sourceLabel(d)) + '</td></tr>').join('') + '</tbody></table></div>' : '<div class="empty">暂无请求明细</div>') +
     '</div>';
 }
 
@@ -585,7 +585,7 @@ async function renderEvents() {
   const rows = eventsData.events || [];
   const total = eventsData.total || 0;
   setText('eventsCount', '共 ' + fmt.format(total) + ' 条，显示 ' + fmt.format(Math.min(rows.length, eventsLimit)) + ' 条');
-  $('events').innerHTML = rows.length ? '<table><thead><tr><th>时间</th><th>模型</th><th>来源</th><th>凭证</th><th>结果</th><th>延迟</th><th>输入</th><th>输出</th><th>思考</th><th>缓存</th><th>总计</th></tr></thead><tbody>' + rows.map((d) => '<tr><td>' + new Date(timestampMs(d.timestamp)).toLocaleString() + '</td><td class="nameCell">' + esc(d.model) + '</td><td>' + esc(sourceLabel(d)) + '</td><td>' + (esc(d.auth_index || '-')) + '</td><td class="' + (d.failed ? 'bad' : 'ok') + '">' + (d.failed ? '失败' : '成功') + '</td><td>' + formatMs(num(d.latency_ms)) + '</td><td>' + fmt.format(num(d.tokens && d.tokens.input_tokens)) + '</td><td>' + fmt.format(num(d.tokens && d.tokens.output_tokens)) + '</td><td>' + fmt.format(num(d.tokens && d.tokens.reasoning_tokens)) + '</td><td>' + fmt.format(num(d.tokens && Math.max(d.tokens.cached_tokens || 0, d.tokens.cache_tokens || 0))) + '</td><td>' + fmt.format(num(d.tokens && d.tokens.total_tokens)) + '</td></tr>').join('') + '</tbody></table>' : '<div class="empty">暂无请求事件</div>';
+  $('events').innerHTML = rows.length ? '<table><thead><tr><th>时间</th><th>模型</th><th>来源</th><th>凭证</th><th>结果</th><th>延迟</th><th>输入</th><th>输出</th><th>思考</th><th>缓存</th><th>总计</th></tr></thead><tbody>' + rows.map((d) => '<tr><td>' + new Date(timestampMs(d.timestamp)).toLocaleString() + '</td><td class="nameCell">' + esc(d.model) + '</td><td class="nameCell">' + esc(sourceLabel(d)) + '</td><td>' + (esc(d.auth_index || '-')) + '</td><td class="' + (d.failed ? 'bad' : 'ok') + '">' + (d.failed ? '失败' : '成功') + '</td><td>' + formatMs(num(d.latency_ms)) + '</td><td>' + fmt.format(num(d.tokens && d.tokens.input_tokens)) + '</td><td>' + fmt.format(num(d.tokens && d.tokens.output_tokens)) + '</td><td>' + fmt.format(num(d.tokens && d.tokens.reasoning_tokens)) + '</td><td>' + fmt.format(num(d.tokens && Math.max(d.tokens.cached_tokens || 0, d.tokens.cache_tokens || 0))) + '</td><td>' + fmt.format(num(d.tokens && d.tokens.total_tokens)) + '</td></tr>').join('') + '</tbody></table>' : '<div class="empty">暂无请求事件</div>';
   renderFilters();
 }
 

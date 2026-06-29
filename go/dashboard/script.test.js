@@ -635,6 +635,32 @@ test('dashboard export truncation headers produce a user notice', () => {
   assert.deepStrictEqual(downloads.find((d) => d.alert), { alert: '导出已截断：共 1,200 条，已导出 500 条' });
 });
 
+test('dashboard api detail renders long error and source cells with safe wrappers', () => {
+  const { context } = createDashboardHarness();
+  const errorHtml = context.apiDetailErrorHtml([
+    {
+      status_code: 520,
+      count: 1,
+      failure: '<!DOCTYPE html> <html class="no-js" lang="en-US"><head><title>opencode.ai | 520</title></head>',
+    },
+  ], false, null);
+  const recentHtml = context.apiDetailRecentHtml([
+    {
+      timestamp_ms: Date.UTC(2026, 5, 29, 4, 56, 2),
+      model: 'deepseek-v4-pro',
+      failed: false,
+      latency_ms: 4520,
+      total_tokens: 48035,
+      source: 'openai-compatible-opencode-go',
+      provider: 'openai-compatible-opencode-go',
+    },
+  ], false, null);
+
+  assert.match(errorHtml, /<td><span class="errorText">&lt;!DOCTYPE html&gt;/);
+  assert.doesNotMatch(errorHtml, /<td class="errorText">/);
+  assert.match(recentHtml, /<td class="nameCell">openai-compatible-opencode-go<\/td>/);
+});
+
 test('dashboard shows pending storage buffer status', async () => {
   const { document, fetchCalls } = createDashboardHarness({
     storage: {

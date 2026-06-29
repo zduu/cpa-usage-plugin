@@ -54,7 +54,7 @@ tr:last-child td{border-bottom:0}
 .barItem{display:grid;grid-template-columns:minmax(120px,1fr) minmax(160px,2fr) auto;gap:10px;align-items:center;font-size:12px}
 .barTrack{height:8px;background:#eeeeee;border-radius:999px;overflow:hidden}
 .barFill{height:100%;background:#8b8680;border-radius:999px}
-.errorText{max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.errorText{max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
 .apiCardGrid{display:grid;gap:12px}
 .apiCard{border:1px solid #dedede;border-radius:8px;padding:16px;background:#fff;display:grid;grid-template-columns:1fr auto;gap:12px;align-items:center}
 .apiName{font-size:18px;font-weight:800;color:#2f2f2f;margin-bottom:10px}
@@ -86,5 +86,5 @@ tr:last-child td{border-bottom:0}
 .tooltip .ok{color:#10b981}.tooltip .bad{color:#c65746}
 .hidden{display:none!important}
 @media(max-width:1120px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.layout{grid-template-columns:1fr}.detailGrid{grid-template-columns:repeat(3,minmax(0,1fr))}.splitGrid{grid-template-columns:1fr}}
-@media(max-width:640px){.shell{padding:14px}h1{font-size:20px}.cards{grid-template-columns:1fr}.value{font-size:24px}.priceGrid{grid-template-columns:1fr}.priceItem{align-items:stretch;flex-direction:column}.priceActions{justify-content:stretch}.priceActions .btn{flex:1 1 120px}.detailGrid{grid-template-columns:1fr}.barItem{grid-template-columns:1fr}.apiCard{grid-template-columns:1fr}.btn,.select,.input{width:100%}.toolbar{width:100%}.toolbar>*{flex:1 1 150px}}
+@media(max-width:640px){.shell{padding:14px}h1{font-size:20px}.cards{grid-template-columns:1fr}.value{font-size:24px}.priceGrid{grid-template-columns:1fr}.priceItem{align-items:stretch;flex-direction:column}.priceActions{justify-content:stretch}.priceActions .btn{flex:1 1 120px}.detailGrid{grid-template-columns:1fr}.barItem{grid-template-columns:1fr}.apiCard{grid-template-columns:1fr}.btn,.select,.input{width:100%}.toolbar{width:100%}.toolbar>*{flex:1 1 150px}table{font-size:11px}th,td{padding:6px 6px;white-space:normal;word-break:break-word}.nameCell{min-width:80px;font-size:11px}.errorText{max-width:none;white-space:normal;word-break:break-word;overflow:visible}.header{padding-right:0}}
 @media(prefers-color-scheme:dark){:root{background:#111315;color:#f2f2f2}body{background:#111315;color:#f2f2f2}.panel,.stat,th,.btn,.select,.input,.apiCard{background:#181b1f;border-color:#30343a;color:#f2f2f2}.spark,.empty,.metric,.chip{background:#121417;border-color:#30343a}.clickableRow:hover td,.selectedRow td{background:#20242a}.barTrack{background:#2a2f35}.label,th,.subtle,.updated,.neutral,.meta,.legend,.metricLabel,.chip{color:#a8a29b}td{border-color:#30343a}.nameCell,.apiName{color:#f2f2f2}.pill,.storageStatus{background:#20242a;border-color:#3a3f46;color:#c9c3bc}.storageStatus.ok{background:#063820;border-color:#0f6b43;color:#86efac}.storageStatus.warn{background:#3a2512;border-color:#8a541d;color:#fdba74}.storageStatus.bad{background:#3b1818;border-color:#8a2d2d;color:#fca5a5}.healthCell{background:#2a2f35}.tooltip{background:#f2f2f2;color:#1b1b1b}}
