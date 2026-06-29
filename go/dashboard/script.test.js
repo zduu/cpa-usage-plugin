@@ -57,6 +57,7 @@ function createDashboardHarness(options = {}) {
   const dashboardEtags = !!options.dashboardEtags;
   const wrapDashboardResponses = !!options.wrapDashboardResponses;
   const failDashboardSummary = !!options.failDashboardSummary;
+  const forceSummaryNotModified = !!options.forceSummaryNotModified;
   const nullDashboardSummary = !!options.nullDashboardSummary;
   const nullDashboardData = !!options.nullDashboardData;
   const nullDashboardApiDetail = !!options.nullDashboardApiDetail;
@@ -401,6 +402,9 @@ function createDashboardHarness(options = {}) {
   function fetchResponse(payload, route, url, requestOptions) {
     let status = 200;
     const headers = {};
+    if (forceSummaryNotModified && route === 'dashboard-summary' && !String(url).includes('_ts=')) {
+      status = 304;
+    }
     if (dashboardEtags && route) {
       const etag = dashboardEtag(route, url);
       headers.ETag = [etag];
@@ -876,6 +880,15 @@ test('dashboard fallback handles null summary payload', async () => {
   const cells = (document.getElementById('healthGrid').innerHTML.match(/healthCell/g) || []).length;
   assert.strictEqual(cells, 672);
   assert.match(document.getElementById('updated').textContent, /兼容模式/);
+});
+
+test('dashboard summary retries without falling back when browser returns 304 without local cache', async () => {
+  const { document, fetchCalls } = createDashboardHarness({ forceSummaryNotModified: true });
+
+  await waitFor(() => fetchCalls.filter((url) => url.includes('dashboard-summary')).length >= 2);
+  assert.ok(fetchCalls.some((url) => url.includes('dashboard-summary?_ts=')), 'expected cache-busting retry');
+  assert.ok(!fetchCalls.some((url) => url.includes('dashboard-data')), 'should not fall back to dashboard-data');
+  assert.doesNotMatch(document.getElementById('updated').textContent, /兼容模式/);
 });
 
 test('dashboard load reports null fallback payload without throwing', async () => {

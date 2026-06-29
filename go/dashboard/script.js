@@ -97,10 +97,16 @@ async function fetchConditionalJsonPayload(cacheKey, url, options) {
   const headers = cloneHeaders(merged.headers);
   if (cached && cached.etag && !headerValue(headers, 'If-None-Match')) headers['If-None-Match'] = cached.etag;
   merged.headers = headers;
-  const meta = await fetchJsonPayloadWithMeta(url, merged);
+  let meta = await fetchJsonPayloadWithMeta(url, merged);
   if (meta.statusCode === 304) {
     if (cached && Object.prototype.hasOwnProperty.call(cached, 'data')) return cached.data;
-    throw new Error('服务端返回 304，但本地没有可复用缓存');
+    const retryOptions = Object.assign({}, options || {});
+    const retryHeaders = cloneHeaders(retryOptions.headers);
+    delete retryHeaders['If-None-Match'];
+    delete retryHeaders['if-none-match'];
+    retryOptions.headers = retryHeaders;
+    meta = await fetchJsonPayloadWithMeta(String(url) + (String(url).includes('?') ? '&' : '?') + '_ts=' + Date.now(), retryOptions);
+    if (meta.statusCode === 304) throw new Error('服务端返回 304，但本地没有可复用缓存');
   }
   const etag = headerValue(meta.headers, 'ETag');
   if (etag) conditionalPayloadCache.set(cacheKey, { etag, data: meta.data });

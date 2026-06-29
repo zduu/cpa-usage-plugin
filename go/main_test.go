@@ -1066,20 +1066,32 @@ func TestStorageSnapshotRestoresAggregateTotalsWithTrimmedDetails(t *testing.T) 
 		Version:     1,
 		GeneratedAt: now.Format(time.RFC3339),
 		Usage: StatisticsSnapshot{
-			TotalRequests: 5,
-			SuccessCount:  5,
-			TotalTokens:   50,
+			TotalRequests:   5,
+			SuccessCount:    5,
+			TotalTokens:     50,
+			InputTokens:     25,
+			OutputTokens:    15,
+			CachedTokens:    5,
+			ReasoningTokens: 2,
 			APIs: map[string]APISnapshot{
 				"openai": {
-					TotalRequests: 5,
-					SuccessCount:  5,
-					TotalTokens:   50,
+					TotalRequests:   5,
+					SuccessCount:    5,
+					TotalTokens:     50,
+					InputTokens:     25,
+					OutputTokens:    15,
+					CachedTokens:    5,
+					ReasoningTokens: 2,
 					Models: map[string]ModelSnapshot{
 						"gpt-4": {
-							TotalRequests: 5,
-							SuccessCount:  5,
-							TotalTokens:   50,
-							Details:       details,
+							TotalRequests:   5,
+							SuccessCount:    5,
+							TotalTokens:     50,
+							InputTokens:     25,
+							OutputTokens:    15,
+							CachedTokens:    5,
+							ReasoningTokens: 2,
+							Details:         details,
 						},
 					},
 				},
@@ -1106,12 +1118,121 @@ func TestStorageSnapshotRestoresAggregateTotalsWithTrimmedDetails(t *testing.T) 
 	if snapshot.TotalRequests != 5 || snapshot.TotalTokens != 50 {
 		t.Fatalf("snapshot totals = requests %d tokens %d, want 5/50", snapshot.TotalRequests, snapshot.TotalTokens)
 	}
+	if snapshot.InputTokens != 25 || snapshot.OutputTokens != 15 || snapshot.CachedTokens != 5 || snapshot.ReasoningTokens != 2 {
+		t.Fatalf("snapshot token parts = %#v, want 25/15/5/2", snapshot)
+	}
 	if model.TotalRequests != 5 || len(model.Details) != 2 {
 		t.Fatalf("model after restore = requests %d details %d, want 5/2", model.TotalRequests, len(model.Details))
+	}
+	if model.InputTokens != 25 || model.OutputTokens != 15 || model.CachedTokens != 5 || model.ReasoningTokens != 2 {
+		t.Fatalf("model token parts after restore = %#v, want 25/15/5/2", model)
+	}
+	summary := stats.SummaryWithoutDetails()
+	if summary.Usage.InputTokens != 25 || summary.Usage.OutputTokens != 15 || summary.Usage.CachedTokens != 5 || summary.Usage.ReasoningTokens != 2 {
+		t.Fatalf("summary usage token parts = %#v, want 25/15/5/2", summary.Usage)
+	}
+	if summary.Usage.APIs[apiKey].InputTokens != 25 || summary.Usage.APIs[apiKey].OutputTokens != 15 ||
+		summary.Usage.APIs[apiKey].CachedTokens != 5 || summary.Usage.APIs[apiKey].ReasoningTokens != 2 {
+		t.Fatalf("summary api token parts = %#v, want 25/15/5/2", summary.Usage.APIs[apiKey])
+	}
+	if len(summary.ModelStats) != 1 || summary.ModelStats[0].InputTokens != 25 || summary.ModelStats[0].OutputTokens != 15 ||
+		summary.ModelStats[0].CachedTokens != 5 || summary.ModelStats[0].ReasoningTokens != 2 {
+		t.Fatalf("summary model stats = %#v, want 25/15/5/2", summary.ModelStats)
 	}
 	detail := stats.QueryAPIDetail(apiKey, "all", 10, 10)
 	if detail.Summary.TotalRequests != 5 || len(detail.RecentEvents) != 2 {
 		t.Fatalf("api detail after restore = summary %#v recent %d, want total 5 and 2 recent", detail.Summary, len(detail.RecentEvents))
+	}
+}
+
+func TestStorageSnapshotRestoreRepairsMissingTokenPartAggregatesFromDetails(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "usage-statistics")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir storage dir: %v", err)
+	}
+	now := time.Now().UTC()
+	details := []RequestDetail{
+		{
+			Model:     "gpt-4",
+			Timestamp: now.Add(-time.Minute),
+			Source:    "openai-prod",
+			Provider:  "openai",
+			Tokens: TokenStats{
+				InputTokens:     10,
+				OutputTokens:    3,
+				CachedTokens:    2,
+				ReasoningTokens: 1,
+				TotalTokens:     13,
+			},
+		},
+		{
+			Model:     "gpt-4",
+			Timestamp: now,
+			Source:    "openai-prod",
+			Provider:  "openai",
+			Tokens: TokenStats{
+				InputTokens:     15,
+				OutputTokens:    5,
+				CachedTokens:    4,
+				ReasoningTokens: 2,
+				TotalTokens:     20,
+			},
+		},
+	}
+	snapshotPayload := persistedStorageSnapshot{
+		Version:     1,
+		GeneratedAt: now.Format(time.RFC3339),
+		Usage: StatisticsSnapshot{
+			TotalRequests: 2,
+			SuccessCount:  2,
+			TotalTokens:   33,
+			APIs: map[string]APISnapshot{
+				"openai": {
+					TotalRequests: 2,
+					SuccessCount:  2,
+					TotalTokens:   33,
+					Models: map[string]ModelSnapshot{
+						"gpt-4": {
+							TotalRequests: 2,
+							SuccessCount:  2,
+							TotalTokens:   33,
+							Details:       details,
+						},
+					},
+				},
+			},
+		},
+	}
+	if err := os.WriteFile(storageSnapshotPath(dir), mustMarshal(snapshotPayload), 0o600); err != nil {
+		t.Fatalf("write storage snapshot: %v", err)
+	}
+
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		MaxDetailsPerModel: 10,
+		RetentionDays:      0,
+		DedupWindowMinutes: 0,
+		StorageEnabled:     true,
+		StoragePath:        dir,
+	})
+	defer stats.Close()
+
+	summary := stats.SummaryWithoutDetails()
+	apiKey := "openai · openai-prod"
+	model := summary.Usage.APIs[apiKey].Models["gpt-4"]
+	if summary.Usage.InputTokens != 25 || summary.Usage.OutputTokens != 8 || summary.Usage.CachedTokens != 6 || summary.Usage.ReasoningTokens != 3 {
+		t.Fatalf("summary usage token parts = %#v, want 25/8/6/3", summary.Usage)
+	}
+	if summary.Usage.APIs[apiKey].InputTokens != 25 || summary.Usage.APIs[apiKey].OutputTokens != 8 ||
+		summary.Usage.APIs[apiKey].CachedTokens != 6 || summary.Usage.APIs[apiKey].ReasoningTokens != 3 {
+		t.Fatalf("summary api token parts = %#v, want 25/8/6/3", summary.Usage.APIs[apiKey])
+	}
+	if model.InputTokens != 25 || model.OutputTokens != 8 || model.CachedTokens != 6 || model.ReasoningTokens != 3 {
+		t.Fatalf("summary model aggregate = %#v, want 25/8/6/3", model)
+	}
+	if len(summary.ModelStats) != 1 || summary.ModelStats[0].InputTokens != 25 || summary.ModelStats[0].OutputTokens != 8 ||
+		summary.ModelStats[0].CachedTokens != 6 || summary.ModelStats[0].ReasoningTokens != 3 {
+		t.Fatalf("summary model stats = %#v, want 25/8/6/3", summary.ModelStats)
 	}
 }
 

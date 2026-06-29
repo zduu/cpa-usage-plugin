@@ -1155,12 +1155,11 @@ func (s *RequestStatistics) restoreStorageSnapshotLocked(snapshot StatisticsSnap
 	s.successCount = nonNegativeInt64(snapshot.SuccessCount)
 	s.failureCount = nonNegativeInt64(snapshot.FailureCount)
 	s.totalTokens = nonNegativeInt64(snapshot.TotalTokens)
-	s.inputTokens = 0
-	s.outputTokens = 0
-	s.cachedTokens = 0
-	s.reasoningTokens = 0
-	s.latencySum = 0
-	s.latencyN = 0
+	s.inputTokens = nonNegativeInt64(snapshot.InputTokens)
+	s.outputTokens = nonNegativeInt64(snapshot.OutputTokens)
+	s.cachedTokens = nonNegativeInt64(snapshot.CachedTokens)
+	s.reasoningTokens = nonNegativeInt64(snapshot.ReasoningTokens)
+	s.latencySum, s.latencyN = restoredLatencyAggregate(snapshot.AvgLatencyMs, s.totalRequests)
 	s.apis = make(map[string]*apiStats, len(snapshot.APIs))
 	s.requestsByDay = copyStringInt64Map(snapshot.RequestsByDay)
 	s.requestsByHour = hourStringMapToIntMap(snapshot.RequestsByHour)
@@ -1180,22 +1179,33 @@ func (s *RequestStatistics) restoreStorageSnapshotLocked(snapshot StatisticsSnap
 		}
 		apiName = storageSnapshotAPIName(apiName, apiSnapshot)
 		apiSt := &apiStats{
-			TotalRequests: nonNegativeInt64(apiSnapshot.TotalRequests),
-			SuccessCount:  nonNegativeInt64(apiSnapshot.SuccessCount),
-			FailureCount:  nonNegativeInt64(apiSnapshot.FailureCount),
-			TotalTokens:   nonNegativeInt64(apiSnapshot.TotalTokens),
-			Models:        make(map[string]*modelStats, len(apiSnapshot.Models)),
-			Sources:       make(map[string]*sourceStatAccumulator),
+			TotalRequests:   nonNegativeInt64(apiSnapshot.TotalRequests),
+			SuccessCount:    nonNegativeInt64(apiSnapshot.SuccessCount),
+			FailureCount:    nonNegativeInt64(apiSnapshot.FailureCount),
+			TotalTokens:     nonNegativeInt64(apiSnapshot.TotalTokens),
+			InputTokens:     nonNegativeInt64(apiSnapshot.InputTokens),
+			OutputTokens:    nonNegativeInt64(apiSnapshot.OutputTokens),
+			CachedTokens:    nonNegativeInt64(apiSnapshot.CachedTokens),
+			ReasoningTokens: nonNegativeInt64(apiSnapshot.ReasoningTokens),
+			Models:          make(map[string]*modelStats, len(apiSnapshot.Models)),
+			Sources:         make(map[string]*sourceStatAccumulator),
 		}
+		apiSt.latencySum, apiSt.latencyN = restoredLatencyAggregate(apiSnapshot.AvgLatencyMs, apiSt.TotalRequests)
 		for modelName, modelSnapshot := range apiSnapshot.Models {
 			modelName = normalizeModelName(modelName)
 			modelSt := &modelStats{
-				TotalRequests: nonNegativeInt64(modelSnapshot.TotalRequests),
-				SuccessCount:  nonNegativeInt64(modelSnapshot.SuccessCount),
-				FailureCount:  nonNegativeInt64(modelSnapshot.FailureCount),
-				TotalTokens:   nonNegativeInt64(modelSnapshot.TotalTokens),
-				Details:       make([]RequestDetail, 0, len(modelSnapshot.Details)),
+				TotalRequests:   nonNegativeInt64(modelSnapshot.TotalRequests),
+				SuccessCount:    nonNegativeInt64(modelSnapshot.SuccessCount),
+				FailureCount:    nonNegativeInt64(modelSnapshot.FailureCount),
+				TotalTokens:     nonNegativeInt64(modelSnapshot.TotalTokens),
+				InputTokens:     nonNegativeInt64(modelSnapshot.InputTokens),
+				OutputTokens:    nonNegativeInt64(modelSnapshot.OutputTokens),
+				CachedTokens:    nonNegativeInt64(modelSnapshot.CachedTokens),
+				ReasoningTokens: nonNegativeInt64(modelSnapshot.ReasoningTokens),
+				Details:         make([]RequestDetail, 0, len(modelSnapshot.Details)),
 			}
+			modelSt.latencySum, modelSt.latencyN = restoredLatencyAggregate(modelSnapshot.AvgLatencyMs, modelSt.TotalRequests)
+			var detailAggregates detailTotals
 			for _, detail := range modelSnapshot.Details {
 				if detail.Model == "" {
 					detail.Model = modelName
@@ -1214,6 +1224,13 @@ func (s *RequestStatistics) restoreStorageSnapshotLocked(snapshot StatisticsSnap
 				restoredDetails++
 
 				totals := detailTotalsFromRequest(detail)
+				detailAggregates.totalTokens += totals.totalTokens
+				detailAggregates.inputTokens += totals.inputTokens
+				detailAggregates.outputTokens += totals.outputTokens
+				detailAggregates.cachedTokens += totals.cachedTokens
+				detailAggregates.reasoningTokens += totals.reasoningTokens
+				detailAggregates.latencySum += totals.latencySum
+				detailAggregates.latencyN += totals.latencyN
 				incrementAPISourceStats(apiSt, detail, totals)
 				s.incrementSummaryDimensionStatsLocked(modelName, detail, totals)
 				s.incrementHealthBucketLocked(detail)
@@ -1221,13 +1238,92 @@ func (s *RequestStatistics) restoreStorageSnapshotLocked(snapshot StatisticsSnap
 					s.lastRecordedAt = detail.Timestamp
 				}
 			}
+			modelSt.InputTokens = maxInt64(modelSt.InputTokens, detailAggregates.inputTokens)
+			modelSt.OutputTokens = maxInt64(modelSt.OutputTokens, detailAggregates.outputTokens)
+			modelSt.CachedTokens = maxInt64(modelSt.CachedTokens, detailAggregates.cachedTokens)
+			modelSt.ReasoningTokens = maxInt64(modelSt.ReasoningTokens, detailAggregates.reasoningTokens)
+			if modelSt.latencyN == 0 && detailAggregates.latencyN > 0 {
+				modelSt.latencySum = detailAggregates.latencySum
+				modelSt.latencyN = detailAggregates.latencyN
+			}
 			apiSt.Models[modelName] = modelSt
 			s.mergeModelSummaryAggregateLocked(modelName, modelSt)
 		}
+		restoreAPIAggregatesFromModels(apiSt)
 		s.apis[apiName] = apiSt
 	}
+	restoreSnapshotAggregatesFromAPIs(s)
 	if s.totalRequests == 0 && restoredDetails > 0 {
 		s.rebuildAggregatesLocked()
+	}
+}
+
+func restoredLatencyAggregate(avgLatencyMs float64, requestCount int64) (int64, int64) {
+	if !(avgLatencyMs > 0) || requestCount <= 0 {
+		return 0, 0
+	}
+	return int64(math.Round(avgLatencyMs * float64(requestCount))), requestCount
+}
+
+func restoreAPIAggregatesFromModels(apiSt *apiStats) {
+	if apiSt == nil {
+		return
+	}
+	var inputTokens int64
+	var outputTokens int64
+	var cachedTokens int64
+	var reasoningTokens int64
+	var latencySum int64
+	var latencyN int64
+	for _, modelSt := range apiSt.Models {
+		if modelSt == nil {
+			continue
+		}
+		inputTokens += nonNegativeInt64(modelSt.InputTokens)
+		outputTokens += nonNegativeInt64(modelSt.OutputTokens)
+		cachedTokens += nonNegativeInt64(modelSt.CachedTokens)
+		reasoningTokens += nonNegativeInt64(modelSt.ReasoningTokens)
+		latencySum += modelSt.latencySum
+		latencyN += modelSt.latencyN
+	}
+	apiSt.InputTokens = maxInt64(apiSt.InputTokens, inputTokens)
+	apiSt.OutputTokens = maxInt64(apiSt.OutputTokens, outputTokens)
+	apiSt.CachedTokens = maxInt64(apiSt.CachedTokens, cachedTokens)
+	apiSt.ReasoningTokens = maxInt64(apiSt.ReasoningTokens, reasoningTokens)
+	if apiSt.latencyN == 0 && latencyN > 0 {
+		apiSt.latencySum = latencySum
+		apiSt.latencyN = latencyN
+	}
+}
+
+func restoreSnapshotAggregatesFromAPIs(s *RequestStatistics) {
+	if s == nil {
+		return
+	}
+	var inputTokens int64
+	var outputTokens int64
+	var cachedTokens int64
+	var reasoningTokens int64
+	var latencySum int64
+	var latencyN int64
+	for _, apiSt := range s.apis {
+		if apiSt == nil {
+			continue
+		}
+		inputTokens += nonNegativeInt64(apiSt.InputTokens)
+		outputTokens += nonNegativeInt64(apiSt.OutputTokens)
+		cachedTokens += nonNegativeInt64(apiSt.CachedTokens)
+		reasoningTokens += nonNegativeInt64(apiSt.ReasoningTokens)
+		latencySum += apiSt.latencySum
+		latencyN += apiSt.latencyN
+	}
+	s.inputTokens = maxInt64(s.inputTokens, inputTokens)
+	s.outputTokens = maxInt64(s.outputTokens, outputTokens)
+	s.cachedTokens = maxInt64(s.cachedTokens, cachedTokens)
+	s.reasoningTokens = maxInt64(s.reasoningTokens, reasoningTokens)
+	if s.latencyN == 0 && latencyN > 0 {
+		s.latencySum = latencySum
+		s.latencyN = latencyN
 	}
 }
 
