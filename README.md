@@ -20,6 +20,24 @@ CPA 用量统计插件，用于在 CLIProxyAPI/CPA v7 插件系统中记录请�
 - 健康检查端点 `/health` 可查看插件运行状态、顶层 `alerts` 告警、持久化状态、后台 writer 批次/滑动平均/p95/p99/压力指标、看板查询/缓存指标、条件请求命中率和事件导出压力指标。
 - 事件导出支持按筛选条件输出 JSON、CSV、JSONL，可通过 `gzip=1` 生成 gzip 文件内容，并用 `export_max_records`/`limit` 控制超大导出的返回行数；看板导出按钮默认使用后台导出任务，按页写入临时文件，生成完成后再下载结果。
 
+## 界面示例
+
+### 插件安装与启用
+
+![插件管理中的用量统计插件](docs/images/readme/plugin-management.png)
+
+### 概览看板与服务健康网格
+
+![用量统计概览看板](docs/images/readme/dashboard-overview.png)
+
+### 模型价格与接口统计
+
+![模型价格与接口统计](docs/images/readme/pricing-and-api-stats.png)
+
+### 模型统计与请求事件明细
+
+![模型统计与请求事件明细](docs/images/readme/model-and-events.png)
+
 ## 构建
 
 本仓库使用 GitHub Actions 构建 Linux、macOS 和 Windows 插件。
@@ -61,6 +79,14 @@ cpa-usage-plugin/
 ├── CHANGELOG.md
 ├── CPA_USAGE.md
 ├── README.md
+├── docs/
+│   ├── optimization-recommendations.md
+│   └── images/
+│       └── readme/
+│           ├── plugin-management.png
+│           ├── dashboard-overview.png
+│           ├── pricing-and-api-stats.png
+│           └── model-and-events.png
 ├── scripts/
 │   ├── extract-release-notes.sh
 │   └── update-latest-release.sh
