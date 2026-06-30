@@ -177,7 +177,7 @@ plugins:
       price_storage_path: usage-statistics-prices.json
       # 可选：允许外部脚本更新插件文件。默认 false。
       update_enabled: false
-      # 可选：latest 或指定版本号，例如 v2.0.2。
+      # 可选：latest 或指定版本号，例如 v2.1.0。
       update_version: latest
 ```
 
@@ -197,7 +197,7 @@ cd CLIProxyAPI
 
 ```text
 pluginhost: plugin loaded plugin_id=usage-statistics path=plugins/usage-statistics.so
-pluginhost: plugin registered plugin_id=usage-statistics plugin_name=用量统计 version=2.0.2
+pluginhost: plugin registered plugin_id=usage-statistics plugin_name=用量统计 version=2.1.0
 ```
 
 ## 数据持久化（可选）
@@ -266,7 +266,7 @@ plugins:
     usage-statistics:
       enabled: true
       update_enabled: true
-      update_version: latest   # 或 v2.0.2
+      update_version: latest   # 或 v2.1.0
 ```
 
 执行更新脚本：
