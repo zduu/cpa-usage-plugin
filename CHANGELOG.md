@@ -2,6 +2,13 @@
 
 本文件用于维护每个 GitHub Release 的人工说明。发布 tag 前必须把 `Unreleased` 中本次要发布的内容整理到对应版本小节，例如 `## v1.2.19 - 2026-07-01`。
 
+## v2.2.0 - 2026-06-30
+
+### 插件商店集成
+- CI 新增插件商店兼容资产：每个平台生成 `usage-statistics_{version}_{goos}_{goarch}.zip` 和 `checksums.txt`
+- Release 同时上传 zip 资产，可直接用于 CPA 插件商店一键安装
+- 文档新增插件商店安装指南（自定义商店源 / config store 配置 / 管理面板操作）
+
 ## v2.1.0 - 2026-06-30
 
 ### 新增功能

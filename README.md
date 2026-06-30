@@ -2,7 +2,7 @@
 
 CPA 用量统计插件，用于在 CLIProxyAPI/CPA v7 插件系统中记录请求用量，并提供管理页面查看统计数据。
 
-当前代码版本：`2.1.0`。
+当前代码版本：`2.2.0`。
 
 ## 功能
 
@@ -28,6 +28,7 @@ CPA 用量统计插件，用于在 CLIProxyAPI/CPA v7 插件系统中记录请�
 2. CI 自动运行 Go 测试 (`go test -v -race ./...`) 和 JS 测试 (`node --test`)。
 3. 在 Actions 运行结果中下载对应架构 artifact，例如 `usage-statistics-plugin-linux-amd64`。
 4. Release 中会上传按平台命名的资产，例如 `usage-statistics-linux-amd64.so`、`usage-statistics-darwin-arm64.dylib`、`usage-statistics-windows-amd64.dll`，并保留 `usage-statistics.so` 作为 `linux-amd64` 兼容别名。
+5. CI 同时生成插件商店兼容的 zip 资产（`usage-statistics_{version}_{goos}_{goarch}.zip`）和 `checksums.txt`，可直接用于 CPA 插件商店一键安装。
 
 本地构建（需要 Go 1.26+ 和 CGO）：
 

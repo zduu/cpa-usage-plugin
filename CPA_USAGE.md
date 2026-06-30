@@ -15,7 +15,76 @@ Linux 下载后将文件重命名为 `usage-statistics.so` 放入 CPA 插件目�
 
 > 也可以从 GitHub Actions 的 `Build Plugin` workflow 下载对应架构的 `usage-statistics-plugin-*` artifact 自行构建。
 
-## 2. 放入插件目录
+### 插件商店安装（推荐）
+
+CPA v7 内置插件商店，支持从注册表一键安装。Release 中的 `usage-statistics_{version}_{goos}_{goarch}.zip` 和 `checksums.txt` 已兼容商店格式。
+
+**方式 A：自定义商店源（插件出现在商店列表中，可浏览安装）**
+
+在 `config.yaml` 中添加自定义商店源：
+
+```yaml
+plugins:
+  enabled: true
+  dir: plugins
+  store-sources:
+    - "https://raw.githubusercontent.com/zduu/cpa-usage-plugin/main/registry.json"
+```
+
+然后在仓库根目录创建 `registry.json`：
+
+```json
+{
+    "schema_version": 1,
+    "plugins": [
+        {
+            "id": "usage-statistics",
+            "name": "用量统计",
+            "description": "CPA 用量统计插件，记录请求用量、Token 消耗、延迟等统计信息，提供可视化管理面板。",
+            "author": "zduu",
+            "repository": "https://github.com/zduu/cpa-usage-plugin",
+            "homepage": "https://github.com/zduu/cpa-usage-plugin",
+            "license": "MIT",
+            "tags": ["Usage", "Statistics", "Dashboard", "Management"]
+        }
+    ]
+}
+```
+
+重启 CPA 后，管理面板 → 插件商店中会出现「用量统计」，点击安装即可。之后有新版本发布时，管理面板会显示更新提示，可直接在面板中点击升级到指定版本。
+
+> **版本切换**：安装后的插件，store 版本信息保存在 `plugins.configs.<id>.store` 中。管理面板支持直接修改版本配置，无需手动编辑 `config.yaml`。
+
+**方式 B：直接在 config 里写 store 配置（跳过注册表，CPA 启动时自动安装）**
+
+在 `config.yaml` 中直接指定插件来源：
+
+```yaml
+plugins:
+  enabled: true
+  dir: plugins
+  configs:
+    usage-statistics:
+      enabled: true
+      store:
+        id: "usage-statistics"
+        name: "用量统计"
+        description: "CPA 用量统计插件，记录请求用量、Token 消耗等统计信息"
+        author: "zduu"
+        version: "2.2.0"
+        repository: "https://github.com/zduu/cpa-usage-plugin"
+        release-tag: "v2.2.0"
+```
+
+CPA 启动时会自动从 GitHub Release 下载对应平台的 zip 并安装到 `plugins/` 目录，支持跨平台自动选择正确的动态库文件。之后可在管理面板中修改版本号，保存后重启 CPA 即可自动切换到指定版本。
+
+> 首次配置后，后续版本变更可以直接在管理面板中操作，无需手动编辑 `config.yaml`。
+
+**方式 C：手动下载安装（不需要插件商店）**
+
+按下方「2. 放入插件目录（手动安装）」的方式手动下载部署，配合「按配置更新插件文件」中的脚本实现自动更新。
+
+## 2. 放入插件目录（手动安装）
 
 CPA（CLIProxyAPI）通常以 Docker 方式运行，镜像为 `eceasy/cli-proxy-api:latest`。项目目录结构一般如下：
 

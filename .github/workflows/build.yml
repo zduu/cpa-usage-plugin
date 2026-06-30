@@ -149,11 +149,31 @@ jobs:
             windows) x86_64-w64-mingw32-nm -g "$asset" | grep ' cliproxy_plugin_init$' ;;
           esac
 
+      - name: Package plugin store zip
+        run: |
+          VERSION=$(sed -n 's/^const pluginVersion = "\([^"]*\)"/\1/p' go/register.go)
+          echo "Plugin version: $VERSION"
+          LIB="usage-statistics-${{ matrix.platform }}.${{ matrix.ext }}"
+          mkdir -p store-artifacts
+          cp "$LIB" "store-artifacts/usage-statistics.${{ matrix.ext }}"
+          cd store-artifacts
+          ZIP_FILE="usage-statistics_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.zip"
+          zip "$ZIP_FILE" "usage-statistics.${{ matrix.ext }}"
+          cd ..
+          cp "store-artifacts/${ZIP_FILE}" .
+
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
           name: usage-statistics-plugin-${{ matrix.platform }}
           path: usage-statistics-${{ matrix.platform }}.${{ matrix.ext }}
+          retention-days: 90
+
+      - name: Upload store artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: usage-statistics-store-${{ matrix.platform }}
+          path: usage-statistics_*_${{ matrix.goos }}_${{ matrix.goarch }}.zip
           retention-days: 90
 
   verify:
@@ -220,6 +240,20 @@ jobs:
       - name: Add legacy amd64 asset alias
         run: cp dist/usage-statistics-linux-amd64.so dist/usage-statistics.so
 
+      - name: Download store artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: usage-statistics-store-*
+          path: store-dist
+          merge-multiple: true
+
+      - name: Generate checksums.txt
+        run: |
+          cd store-dist
+          sha256sum *.zip > checksums.txt
+          echo "=== checksums.txt ==="
+          cat checksums.txt
+
       - name: Prepare release notes
         run: sh scripts/extract-release-notes.sh "$GITHUB_REF_NAME" CHANGELOG.md dist/release-notes.md
 
@@ -233,6 +267,8 @@ jobs:
             dist/usage-statistics-darwin-amd64.dylib
             dist/usage-statistics-darwin-arm64.dylib
             dist/usage-statistics-windows-amd64.dll
+            store-dist/usage-statistics_*.zip
+            store-dist/checksums.txt
           draft: false
           prerelease: false
           body_path: dist/release-notes.md
