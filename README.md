@@ -57,9 +57,13 @@ node --test go/dashboard/*.test.js
 ```text
 cpa-usage-plugin/
 ├── .github/workflows/build.yml
+├── registry.json           # 插件商店注册表
+├── CHANGELOG.md
 ├── CPA_USAGE.md
 ├── README.md
-├── scripts/update-latest-release.sh
+├── scripts/
+│   ├── extract-release-notes.sh
+│   └── update-latest-release.sh
 └── go/
     ├── go.mod
     ├── main.go              # CGO 入口 + 分发器 + 信封工具
@@ -69,6 +73,7 @@ cpa-usage-plugin/
     ├── register.go          # 注册 / 配置 / YAML 解析
     ├── management.go        # 管理接口路由 + 处理器
     ├── dashboard.go         # go:embed 前端嵌入 + 摘要/事件 API
+    ├── dashboard_export_jobs.go  # 后台导出任务
     ├── main_test.go         # 原有测试
     ├── dashboard_test.go    # 新 API 测试
     └── dashboard/

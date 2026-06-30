@@ -1,4 +1,4 @@
-# 在 CPA 中使用
+# CPA 用量统计插件 — 使用文档
 
 ## 1. 下载插件
 
@@ -11,17 +11,15 @@
 - Windows x86_64 / amd64：`usage-statistics-windows-amd64.dll`
 - `usage-statistics.so` 保留为 amd64 兼容别名。
 
-Linux 下载后将文件重命名为 `usage-statistics.so` 放入 CPA 插件目录；macOS/Windows 通常应分别保留或重命名为 `.dylib`/`.dll`，并确保 CPA 配置引用对应文件名。
-
 > 也可以从 GitHub Actions 的 `Build Plugin` workflow 下载对应架构的 `usage-statistics-plugin-*` artifact 自行构建。
 
-### 插件商店安装（推荐）
+## 2. 安装方式
 
-CPA v7 内置插件商店，支持从注册表一键安装。Release 中的 `usage-statistics_{version}_{goos}_{goarch}.zip` 和 `checksums.txt` 已兼容商店格式。
+### 方式 A：插件商店安装（推荐）
 
-**方式 A：自定义商店源（插件出现在商店列表中，可浏览安装）**
+CPA v7 内置插件商店，管理面板中浏览、一键安装/更新。Release 中的 `usage-statistics_{version}_{goos}_{goarch}.zip` 和 `checksums.txt` 已兼容商店格式，仓库根目录已提供 `registry.json`。
 
-在 `config.yaml` 中添加自定义商店源：
+在 `config.yaml` 中添加商店源和 store 配置：
 
 ```yaml
 plugins:
@@ -29,79 +27,77 @@ plugins:
   dir: plugins
   store-sources:
     - "https://raw.githubusercontent.com/zduu/cpa-usage-plugin/main/registry.json"
-```
-
-然后在仓库根目录创建 `registry.json`：
-
-```json
-{
-    "schema_version": 1,
-    "plugins": [
-        {
-            "id": "usage-statistics",
-            "name": "用量统计",
-            "description": "CPA 用量统计插件，记录请求用量、Token 消耗、延迟等统计信息，提供可视化管理面板。",
-            "author": "zduu",
-            "repository": "https://github.com/zduu/cpa-usage-plugin",
-            "homepage": "https://github.com/zduu/cpa-usage-plugin",
-            "license": "MIT",
-            "tags": ["Usage", "Statistics", "Dashboard", "Management"]
-        }
-    ]
-}
-```
-
-重启 CPA 后，管理面板 → 插件商店中会出现「用量统计」，点击安装即可。之后有新版本发布时，管理面板会显示更新提示，可直接在面板中点击升级到指定版本。
-
-> **版本切换**：安装后的插件，store 版本信息保存在 `plugins.configs.<id>.store` 中。管理面板支持直接修改版本配置，无需手动编辑 `config.yaml`。
-
-**方式 B：直接在 config 里写 store 配置（跳过注册表，CPA 启动时自动安装）**
-
-在 `config.yaml` 中直接指定插件来源：
-
-```yaml
-plugins:
-  enabled: true
-  dir: plugins
   configs:
     usage-statistics:
       enabled: true
       store:
-        id: "usage-statistics"
-        name: "用量统计"
-        description: "CPA 用量统计插件，记录请求用量、Token 消耗等统计信息"
-        author: "zduu"
         version: "2.2.0"
-        repository: "https://github.com/zduu/cpa-usage-plugin"
         release-tag: "v2.2.0"
+        repository: "https://github.com/zduu/cpa-usage-plugin"
+      # 其他配置项见第 3 节 ...
 ```
 
-CPA 启动时会自动从 GitHub Release 下载对应平台的 zip 并安装到 `plugins/` 目录，支持跨平台自动选择正确的动态库文件。之后可在管理面板中修改版本号，保存后重启 CPA 即可自动切换到指定版本。
+然后完成下方第 3 节的剩余配置，重启 CPA。之后登录管理面板 → 插件商店，可看到「用量统计」并直接点击安装。
 
-> 首次配置后，后续版本变更可以直接在管理面板中操作，无需手动编辑 `config.yaml`。
+> **更新版本**：新版本发布后，管理面板 → 插件商店中点击「更新」即可，CPA 自动下载、校验、替换并加载，无需手动操作。
 
-**方式 C：手动下载安装（不需要插件商店）**
+### 方式 B：脚本更新（不依赖插件商店）
 
-按下方「2. 放入插件目录（手动安装）」的方式手动下载部署，配合「按配置更新插件文件」中的脚本实现自动更新。
+按下方「3. 部署」方式手动下载部署。更新可通过 `update-latest-release.sh` 脚本自动完成，见第 8 节。
 
-## 2. 放入插件目录（手动安装）
+## 3. 部署
 
-CPA（CLIProxyAPI）通常以 Docker 方式运行，镜像为 `eceasy/cli-proxy-api:latest`。项目目录结构一般如下：
+### 3.1 Docker Compose 部署（推荐）
+
+CPA 通常以 Docker 方式运行，镜像为 `eceasy/cli-proxy-api:latest`。项目目录结构：
 
 ```
 ~/docker/CLIProxyAPI/
 ├── docker-compose.yml    # 容器编排配置
 ├── config.yaml           # CPA 主配置
 ├── .env                  # 环境变量
-├── plugins/              # 插件目录
+├── plugins/              # 插件目录（挂载到容器）
 ├── data/                 # 数据目录（持久化）
 ├── auths/                # 认证目录
 └── logs/                 # 日志目录
 ```
 
-### macOS 二进制部署（本机直跑，非 Docker）
+`docker-compose.yml` 中挂载插件目录：
 
-如果你的 CPA 是直接下载二进制文件在 macOS 上运行（不通过 Docker），目录结构通常如下：
+```yaml
+services:
+  cli-proxy-api:
+    image: eceasy/cli-proxy-api:latest
+    container_name: cli-proxy-api
+    ports:
+      - "8317:8317"
+    volumes:
+      - ./plugins:/CLIProxyAPI/plugins
+      - ./data:/CLIProxyAPI/data
+      - ${CLI_PROXY_CONFIG_PATH:-./config.yaml}:/CLIProxyAPI/config.yaml
+      - ${CLI_PROXY_AUTH_PATH:-./auths}:/root/.cli-proxy-api
+      - ${CLI_PROXY_LOG_PATH:-./logs}:/CLIProxyAPI/logs
+    restart: unless-stopped
+```
+
+将插件文件放入宿主机插件目录：
+
+```bash
+mkdir -p ~/docker/CLIProxyAPI/plugins
+cp usage-statistics-linux-amd64.so ~/docker/CLIProxyAPI/plugins/usage-statistics.so
+chmod 755 ~/docker/CLIProxyAPI/plugins/usage-statistics.so
+```
+
+重启容器加载：
+
+```bash
+cd ~/docker/CLIProxyAPI
+docker compose restart cli-proxy-api
+```
+
+### 3.2 macOS 二进制部署（本机直跑，非 Docker）
+
+如果你的 CPA 是直接下载二进制文件在 macOS 上运行（不通过 Docker），目录结构：
 
 ```
 CLIProxyAPI/
@@ -120,73 +116,24 @@ CLIProxyAPI/
 mkdir -p CLIProxyAPI/plugins
 mkdir -p CLIProxyAPI/data
 
-# 2. 下载 macOS arm64 插件（Apple Silicon）
-# 从 GitHub Releases 或 Actions artifact 获取 usage-statistics-darwin-arm64.dylib
+# 2. 下载 macOS 插件并放入
+# Apple Silicon 使用 usage-statistics-darwin-arm64.dylib
+# Intel 使用 usage-statistics-darwin-amd64.dylib
 cp usage-statistics-darwin-arm64.dylib CLIProxyAPI/plugins/usage-statistics.dylib
 chmod 755 CLIProxyAPI/plugins/usage-statistics.dylib
 
-# 如果是 Intel Mac，使用 usage-statistics-darwin-amd64.dylib
-
-# 3. 在 config.yaml 中启用插件（见第 3 节配置说明）
+# 3. 配置 config.yaml（见第 4 节）
 
 # 4. 启动 CPA
 cd CLIProxyAPI
 ./cli-proxy-api
 ```
 
-> **注意**：macOS 上插件文件扩展名必须是 `.dylib`，不能用 `.so`。配置中 `dir: plugins` 指向放置 `.dylib` 的目录即可。
+> **注意**：macOS 上插件扩展名必须是 `.dylib`，不能用 `.so`。`dir: plugins` 指向放置 `.dylib` 的目录即可。
 
-### Docker Compose 部署（推荐）
+### 3.3 直接部署（非 Docker / Linux / Windows）
 
-在 `docker-compose.yml` 中通过 `volumes` 将宿主插件目录挂载到容器：
-
-```yaml
-services:
-  cli-proxy-api:
-    image: eceasy/cli-proxy-api:latest
-    container_name: cli-proxy-api
-    ports:
-      - "8317:8317"
-    volumes:
-      - ./plugins:/CLIProxyAPI/plugins
-      - ./data:/CLIProxyAPI/data
-      - ${CLI_PROXY_CONFIG_PATH:-./config.yaml}:/CLIProxyAPI/config.yaml
-      - ${CLI_PROXY_AUTH_PATH:-./auths}:/root/.cli-proxy-api
-      - ${CLI_PROXY_LOG_PATH:-./logs}:/CLIProxyAPI/logs
-    restart: unless-stopped
-```
-
-宿主机插件目录放在 `./plugins`（相对于 docker-compose.yml 所在目录），插件文件放入即可：
-
-```bash
-mkdir -p ~/docker/CLIProxyAPI/plugins
-cp usage-statistics-linux-amd64.so ~/docker/CLIProxyAPI/plugins/usage-statistics.so
-chmod 755 ~/docker/CLIProxyAPI/plugins/usage-statistics.so
-```
-
-然后重启容器加载新插件：
-
-```bash
-cd ~/docker/CLIProxyAPI
-docker compose restart cli-proxy-api
-```
-
-### 方式二：docker cp（临时测试）
-
-如果不方便修改 docker-compose.yml，可直接将插件复制到运行中的容器内：
-
-```bash
-cp usage-statistics-linux-amd64.so usage-statistics.so
-docker cp usage-statistics.so cli-proxy-api:/CLIProxyAPI/plugins/
-docker exec cli-proxy-api chmod 755 /CLIProxyAPI/plugins/usage-statistics.so
-docker restart cli-proxy-api
-```
-
-> 容器名以实际为准：可通过 `docker ps` 查看。docker cp 方式在容器重建后会丢失，建议后续还是用 volume 挂载。
-
-### 直接部署（非 Docker）
-
-如果 CPA 直接运行在宿主机上（Linux/macOS/Windows），将对应架构的插件文件放到 CPA 工作目录下的 `plugins` 子目录：
+将插件文件放入 CPA 工作目录下的 `plugins` 子目录：
 
 ```bash
 # Linux
@@ -205,7 +152,22 @@ chmod 755 CLIProxyAPI/plugins/usage-statistics.dylib
 copy usage-statistics-windows-amd64.dll CLIProxyAPI\plugins\usage-statistics.dll
 ```
 
-## 3. 启用插件
+> **文件名说明**：方式 A（插件商店）安装后 pluginhost 要求文件名为 `usage-statistics-v{版本号}.{ext}`，安装时 CPA 自动处理。方式 B（脚本）使用 `usage-statistics.{ext}` 即可，pluginhost 通过二进制内置版本号识别。如果从方式 B 迁移到方式 A，将文件重命名为带版本号格式并添加 `store` 块。
+
+### 3.4 docker cp（临时测试）
+
+如果不方便修改 `docker-compose.yml`，直接复制到运行中的容器：
+
+```bash
+cp usage-statistics-linux-amd64.so usage-statistics.so
+docker cp usage-statistics.so cli-proxy-api:/CLIProxyAPI/plugins/
+docker exec cli-proxy-api chmod 755 /CLIProxyAPI/plugins/usage-statistics.so
+docker restart cli-proxy-api
+```
+
+> 容器名以实际为准（`docker ps` 查看）。`docker cp` 方式在容器重建后会丢失，建议后续改用 volume 挂载。
+
+## 4. 启用插件
 
 在 CPA 配置文件（通常为 `config.yaml`）中启用插件系统，并启用 `usage-statistics`：
 
@@ -213,9 +175,15 @@ copy usage-statistics-windows-amd64.dll CLIProxyAPI\plugins\usage-statistics.dll
 plugins:
   enabled: true
   dir: plugins
+  store-sources:
+    - "https://raw.githubusercontent.com/zduu/cpa-usage-plugin/main/registry.json"
   configs:
     usage-statistics:
       enabled: true
+      store:
+        version: "2.2.0"
+        release-tag: "v2.2.0"
+        repository: "https://github.com/zduu/cpa-usage-plugin"
       # 每个上游接口/模型最多保留的请求明细条数。默认 5000。
       max_details_per_model: 5000
       # 内存统计最多保留的天数，0 表示不按时间淘汰。默认 30。
@@ -246,11 +214,11 @@ plugins:
       price_storage_path: usage-statistics-prices.json
       # 可选：允许外部脚本更新插件文件。默认 false。
       update_enabled: false
-      # 可选：latest 或指定版本号，例如 v2.1.0。
+      # 可选：latest 或指定版本号，例如 v2.2.0。
       update_version: latest
 ```
 
-然后重启 CPA 服务：
+重启 CPA 服务：
 
 ```bash
 # Docker 方式
@@ -265,140 +233,13 @@ cd CLIProxyAPI
 启动后查看日志确认插件加载成功：
 
 ```text
-pluginhost: plugin loaded plugin_id=usage-statistics path=plugins/usage-statistics.so
-pluginhost: plugin registered plugin_id=usage-statistics plugin_name=用量统计 version=2.1.0
+pluginhost: plugin loaded plugin_id=usage-statistics version=2.2.0 path=plugins/usage-statistics-v2.2.0.so
+pluginhost: plugin registered plugin_id=usage-statistics plugin_name=用量统计 version=2.2.0 path=plugins/usage-statistics-v2.2.0.so
 ```
 
-## 数据持久化（可选）
+> `store-sources` 引入插件商店注册表，管理面板可浏览安装。`store` 块标记当前期望版本，pluginhost 会匹配 `usage-statistics-v{版本号}.{ext}` 文件名，并自动清理旧版本文件。
 
-默认 `storage_enabled: false`，统计只保存在插件进程内存中，重启 CPA/容器后会清零。需要重启或更新插件后保留数据时，开启 JSONL 持久化，并把 `storage_path` 放到宿主机挂载目录中。
-
-推荐在 `docker-compose.yml` 的 `volumes` 中增加数据目录挂载：
-
-```yaml
-services:
-  cli-proxy-api:
-    # ...
-    volumes:
-      - ./plugins:/CLIProxyAPI/plugins
-      - ./data:/CLIProxyAPI/data            # 新增：持久化数据目录
-      - ${CLI_PROXY_CONFIG_PATH:-./config.yaml}:/CLIProxyAPI/config.yaml
-      - ${CLI_PROXY_AUTH_PATH:-./auths}:/root/.cli-proxy-api
-      - ${CLI_PROXY_LOG_PATH:-./logs}:/CLIProxyAPI/logs
-```
-
-然后在 `config.yaml` 中开启：
-
-```yaml
-plugins:
-  configs:
-    usage-statistics:
-      enabled: true
-      storage_enabled: true
-      storage_path: data/usage-statistics.jsonl
-      storage_flush_interval_seconds: 5
-      storage_snapshot_interval_seconds: 300
-      storage_snapshot_record_interval: 1000
-      storage_sync_interval_seconds: 0
-      storage_sync_record_interval: 0
-```
-
-说明：
-
-- 不配置或保持 `storage_enabled: false` 时，就是原来的内存模式，重启清零。
-- 开启后每条新请求会进入后台写入队列，由后台 writer 批量追加写入日期分片，例如 `data/usage-statistics/usage-2026-06-28.jsonl`；插件启动时只 replay 保留窗口内的日期分片。
-- 如果 `storage_path` 配置为历史单文件路径（如 `data/usage-statistics.jsonl`），插件会继续读取该旧文件作为兼容输入，新数据会写入同名目录 `data/usage-statistics/` 下的日期分片。
-- 插件正常关闭、日期分片切换、达到 `storage_snapshot_interval_seconds` 或达到 `storage_snapshot_record_interval` 时会写入 `snapshot.json`；snapshot 成功后会清理 snapshot 日期之前的旧 JSONL 分片。下次启动会先加载 snapshot，再 replay snapshot 当天及之后的分片增量。
-- `storage_path` 是相对 CPA 工作目录的路径；Docker 中建议放到已挂载的 `/CLIProxyAPI/data` 或其他宿主机 volume。
-- 当 `retention_days` 大于 0 时，保留窗口外的日期分片会被清理；旧单文件不会自动删除。
-- `storage_flush_interval_seconds` 越小，异常退出时最多丢失的数据越少；默认 30 秒，想更稳可以设为 5 或 1。
-- `storage_snapshot_interval_seconds` 和 `storage_snapshot_record_interval` 控制启动恢复成本；默认 300 秒或 1000 条写一次快照，高请求量实例可降低记录间隔，低频实例可保持默认。
-- `storage_sync_interval_seconds` 和 `storage_sync_record_interval` 默认关闭；如果需要更强的异常断电保护，可配置如 `storage_sync_interval_seconds: 30` 或 `storage_sync_record_interval: 1000`，但会增加磁盘 I/O。
-- `/health` 的 `storage.write_queue_length` 和 `storage.write_queue_capacity` 可观察后台写入队列积压；`storage.last_write_batch_records`、`storage.last_write_batch_duration_ms`、`storage.last_write_queue_wait_ms` 可观察最近 writer 批次规模、写入耗时和最长排队时长；`storage.write_batch_avg_duration_ms`、`storage.write_batch_p95_duration_ms`、`storage.write_batch_p99_duration_ms`、`storage.write_queue_wait_avg_ms`、`storage.write_queue_wait_p95_ms`、`storage.write_queue_wait_p99_ms` 和 `storage.write_pressure` 可观察持续磁盘压力与长尾抖动。看板底部出现“持久化排队中”或“持久化写入偏慢”时，说明磁盘写入速度短时间低于请求记录速度。
-- 如果已经有内存数据，建议先导出；开启持久化并重启后，再把导出的 JSON 导入一次，后续数据才会继续写入持久化文件。
-
-## 按配置更新插件文件
-
-如果希望在配置中控制是否更新、更新到最新版本还是指定版本，可以使用仓库中的更新脚本。下面的命令会把仓库脚本下载到 CPA 工作目录。脚本会读取同目录 `config.yaml` 中的 `update_enabled` 和 `update_version`，自动选择当前系统对应的 release 资产并安装到插件目录；默认不会重启 CPA，只有传入 `--restart` 或 `--auto-restart` 时才会重启 Docker 容器。
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/zduu/cpa-usage-plugin/main/scripts/update-latest-release.sh \
-  -o /home/<用户>/docker/CLIProxyAPI/update-usage-statistics.sh
-chmod +x /home/<用户>/docker/CLIProxyAPI/update-usage-statistics.sh
-```
-
-在 `config.yaml` 中开启更新并选择版本：
-
-```yaml
-plugins:
-  configs:
-    usage-statistics:
-      enabled: true
-      update_enabled: true
-      update_version: latest   # 或 v2.1.0
-```
-
-执行更新脚本：
-
-```bash
-cd /home/<用户>/docker/CLIProxyAPI
-bash update-usage-statistics.sh        # 只安装新插件文件，不重启
-bash update-usage-statistics.sh --restart  # 安装后自动 docker restart cli-proxy-api
-```
-
-脚本完成后如果没有使用 `--restart`，需要手动重启 CPA 容器：
-
-```bash
-docker restart cli-proxy-api
-```
-
-说明：插件文件被 CPA 进程加载后，直接覆盖文件不会让运行中的进程使用新代码；需要重启 CPA 后才会加载新版本。Linux 默认安装文件名为 `usage-statistics.so`，macOS 为 `usage-statistics.dylib`，Windows 为 `usage-statistics.dll`。
-
-## 自动更新（crontab）
-
-如果希望插件在后台自动检查更新并重启 CPA，在宿主机配一条 crontab 即可：
-
-```bash
-# 每 6 小时检查一次，有更新自动重启容器
-crontab -e
-```
-
-添加一行：
-
-```text
-0 */6 * * * cd ~/docker/CLIProxyAPI && bash update-usage-statistics.sh --restart >> ~/docker/CLIProxyAPI/update.log 2>&1
-```
-
-说明：
-
-- 脚本通过 `--restart` 在安装新插件后自动执行 `docker restart cli-proxy-api`
-- 如果已是最新版本，脚本直接退出，**不会误重启容器**
-- 日志写入 `update.log`，方便排查
-- 默认容器名为 `cli-proxy-api`，可通过环境变量 `DOCKER_CONTAINER` 覆盖
-
-也可以通过 `--force --restart` 组合强制重新下载并重启：
-
-```bash
-bash update-usage-statistics.sh --force --restart
-```
-
-更新脚本会根据当前系统自动选择 release 资产：
-
-- `x86_64` / `amd64` 下载 `usage-statistics-linux-amd64.so`
-- `aarch64` / `arm64` 下载 `usage-statistics-linux-arm64.so`
-- macOS 会下载对应的 `usage-statistics-darwin-*.dylib`
-- Windows amd64 会下载 `usage-statistics-windows-amd64.dll`
-
-安装到插件目录时，Linux 默认保存为 `usage-statistics.so`，macOS 默认保存为 `usage-statistics.dylib`，Windows 默认保存为 `usage-statistics.dll`。如果需要手动指定目标平台，可设置 `PLUGIN_PLATFORM=linux-amd64`、`PLUGIN_PLATFORM=linux-arm64`、`PLUGIN_PLATFORM=darwin-amd64`、`PLUGIN_PLATFORM=darwin-arm64` 或 `PLUGIN_PLATFORM=windows-amd64`；如果使用自定义资产名或安装文件名，可设置 `PLUGIN_ASSET` / `PLUGIN_FILE`。
-
-脚本支持的参数：
-
-| 参数 | 作用 |
-|------|------|
-| `--restart` | 更新成功后自动重启容器 |
-| `--force` | 跳过版本和 SHA 检查，强制重新下载安装 |
-
-## 4. 查看统计
+## 5. 查看统计
 
 登录 CPA 管理端（默认 `http://<服务器IP>:8317/management.html`），在菜单中打开"用量统计"。
 
@@ -424,7 +265,7 @@ bash update-usage-statistics.sh --force --restart
 - 可选 JSONL 持久化通过 `storage_enabled` 开启，重启后会 replay 持久化事件并继续应用保留策略。
 - 页面底部 `_meta` 区域可见当前保留配置、已存储明细数和累积淘汰数。
 
-## 5. 管理 API 使用
+## 6. 管理 API 使用
 
 以下端点可通过管理 API 调用（需要管理密钥）：
 
@@ -528,6 +369,140 @@ curl -X POST http://127.0.0.1:8317/v0/management/plugins/usage-statistics/usage/
 
 导入响应包含 `added`（新增条数）、`skipped`（去重跳过）、`ignored_by_retention`（超出保留窗口忽略）。
 同时包含 `input_records`（输入记录数）、`accepted_records`（被处理记录数）、`rejected_records`（校验拒绝数）、`total_requests` 和 `failed_requests`，便于核对导入结果。
+
+## 7. 数据持久化（可选）
+
+默认 `storage_enabled: false`，统计只保存在插件进程内存中，重启 CPA/容器后会清零。需要重启或更新插件后保留数据时，开启 JSONL 持久化，并把 `storage_path` 放到宿主机挂载目录中。
+
+推荐在 `docker-compose.yml` 的 `volumes` 中增加数据目录挂载：
+
+```yaml
+services:
+  cli-proxy-api:
+    # ...
+    volumes:
+      - ./plugins:/CLIProxyAPI/plugins
+      - ./data:/CLIProxyAPI/data            # 新增：持久化数据目录
+      - ${CLI_PROXY_CONFIG_PATH:-./config.yaml}:/CLIProxyAPI/config.yaml
+      - ${CLI_PROXY_AUTH_PATH:-./auths}:/root/.cli-proxy-api
+      - ${CLI_PROXY_LOG_PATH:-./logs}:/CLIProxyAPI/logs
+```
+
+然后在 `config.yaml` 中开启：
+
+```yaml
+plugins:
+  configs:
+    usage-statistics:
+      enabled: true
+      storage_enabled: true
+      storage_path: data/usage-statistics.jsonl
+      storage_flush_interval_seconds: 5
+      storage_snapshot_interval_seconds: 300
+      storage_snapshot_record_interval: 1000
+      storage_sync_interval_seconds: 0
+      storage_sync_record_interval: 0
+```
+
+说明：
+
+- 不配置或保持 `storage_enabled: false` 时，就是原来的内存模式，重启清零。
+- 开启后每条新请求会进入后台写入队列，由后台 writer 批量追加写入日期分片，例如 `data/usage-statistics/usage-2026-06-28.jsonl`；插件启动时只 replay 保留窗口内的日期分片。
+- 如果 `storage_path` 配置为历史单文件路径（如 `data/usage-statistics.jsonl`），插件会继续读取该旧文件作为兼容输入，新数据会写入同名目录 `data/usage-statistics/` 下的日期分片。
+- 插件正常关闭、日期分片切换、达到 `storage_snapshot_interval_seconds` 或达到 `storage_snapshot_record_interval` 时会写入 `snapshot.json`；snapshot 成功后会清理 snapshot 日期之前的旧 JSONL 分片。下次启动会先加载 snapshot，再 replay snapshot 当天及之后的分片增量。
+- `storage_path` 是相对 CPA 工作目录的路径；Docker 中建议放到已挂载的 `/CLIProxyAPI/data` 或其他宿主机 volume。
+- 当 `retention_days` 大于 0 时，保留窗口外的日期分片会被清理；旧单文件不会自动删除。
+- `storage_flush_interval_seconds` 越小，异常退出时最多丢失的数据越少；默认 30 秒，想更稳可以设为 5 或 1。
+- `storage_snapshot_interval_seconds` 和 `storage_snapshot_record_interval` 控制启动恢复成本；默认 300 秒或 1000 条写一次快照，高请求量实例可降低记录间隔，低频实例可保持默认。
+- `storage_sync_interval_seconds` 和 `storage_sync_record_interval` 默认关闭；如果需要更强的异常断电保护，可配置如 `storage_sync_interval_seconds: 30` 或 `storage_sync_record_interval: 1000`，但会增加磁盘 I/O。
+- `/health` 的 `storage.write_queue_length` 和 `storage.write_queue_capacity` 可观察后台写入队列积压；`storage.last_write_batch_records`、`storage.last_write_batch_duration_ms`、`storage.last_write_queue_wait_ms` 可观察最近 writer 批次规模、写入耗时和最长排队时长；`storage.write_batch_avg_duration_ms`、`storage.write_batch_p95_duration_ms`、`storage.write_batch_p99_duration_ms`、`storage.write_queue_wait_avg_ms`、`storage.write_queue_wait_p95_ms`、`storage.write_queue_wait_p99_ms` 和 `storage.write_pressure` 可观察持续磁盘压力与长尾抖动。看板底部出现"持久化排队中"或"持久化写入偏慢"时，说明磁盘写入速度短时间低于请求记录速度。
+- 如果已经有内存数据，建议先导出；开启持久化并重启后，再把导出的 JSON 导入一次，后续数据才会继续写入持久化文件。
+
+## 8. 更新插件
+
+### 方式 A：管理面板一键更新
+
+新版本发布后，登录管理面板 → 插件商店 → 点击「更新」，CPA 自动下载、校验、替换并加载。
+
+### 方式 B：脚本更新（手动或 crontab）
+
+如果使用 `update-latest-release.sh` 脚本（读取 `config.yaml` 中的 `update_enabled` 和 `update_version`），下载脚本到 CPA 工作目录：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zduu/cpa-usage-plugin/main/scripts/update-latest-release.sh \
+  -o CLIProxyAPI/update-latest-release.sh
+chmod +x CLIProxyAPI/update-latest-release.sh
+```
+
+在 `config.yaml` 中开启更新并选择版本：
+
+```yaml
+plugins:
+  configs:
+    usage-statistics:
+      enabled: true
+      update_enabled: true
+      update_version: latest   # 或 v2.2.0
+```
+
+执行脚本：
+
+```bash
+cd CLIProxyAPI
+bash update-latest-release.sh           # 只安装新插件文件，不重启
+bash update-latest-release.sh --restart # 安装后自动 docker restart cli-proxy-api
+
+脚本完成后如果没有使用 `--restart`，需要手动重启 CPA 容器：
+
+```bash
+docker restart cli-proxy-api
+```
+
+说明：插件文件被 CPA 进程加载后，直接覆盖文件不会让运行中的进程使用新代码；需要重启 CPA 后才会加载新版本。Linux 默认安装文件名为 `usage-statistics.so`，macOS 为 `usage-statistics.dylib`，Windows 为 `usage-statistics.dll`。
+
+#### 自动更新（crontab）
+
+如果希望插件在后台自动检查更新并重启 CPA，在宿主机配一条 crontab：
+
+```bash
+# 每 6 小时检查一次，有更新自动重启容器
+crontab -e
+```
+
+添加一行：
+
+```text
+0 */6 * * * cd CLIProxyAPI && bash update-latest-release.sh --restart >> update.log 2>&1
+```
+
+说明：
+
+- 脚本通过 `--restart` 在安装新插件后自动执行 `docker restart cli-proxy-api`
+- 如果已是最新版本，脚本直接退出，**不会误重启容器**
+- 日志写入 `update.log`，方便排查
+- 默认容器名为 `cli-proxy-api`，可通过环境变量 `DOCKER_CONTAINER` 覆盖
+
+也可以通过 `--force --restart` 组合强制重新下载并重启：
+
+```bash
+bash update-latest-release.sh --force --restart
+```
+
+更新脚本会根据当前系统自动选择 release 资产：
+
+- `x86_64` / `amd64` 下载 `usage-statistics-linux-amd64.so`
+- `aarch64` / `arm64` 下载 `usage-statistics-linux-arm64.so`
+- macOS 会下载对应的 `usage-statistics-darwin-*.dylib`
+- Windows amd64 会下载 `usage-statistics-windows-amd64.dll`
+
+安装到插件目录时，Linux 默认保存为 `usage-statistics.so`，macOS 默认保存为 `usage-statistics.dylib`，Windows 默认保存为 `usage-statistics.dll`。如果需要手动指定目标平台，可设置 `PLUGIN_PLATFORM=linux-amd64`、`PLUGIN_PLATFORM=linux-arm64`、`PLUGIN_PLATFORM=darwin-amd64`、`PLUGIN_PLATFORM=darwin-arm64` 或 `PLUGIN_PLATFORM=windows-amd64`；如果使用自定义资产名或安装文件名，可设置 `PLUGIN_ASSET` / `PLUGIN_FILE`。
+
+脚本支持的参数：
+
+| 参数 | 作用 |
+|------|------|
+| `--restart` | 更新成功后自动重启容器 |
+| `--force` | 跳过版本和 SHA 检查，强制重新下载安装 |
 
 ## 注意
 
