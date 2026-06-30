@@ -20,6 +20,128 @@ const conditionalPayloadCache = new Map();
 const $ = (id) => document.getElementById(id);
 const setText = (id, value) => { $(id).textContent = value };
 
+// ---- 主题检测：跟随 CPA 日间/夜间模式 ----
+// CPA 管理面板在 iframe 中加载此看板，父窗口通过 data-theme 属性控制主题：
+//   data-theme="dark"  → 暗色模式
+//   data-theme="white" → 浅色模式（CPA 使用 "white"，不是 "light"）
+//   无属性             → 自动（跟随 OS 偏好）
+// 同时也通过 localStorage key cli-proxy-theme 持久化。
+(function() {
+  try {
+    var CPA_THEME_STORAGE_KEY = 'cli-proxy-theme';
+
+    function getParentDocument() {
+      try {
+        if (window.parent && window.parent !== window && window.parent.document) {
+          return window.parent.document;
+        }
+      } catch (e) { /* 跨域不可访问 */ }
+      return null;
+    }
+
+    // 将 CPA 主题值映射为 dark/light
+    // CPA 面板使用 "white" 表示浅色模式
+    function cpaThemeToMode(value) {
+      if (value === 'dark') return 'dark';
+      if (value === 'white') return 'light';
+      return null; // auto 或其他 → 回退到 OS 偏好
+    }
+
+    // 从父窗口 html data-theme 属性检测
+    function detectFromParentDocument() {
+      var parentDoc = getParentDocument();
+      if (!parentDoc || !parentDoc.documentElement) return null;
+      var theme = parentDoc.documentElement.getAttribute('data-theme');
+      return cpaThemeToMode(theme);
+    }
+
+    // 从共享 localStorage 检测（与父窗口同源时可用）
+    function detectFromLocalStorage() {
+      try {
+        var stored = localStorage.getItem(CPA_THEME_STORAGE_KEY);
+        return cpaThemeToMode(stored);
+      } catch (e) { return null; }
+    }
+
+    // 回退：OS 偏好
+    function detectFromOS() {
+      if (typeof window.matchMedia === 'function') {
+        return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      }
+      return 'light';
+    }
+
+    function detectCPATheme() {
+      // 策略 1（最优先）：父窗口 data-theme 属性
+      var mode = detectFromParentDocument();
+      if (mode) return mode;
+      // 策略 2：共享 localStorage
+      mode = detectFromLocalStorage();
+      if (mode) return mode;
+      // 策略 3：回退 OS 偏好
+      return detectFromOS();
+    }
+
+    function applyTheme(theme) {
+      if (document.documentElement && document.documentElement.setAttribute) {
+        document.documentElement.setAttribute('data-cpa-theme', theme);
+      }
+    }
+
+    function syncTheme() {
+      applyTheme(detectCPATheme());
+    }
+
+    // 监听父窗口 data-theme 属性变化（MutationObserver on parent）
+    if (typeof MutationObserver !== 'undefined') {
+      var parentDoc = getParentDocument();
+      if (parentDoc && parentDoc.documentElement) {
+        var parentObserver = new MutationObserver(function() {
+          var mode = detectFromParentDocument();
+          if (mode) applyTheme(mode);
+        });
+        parentObserver.observe(parentDoc.documentElement, {
+          attributes: true,
+          attributeFilter: ['data-theme']
+        });
+      }
+    }
+
+    // 监听同源 localStorage 变化（父窗口切换主题时触发 storage 事件）
+    if (typeof window.addEventListener === 'function') {
+      window.addEventListener('storage', function(e) {
+        if (e.key === CPA_THEME_STORAGE_KEY) {
+          var mode = cpaThemeToMode(e.newValue);
+          // auto → 回退到 OS 或父窗口
+          if (!mode) {
+            mode = detectFromParentDocument() || detectFromOS();
+          }
+          applyTheme(mode);
+        }
+      });
+    }
+
+    // 监听 OS 偏好变化（仅在 CPA 为 auto 模式时生效）
+    if (typeof window.matchMedia === 'function') {
+      var osDarkQuery = window.matchMedia('(prefers-color-scheme: dark)');
+      var onOSChange = function(e) {
+        // 仅在 CPA 主题为 auto 时跟随 OS
+        var stored = detectFromLocalStorage();
+        var parentMode = detectFromParentDocument();
+        if (stored === null && parentMode === null) {
+          applyTheme(e.matches ? 'dark' : 'light');
+        }
+      };
+      if (osDarkQuery && osDarkQuery.addEventListener) {
+        osDarkQuery.addEventListener('change', onOSChange);
+      }
+    }
+
+    // 首次同步
+    syncTheme();
+  } catch (e) { /* 主题检测失败不影响页面功能 */ }
+})();
+
 function cloneHeaders(headers) {
   if (!headers) return {};
   if (Array.isArray(headers)) return Object.fromEntries(headers);
