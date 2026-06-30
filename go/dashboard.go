@@ -52,12 +52,18 @@ func init() {
 }
 
 // handleDashboardSummary returns lightweight dashboard data without detail arrays.
-func handleDashboardSummary(headers map[string][]string) ([]byte, error) {
-	etag := dashboardSummaryETag(time.Now())
+// When a "range" query parameter is present (7h/24h/7d), the summary is scoped
+// to that time window instead of returning the globally pre-aggregated data.
+func handleDashboardSummary(query map[string][]string, headers map[string][]string) ([]byte, error) {
+	rangeKey := ""
+	if v, ok := query["range"]; ok && len(v) > 0 {
+		rangeKey = v[0]
+	}
+	etag := dashboardSummaryETag(time.Now(), rangeKey)
 	if dashboardConditionalMatch("dashboard-summary", headers, etag) {
 		return dashboardNotModified(etag)
 	}
-	summary := stats.SummaryWithoutDetails()
+	summary := stats.SummaryWithoutDetailsForRange(rangeKey)
 	responseJSON, err := json.Marshal(summary)
 	if err != nil {
 		return nil, err
@@ -70,9 +76,16 @@ func handleDashboardSummary(headers map[string][]string) ([]byte, error) {
 	return okEnvelopeJSON(string(mustMarshal(resp)))
 }
 
-func dashboardSummaryETag(now time.Time) string {
+func dashboardSummaryETag(now time.Time, rangeKey string) string {
 	window := summaryHealthWindow(now).UTC().Format(time.RFC3339)
-	return dashboardWeakETag("summary", strconv.FormatUint(stats.DashboardVersion(), 10), window)
+	parts := []string{"summary", strconv.FormatUint(stats.DashboardVersion(), 10), window}
+	if rangeKey != "" {
+		parts = append(parts, rangeKey)
+	}
+	if rangeKey != "" && rangeKey != "all" {
+		parts = append(parts, strconv.FormatInt(now.UTC().Unix(), 10))
+	}
+	return dashboardWeakETag(parts...)
 }
 
 func dashboardEventsQuery(query map[string][]string) EventsQuery {

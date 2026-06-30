@@ -1361,3 +1361,269 @@ func TestEvictedTotalTracksPrunedRecords(t *testing.T) {
 		t.Fatalf("detail_count should be 2, got %d", detailCount)
 	}
 }
+
+// ============================================================================
+// P0 Tests: Range-scoped summary
+// ============================================================================
+
+func TestSummaryRange24hOnlyCountsRecentEvents(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0, RetentionDays: 30})
+
+	// Old event (~48 hours ago, outside 24h window)
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-4",
+		RequestedAt: time.Now().Add(-48 * time.Hour),
+		Detail:      UsageDetail{TotalTokens: 100},
+	})
+	// Recent event
+	stats.Record(UsageRecord{
+		Provider: "openai",
+		Model:    "gpt-4",
+		Detail:   UsageDetail{TotalTokens: 50},
+	})
+
+	summary := stats.SummaryWithoutDetailsForRange("24h")
+	if summary.Usage.TotalRequests != 1 {
+		t.Fatalf("24h range: total_requests = %d, want 1", summary.Usage.TotalRequests)
+	}
+	if summary.Usage.TotalTokens != 50 {
+		t.Fatalf("24h range: total_tokens = %d, want 50", summary.Usage.TotalTokens)
+	}
+}
+
+func TestSummaryRangeAllMatchesFullSummary(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0, RetentionDays: 30})
+
+	stats.Record(UsageRecord{
+		Provider: "openai",
+		Model:    "gpt-4",
+		Detail:   UsageDetail{TotalTokens: 100},
+	})
+	stats.Record(UsageRecord{
+		Provider: "openai",
+		Model:    "gpt-4",
+		Detail:   UsageDetail{TotalTokens: 50},
+	})
+
+	fullSummary := stats.SummaryWithoutDetails()
+	allSummary := stats.SummaryWithoutDetailsForRange("all")
+
+	if fullSummary.Usage.TotalRequests != allSummary.Usage.TotalRequests {
+		t.Fatalf("range=all should match full summary: %d vs %d", fullSummary.Usage.TotalRequests, allSummary.Usage.TotalRequests)
+	}
+	if fullSummary.Usage.TotalTokens != allSummary.Usage.TotalTokens {
+		t.Fatalf("range=all should match full summary tokens: %d vs %d", fullSummary.Usage.TotalTokens, allSummary.Usage.TotalTokens)
+	}
+}
+
+func TestSummaryEmptyRangeUsesFullPath(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0, RetentionDays: 30})
+
+	stats.Record(UsageRecord{
+		Provider: "openai",
+		Model:    "gpt-4",
+		Detail:   UsageDetail{TotalTokens: 100},
+	})
+
+	fullSummary := stats.SummaryWithoutDetails()
+	emptySummary := stats.SummaryWithoutDetailsForRange("")
+
+	if fullSummary.Usage.TotalRequests != emptySummary.Usage.TotalRequests {
+		t.Fatalf("empty range should match full summary: %d vs %d", fullSummary.Usage.TotalRequests, emptySummary.Usage.TotalRequests)
+	}
+}
+
+func TestSummaryRange7hOnlyCountsLast7Hours(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0, RetentionDays: 30})
+
+	// Old event (~8 hours ago)
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-4",
+		RequestedAt: time.Now().Add(-8 * time.Hour),
+		Detail:      UsageDetail{TotalTokens: 100},
+	})
+	// Recent events within 7h
+	for i := 0; i < 3; i++ {
+		stats.Record(UsageRecord{
+			Provider:    "openai",
+			Model:       "gpt-4",
+			RequestedAt: time.Now().Add(-time.Duration(i) * time.Hour),
+			Detail:      UsageDetail{TotalTokens: 10},
+		})
+	}
+
+	summary := stats.SummaryWithoutDetailsForRange("7h")
+	if summary.Usage.TotalRequests != 3 {
+		t.Fatalf("7h range: total_requests = %d, want 3", summary.Usage.TotalRequests)
+	}
+	if summary.Usage.TotalTokens != 30 {
+		t.Fatalf("7h range: total_tokens = %d, want 30", summary.Usage.TotalTokens)
+	}
+}
+
+func TestSummaryRangeIncludesAPIAndModelStats(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0, RetentionDays: 30})
+
+	stats.Record(UsageRecord{
+		Provider: "openai",
+		Source:   "openai-prod",
+		Model:    "gpt-4",
+		Detail:   UsageDetail{InputTokens: 10, OutputTokens: 5},
+	})
+	stats.Record(UsageRecord{
+		Provider: "openai",
+		Source:   "openai-prod",
+		Model:    "gpt-3.5",
+		Detail:   UsageDetail{InputTokens: 20, OutputTokens: 10},
+	})
+
+	summary := stats.SummaryWithoutDetailsForRange("24h")
+	if len(summary.ModelStats) != 2 {
+		t.Fatalf("model stats length = %d, want 2", len(summary.ModelStats))
+	}
+	if len(summary.Usage.APIs) != 1 {
+		t.Fatalf("api count = %d, want 1", len(summary.Usage.APIs))
+	}
+	if len(summary.SourceStats) != 1 || summary.SourceStats[0].Source != "openai-prod" {
+		t.Fatalf("source stats = %#v, want 1 source openai-prod", summary.SourceStats)
+	}
+}
+
+func TestSummaryRangeExcludesAPIsWithoutMatchingEvents(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0, RetentionDays: 30})
+
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Source:      "openai-old",
+		Model:       "gpt-4",
+		RequestedAt: time.Now().Add(-48 * time.Hour),
+		Detail:      UsageDetail{TotalTokens: 100},
+	})
+	stats.Record(UsageRecord{
+		Provider: "anthropic",
+		Source:   "anthropic-prod",
+		Model:    "claude",
+		Detail:   UsageDetail{TotalTokens: 50},
+	})
+
+	summary := stats.SummaryWithoutDetailsForRange("24h")
+	oldAPI := usageGroupKey(UsageRecord{Provider: "openai", Source: "openai-old"})
+	recentAPI := usageGroupKey(UsageRecord{Provider: "anthropic", Source: "anthropic-prod"})
+	if _, ok := summary.Usage.APIs[oldAPI]; ok {
+		t.Fatalf("range summary included API with no matching events: %#v", summary.Usage.APIs[oldAPI])
+	}
+	if api := summary.Usage.APIs[recentAPI]; api.TotalRequests != 1 {
+		t.Fatalf("recent API total_requests = %d, want 1; apis=%#v", api.TotalRequests, summary.Usage.APIs)
+	}
+}
+
+func TestSummaryRangeEmptyResultIsValid(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0, RetentionDays: 30})
+
+	// No events added.
+	summary := stats.SummaryWithoutDetailsForRange("24h")
+
+	if summary.Usage.TotalRequests != 0 {
+		t.Fatalf("empty summary total_requests = %d, want 0", summary.Usage.TotalRequests)
+	}
+	if len(summary.HealthGrid) != 672 {
+		t.Fatalf("health grid length = %d, want 672", len(summary.HealthGrid))
+	}
+	if summary.GeneratedAt == "" {
+		t.Fatal("generated_at should not be empty")
+	}
+}
+
+func TestAPIDetailFollowsRange(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0, RetentionDays: 30})
+
+	// Old event (~48h ago)
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Source:      "openai",
+		Model:       "gpt-4",
+		RequestedAt: time.Now().Add(-48 * time.Hour),
+		Detail:      UsageDetail{TotalTokens: 100},
+	})
+	// Recent event
+	stats.Record(UsageRecord{
+		Provider: "openai",
+		Source:   "openai",
+		Model:    "gpt-4",
+		Detail:   UsageDetail{TotalTokens: 50},
+	})
+
+	result24h := stats.QueryAPIDetail("openai", "24h", 10, 10)
+	if result24h.TotalEvents != 1 {
+		t.Fatalf("24h range total_events = %d, want 1", result24h.TotalEvents)
+	}
+	if result24h.Summary.TotalRequests != 1 {
+		t.Fatalf("24h range summary total_requests = %d, want 1", result24h.Summary.TotalRequests)
+	}
+
+	resultAll := stats.QueryAPIDetail("openai", "all", 10, 10)
+	if resultAll.TotalEvents != 2 {
+		t.Fatalf("all range total_events = %d, want 2", resultAll.TotalEvents)
+	}
+	if resultAll.Summary.TotalRequests != 2 {
+		t.Fatalf("all range summary total_requests = %d, want 2", resultAll.Summary.TotalRequests)
+	}
+}
+
+func TestSummaryETagVariesByRange(t *testing.T) {
+	now := time.Now()
+	etag24h := dashboardSummaryETag(now, "24h")
+	etag7d := dashboardSummaryETag(now, "7d")
+	etagAll := dashboardSummaryETag(now, "all")
+
+	if etag24h == etag7d {
+		t.Fatalf("24h and 7d ETags should differ: %q vs %q", etag24h, etag7d)
+	}
+	if etag24h == etagAll {
+		t.Fatalf("24h and all ETags should differ: %q vs %q", etag24h, etagAll)
+	}
+	if etag7d == etagAll {
+		t.Fatalf("7d and all ETags should differ: %q vs %q", etag7d, etagAll)
+	}
+}
+
+func TestSummaryRangeETagVariesByTimeBucket(t *testing.T) {
+	now := time.Now()
+	etagNow := dashboardSummaryETag(now, "24h")
+	etagNext := dashboardSummaryETag(now.Add(time.Second), "24h")
+
+	if etagNow == etagNext {
+		t.Fatalf("range summary ETag should vary by time bucket: %q", etagNow)
+	}
+}
+
+func TestSummaryRangeCachedResultsUseCache(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0, RetentionDays: 30})
+
+	stats.Record(UsageRecord{
+		Provider: "openai",
+		Model:    "gpt-4",
+		Detail:   UsageDetail{TotalTokens: 100},
+	})
+
+	first := stats.SummaryWithoutDetailsForRange("24h")
+	second := stats.SummaryWithoutDetailsForRange("24h")
+
+	if first.Usage.TotalRequests != second.Usage.TotalRequests {
+		t.Fatalf("cached result should match: %d vs %d", first.Usage.TotalRequests, second.Usage.TotalRequests)
+	}
+	if first.Usage.TotalTokens != second.Usage.TotalTokens {
+		t.Fatalf("cached result should match: %d vs %d", first.Usage.TotalTokens, second.Usage.TotalTokens)
+	}
+}

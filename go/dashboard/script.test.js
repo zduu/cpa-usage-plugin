@@ -875,18 +875,19 @@ test('dashboard api detail refresh keeps cached content while loading', async ()
   await promise;
 });
 
-test('dashboard api detail uses the same full-range scope as upstream stats', async () => {
+test('dashboard api detail follows current time range selector', async () => {
   const { document, fetchRequests } = createDashboardHarness();
   const apiDetailRequests = () => fetchRequests.filter((req) => req.url.includes('dashboard-api-detail'));
 
   await waitFor(() => apiDetailRequests().length > 0);
-  assert.strictEqual(new URL(apiDetailRequests().at(-1).url, 'http://test.local').searchParams.get('range'), 'all');
+  // Default range is 24h (set from localStorage fallback).
+  assert.strictEqual(new URL(apiDetailRequests().at(-1).url, 'http://test.local').searchParams.get('range'), '24h');
 
   document.getElementById('range').value = '7d';
   await document.getElementById('range').onchange();
 
   await waitFor(() => apiDetailRequests().length > 1);
-  assert.strictEqual(new URL(apiDetailRequests().at(-1).url, 'http://test.local').searchParams.get('range'), 'all');
+  assert.strictEqual(new URL(apiDetailRequests().at(-1).url, 'http://test.local').searchParams.get('range'), '7d');
 });
 
 test('dashboard api detail uses summary failure count when backend returns null payload', async () => {
@@ -926,7 +927,7 @@ test('dashboard summary retries without falling back when browser returns 304 wi
   const { document, fetchCalls } = createDashboardHarness({ forceSummaryNotModified: true });
 
   await waitFor(() => fetchCalls.filter((url) => url.includes('dashboard-summary')).length >= 2);
-  assert.ok(fetchCalls.some((url) => url.includes('dashboard-summary?_ts=')), 'expected cache-busting retry');
+  assert.ok(fetchCalls.some((url) => url.includes('dashboard-summary') && url.includes('_ts=')), 'expected cache-busting retry');
   assert.ok(!fetchCalls.some((url) => url.includes('dashboard-data')), 'should not fall back to dashboard-data');
   assert.doesNotMatch(document.getElementById('updated').textContent, /兼容模式/);
 });

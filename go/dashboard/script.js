@@ -7,6 +7,7 @@ let modelPrices = {};
 let selectedApi = '';
 let clientApiSort = 'requests';
 let pollTimer = null, pollFailures = 0;
+let currentRange = '';
 const eventsLimit = 500;
 const apiDetailRecentLimit = 120;
 const visiblePollDelayMs = 30000;
@@ -468,7 +469,7 @@ function normalizeApiDetailEvent(d) {
 
 async function fetchApiDetailData(api) {
   const params = new URLSearchParams();
-  params.set('range', 'all');
+  params.set('range', $('range').value);
   params.set('api', api);
   params.set('recent_limit', String(apiDetailRecentLimit));
   const url = pluginEndpoint('dashboard-api-detail') + '?' + params.toString();
@@ -478,7 +479,7 @@ async function fetchApiDetailData(api) {
 }
 
 function apiDetailCacheKey(api) {
-  return api;
+  return api + '|' + $('range').value;
 }
 
 function apiDetailErrorHtml(errorRows, loading, error, knownFailureCount) {
@@ -569,6 +570,18 @@ function renderFilters() {
   fill('filterAuth', '凭证', authIndexes);
 }
 
+function normalizeEventsPayload(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    return { events: [], total: 0, limit: eventsLimit, offset: 0 };
+  }
+  return {
+    events: Array.isArray(data.events) ? data.events : [],
+    total: data.total || 0,
+    limit: data.limit || eventsLimit,
+    offset: data.offset || 0,
+  };
+}
+
 async function renderEvents() {
   // Fetch paginated events from server
   const params = new URLSearchParams();
@@ -580,12 +593,12 @@ async function renderEvents() {
   const fa = $('filterAuth').value; if (fa) params.set('auth', fa);
   try {
     const url = pluginEndpoint('dashboard-events') + '?' + params.toString();
-    eventsData = await fetchConditionalJsonPayload('dashboard-events:' + url, url, { cache: 'no-store' });
+    eventsData = normalizeEventsPayload(await fetchConditionalJsonPayload('dashboard-events:' + url, url, { cache: 'no-store' }));
   } catch (e) {
     eventsData = { events: [], total: 0, limit: eventsLimit, offset: 0 };
   }
-  const rows = eventsData.events || [];
-  const total = eventsData.total || 0;
+  const rows = eventsData.events;
+  const total = eventsData.total;
   setText('eventsCount', '共 ' + fmt.format(total) + ' 条，显示 ' + fmt.format(Math.min(rows.length, eventsLimit)) + ' 条');
   $('events').innerHTML = rows.length ? '<table><thead><tr><th>时间</th><th>模型</th><th>来源</th><th>凭证</th><th>结果</th><th>延迟</th><th>输入</th><th>输出</th><th>思考</th><th>缓存</th><th>总计</th></tr></thead><tbody>' + rows.map((d) => '<tr><td>' + new Date(timestampMs(d.timestamp)).toLocaleString() + '</td><td class="nameCell">' + esc(d.model) + '</td><td class="nameCell">' + esc(sourceLabel(d)) + '</td><td>' + (esc(d.auth_index || '-')) + '</td><td class="' + (d.failed ? 'bad' : 'ok') + '">' + (d.failed ? '失败' : '成功') + '</td><td>' + formatMs(num(d.latency_ms)) + '</td><td>' + fmt.format(num(d.tokens && d.tokens.input_tokens)) + '</td><td>' + fmt.format(num(d.tokens && d.tokens.output_tokens)) + '</td><td>' + fmt.format(num(d.tokens && d.tokens.reasoning_tokens)) + '</td><td>' + fmt.format(num(d.tokens && Math.max(d.tokens.cached_tokens || 0, d.tokens.cache_tokens || 0))) + '</td><td>' + fmt.format(num(d.tokens && d.tokens.total_tokens)) + '</td></tr>').join('') + '</tbody></table>' : '<div class="empty">暂无请求事件</div>';
   renderFilters();
@@ -849,6 +862,7 @@ function summaryRecordKey(data) {
 
 function shouldRefreshDetails(previousSummary, nextSummary, forceDetails) {
   if (forceDetails || !eventsData) return true;
+  if (currentRange !== $('range').value) return true;
   const nextKey = summaryRecordKey(nextSummary);
   if (!nextKey) return true;
   return nextKey !== summaryRecordKey(previousSummary);
@@ -877,20 +891,24 @@ async function load(options) {
   const forceDetails = options && options.forceDetails;
   try {
     const previousSummary = summaryData;
-    // Try new summary endpoint first
+    const selectedRange = $('range').value;
+    // Try new summary endpoint first with current range
+    const summaryUrl = pluginEndpoint('dashboard-summary') + '?range=' + encodeURIComponent(selectedRange);
     const [data] = await Promise.all([
-      fetchConditionalJsonPayload('dashboard-summary', pluginEndpoint('dashboard-summary'), { cache: 'no-store' }),
+      fetchConditionalJsonPayload('dashboard-summary:' + summaryUrl, summaryUrl, { cache: 'no-store' }),
       loadModelPrices()
     ]);
     summaryData = requireObjectPayload(data, 'dashboard-summary');
     setText('updated', '更新于 ' + new Date(data.generated_at || Date.now()).toLocaleTimeString());
     const refreshDetails = shouldRefreshDetails(previousSummary, summaryData, forceDetails);
     await rerender({ refreshEvents: refreshDetails, refreshApiDetail: refreshDetails });
+    currentRange = selectedRange;
     pollFailures = 0; schedulePoll(pollDelay());
   } catch (error) {
     // Fallback: try old dashboard-data endpoint
     try {
       const previousSummary = summaryData;
+      const selectedRange = $('range').value;
       const [data] = await Promise.all([
         fetchJsonPayload(pluginEndpoint('dashboard-data'), { cache: 'no-store' }),
         loadModelPrices()
@@ -899,6 +917,7 @@ async function load(options) {
       setText('updated', '更新于 ' + new Date(data.generated_at || Date.now()).toLocaleTimeString() + '（兼容模式）');
       const refreshDetails = shouldRefreshDetails(previousSummary, summaryData, forceDetails);
       await rerender({ refreshEvents: refreshDetails, refreshApiDetail: refreshDetails });
+      currentRange = selectedRange;
       pollFailures = 0; schedulePoll(pollDelay());
     } catch (fallbackError) {
       setText('updated', (fallbackError && fallbackError.message) || (error && error.message) || '加载用量统计失败');

@@ -117,6 +117,9 @@ type RequestStatistics struct {
 	summaryCacheVersion uint64
 	summaryCacheWindow  time.Time
 
+	summaryRangeCache       map[string]DashboardSummary
+	summaryRangeCacheWindow map[string]time.Time
+
 	eventQueryCache      map[dashboardEventCacheKey]EventsResult
 	eventQueryCacheOrder []dashboardEventCacheKey
 	eventIndexVersion    uint64
@@ -403,6 +406,8 @@ func (s *RequestStatistics) invalidateSummaryLocked() {
 	s.eventModelIndex = nil
 	s.eventSourceIndex = nil
 	s.eventAuthIndex = nil
+	s.summaryRangeCache = nil
+	s.summaryRangeCacheWindow = nil
 }
 
 func (s *RequestStatistics) Record(record UsageRecord) {
@@ -2823,6 +2828,53 @@ func (s *RequestStatistics) SummaryWithoutDetails() DashboardSummary {
 	return summary
 }
 
+// SummaryWithoutDetailsForRange computes a lightweight dashboard summary scoped to
+// the given time range. "all" or empty rangeKey delegates to the fast pre-aggregated path.
+func (s *RequestStatistics) SummaryWithoutDetailsForRange(rangeKey string) DashboardSummary {
+	if s == nil {
+		return DashboardSummary{}
+	}
+	if rangeKey == "" || rangeKey == "all" {
+		return s.SummaryWithoutDetails()
+	}
+
+	startedAt := time.Now()
+	now := startedAt
+	healthWindow := summaryHealthWindow(now)
+	cutoff := dashboardRangeCutoff(rangeKey, now)
+	if cutoff.IsZero() {
+		return s.SummaryWithoutDetails()
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.summaryRangeCache == nil {
+		s.summaryRangeCache = make(map[string]DashboardSummary)
+		s.summaryRangeCacheWindow = make(map[string]time.Time)
+	}
+	cacheKey := summaryRangeCacheKey(rangeKey, now)
+	cached, ok := s.summaryRangeCache[cacheKey]
+	if ok && s.summaryRangeCacheWindow != nil {
+		if window, hasWindow := s.summaryRangeCacheWindow[cacheKey]; hasWindow && window.Equal(healthWindow) {
+			s.summaryCacheHits++
+			s.lastSummaryDuration = time.Since(startedAt)
+			return cloneDashboardSummaryWithGeneratedAt(cached, now)
+		}
+	}
+
+	s.summaryCacheMisses++
+	summary := s.buildSummaryWithoutDetailsForRangeLocked(now, healthWindow, cutoff)
+	s.summaryRangeCache[cacheKey] = cloneDashboardSummary(summary)
+	s.summaryRangeCacheWindow[cacheKey] = healthWindow
+	s.lastSummaryDuration = time.Since(startedAt)
+	return summary
+}
+
+func summaryRangeCacheKey(rangeKey string, now time.Time) string {
+	return rangeKey + "|" + strconv.FormatInt(now.UTC().Unix(), 10)
+}
+
 func summaryHealthWindow(now time.Time) time.Time {
 	return now.UTC().Truncate(dashboardHealthStep).Add(dashboardHealthStep)
 }
@@ -3041,6 +3093,418 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsLocked(now time.Time, heal
 
 	summary.GeneratedAt = now.UTC().Format(time.RFC3339)
 	return summary
+}
+
+// buildSummaryWithoutDetailsForRangeLocked scans all events within the cutoff window
+// and builds a fresh DashboardSummary. Caller must hold s.mu.
+func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Time, healthWindow time.Time, cutoff time.Time) DashboardSummary {
+	summary := DashboardSummary{}
+
+	// Usage accumulators
+	var totalRequests, successCount, failureCount int64
+	var totalTokens, inputTokens, outputTokens, cachedTokens, reasoningTokens int64
+	var latencySum, latencyN int64
+
+	requestsByDay := make(map[string]int64)
+	requestsByHour := make(map[int]int64)
+	tokensByDay := make(map[string]int64)
+	tokensByHour := make(map[int]int64)
+
+	// Dimension aggregators
+	modelAgg := make(map[string]*ModelStat)
+	sourceAgg := make(map[string]*sourceStatAccumulator)
+	credentialAgg := make(map[string]*CredentialStat)
+	clientAPIAgg := make(map[string]*clientAPIStatAccumulator)
+	apiAgg := make(map[string]*apiRangeAgg)
+
+	for apiName, apiSt := range s.apis {
+		if apiSt == nil {
+			continue
+		}
+		for modelName, modelSt := range apiSt.Models {
+			if modelSt == nil {
+				continue
+			}
+			for _, detail := range modelSt.Details {
+				if !cutoff.IsZero() && !detail.Timestamp.IsZero() && detail.Timestamp.Before(cutoff) {
+					continue
+				}
+				totals := detailTotalsFromRequest(detail)
+				dModel := detailModel(modelName, detail)
+
+				// Global usage
+				totalRequests++
+				if detail.Failed {
+					failureCount++
+				} else {
+					successCount++
+				}
+				totalTokens += totals.totalTokens
+				inputTokens += totals.inputTokens
+				outputTokens += totals.outputTokens
+				cachedTokens += totals.cachedTokens
+				reasoningTokens += totals.reasoningTokens
+				if detail.LatencyMs > 0 {
+					latencySum += detail.LatencyMs
+					latencyN++
+				}
+
+				// Day/hour time series
+				dayKey := detail.Timestamp.Format("2006-01-02")
+				requestsByDay[dayKey]++
+				requestsByHour[detail.Timestamp.Hour()]++
+				tokensByDay[dayKey] += totals.totalTokens
+				tokensByHour[detail.Timestamp.Hour()] += totals.totalTokens
+
+				// Per-API aggregation
+				api := getOrCreateAPIRangeAgg(apiAgg, apiName)
+				api.TotalRequests++
+				if detail.Failed {
+					api.FailureCount++
+				} else {
+					api.SuccessCount++
+				}
+				api.TotalTokens += totals.totalTokens
+				api.InputTokens += totals.inputTokens
+				api.OutputTokens += totals.outputTokens
+				api.CachedTokens += totals.cachedTokens
+				api.ReasoningTokens += totals.reasoningTokens
+				if detail.LatencyMs > 0 {
+					api.latencySum += detail.LatencyMs
+					api.latencyN++
+				}
+				rangeIncrementAPIModel(api, dModel, detail, totals)
+
+				// Model summary stats
+				ms, ok := modelAgg[dModel]
+				if !ok {
+					ms = &ModelStat{Model: dModel}
+					modelAgg[dModel] = ms
+				}
+				ms.TotalRequests++
+				if detail.Failed {
+					ms.FailureCount++
+				} else {
+					ms.SuccessCount++
+				}
+				ms.TotalTokens += totals.totalTokens
+				ms.InputTokens += totals.inputTokens
+				ms.OutputTokens += totals.outputTokens
+				ms.CachedTokens += totals.cachedTokens
+				ms.ReasoningTokens += totals.reasoningTokens
+				if detail.LatencyMs > 0 {
+					ms.latencySum += detail.LatencyMs
+					ms.latencyN++
+				}
+
+				// Source stats
+				source := summarySourceKey(detail)
+				src, ok := sourceAgg[source]
+				if !ok {
+					src = &sourceStatAccumulator{
+						stat:      SourceStat{Source: source, Provider: detail.Provider},
+						providers: make(map[string]int64),
+					}
+					sourceAgg[source] = src
+				}
+				if src.stat.Provider == "" {
+					src.stat.Provider = detail.Provider
+				}
+				src.stat.TotalRequests++
+				if detail.Failed {
+					src.stat.FailureCount++
+				} else {
+					src.stat.SuccessCount++
+				}
+				src.stat.TotalTokens += totals.totalTokens
+
+				// Credential stats
+				credKey := summaryCredentialKey(detail)
+				cred, ok := credentialAgg[credKey]
+				if !ok {
+					cred = &CredentialStat{AuthIndex: credKey}
+					credentialAgg[credKey] = cred
+				}
+				cred.TotalRequests++
+				if detail.Failed {
+					cred.FailureCount++
+				} else {
+					cred.SuccessCount++
+				}
+				cred.TotalTokens += totals.totalTokens
+
+				// Client API stats
+				clientKey := clientAPIGroupKey(detail)
+				client, ok := clientAPIAgg[clientKey]
+				if !ok {
+					client = &clientAPIStatAccumulator{
+						stat: ClientAPIStat{
+							APIKey:     clientAPIGroupLabel(detail),
+							APIKeyHash: detail.APIKeyHash,
+						},
+						models: make(map[string]*ClientAPIModelStat),
+					}
+					clientAPIAgg[clientKey] = client
+				}
+				client.stat.TotalRequests++
+				if detail.Failed {
+					client.stat.FailureCount++
+				} else {
+					client.stat.SuccessCount++
+				}
+				client.stat.TotalTokens += totals.totalTokens
+				client.stat.InputTokens += totals.inputTokens
+				client.stat.OutputTokens += totals.outputTokens
+				client.stat.CachedTokens += totals.cachedTokens
+				client.stat.ReasoningTokens += totals.reasoningTokens
+				rangeIncrementClientModel(client, dModel, detail, totals)
+			}
+		}
+	}
+
+	// Build usage
+	summary.Usage.TotalRequests = totalRequests
+	summary.Usage.SuccessCount = successCount
+	summary.Usage.FailureCount = failureCount
+	summary.Usage.TotalTokens = totalTokens
+	summary.Usage.InputTokens = inputTokens
+	summary.Usage.OutputTokens = outputTokens
+	summary.Usage.CachedTokens = cachedTokens
+	summary.Usage.ReasoningTokens = reasoningTokens
+	if latencyN > 0 {
+		summary.Usage.AvgLatencyMs = float64(latencySum) / float64(latencyN)
+	}
+
+	// Build API snapshots
+	summary.Usage.APIs = make(map[string]APISnapshotWithoutDetails, len(apiAgg))
+	for apiName, api := range apiAgg {
+		apiSnap := APISnapshotWithoutDetails{
+			TotalRequests:   api.TotalRequests,
+			SuccessCount:    api.SuccessCount,
+			FailureCount:    api.FailureCount,
+			TotalTokens:     api.TotalTokens,
+			InputTokens:     api.InputTokens,
+			OutputTokens:    api.OutputTokens,
+			CachedTokens:    api.CachedTokens,
+			ReasoningTokens: api.ReasoningTokens,
+			Models:          make(map[string]ModelSnapshotWithoutDetails, len(api.models)),
+		}
+		if api.latencyN > 0 {
+			apiSnap.AvgLatencyMs = float64(api.latencySum) / float64(api.latencyN)
+		}
+		for mName, m := range api.models {
+			modelSnap := ModelSnapshotWithoutDetails{
+				TotalRequests:   m.TotalRequests,
+				SuccessCount:    m.SuccessCount,
+				FailureCount:    m.FailureCount,
+				TotalTokens:     m.TotalTokens,
+				InputTokens:     m.InputTokens,
+				OutputTokens:    m.OutputTokens,
+				CachedTokens:    m.CachedTokens,
+				ReasoningTokens: m.ReasoningTokens,
+			}
+			if m.latencyN > 0 {
+				modelSnap.AvgLatencyMs = float64(m.latencySum) / float64(m.latencyN)
+			}
+			apiSnap.Models[mName] = modelSnap
+		}
+		summary.Usage.APIs[apiName] = apiSnap
+	}
+
+	// Build model stats
+	summary.ModelStats = make([]ModelStat, 0, len(modelAgg))
+	for _, m := range modelAgg {
+		if m.latencyN > 0 {
+			m.AvgLatencyMs = float64(m.latencySum) / float64(m.latencyN)
+		}
+		m.latencySum = 0
+		m.latencyN = 0
+		summary.ModelStats = append(summary.ModelStats, *m)
+	}
+	sort.SliceStable(summary.ModelStats, func(i, j int) bool {
+		return summary.ModelStats[i].TotalRequests > summary.ModelStats[j].TotalRequests
+	})
+
+	// Build source stats
+	summary.SourceStats = make([]SourceStat, 0, len(sourceAgg))
+	for _, sr := range sourceAgg {
+		summary.SourceStats = append(summary.SourceStats, sr.stat)
+	}
+	sort.SliceStable(summary.SourceStats, func(i, j int) bool {
+		return summary.SourceStats[i].TotalRequests > summary.SourceStats[j].TotalRequests
+	})
+
+	// Build credential stats
+	summary.CredentialStats = make([]CredentialStat, 0, len(credentialAgg))
+	for _, cr := range credentialAgg {
+		summary.CredentialStats = append(summary.CredentialStats, *cr)
+	}
+	sort.SliceStable(summary.CredentialStats, func(i, j int) bool {
+		return summary.CredentialStats[i].TotalRequests > summary.CredentialStats[j].TotalRequests
+	})
+
+	// Build client API stats
+	summary.ClientAPIStats = make([]ClientAPIStat, 0, len(clientAPIAgg))
+	for _, agg := range clientAPIAgg {
+		stat := agg.stat
+		stat.Models = make([]ClientAPIModelStat, 0, len(agg.models))
+		for _, model := range agg.models {
+			stat.Models = append(stat.Models, *model)
+		}
+		sort.SliceStable(stat.Models, func(i, j int) bool {
+			return stat.Models[i].TotalRequests > stat.Models[j].TotalRequests
+		})
+		summary.ClientAPIStats = append(summary.ClientAPIStats, stat)
+	}
+	sort.SliceStable(summary.ClientAPIStats, func(i, j int) bool {
+		return summary.ClientAPIStats[i].TotalRequests > summary.ClientAPIStats[j].TotalRequests
+	})
+
+	// Build health grid from pre-aggregated health buckets (always 7-day window, not scoped by range).
+	healthStart := healthWindow.Add(-dashboardHealthSlotCount * dashboardHealthStep)
+	summary.HealthGrid = make([]HealthGridSlot, dashboardHealthSlotCount)
+	for i := 0; i < dashboardHealthSlotCount; i++ {
+		t := healthStart.Add(time.Duration(i) * dashboardHealthStep)
+		slot := s.healthBuckets[t.Unix()]
+		summary.HealthGrid[i] = HealthGridSlot{
+			Slot:    i,
+			Total:   slot.success + slot.failure,
+			Success: slot.success,
+			Failure: slot.failure,
+			Start:   t.Format(time.RFC3339),
+			End:     t.Add(dashboardHealthStep).Format(time.RFC3339),
+		}
+	}
+
+	// Time series
+	summary.Usage.RequestsByDay = make(map[string]int64, len(requestsByDay))
+	for k, v := range requestsByDay {
+		summary.Usage.RequestsByDay[k] = v
+	}
+	summary.Usage.RequestsByHour = make(map[string]int64, 24)
+	for hour, v := range requestsByHour {
+		if hour >= 0 && hour < 24 {
+			summary.Usage.RequestsByHour[hourKeys[hour]] = v
+		}
+	}
+	summary.Usage.TokensByDay = make(map[string]int64, len(tokensByDay))
+	for k, v := range tokensByDay {
+		summary.Usage.TokensByDay[k] = v
+	}
+	summary.Usage.TokensByHour = make(map[string]int64, 24)
+	for hour, v := range tokensByHour {
+		if hour >= 0 && hour < 24 {
+			summary.Usage.TokensByHour[hourKeys[hour]] = v
+		}
+	}
+
+	// Metadata (uses global counters, not range-scoped).
+	summary.Meta.RetentionDays = int(s.retention.Hours() / 24)
+	summary.Meta.MaxDetailsPerModel = s.maxDetailsPerModel
+	summary.Meta.CurrentDetailCount = s.countDetailsLocked()
+	summary.Meta.EvictedTotal = s.evictedTotal
+	summary.Meta.SummaryVersion = s.summaryVersion
+	summary.Meta.Storage = s.storageStatusLocked()
+	if !s.lastRecordedAt.IsZero() {
+		summary.Meta.LastRecordedAt = s.lastRecordedAt.UTC().Format(time.RFC3339)
+	}
+	if s.lastImportResult != nil {
+		summary.Meta.LastImport = &ImportSummary{
+			Added:              s.lastImportResult.Added,
+			Skipped:            s.lastImportResult.Skipped,
+			IgnoredByRetention: s.lastImportResult.IgnoredByRetention,
+		}
+	}
+
+	summary.GeneratedAt = now.UTC().Format(time.RFC3339)
+	return summary
+}
+
+// apiRangeAgg and modelRangeAgg are lightweight accumulators used during
+// range-scoped summary construction.
+type apiRangeAgg struct {
+	TotalRequests   int64
+	SuccessCount    int64
+	FailureCount    int64
+	TotalTokens     int64
+	InputTokens     int64
+	OutputTokens    int64
+	CachedTokens    int64
+	ReasoningTokens int64
+	latencySum      int64
+	latencyN        int64
+	models          map[string]*modelRangeAgg
+}
+
+type modelRangeAgg struct {
+	TotalRequests   int64
+	SuccessCount    int64
+	FailureCount    int64
+	TotalTokens     int64
+	InputTokens     int64
+	OutputTokens    int64
+	CachedTokens    int64
+	ReasoningTokens int64
+	latencySum      int64
+	latencyN        int64
+}
+
+func getOrCreateAPIRangeAgg(apiAgg map[string]*apiRangeAgg, apiName string) *apiRangeAgg {
+	a, ok := apiAgg[apiName]
+	if !ok {
+		a = &apiRangeAgg{models: make(map[string]*modelRangeAgg)}
+		apiAgg[apiName] = a
+	}
+	return a
+}
+
+func rangeIncrementAPIModel(api *apiRangeAgg, modelName string, detail RequestDetail, totals detailTotals) {
+	m, ok := api.models[modelName]
+	if !ok {
+		m = &modelRangeAgg{}
+		api.models[modelName] = m
+	}
+	m.TotalRequests++
+	if detail.Failed {
+		m.FailureCount++
+	} else {
+		m.SuccessCount++
+	}
+	m.TotalTokens += totals.totalTokens
+	m.InputTokens += totals.inputTokens
+	m.OutputTokens += totals.outputTokens
+	m.CachedTokens += totals.cachedTokens
+	m.ReasoningTokens += totals.reasoningTokens
+	if detail.LatencyMs > 0 {
+		m.latencySum += detail.LatencyMs
+		m.latencyN++
+	}
+}
+
+func rangeIncrementClientModel(client *clientAPIStatAccumulator, modelName string, detail RequestDetail, totals detailTotals) {
+	cm, ok := client.models[modelName]
+	if !ok {
+		cm = &ClientAPIModelStat{Model: modelName}
+		client.models[modelName] = cm
+	}
+	cm.TotalRequests++
+	if detail.Failed {
+		cm.FailureCount++
+	} else {
+		cm.SuccessCount++
+	}
+	cm.TotalTokens += totals.totalTokens
+	cm.InputTokens += totals.inputTokens
+	cm.OutputTokens += totals.outputTokens
+	cm.CachedTokens += totals.cachedTokens
+	cm.ReasoningTokens += totals.reasoningTokens
+}
+
+func detailModel(modelName string, detail RequestDetail) string {
+	if detail.Model != "" {
+		return detail.Model
+	}
+	return modelName
 }
 
 func clientAPIGroupLabel(detail RequestDetail) string {
