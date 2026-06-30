@@ -41,6 +41,7 @@ class FakeElement {
 function createDashboardHarness(options = {}) {
   const elements = new Map();
   const listeners = new Map();
+  const windowListeners = new Map();
   let visibilityState = options.visibilityState || 'visible';
   const sortButtons = ['requests', 'tokens', 'cost'].map((name) => {
     const el = new FakeElement('sort-' + name);
@@ -66,6 +67,8 @@ function createDashboardHarness(options = {}) {
   let exportJobSeq = 0;
 
   const document = {
+    body: new FakeElement('body'),
+    documentElement: new FakeElement('html'),
     get visibilityState() {
       return visibilityState;
     },
@@ -96,6 +99,7 @@ function createDashboardHarness(options = {}) {
       this.values.set(key, String(value));
     },
   };
+  if (options.language) localStorage.setItem('cli-proxy-language', options.language);
 
   const summary = {
     generated_at: new Date().toISOString(),
@@ -159,6 +163,7 @@ function createDashboardHarness(options = {}) {
   summary.model_stats[0].failure_count = apiFailureCount;
   summary.model_stats[0].success_count = summary.model_stats[0].total_requests - apiFailureCount;
   if (options.storage) summary._meta.storage = options.storage;
+  if (options.clientApiStats) summary.client_api_stats = options.clientApiStats;
 
   function eventsPage(url) {
     const parsed = new URL(url, 'http://test.local/v0/management/plugins/usage-statistics/dashboard');
@@ -457,10 +462,12 @@ function createDashboardHarness(options = {}) {
     document,
     localStorage,
     location: { pathname: options.pathname || '/v0/management/plugins/usage-statistics/dashboard', host: 'test.local' },
-    navigator: { userAgent: 'node-test' },
+    navigator: { userAgent: 'node-test', language: options.navigatorLanguage || 'zh-CN' },
     window: { innerWidth: 1200, innerHeight: 800 },
     setTimeout(_fn, delay) { timeoutDelays.push(delay); return timeoutDelays.length; },
     clearTimeout() {},
+    setInterval() { return 1; },
+    clearInterval() {},
     alert(message) { downloads.push({ alert: message }); },
     fetch: async (url, options = {}) => {
       fetchCalls.push(String(url));
@@ -543,6 +550,15 @@ function createDashboardHarness(options = {}) {
   }
   context.window.document = document;
   context.window.localStorage = localStorage;
+  context.window.parent = context.window;
+  context.window.navigator = context.navigator;
+  context.window.location = context.location;
+  context.window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
+  context.window.addEventListener = (type, handler) => {
+    const handlers = windowListeners.get(type) || [];
+    handlers.push(handler);
+    windowListeners.set(type, handlers);
+  };
   context.URL.createObjectURL = (blob) => {
     const text = blob.parts.map((part) => String(part)).join('');
     downloads.push({ text, type: blob.type });
@@ -551,13 +567,19 @@ function createDashboardHarness(options = {}) {
   context.URL.revokeObjectURL = () => {};
 
   vm.createContext(context);
+  const i18n = fs.readFileSync(path.join(__dirname, 'i18n.js'), 'utf8');
   const helpers = fs.readFileSync(path.join(__dirname, 'helpers.js'), 'utf8');
   const script = fs.readFileSync(path.join(__dirname, 'script.js'), 'utf8');
-  vm.runInContext(helpers + '\n' + script, context, { filename: 'dashboard-bundle.js' });
+  vm.runInContext(i18n + '\n' + helpers + '\n' + script, context, { filename: 'dashboard-bundle.js' });
 
   const setVisibility = (state) => {
     visibilityState = state;
     (listeners.get('visibilitychange') || []).forEach((handler) => handler());
+  };
+  const setLanguage = (lang, options = {}) => {
+    const value = options.persisted ? JSON.stringify({ state: { language: lang }, version: 0 }) : lang;
+    localStorage.setItem('cli-proxy-language', value);
+    (windowListeners.get('storage') || []).forEach((handler) => handler({ key: 'cli-proxy-language', newValue: value }));
   };
   const setSummaryLastRecordedAt = (value) => {
     summaryLastRecordedAt = value;
@@ -566,7 +588,7 @@ function createDashboardHarness(options = {}) {
     summaryVersion = value;
   };
 
-  return { context, document, fetchCalls, fetchRequests, downloads, timeoutDelays, setVisibility, setSummaryLastRecordedAt, setSummaryVersion };
+  return { context, document, fetchCalls, fetchRequests, downloads, timeoutDelays, setVisibility, setLanguage, setSummaryLastRecordedAt, setSummaryVersion };
 }
 
 async function waitFor(fn) {
@@ -629,6 +651,46 @@ test('dashboard loads summary and export button uses backend event export', asyn
   assert.ok(fetchRequests.some((request) => request.url.includes('dashboard-events-export-jobs') && request.options.method === 'POST' && new URL(request.url, 'http://test.local').searchParams.get('format') === 'csv'));
   const exported = JSON.parse(downloads.find((d) => d.text && d.text.startsWith('[')).text);
   assert.strictEqual(exported.length, 1200);
+});
+
+test('dashboard follows runtime language changes', async () => {
+  const { document, setLanguage } = createDashboardHarness();
+
+  await waitFor(() => document.getElementById('eventsCount').textContent.includes('共'));
+  setLanguage('en', { persisted: true });
+
+  await waitFor(() => document.documentElement.lang === 'en');
+  await waitFor(() => document.getElementById('successText').textContent.includes('Success requests:'));
+  await waitFor(() => document.getElementById('eventsCount').textContent.includes('Total 1,200, showing 500'));
+  await waitFor(() => document.getElementById('modelStats').innerHTML.includes('Success Rate'));
+  await waitFor(() => document.getElementById('priceList').innerHTML.includes('Edit'));
+  await waitFor(() => document.getElementById('updated').textContent.includes('Updated at:'));
+
+  assert.strictEqual(document.documentElement.lang, 'en');
+  assert.strictEqual(document.getElementById('rpmMeta').textContent, 'Last hour requests: 1,200');
+  assert.strictEqual(document.getElementById('costMeta').textContent, 'Total tokens: 24k');
+  assert.strictEqual(document.getElementById('apiDetailTitle').textContent, 'openai');
+  assert.match(document.getElementById('storageStatus').textContent, /Storage disabled/);
+});
+
+test('dashboard language changes do not translate API key labels', async () => {
+  const apiLabel = '成功模型凭证';
+  const { document, setLanguage } = createDashboardHarness({
+    clientApiStats: [{
+      api_key: apiLabel,
+      total_requests: 3,
+      success_count: 2,
+      failure_count: 1,
+      total_tokens: 99,
+      models: [],
+    }],
+  });
+
+  await waitFor(() => document.getElementById('clientApiStats').innerHTML.includes(apiLabel));
+  setLanguage('en');
+
+  await waitFor(() => document.getElementById('clientApiStats').innerHTML.includes('Requests'));
+  assert.match(document.getElementById('clientApiStats').innerHTML, /<div class="apiName">成功模型凭证<\/div>/);
 });
 
 test('dashboard export truncation headers produce a user notice', () => {
@@ -703,6 +765,23 @@ test('dashboard shows pending storage write queue status', async () => {
   assert.strictEqual(el.textContent, '持久化已开启');
   assert.match(el.title, /5 条记录/);
   assert.match(el.title, /4,096/);
+});
+
+test('dashboard omits storage queue capacity when unavailable', async () => {
+  const { document } = createDashboardHarness({
+    storage: {
+      enabled: true,
+      path: 'usage-statistics.jsonl',
+      loaded_path: 'usage-statistics/usage-2026-06-28.jsonl',
+      write_queue_length: 5,
+      write_queue_capacity: 0,
+    },
+  });
+
+  const el = document.getElementById('storageStatus');
+  await waitFor(() => el.textContent === '持久化已开启');
+  assert.match(el.title, /5 条记录等待后台写入/);
+  assert.doesNotMatch(el.title, /队列容量/);
 });
 
 test('dashboard shows pending storage snapshot status', async () => {

@@ -1,6 +1,7 @@
 // cpausage dashboard — main logic. Uses helpers from helpers.js.
 const rangeKey = 'cpa-usage-range-v1';
-const fmt = new Intl.NumberFormat('zh-CN');
+var fmt = new Intl.NumberFormat(typeof getFormatLocale === 'function' ? getFormatLocale() : 'zh-CN');
+var _lastFmtLocale = 'zh-CN';
 let summaryData = null;         // DashboardSummary from /dashboard-summary
 let eventsData = null;          // EventsResult from /dashboard-events
 let modelPrices = {};
@@ -15,10 +16,36 @@ const hiddenPollDelayMs = 300000;
 let apiDetailSeq = 0;
 const apiDetailCache = new Map();
 const conditionalPayloadCache = new Map();
+let apiDetailLastRender = null;
+let updatedState = { type: 'loading', generatedAt: null, message: '' };
 
 // Dom helpers
 const $ = (id) => document.getElementById(id);
 const setText = (id, value) => { $(id).textContent = value };
+function currentLocale() { return typeof getFormatLocale === 'function' ? getFormatLocale() : 'zh-CN'; }
+function localizedColon() { return String(typeof I18N_LANG === 'string' ? I18N_LANG : '').startsWith('zh') ? '：' : ': '; }
+function withLabel(key, value) { return t(key) + localizedColon() + value; }
+function formatInteger(value) { return fmt.format(num(value)); }
+function formatDateTime(value) { return new Date(value).toLocaleString(currentLocale()); }
+function formatTime(value) { return new Date(value).toLocaleTimeString(currentLocale()); }
+function statusText(failed) { return failed ? t('failure_label') : t('success_label'); }
+function renderUpdated() {
+  const el = $('updated');
+  if (!el) return;
+  if (updatedState.type === 'success') {
+    setText('updated', withLabel('updated_at', formatTime(updatedState.generatedAt || Date.now())));
+    return;
+  }
+  if (updatedState.type === 'compat') {
+    setText('updated', withLabel('updated_at', formatTime(updatedState.generatedAt || Date.now())) + ' (' + t('compat_mode') + ')');
+    return;
+  }
+  if (updatedState.type === 'error') {
+    setText('updated', updatedState.message || t('load_usage_failed'));
+    return;
+  }
+  setText('updated', t('loading'));
+}
 
 // ---- 主题检测：跟随 CPA 日间/夜间模式 ----
 // CPA 管理面板在 iframe 中加载此看板，父窗口通过 data-theme 属性控制主题：
@@ -177,11 +204,11 @@ async function fetchJsonPayloadWithMeta(url, options) {
   if (text) {
     try { payload = JSON.parse(text) } catch {
       if (!response.ok) throw new Error(text);
-      throw new Error('响应不是有效 JSON');
+      throw new Error(t('response_not_json'));
     }
   }
   if (!response.ok) {
-    const message = payload && payload.error && payload.error.message ? payload.error.message : (text || ('请求失败：' + response.status));
+    const message = payload && payload.error && payload.error.message ? payload.error.message : (text || (t('request_failed_colon') + response.status));
     throw new Error(message);
   }
   const meta = unwrapPluginPayloadWithMeta(payload);
@@ -204,7 +231,7 @@ async function fetchTextPayload(url, options) {
 async function fetchTextPayloadWithMeta(url, options) {
   const response = await fetch(url, options);
   const text = await response.text();
-  if (!response.ok) throw new Error(text || ('请求失败：' + response.status));
+  if (!response.ok) throw new Error(text || (t('request_failed_colon') + response.status));
   if (!text) return { data: '', statusCode: response.status || 200, headers: {} };
   let payload = null;
   try { payload = JSON.parse(text) } catch { return { data: text, statusCode: response.status || 200, headers: {} } }
@@ -229,7 +256,7 @@ async function fetchConditionalJsonPayload(cacheKey, url, options) {
     delete retryHeaders['if-none-match'];
     retryOptions.headers = retryHeaders;
     meta = await fetchJsonPayloadWithMeta(String(url) + (String(url).includes('?') ? '&' : '?') + '_ts=' + Date.now(), retryOptions);
-    if (meta.statusCode === 304) throw new Error('服务端返回 304，但本地没有可复用缓存');
+    if (meta.statusCode === 304) throw new Error(t('no_304_cache'));
   }
   const etag = headerValue(meta.headers, 'ETag');
   if (etag) conditionalPayloadCache.set(cacheKey, { etag, data: meta.data });
@@ -239,7 +266,7 @@ async function fetchConditionalJsonPayload(cacheKey, url, options) {
 
 function requireObjectPayload(data, label) {
   if (!data || typeof data !== 'object' || Array.isArray(data)) {
-    throw new Error(label + ' 返回空数据');
+    throw new Error(label + ' ' + t('empty_response'));
   }
   return data;
 }
@@ -295,21 +322,21 @@ function renderStats() {
   if (!summaryData) return;
   const u = summaryData.usage;
   setText('totalRequests', fmt.format(u.total_requests));
-  setText('successText', '成功请求：' + fmt.format(u.success_count));
-  setText('failureText', '失败请求：' + fmt.format(u.failure_count));
-  setText('avgLatency', '平均延迟：' + formatMs(u.avg_latency_ms));
+  setText('successText', withLabel('success_requests', formatInteger(u.success_count)));
+  setText('failureText', withLabel('failure_requests', formatInteger(u.failure_count)));
+  setText('avgLatency', withLabel('avg_latency', formatMs(u.avg_latency_ms)));
   setText('totalTokens', compact(u.total_tokens));
-  setText('cachedText', '缓存 token：' + compact(u.cached_tokens));
-  setText('reasoningText', '思考 token：' + compact(u.reasoning_tokens));
+  setText('cachedText', withLabel('cached_tokens', compact(u.cached_tokens)));
+  setText('reasoningText', withLabel('reasoning_tokens', compact(u.reasoning_tokens)));
   // RPM: compute from hourly time series
   const hourValues = Object.values(u.requests_by_hour || {}).map(num);
   const recentHours = hourValues.slice(-1);
   const recentReq = recentHours.length ? recentHours[0] : 0;
   setText('rpm', (recentReq / 60).toFixed(2));
-  setText('rpmMeta', '最近1小时请求：' + fmt.format(recentReq));
+  setText('rpmMeta', withLabel('recent_requests_label', formatInteger(recentReq)));
   const cost = (summaryData.model_stats || []).reduce((s, m) => s + aggregateCost(m, modelPrices), 0);
   setText('totalCost', formatUsd(cost));
-  setText('costMeta', '总 token 数：' + compact(u.total_tokens));
+  setText('costMeta', withLabel('total_tokens_label', compact(u.total_tokens)));
   // Sparklines from hourly data
   const reqByHour = Array.from({ length: 24 }, (_, i) => {
     const k = String(i).padStart(2, '0');
@@ -328,42 +355,42 @@ function renderStats() {
 function storageBatchTitle(storage) {
   const records = num(storage && storage.last_write_batch_records);
   if (records <= 0) return '';
-  const parts = ['最近批量写入 ' + records.toLocaleString() + ' 条'];
+  const parts = [t('storage_batch_title', formatInteger(records))];
   const duration = num(storage.last_write_batch_duration_ms);
-  if (duration > 0) parts.push('耗时 ' + formatMs(duration));
+  if (duration > 0) parts.push(t('storage_batch_duration') + ' ' + formatMs(duration));
   const avgDuration = num(storage.write_batch_avg_duration_ms);
-  if (avgDuration > 0) parts.push('平均耗时 ' + formatMs(avgDuration));
+  if (avgDuration > 0) parts.push(t('storage_batch_avg') + ' ' + formatMs(avgDuration));
   const p95Duration = num(storage.write_batch_p95_duration_ms);
   const p99Duration = num(storage.write_batch_p99_duration_ms);
-  if (p95Duration > 0) parts.push('耗时 p95 ' + formatMs(p95Duration) + (p99Duration > 0 ? ' / p99 ' + formatMs(p99Duration) : ''));
+  if (p95Duration > 0) parts.push(t('storage_batch_p95') + ' ' + formatMs(p95Duration) + (p99Duration > 0 ? ' / p99 ' + formatMs(p99Duration) : ''));
   const wait = num(storage.last_write_queue_wait_ms);
-  if (wait > 0) parts.push('最长排队 ' + formatMs(wait));
+  if (wait > 0) parts.push(t('storage_batch_wait') + ' ' + formatMs(wait));
   const avgWait = num(storage.write_queue_wait_avg_ms);
-  if (avgWait > 0) parts.push('平均排队 ' + formatMs(avgWait));
+  if (avgWait > 0) parts.push(t('storage_batch_avg_wait') + ' ' + formatMs(avgWait));
   const p95Wait = num(storage.write_queue_wait_p95_ms);
   const p99Wait = num(storage.write_queue_wait_p99_ms);
-  if (p95Wait > 0) parts.push('排队 p95 ' + formatMs(p95Wait) + (p99Wait > 0 ? ' / p99 ' + formatMs(p99Wait) : ''));
-  return parts.join('，');
+  if (p95Wait > 0) parts.push(t('storage_batch_wait_p95') + ' ' + formatMs(p95Wait) + (p99Wait > 0 ? ' / p99 ' + formatMs(p99Wait) : ''));
+  return parts.join(typeof I18N_LANG === 'string' && I18N_LANG.startsWith('zh') ? '，' : ', ');
 }
 
 function storagePressureLabel(value) {
   switch (String(value || '')) {
-    case 'full': return '队列已满';
-    case 'backlog': return '队列积压';
-    case 'queued': return '正在排队';
-    case 'slow': return '写入偏慢';
-    case 'normal': return '正常';
+    case 'full': return t('write_queue_full');
+    case 'backlog': return t('write_queue_backlog');
+    case 'queued': return t('write_queued');
+    case 'slow': return t('write_slow');
+    case 'normal': return t('write_normal');
     default: return '';
   }
 }
 
 function storagePressureTitle(storage) {
   const label = storagePressureLabel(storage && storage.write_pressure);
-  return label ? '写入压力：' + label : '';
+  return label ? withLabel('write_pressure', label) : '';
 }
 
 function storageTitle() {
-  return Array.from(arguments).filter(Boolean).join('；');
+  return Array.from(arguments).filter(Boolean).join(' | ');
 }
 
 function renderStorageStatus() {
@@ -377,13 +404,13 @@ function renderStorageStatus() {
     return;
   }
   if (!storage.enabled) {
-    el.textContent = '未开启持久化';
+    el.textContent = t('storage_disabled');
     el.classList.add('warn');
     el.title = storage.path || '';
     return;
   }
   if (storage.last_error) {
-    el.textContent = '持久化异常';
+    el.textContent = t('storage_error');
     el.classList.add('bad');
     el.title = storage.last_error;
     return;
@@ -392,21 +419,21 @@ function renderStorageStatus() {
   const queued = num(storage.write_queue_length);
   if (queued > 0) {
     const capacity = num(storage.write_queue_capacity);
-    titleParts.push(queued.toLocaleString() + ' 条记录等待后台写入' + (capacity > 0 ? '，队列容量 ' + capacity.toLocaleString() : ''));
+    titleParts.push(formatInteger(queued) + (capacity > 0 ? t('storage_pending_queue', formatInteger(capacity)) : t('storage_pending_queue_no_capacity')));
   }
   const pending = num(storage.pending_buffered_records);
   if (pending > 0) {
-    titleParts.push(pending.toLocaleString() + ' 条记录待刷新到文件');
+    titleParts.push(formatInteger(pending) + t('storage_pending_flush'));
   }
   const pendingSync = num(storage.pending_unsynced_records);
   if (pendingSync > 0) {
-    titleParts.push(pendingSync.toLocaleString() + ' 条记录待同步到磁盘');
+    titleParts.push(formatInteger(pendingSync) + t('storage_pending_sync'));
   }
   const pendingSnapshot = num(storage.pending_snapshot_records);
   if (pendingSnapshot > 0) {
-    titleParts.push(pendingSnapshot.toLocaleString() + ' 条记录待写入快照');
+    titleParts.push(formatInteger(pendingSnapshot) + t('storage_pending_snapshot'));
   }
-  el.textContent = '持久化已开启';
+  el.textContent = t('storage_enabled');
   el.classList.add('ok');
   el.title = storageTitle(...titleParts, storagePressureTitle(storage), storageBatchTitle(storage));
 }
@@ -421,8 +448,8 @@ function renderHealth() {
     totalS += slot.success; totalF += slot.failure;
     const total = slot.total;
     const rate = total ? slot.success / total : -1;
-    const timeRange = new Date(slot.start).toLocaleString() + ' - ' + new Date(slot.end).toLocaleString();
-    const tip = '<span>' + timeRange + '</span><br>' + (total ? '<span class="ok">成功 ' + slot.success + '</span> <span class="bad">失败 ' + slot.failure + '</span> <span>成功率 ' + pct(rate * 100) + '</span>' : '<span>无请求</span>');
+    const timeRange = formatDateTime(slot.start) + ' - ' + formatDateTime(slot.end);
+    const tip = '<span>' + timeRange + '</span><br>' + (total ? '<span class="ok">' + t('success_label') + ' ' + formatInteger(slot.success) + '</span> <span class="bad">' + t('failure_label') + ' ' + formatInteger(slot.failure) + '</span> <span>' + t('success_rate') + ' ' + pct(rate * 100) + '</span>' : '<span>' + t('no_requests') + '</span>');
     tooltips.push(tip);
     cells.push('<div class="healthCell ' + (total ? 'active' : '') + '" data-health-idx="' + i + '" style="' + healthCellStyle(i, count, total, rate) + '"></div>');
   });
@@ -445,7 +472,7 @@ function renderHealth() {
     if (!e.relatedTarget || !e.relatedTarget.closest('.healthCell')) tip.classList.add('hidden');
   };
   $('healthGrid').onmouseout = function (e) { const t = e.relatedTarget; if (!t || !t.closest('.healthCell')) tip.classList.add('hidden') };
-  const total = totalS + totalF; setText('healthRate', total ? pct(totalS / total * 100) : '-'); setText('healthSuccess', '成功 ' + fmt.format(totalS)); setText('healthFailure', '失败 ' + fmt.format(totalF));
+  const total = totalS + totalF; setText('healthRate', total ? pct(totalS / total * 100) : '-'); setText('healthSuccess', t('success_label') + ' ' + formatInteger(totalS)); setText('healthFailure', t('failure_label') + ' ' + formatInteger(totalF));
 }
 
 const healthGridCount = 672;
@@ -512,7 +539,7 @@ function renderPrices() {
   $('priceModelOptions').innerHTML = priceModelOptions().map((m) => '<option value="' + esc(m) + '"></option>').join('');
   $('priceModel').value = selected;
   const entries = Object.entries(modelPrices).sort(([a], [b]) => a.localeCompare(b));
-  $('priceList').innerHTML = entries.length ? entries.map(([m, p]) => '<div class="priceItem"><div><strong>' + esc(m) + '</strong><div class="priceMeta"><span>输入 ' + num(p.prompt).toFixed(4) + '</span><span>输出 ' + num(p.completion).toFixed(4) + '</span><span>缓存 ' + num(p.cache).toFixed(4) + '</span></div></div><div class="priceActions"><button class="btn" data-edit-price="' + esc(m) + '">编辑</button><button class="btn danger" data-del-price="' + esc(m) + '">删除</button></div></div>').join('') : '<div class="empty">暂无价格设置，设置后会显示估算花费。</div>';
+  $('priceList').innerHTML = entries.length ? entries.map(([m, p]) => '<div class="priceItem"><div><strong>' + esc(m) + '</strong><div class="priceMeta"><span>' + t('input_price') + ' ' + num(p.prompt).toFixed(4) + '</span><span>' + t('output_price') + ' ' + num(p.completion).toFixed(4) + '</span><span>' + t('cache_price') + ' ' + num(p.cache).toFixed(4) + '</span></div></div><div class="priceActions"><button class="btn" data-edit-price="' + esc(m) + '">' + t('edit') + '</button><button class="btn danger" data-del-price="' + esc(m) + '">' + t('delete') + '</button></div></div>').join('') : '<div class="empty">' + t('no_prices') + '</div>';
   document.querySelectorAll('[data-edit-price]').forEach((btn) => btn.onclick = () => fillPriceForm(btn.dataset.editPrice));
   document.querySelectorAll('[data-del-price]').forEach((btn) => btn.onclick = async () => {
     try {
@@ -520,16 +547,16 @@ function renderPrices() {
       if ($('priceModel').value === btn.dataset.delPrice) fillPriceForm('');
       await rerender({ refreshEvents: false, refreshApiDetail: true });
     } catch (e) {
-      alert('删除价格失败：' + (e && e.message ? e.message : '未知错误'));
+      alert(t('price_delete_failed') + (e && e.message ? e.message : t('unknown_error')));
     }
   });
 }
 
 function renderClientApiStats() {
   const stats = summaryData && summaryData.client_api_stats;
-  if (!stats || !stats.length) { $('clientApiStats').innerHTML = '<div class="empty">暂无 API key 请求数据</div>'; return }
+  if (!stats || !stats.length) { $('clientApiStats').innerHTML = '<div class="empty">' + t('no_api_data') + '</div>'; return }
   let rows = stats.map((r) => ({
-    name: r.api_key || '未知 API',
+    name: r.api_key || t('unknown_api'),
     requests: r.total_requests,
     success: r.success_count,
     failure: r.failure_count,
@@ -540,12 +567,12 @@ function renderClientApiStats() {
   else if (clientApiSort === 'cost') rows.sort((a, b) => b.cost - a.cost);
   else rows.sort((a, b) => b.requests - a.requests);
   document.querySelectorAll('[data-api-sort]').forEach((btn) => btn.classList.toggle('active', btn.dataset.apiSort === clientApiSort));
-  $('clientApiStats').innerHTML = rows.length ? '<div class="apiCardGrid">' + rows.map((r) => '<div class="apiCard"><div><div class="apiName">' + esc(r.name) + '</div><div class="apiChips"><span class="chip">请求次数: ' + fmt.format(r.requests) + '（<span class="ok">' + fmt.format(r.success) + '</span> <span class="bad">' + fmt.format(r.failure) + '</span>）</span><span class="chip">Token数量: ' + compact(r.tokens) + '</span><span class="chip">总花费: ' + formatUsd(r.cost) + '</span></div></div><div class="apiArrow">▶</div></div>').join('') + '</div>' : '<div class="empty">暂无 API key 请求数据</div>';
+  $('clientApiStats').innerHTML = rows.length ? '<div class="apiCardGrid">' + rows.map((r) => '<div class="apiCard"><div><div class="apiName">' + esc(r.name) + '</div><div class="apiChips"><span class="chip">' + withLabel('sort_requests', formatInteger(r.requests)) + ' (<span class="ok">' + formatInteger(r.success) + '</span> <span class="bad">' + formatInteger(r.failure) + '</span>)</span><span class="chip">' + withLabel('sort_tokens', compact(r.tokens)) + '</span><span class="chip">' + withLabel('sort_cost', formatUsd(r.cost)) + '</span></div></div><div class="apiArrow">▶</div></div>').join('') + '</div>' : '<div class="empty">' + t('no_api_data') + '</div>';
 }
 
 function renderApiStats() {
   const usage = summaryData && summaryData.usage;
-  if (!usage || !usage.apis) { $('apiStats').innerHTML = '<div class="empty">暂无接口数据</div>'; $('apiSelect').innerHTML = '<option value="">暂无上游接口</option>'; return }
+  if (!usage || !usage.apis) { $('apiStats').innerHTML = '<div class="empty">' + t('no_upstream_data') + '</div>'; $('apiSelect').innerHTML = '<option value="">' + t('upstream_select_none') + '</option>'; return }
   const rows = Object.entries(usage.apis).map(([api, a]) => ({
     api,
     requests: a.total_requests,
@@ -558,11 +585,11 @@ function renderApiStats() {
   })).sort((a, b) => b.requests - a.requests);
   if (rows.length && (!selectedApi || !rows.some((r) => r.api === selectedApi))) selectedApi = rows[0].api;
   if (!rows.length) selectedApi = '';
-  $('apiSelect').innerHTML = rows.length ? rows.map((r) => '<option value="' + esc(r.api) + '">' + esc(friendlyApiName(r.api)) + '</option>').join('') : '<option value="">暂无上游接口</option>';
+  $('apiSelect').innerHTML = rows.length ? rows.map((r) => '<option value="' + esc(r.api) + '">' + esc(friendlyApiName(r.api)) + '</option>').join('') : '<option value="">' + t('upstream_select_none') + '</option>';
   $('apiSelect').value = selectedApi;
   $('apiSelect').disabled = !rows.length;
   $('apiSelect').onchange = () => { selectedApi = $('apiSelect').value; renderApiStats(); renderApiDetail() };
-  $('apiStats').innerHTML = rows.length ? '<table><thead><tr><th>接口</th><th>请求</th><th>成功率</th><th>token</th><th>平均延迟</th><th>模型</th></tr></thead><tbody>' + rows.map((r) => '<tr class="clickableRow ' + (r.api === selectedApi ? 'selectedRow' : '') + '" data-api="' + esc(r.api) + '"><td class="nameCell">' + esc(friendlyApiName(r.api)) + '</td><td>' + fmt.format(r.requests) + ' <span class="ok">(' + fmt.format(r.success) + '</span> <span class="bad">' + fmt.format(r.failure) + ')</span></td><td class="' + (r.successRate >= 95 ? 'ok' : r.successRate >= 80 ? 'neutral' : 'bad') + '">' + pct(r.successRate) + '</td><td>' + compact(r.tokens) + '</td><td>' + formatMs(r.avgLatency) + '</td><td>' + r.modelCount + ' 个</td></tr>').join('') + '</tbody></table>' : '<div class="empty">暂无接口数据</div>';
+  $('apiStats').innerHTML = rows.length ? '<table><thead><tr><th>' + t('col_api') + '</th><th>' + t('col_requests') + '</th><th>' + t('col_success_rate') + '</th><th>' + t('col_tokens') + '</th><th>' + t('col_avg_latency') + '</th><th>' + t('col_models') + '</th></tr></thead><tbody>' + rows.map((r) => '<tr class="clickableRow ' + (r.api === selectedApi ? 'selectedRow' : '') + '" data-api="' + esc(r.api) + '"><td class="nameCell">' + esc(friendlyApiName(r.api)) + '</td><td>' + formatInteger(r.requests) + ' <span class="ok">(' + formatInteger(r.success) + '</span> <span class="bad">' + formatInteger(r.failure) + ')</span></td><td class="' + (r.successRate >= 95 ? 'ok' : r.successRate >= 80 ? 'neutral' : 'bad') + '">' + pct(r.successRate) + '</td><td>' + compact(r.tokens) + '</td><td>' + formatMs(r.avgLatency) + '</td><td>' + formatInteger(r.modelCount) + ' ' + t('model_count') + '</td></tr>').join('') + '</tbody></table>' : '<div class="empty">' + t('no_upstream_data') + '</div>';
   document.querySelectorAll('[data-api]').forEach((row) => row.onclick = () => { selectedApi = row.getAttribute('data-api') || ''; renderApiStats(); renderApiDetail() });
 }
 
@@ -574,7 +601,7 @@ function barsHtml(title, rows, total, emptyText) {
   if (!rows.length) return '<div><div class="subtle" style="margin-bottom:8px">' + esc(title) + '</div><div class="empty">' + esc(emptyText) + '</div></div>';
   return '<div><div class="subtle" style="margin-bottom:8px">' + esc(title) + '</div><div class="barList">' + rows.slice(0, 8).map((r) => {
     const width = total ? Math.max(4, Math.round(r.requests / total * 100)) : 0;
-    return '<div class="barItem"><div class="nameCell">' + esc(r.name) + '</div><div class="barTrack"><div class="barFill" style="width:' + width + '%"></div></div><div>' + fmt.format(r.requests) + ' 次</div></div>';
+    return '<div class="barItem"><div class="nameCell">' + esc(r.name) + '</div><div class="barTrack"><div class="barFill" style="width:' + width + '%"></div></div><div>' + formatInteger(r.requests) + ' ' + t('col_requests') + '</div></div>';
   }).join('') + '</div></div>';
 }
 
@@ -605,23 +632,24 @@ function apiDetailCacheKey(api) {
 }
 
 function apiDetailErrorHtml(errorRows, loading, error, knownFailureCount) {
-  if (loading && !errorRows.length) return '<div><div class="subtle" style="margin-bottom:8px">错误统计</div><div class="empty">正在加载接口请求明细...</div></div>';
-  if (error && !errorRows.length && num(knownFailureCount) === 0) return '<div><div class="subtle" style="margin-bottom:8px">错误统计</div><div class="empty">暂无失败请求</div></div>';
-  if (error && !errorRows.length) return '<div><div class="subtle" style="margin-bottom:8px">错误统计</div><div class="empty">请求明细加载失败：' + esc(error.message || '未知错误') + '</div></div>';
-  return '<div><div class="subtle" style="margin-bottom:8px">错误统计</div>' +
-    (errorRows.length ? '<div class="tableWrap"><table><thead><tr><th>状态码</th><th>次数</th><th>错误</th></tr></thead><tbody>' + errorRows.slice(0, 10).map((r) => '<tr><td class="bad">' + esc(r.status_code || '-') + '</td><td>' + fmt.format(r.count) + '</td><td><span class="errorText">' + esc(r.failure || '未返回错误内容') + '</span></td></tr>').join('') + '</tbody></table></div>' : '<div class="empty">暂无失败请求</div>') +
+  if (loading && !errorRows.length) return '<div><div class="subtle" style="margin-bottom:8px">' + t('error_stats') + '</div><div class="empty">' + t('loading_api_detail') + '</div></div>';
+  if (error && !errorRows.length && num(knownFailureCount) === 0) return '<div><div class="subtle" style="margin-bottom:8px">' + t('error_stats') + '</div><div class="empty">' + t('no_failures') + '</div></div>';
+  if (error && !errorRows.length) return '<div><div class="subtle" style="margin-bottom:8px">' + t('error_stats') + '</div><div class="empty">' + t('detail_load_failed_msg') + esc(error.message || t('unknown_error')) + '</div></div>';
+  return '<div><div class="subtle" style="margin-bottom:8px">' + t('error_stats') + '</div>' +
+    (errorRows.length ? '<div class="tableWrap"><table><thead><tr><th>' + t('col_status') + '</th><th>' + t('col_requests') + '</th><th>' + t('error_stats') + '</th></tr></thead><tbody>' + errorRows.slice(0, 10).map((r) => '<tr><td class="bad">' + esc(r.status_code || '-') + '</td><td>' + formatInteger(r.count) + '</td><td><span class="errorText">' + esc(r.failure || t('no_body_returned')) + '</span></td></tr>').join('') + '</tbody></table></div>' : '<div class="empty">' + t('no_failures') + '</div>') +
     '</div>';
 }
 
 function apiDetailRecentHtml(rows, loading, error) {
-  if (loading && !rows.length) return '<div><div class="subtle" style="margin-bottom:8px">最近请求</div><div class="empty">正在加载接口请求明细...</div></div>';
-  if (error && !rows.length) return '<div><div class="subtle" style="margin-bottom:8px">最近请求</div><div class="empty">请求明细加载失败</div></div>';
-  return '<div><div class="subtle" style="margin-bottom:8px">最近请求</div>' +
-    (rows.length ? '<div class="tableWrap"><table><thead><tr><th>时间</th><th>模型</th><th>结果</th><th>延迟</th><th>token</th><th>来源</th></tr></thead><tbody>' + rows.slice(0, apiDetailRecentLimit).map((d) => '<tr><td>' + new Date(d.timestamp_ms).toLocaleString() + '</td><td class="nameCell">' + esc(d.model) + '</td><td class="' + (d.failed ? 'bad' : 'ok') + '">' + (d.failed ? '失败' : '成功') + '</td><td>' + formatMs(num(d.latency_ms)) + '</td><td>' + fmt.format(d.total_tokens) + '</td><td class="nameCell">' + esc(sourceLabel(d)) + '</td></tr>').join('') + '</tbody></table></div>' : '<div class="empty">暂无请求明细</div>') +
+  if (loading && !rows.length) return '<div><div class="subtle" style="margin-bottom:8px">' + t('recent_requests') + '</div><div class="empty">' + t('loading_api_detail') + '</div></div>';
+  if (error && !rows.length) return '<div><div class="subtle" style="margin-bottom:8px">' + t('recent_requests') + '</div><div class="empty">' + t('detail_load_failed') + '</div></div>';
+  return '<div><div class="subtle" style="margin-bottom:8px">' + t('recent_requests') + '</div>' +
+    (rows.length ? '<div class="tableWrap"><table><thead><tr><th>' + t('col_time') + '</th><th>' + t('col_model') + '</th><th>' + t('col_result') + '</th><th>' + t('col_latency') + '</th><th>' + t('col_tokens') + '</th><th>' + t('col_source') + '</th></tr></thead><tbody>' + rows.slice(0, apiDetailRecentLimit).map((d) => '<tr><td>' + formatDateTime(d.timestamp_ms) + '</td><td class="nameCell">' + esc(d.model) + '</td><td class="' + (d.failed ? 'bad' : 'ok') + '">' + statusText(d.failed) + '</td><td>' + formatMs(num(d.latency_ms)) + '</td><td>' + formatInteger(d.total_tokens) + '</td><td class="nameCell">' + esc(sourceLabel(d)) + '</td></tr>').join('') + '</tbody></table></div>' : '<div class="empty">' + t('no_detail') + '</div>') +
     '</div>';
 }
 
 function renderApiDetailContent(apiData, detailState) {
+  apiDetailLastRender = { api: selectedApi, apiData, detailState };
   const detail = detailState && detailState.detail;
   const rows = (detail && detail.recent_events) || [];
   const loading = detailState && detailState.loading;
@@ -632,20 +660,20 @@ function renderApiDetailContent(apiData, detailState) {
   const rate = requests ? success / requests * 100 : 100;
   const models = detail ? (detail.model_stats || []).map((m) => ({ name: m.model || 'unknown', requests: num(m.total_requests), success: num(m.success_count), failure: num(m.failure_count), tokens: num(m.total_tokens), input_tokens: num(m.input_tokens), output_tokens: num(m.output_tokens), cached_tokens: num(m.cached_tokens), reasoning_tokens: num(m.reasoning_tokens), avgLatency: num(m.avg_latency_ms) })) : Object.entries(apiData.models || {}).map(([name, m]) => ({ name, requests: num(m.total_requests), success: num(m.success_count), failure: num(m.failure_count), tokens: num(m.total_tokens), input_tokens: num(m.input_tokens), output_tokens: num(m.output_tokens), cached_tokens: num(m.cached_tokens), reasoning_tokens: num(m.reasoning_tokens), avgLatency: num(m.avg_latency_ms) }));
   models.sort((a, b) => b.requests - a.requests);
-  const sources = detail ? (detail.source_stats || []).map((s) => ({ name: s.source || '未知来源', requests: num(s.total_requests), success: num(s.success_count), failure: num(s.failure_count), tokens: num(s.total_tokens) })) : [];
+  const sources = detail ? (detail.source_stats || []).map((s) => ({ name: s.source || t('unknown_source'), requests: num(s.total_requests), success: num(s.success_count), failure: num(s.failure_count), tokens: num(s.total_tokens) })) : [];
   const errorRows = (detail && detail.error_stats) || [];
   const totalCost = models.reduce((s, m) => s + aggregateCost({ model: m.name, input_tokens: m.input_tokens, output_tokens: m.output_tokens, cached_tokens: m.cached_tokens, reasoning_tokens: m.reasoning_tokens }, modelPrices), 0);
   $('apiDetail').innerHTML = '<div class="detailGrid">' +
-    metricHtml('请求数', fmt.format(requests), '<span class="ok">成功 ' + fmt.format(success) + '</span><span class="bad">失败 ' + fmt.format(failure) + '</span>') +
-    metricHtml('成功率', '<span class="' + (rate >= 95 ? 'ok' : rate >= 80 ? 'neutral' : 'bad') + '">' + pct(rate) + '</span>') +
-    metricHtml('总 token', compact(summary.total_tokens), '<span>缓存 token：' + compact(summary.cached_tokens) + '</span><span>思考 token：' + compact(summary.reasoning_tokens) + '</span>') +
-    metricHtml('平均延迟', formatMs(summary.avg_latency_ms)) +
-    metricHtml('模型数', fmt.format(models.length), sources.length ? '<span>来源 ' + fmt.format(sources.length) + '</span>' : '') +
-    metricHtml('总花费', formatUsd(totalCost), '<span>总 token 数：' + compact(summary.total_tokens) + '</span>') +
+    metricHtml(t('requests_label'), formatInteger(requests), '<span class="ok">' + t('success_label') + ' ' + formatInteger(success) + '</span><span class="bad">' + t('failure_label') + ' ' + formatInteger(failure) + '</span>') +
+    metricHtml(t('success_rate'), '<span class="' + (rate >= 95 ? 'ok' : rate >= 80 ? 'neutral' : 'bad') + '">' + pct(rate) + '</span>') +
+    metricHtml(t('total_tokens_label'), compact(summary.total_tokens), '<span>' + withLabel('cached_tokens', compact(summary.cached_tokens)) + '</span><span>' + withLabel('reasoning_tokens', compact(summary.reasoning_tokens)) + '</span>') +
+    metricHtml(t('avg_latency'), formatMs(summary.avg_latency_ms)) +
+    metricHtml(t('model_count'), formatInteger(models.length), sources.length ? '<span>' + t('source_count') + ' ' + formatInteger(sources.length) + '</span>' : '') +
+    metricHtml(t('total_cost'), formatUsd(totalCost), '<span>' + withLabel('total_tokens_label', compact(summary.total_tokens)) + '</span>') +
     '</div>' +
     '<div class="splitGrid">' +
-    barsHtml('模型分布', models, requests, '暂无模型数据') +
-    barsHtml('来源分布', sources, requests, loading ? '正在加载来源数据...' : '暂无来源数据') +
+    barsHtml(t('model_distribution'), models, requests, t('no_model_data')) +
+    barsHtml(t('source_distribution'), sources, requests, loading ? t('loading_source_data') : t('no_source_data')) +
     '</div>' +
     '<div class="splitGrid">' + apiDetailErrorHtml(errorRows, loading, error, knownFailureCount) + apiDetailRecentHtml(rows, loading, error) + '</div>';
 }
@@ -653,7 +681,7 @@ function renderApiDetailContent(apiData, detailState) {
 async function renderApiDetail() {
   const usage = summaryData && summaryData.usage;
   const apiData = usage && usage.apis && usage.apis[selectedApi];
-  if (!apiData) { apiDetailSeq++; setText('apiDetailTitle', '选择一个上游接口查看模型、来源、错误和最近请求。'); $('apiDetail').innerHTML = '<div class="empty">暂无接口详情</div>'; return }
+  if (!apiData) { apiDetailSeq++; apiDetailLastRender = null; setText('apiDetailTitle', t('upstream_detail_select_hint')); $('apiDetail').innerHTML = '<div class="empty">' + t('no_detail_data') + '</div>'; return }
   const api = selectedApi;
   const seq = ++apiDetailSeq;
   const cacheKey = apiDetailCacheKey(api);
@@ -671,14 +699,33 @@ async function renderApiDetail() {
   }
 }
 
+function renderApiDetailFromCache() {
+  const usage = summaryData && summaryData.usage;
+  const apiData = usage && usage.apis && usage.apis[selectedApi];
+  if (!apiData) {
+    apiDetailSeq++;
+    apiDetailLastRender = null;
+    setText('apiDetailTitle', t('upstream_detail_select_hint'));
+    $('apiDetail').innerHTML = '<div class="empty">' + t('no_detail_data') + '</div>';
+    return;
+  }
+  setText('apiDetailTitle', friendlyApiName(selectedApi));
+  if (apiDetailLastRender && apiDetailLastRender.api === selectedApi) {
+    renderApiDetailContent(apiData, apiDetailLastRender.detailState);
+    return;
+  }
+  const cached = apiDetailCache.get(apiDetailCacheKey(selectedApi));
+  renderApiDetailContent(apiData, cached ? { detail: cached } : { loading: true });
+}
+
 function renderModelStats() {
-  if (!summaryData || !summaryData.model_stats) { $('modelStats').innerHTML = '<div class="empty">暂无模型数据</div>'; return }
+  if (!summaryData || !summaryData.model_stats) { $('modelStats').innerHTML = '<div class="empty">' + t('no_model_data') + '</div>'; return }
   const rows = summaryData.model_stats;
-  $('modelStats').innerHTML = rows.length ? '<table><thead><tr><th>模型</th><th>请求</th><th>token</th><th>平均延迟</th><th>成功率</th><th>花费</th></tr></thead><tbody>' + rows.map((r) => {
+  $('modelStats').innerHTML = rows.length ? '<table><thead><tr><th>' + t('col_model') + '</th><th>' + t('col_requests') + '</th><th>' + t('col_tokens') + '</th><th>' + t('col_avg_latency') + '</th><th>' + t('col_success_rate') + '</th><th>' + t('col_cost') + '</th></tr></thead><tbody>' + rows.map((r) => {
     const rate = r.total_requests ? r.success_count / r.total_requests * 100 : 100;
     const cost = aggregateCost(r, modelPrices);
-    return '<tr><td class="nameCell">' + esc(r.model) + '</td><td>' + fmt.format(r.total_requests) + ' <span class="ok">(' + fmt.format(r.success_count) + '</span> <span class="bad">' + fmt.format(r.failure_count) + ')</span></td><td>' + compact(r.total_tokens) + '</td><td>' + formatMs(r.avg_latency_ms) + '</td><td class="' + (rate >= 95 ? 'ok' : rate >= 80 ? 'neutral' : 'bad') + '">' + pct(rate) + '</td><td>' + formatUsd(cost) + '</td></tr>'
-  }).join('') + '</tbody></table>' : '<div class="empty">暂无模型数据</div>';
+    return '<tr><td class="nameCell">' + esc(r.model) + '</td><td>' + formatInteger(r.total_requests) + ' <span class="ok">(' + formatInteger(r.success_count) + '</span> <span class="bad">' + formatInteger(r.failure_count) + ')</span></td><td>' + compact(r.total_tokens) + '</td><td>' + formatMs(r.avg_latency_ms) + '</td><td class="' + (rate >= 95 ? 'ok' : rate >= 80 ? 'neutral' : 'bad') + '">' + pct(rate) + '</td><td>' + formatUsd(cost) + '</td></tr>';
+  }).join('') + '</tbody></table>' : '<div class="empty">' + t('no_model_data') + '</div>';
 }
 
 function renderFilters() {
@@ -686,10 +733,10 @@ function renderFilters() {
   const models = modelNames();
   const sources = (summaryData.source_stats || []).map(s => s.source);
   const authIndexes = eventsData && eventsData.events ? [...new Set(eventsData.events.map((d) => d.auth_index || '-'))].sort() : [];
-  const fill = (id, label, values) => { const old = $(id).value; $(id).innerHTML = '<option value="">全部' + label + '</option>' + values.map((v) => '<option value="' + esc(v) + '">' + esc(v) + '</option>').join(''); $(id).value = [...values, ''].includes(old) ? old : '' };
-  fill('filterModel', '模型', models);
-  fill('filterSource', '来源', sources);
-  fill('filterAuth', '凭证', authIndexes);
+  const fill = (id, emptyLabel, values) => { const old = $(id).value; $(id).innerHTML = '<option value="">' + emptyLabel + '</option>' + values.map((v) => '<option value="' + esc(v) + '">' + esc(v) + '</option>').join(''); $(id).value = [...values, ''].includes(old) ? old : '' };
+  fill('filterModel', t('filter_all_models'), models);
+  fill('filterSource', t('filter_all_sources'), sources);
+  fill('filterAuth', t('filter_all_credentials'), authIndexes);
 }
 
 function normalizeEventsPayload(data) {
@@ -702,6 +749,15 @@ function normalizeEventsPayload(data) {
     limit: data.limit || eventsLimit,
     offset: data.offset || 0,
   };
+}
+
+function renderEventsContent() {
+  const data = normalizeEventsPayload(eventsData);
+  const rows = data.events;
+  const total = data.total;
+  setText('eventsCount', t('events_count', formatInteger(total), formatInteger(Math.min(rows.length, eventsLimit))));
+  $('events').innerHTML = rows.length ? '<table><thead><tr><th>' + t('col_time') + '</th><th>' + t('col_model') + '</th><th>' + t('col_source') + '</th><th>' + t('col_credential') + '</th><th>' + t('col_result') + '</th><th>' + t('col_latency') + '</th><th>' + t('col_input') + '</th><th>' + t('col_output') + '</th><th>' + t('col_thinking') + '</th><th>' + t('col_cache') + '</th><th>' + t('col_total') + '</th></tr></thead><tbody>' + rows.map((d) => '<tr><td>' + formatDateTime(timestampMs(d.timestamp)) + '</td><td class="nameCell">' + esc(d.model) + '</td><td class="nameCell">' + esc(sourceLabel(d)) + '</td><td>' + esc(d.auth_index || '-') + '</td><td class="' + (d.failed ? 'bad' : 'ok') + '">' + statusText(d.failed) + '</td><td>' + formatMs(num(d.latency_ms)) + '</td><td>' + formatInteger(num(d.tokens && d.tokens.input_tokens)) + '</td><td>' + formatInteger(num(d.tokens && d.tokens.output_tokens)) + '</td><td>' + formatInteger(num(d.tokens && d.tokens.reasoning_tokens)) + '</td><td>' + formatInteger(num(d.tokens && Math.max(d.tokens.cached_tokens || 0, d.tokens.cache_tokens || 0))) + '</td><td>' + formatInteger(num(d.tokens && d.tokens.total_tokens)) + '</td></tr>').join('') + '</tbody></table>' : '<div class="empty">' + t('no_events') + '</div>';
+  renderFilters();
 }
 
 async function renderEvents() {
@@ -719,11 +775,7 @@ async function renderEvents() {
   } catch (e) {
     eventsData = { events: [], total: 0, limit: eventsLimit, offset: 0 };
   }
-  const rows = eventsData.events;
-  const total = eventsData.total;
-  setText('eventsCount', '共 ' + fmt.format(total) + ' 条，显示 ' + fmt.format(Math.min(rows.length, eventsLimit)) + ' 条');
-  $('events').innerHTML = rows.length ? '<table><thead><tr><th>时间</th><th>模型</th><th>来源</th><th>凭证</th><th>结果</th><th>延迟</th><th>输入</th><th>输出</th><th>思考</th><th>缓存</th><th>总计</th></tr></thead><tbody>' + rows.map((d) => '<tr><td>' + new Date(timestampMs(d.timestamp)).toLocaleString() + '</td><td class="nameCell">' + esc(d.model) + '</td><td class="nameCell">' + esc(sourceLabel(d)) + '</td><td>' + (esc(d.auth_index || '-')) + '</td><td class="' + (d.failed ? 'bad' : 'ok') + '">' + (d.failed ? '失败' : '成功') + '</td><td>' + formatMs(num(d.latency_ms)) + '</td><td>' + fmt.format(num(d.tokens && d.tokens.input_tokens)) + '</td><td>' + fmt.format(num(d.tokens && d.tokens.output_tokens)) + '</td><td>' + fmt.format(num(d.tokens && d.tokens.reasoning_tokens)) + '</td><td>' + fmt.format(num(d.tokens && Math.max(d.tokens.cached_tokens || 0, d.tokens.cache_tokens || 0))) + '</td><td>' + fmt.format(num(d.tokens && d.tokens.total_tokens)) + '</td></tr>').join('') + '</tbody></table>' : '<div class="empty">暂无请求事件</div>';
-  renderFilters();
+  renderEventsContent();
 }
 
 function download(name, text, type) { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000) }
@@ -750,16 +802,16 @@ async function waitForExportJob(job) {
   let current = job;
   for (let i = 0; i < 120; i++) {
     if (current && current.status === 'succeeded') return current;
-    if (current && current.status === 'failed') throw new Error(current.error || '导出任务失败');
+    if (current && current.status === 'failed') throw new Error(current.error || t('export_job_failed'));
     await delay(i < 10 ? 250 : 1000);
     current = await getExportJob(job.id);
   }
-  throw new Error('导出任务超时');
+  throw new Error(t('export_job_timeout'));
 }
 
 async function fetchExportJobResult(params) {
   const job = await createExportJob(params);
-  if (!job || !job.id) throw new Error('导出任务未返回 ID');
+  if (!job || !job.id) throw new Error(t('export_no_id'));
   try {
     const completed = await waitForExportJob(job);
     const downloadPath = completed.download_path || ('dashboard-events-export-download?id=' + encodeURIComponent(job.id));
@@ -770,8 +822,8 @@ async function fetchExportJobResult(params) {
 }
 
 function rowsCsv(rows) {
-  const head = ['时间', '模型', '来源', '凭证', '结果', '延迟毫秒', 'TTFT毫秒', '输入 token', '输出 token', '思考 token', '缓存 token', '总 token', '状态码', '错误'];
-  return [head, ...rows.map((d) => [d.timestamp, d.model, sourceLabel(d), d.auth_index || '', d.failed ? '失败' : '成功', num(d.latency_ms), num(d.ttft_ms), num(d.tokens && d.tokens.input_tokens), num(d.tokens && d.tokens.output_tokens), num(d.tokens && d.tokens.reasoning_tokens), num(d.tokens && Math.max(d.tokens.cached_tokens || 0, d.tokens.cache_tokens || 0)), num(d.tokens && d.tokens.total_tokens), d.status_code || '', d.failure || ''])].map((row) => row.map((v) => '"' + String(v ?? '').replace(/"/g, '""') + '"').join(',')).join('\n');
+  const head = [t('col_time'), t('col_model'), t('col_source'), t('col_credential'), t('col_result'), 'latency_ms', 'ttft_ms', t('col_input') + ' token', t('col_output') + ' token', t('col_thinking') + ' token', t('col_cache') + ' token', t('col_total') + ' token', t('col_status'), t('error_stats')];
+  return [head, ...rows.map((d) => [d.timestamp, d.model, sourceLabel(d), d.auth_index || '', statusText(d.failed), num(d.latency_ms), num(d.ttft_ms), num(d.tokens && d.tokens.input_tokens), num(d.tokens && d.tokens.output_tokens), num(d.tokens && d.tokens.reasoning_tokens), num(d.tokens && Math.max(d.tokens.cached_tokens || 0, d.tokens.cache_tokens || 0)), num(d.tokens && d.tokens.total_tokens), d.status_code || '', d.failure || ''])].map((row) => row.map((v) => '"' + String(v ?? '').replace(/"/g, '""') + '"').join(',')).join('\n');
 }
 
 function makeCounterRow(name) { return { model: name, total_requests: 0, success_count: 0, failure_count: 0, total_tokens: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, reasoning_tokens: 0, latency: [] } }
@@ -924,7 +976,7 @@ async function exportRows(kind) {
     notifyExportTruncated({ truncated: !!data.truncated, total: data.total, exported: rows.length });
     if (kind === 'json') { download('usage-events-' + stamp + '.json', JSON.stringify(rows, null, 2), 'application/json;charset=utf-8'); return }
     download('usage-events-' + stamp + '.csv', rowsCsv(rows), 'text/csv;charset=utf-8');
-  } catch (e) { alert('导出失败'); }
+  } catch (e) { alert(t('export_failed')); }
 }
 
 async function exportApiRows(kind) {
@@ -953,7 +1005,7 @@ async function exportApiRows(kind) {
     notifyExportTruncated({ truncated: !!data.truncated, total: data.total, exported: rows.length });
     if (kind === 'json') { download('usage-api-' + name + '-' + stamp + '.json', JSON.stringify(rows, null, 2), 'application/json;charset=utf-8'); return }
     download('usage-api-' + name + '-' + stamp + '.csv', rowsCsv(rows), 'text/csv;charset=utf-8');
-  } catch (e) { alert('导出失败'); }
+  } catch (e) { alert(t('export_failed')); }
 }
 
 function exportTruncationFromHeaders(headers) {
@@ -966,7 +1018,7 @@ function exportTruncationFromHeaders(headers) {
 
 function notifyExportTruncated(info) {
   if (!info || !info.truncated) return;
-  alert('导出已截断：共 ' + fmt.format(num(info.total)) + ' 条，已导出 ' + fmt.format(num(info.exported)) + ' 条');
+  alert(t('export_truncated', fmt.format(num(info.total)), fmt.format(num(info.exported))));
 }
 
 function summaryRecordKey(data) {
@@ -993,6 +1045,18 @@ function shouldRefreshDetails(previousSummary, nextSummary, forceDetails) {
 async function rerender(options) {
   const opts = Object.assign({ refreshEvents: true, refreshApiDetail: true }, options || {});
   const previousApi = selectedApi;
+
+  // Refresh locale-aware formatters if language changed
+  if (typeof getFormatLocale === 'function') {
+    var newLocale = getFormatLocale();
+    if (newLocale !== _lastFmtLocale) {
+      fmt = new Intl.NumberFormat(newLocale);
+      _lastFmtLocale = newLocale;
+      if (typeof refreshMoneyFormatters === 'function') refreshMoneyFormatters();
+    }
+  }
+
+  renderUpdated();
   renderStats();
   renderStorageStatus();
   renderHealth();
@@ -1001,8 +1065,10 @@ async function rerender(options) {
   renderApiStats();
   renderModelStats();
   if (opts.refreshEvents) await renderEvents();
-  else renderFilters();
+  else renderEventsContent();
   if (opts.refreshApiDetail || previousApi !== selectedApi) await renderApiDetail();
+  else renderApiDetailFromCache();
+  if (typeof applyI18N === 'function') applyI18N();
 }
 
 function pollDelay() { return document.visibilityState === 'hidden' ? hiddenPollDelayMs : visiblePollDelayMs }
@@ -1021,7 +1087,8 @@ async function load(options) {
       loadModelPrices()
     ]);
     summaryData = requireObjectPayload(data, 'dashboard-summary');
-    setText('updated', '更新于 ' + new Date(data.generated_at || Date.now()).toLocaleTimeString());
+    updatedState = { type: 'success', generatedAt: data.generated_at || Date.now(), message: '' };
+    renderUpdated();
     const refreshDetails = shouldRefreshDetails(previousSummary, summaryData, forceDetails);
     await rerender({ refreshEvents: refreshDetails, refreshApiDetail: refreshDetails });
     currentRange = selectedRange;
@@ -1036,13 +1103,15 @@ async function load(options) {
         loadModelPrices()
       ]);
       summaryData = buildSummaryFromFullUsage(data);
-      setText('updated', '更新于 ' + new Date(data.generated_at || Date.now()).toLocaleTimeString() + '（兼容模式）');
+      updatedState = { type: 'compat', generatedAt: data.generated_at || Date.now(), message: '' };
+      renderUpdated();
       const refreshDetails = shouldRefreshDetails(previousSummary, summaryData, forceDetails);
       await rerender({ refreshEvents: refreshDetails, refreshApiDetail: refreshDetails });
       currentRange = selectedRange;
       pollFailures = 0; schedulePoll(pollDelay());
     } catch (fallbackError) {
-      setText('updated', (fallbackError && fallbackError.message) || (error && error.message) || '加载用量统计失败');
+      updatedState = { type: 'error', generatedAt: null, message: (fallbackError && fallbackError.message) || (error && error.message) || '' };
+      renderUpdated();
       pollFailures++; schedulePoll(nextFailureDelay());
     }
   }
@@ -1068,7 +1137,7 @@ $('savePrice').onclick = async () => {
     fillPriceForm('');
     await rerender({ refreshEvents: false, refreshApiDetail: true });
   } catch (e) {
-    alert('保存价格失败：' + (e && e.message ? e.message : '未知错误'));
+    alert(t('price_save_failed') + (e && e.message ? e.message : t('unknown_error')));
   }
 };
 $('priceModel').onchange = () => syncPriceFormForModel($('priceModel').value);
@@ -1081,22 +1150,23 @@ $('exportBtn').onclick = async () => {
   try {
     const data = await fetchJsonPayload(pluginEndpoint('usage/export'), { cache: 'no-store' });
     download('usage-export-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json', JSON.stringify(data, null, 2), 'application/json;charset=utf-8');
-  } catch (e) { alert('导出失败：' + (e && e.message ? e.message : '未知错误')) }
+  } catch (e) { alert(t('export_failed_msg') + (e && e.message ? e.message : t('unknown_error'))) }
 };
 $('importBtn').onclick = () => $('importFile').click();
 $('importFile').onchange = async (e) => {
   const file = e.target.files && e.target.files[0]; if (!file) return;
   try {
     const text = await file.text();
-    if (!currentManagementKey()) throw new Error('未读取到管理登录状态，请回到管理中心重新登录并勾选记住登录。');
+    if (!currentManagementKey()) throw new Error(t('import_no_key'));
     const result = await fetchManagementJsonPayload('usage/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: text });
-    alert('导入完成：新增 ' + (result.added || 0) + '，跳过 ' + (result.skipped || 0) + '，过期忽略 ' + (result.ignored_by_retention || 0));
+    alert(t('import_complete', result.added || 0, result.skipped || 0, result.ignored_by_retention || 0));
     await load({ forceDetails: true });
   } catch (err) {
-    alert('导入失败：' + (err && err.message ? err.message : '未知错误'));
+    alert(t('import_failed') + (err && err.message ? err.message : t('unknown_error')));
   } finally {
     e.target.value = '';
   }
 };
 if (document.addEventListener) document.addEventListener('visibilitychange', handleVisibilityChange);
+renderUpdated();
 load();

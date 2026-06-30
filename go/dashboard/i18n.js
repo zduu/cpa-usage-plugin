@@ -69,6 +69,8 @@ var I18N_MAP = {
     // ---- upstream detail ----
     upstream_detail_title: '上游接口详情',
     upstream_detail_select_hint: '选择一个上游接口查看模型、来源、错误和最近请求。',
+    upstream_api_label: '上游接口',
+    input_model_placeholder: '输入或选择模型',
     export_api_csv: '导出当前接口表格',
     export_api_json: '导出当前接口明细',
 
@@ -170,10 +172,11 @@ var I18N_MAP = {
     storage_batch_wait: '最长排队',
     storage_batch_avg_wait: '平均排队',
     storage_batch_wait_p95: '排队 p95',
-    storage_pending_snapshot: '条记录待写入快照',
-    storage_pending_flush: '条记录待刷新到文件',
-    storage_pending_sync: '条记录待同步到磁盘',
-    storage_pending_queue: '条记录等待后台写入，队列容量 {0}',
+    storage_pending_snapshot: ' 条记录待写入快照',
+    storage_pending_flush: ' 条记录待刷新到文件',
+    storage_pending_sync: ' 条记录待同步到磁盘',
+    storage_pending_queue_no_capacity: ' 条记录等待后台写入',
+    storage_pending_queue: ' 条记录等待后台写入，队列容量 {0}',
 
     // ---- price actions ----
     price_save_failed: '保存价格失败：',
@@ -261,6 +264,8 @@ var I18N_MAP = {
 
     upstream_detail_title: '上游介面詳情',
     upstream_detail_select_hint: '選擇一個上游介面檢視模型、來源、錯誤和最近請求。',
+    upstream_api_label: '上游介面',
+    input_model_placeholder: '輸入或選擇模型',
     export_api_csv: '匯出當前介面表格',
     export_api_json: '匯出當前介面明細',
 
@@ -353,10 +358,11 @@ var I18N_MAP = {
     storage_batch_wait: '最長排隊',
     storage_batch_avg_wait: '平均排隊',
     storage_batch_wait_p95: '排隊 p95',
-    storage_pending_snapshot: '條記錄待寫入快照',
-    storage_pending_flush: '條記錄待刷新到檔案',
-    storage_pending_sync: '條記錄待同步到磁碟',
-    storage_pending_queue: '條記錄等待背景寫入，佇列容量 {0}',
+    storage_pending_snapshot: ' 條記錄待寫入快照',
+    storage_pending_flush: ' 條記錄待刷新到檔案',
+    storage_pending_sync: ' 條記錄待同步到磁碟',
+    storage_pending_queue_no_capacity: ' 條記錄等待背景寫入',
+    storage_pending_queue: ' 條記錄等待背景寫入，佇列容量 {0}',
 
     price_save_failed: '儲存價格失敗：',
     price_delete_failed: '刪除價格失敗：',
@@ -394,8 +400,8 @@ var I18N_MAP = {
     loading: 'Loading...',
 
     total_requests: 'Total Requests',
-    success_requests: 'Success',
-    failure_requests: 'Failure',
+    success_requests: 'Success requests',
+    failure_requests: 'Failure requests',
     avg_latency: 'Avg Latency',
     total_tokens: 'Total Tokens',
     cached_tokens: 'Cached Tokens',
@@ -440,6 +446,8 @@ var I18N_MAP = {
 
     upstream_detail_title: 'Upstream API Detail',
     upstream_detail_select_hint: 'Select an upstream API to view models, sources, errors, and recent requests.',
+    upstream_api_label: 'Upstream API',
+    input_model_placeholder: 'Enter or select model',
     export_api_csv: 'Export API CSV',
     export_api_json: 'Export API JSON',
 
@@ -500,7 +508,7 @@ var I18N_MAP = {
     write_normal: 'Normal',
     write_pressure: 'Write pressure',
 
-    events_count: '{0} total, showing {1}',
+    events_count: 'Total {0}, showing {1}',
     export_truncated: 'Export truncated: {0} total, {1} exported',
     export_failed: 'Export failed',
     export_failed_msg: 'Export failed: ',
@@ -535,6 +543,7 @@ var I18N_MAP = {
     storage_pending_snapshot: ' records pending snapshot',
     storage_pending_flush: ' records pending flush',
     storage_pending_sync: ' records pending sync',
+    storage_pending_queue_no_capacity: ' records pending write',
     storage_pending_queue: ' records pending write, queue capacity {0}',
 
     price_save_failed: 'Failed to save price: ',
@@ -619,6 +628,8 @@ var I18N_MAP = {
 
     upstream_detail_title: 'Детали API',
     upstream_detail_select_hint: 'Выберите API для просмотра моделей, источников, ошибок и последних запросов.',
+    upstream_api_label: 'API',
+    input_model_placeholder: 'Введите или выберите модель',
     export_api_csv: 'Экспорт CSV',
     export_api_json: 'Экспорт JSON',
 
@@ -714,6 +725,7 @@ var I18N_MAP = {
     storage_pending_snapshot: ' записей ожидают снимка',
     storage_pending_flush: ' записей ожидают сброса',
     storage_pending_sync: ' записей ожидают синхронизации',
+    storage_pending_queue_no_capacity: ' записей ожидают записи',
     storage_pending_queue: ' записей ожидают записи, ёмкость очереди {0}',
 
     price_save_failed: 'Ошибка сохранения цены: ',
@@ -739,22 +751,50 @@ var I18N_MAP = {
   }
 };
 
+
+// Locale codes for locale-aware formatting (NumberFormat, Date, etc.)
+var I18N_LOCALE = {
+  'zh-CN': 'zh-CN',
+  'zh-TW': 'zh-TW',
+  'en': 'en-US',
+  'ru': 'ru-RU'
+};
+
+// Returns the locale code for the current language, for Intl formatters
+function getFormatLocale() {
+  return I18N_LOCALE[I18N_LANG] || 'zh-CN';
+}
+
 // ---- i18n runtime ----
 
 var I18N_LANG = 'zh-CN';
+
+function languageFromStorageValue(value) {
+  if (!value) return '';
+  if (I18N_MAP[value]) return value;
+  try {
+    var parsed = JSON.parse(value);
+    var lang = parsed && parsed.state && parsed.state.language;
+    if (!lang && parsed && typeof parsed.language === 'string') lang = parsed.language;
+    if (!lang && typeof parsed === 'string') lang = parsed;
+    return lang && I18N_MAP[lang] ? lang : '';
+  } catch (e) {
+    return '';
+  }
+}
 
 function detectCPALanguage() {
   try {
     // Strategy 1: parent iframe (CPA management panel)
     if (window.parent && window.parent !== window) {
       try {
-        var parentLang = window.parent.localStorage.getItem('cli-proxy-language');
-        if (parentLang && I18N_MAP[parentLang]) return parentLang;
+        var parentLang = languageFromStorageValue(window.parent.localStorage.getItem('cli-proxy-language'));
+        if (parentLang) return parentLang;
       } catch (e) { /* cross-origin */ }
     }
     // Strategy 2: shared localStorage
-    var stored = localStorage.getItem('cli-proxy-language');
-    if (stored && I18N_MAP[stored]) return stored;
+    var stored = languageFromStorageValue(localStorage.getItem('cli-proxy-language'));
+    if (stored) return stored;
     // Strategy 3: browser language
     var nav = (typeof navigator !== 'undefined' && navigator.language) || 'zh-CN';
     var short = nav.split('-')[0];
@@ -781,35 +821,51 @@ function t(key) {
   });
 }
 
-// Apply i18n to all [data-i18n] elements
+// Apply i18n to explicitly marked static elements.
 function applyI18N() {
+  // Update html lang attribute so the page declares the correct language
+  if (document.documentElement) {
+    document.documentElement.lang = I18N_LANG;
+  }
+  var i, el, key;
   var elements = document.querySelectorAll('[data-i18n]');
-  for (var i = 0; i < elements.length; i++) {
-    var el = elements[i];
-    var key = el.getAttribute('data-i18n');
+  for (i = 0; i < elements.length; i++) {
+    el = elements[i];
+    key = el.getAttribute('data-i18n');
     if (key) el.textContent = t(key);
   }
-  // Also handle elements with data-i18n-placeholder for inputs
   var placeholders = document.querySelectorAll('[data-i18n-placeholder]');
-  for (var i = 0; i < placeholders.length; i++) {
-    var el = placeholders[i];
-    var key = el.getAttribute('data-i18n-placeholder');
+  for (i = 0; i < placeholders.length; i++) {
+    el = placeholders[i];
+    key = el.getAttribute('data-i18n-placeholder');
     if (key) el.placeholder = t(key);
   }
 }
 
-// Initialize i18n
+// Initialize i18n — runs synchronously at script load time.
 (function() {
   try {
     I18N_LANG = detectCPALanguage();
 
-    // Listen for language changes via storage event
+    // Apply translations immediately for any pre-existing static HTML.
+    // Note: script.js render functions will call applyI18N() again after
+    // each re-render; this call covers the initial static skeleton.
+    if (typeof document !== 'undefined' && document.body) {
+      applyI18N();
+    } else if (typeof document !== 'undefined' && document.addEventListener) {
+      // DOM not ready yet — wait for it
+      document.addEventListener('DOMContentLoaded', function() { applyI18N(); });
+    }
+
+    // Listen for language changes via storage event (covers both iframe and parent)
     if (typeof window.addEventListener === 'function') {
       window.addEventListener('storage', function(e) {
-        if (e.key === 'cli-proxy-language' && e.newValue && I18N_MAP[e.newValue]) {
-          I18N_LANG = e.newValue;
+        if (e.key !== 'cli-proxy-language') return;
+        var newLang = detectCPALanguage();
+        if (newLang !== I18N_LANG) {
+          I18N_LANG = newLang;
           applyI18N();
-          // Trigger re-render for dynamic content
+          // Also re-render to refresh dynamic labels and locale-aware formatters
           if (typeof rerender === 'function') {
             rerender({ refreshEvents: false, refreshApiDetail: false });
           }
@@ -817,26 +873,22 @@ function applyI18N() {
       });
     }
 
-    // Observe parent document language changes
-    if (typeof MutationObserver !== 'undefined') {
-      try {
-        if (window.parent && window.parent !== window && window.parent.document) {
-          var langObserver = new MutationObserver(function() {
-            var newLang = detectCPALanguage();
-            if (newLang !== I18N_LANG) {
-              I18N_LANG = newLang;
-              applyI18N();
-              if (typeof rerender === 'function') {
-                rerender({ refreshEvents: false, refreshApiDetail: false });
-              }
-            }
-          });
-          langObserver.observe(window.parent.document.documentElement, {
-            attributes: true,
-            attributeFilter: ['lang']
-          });
+    // Poll for language changes — the only reliable cross-frame mechanism because
+    // CPA writes to localStorage, not to the <html> lang attribute.
+    var pollParentInterval = setInterval(function() {
+      var current = detectCPALanguage();
+      if (current !== I18N_LANG) {
+        I18N_LANG = current;
+        applyI18N();
+        if (typeof rerender === 'function') {
+          rerender({ refreshEvents: false, refreshApiDetail: false });
         }
-      } catch (e) { /* cross-origin */ }
+      }
+    }, 2000);
+
+    // Cleanup on unload
+    if (typeof window.addEventListener === 'function') {
+      window.addEventListener('beforeunload', function() { clearInterval(pollParentInterval); });
     }
   } catch (e) { /* i18n failure should not break dashboard */ }
 })();

@@ -1,9 +1,9 @@
 // Pure helper functions - usable in tests without DOM.
-// i18n polyfill: always provide t() so helpers remain callable.
-// In browser, i18n.js defines I18N_MAP and t() — polyfill is skipped.
-// In test, I18N_MAP must be pre-defined; otherwise t() returns the key as-is.
+// i18n polyfill: when i18n.js is loaded first, global t() already exists and this is skipped.
+// When not (test environment), t() is created with zh-CN fallback from I18N_MAP.
+// NOTE: no 'var' — must not shadow the global t() from i18n.js.
 if (typeof t !== 'function') {
-  var t = function(key) {
+  t = function(key) {
     var args = arguments;
     if (typeof I18N_MAP !== 'undefined' && I18N_MAP['zh-CN'] && I18N_MAP['zh-CN'][key]) {
       return I18N_MAP['zh-CN'][key].replace(/\{(\d+)\}/g, function(m, i) {
@@ -23,9 +23,16 @@ const formatMs = (value) => {
   if (value < 1000) return trimFixed(value, 2) + 'ms';
   return (value / 1000).toFixed(2) + 's';
 };
-const money2 = new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const money6 = new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 6 });
-const money6Fixed = new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'USD', minimumFractionDigits: 6, maximumFractionDigits: 6 });
+var money2 = new Intl.NumberFormat(typeof getFormatLocale === 'function' ? getFormatLocale() : 'zh-CN', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
+var money6 = new Intl.NumberFormat(typeof getFormatLocale === 'function' ? getFormatLocale() : 'zh-CN', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 6 });
+var money6Fixed = new Intl.NumberFormat(typeof getFormatLocale === 'function' ? getFormatLocale() : 'zh-CN', { style: 'currency', currency: 'USD', minimumFractionDigits: 6, maximumFractionDigits: 6 });
+// Called by script.js when locale changes
+function refreshMoneyFormatters() {
+  var loc = typeof getFormatLocale === 'function' ? getFormatLocale() : 'zh-CN';
+  money2 = new Intl.NumberFormat(loc, { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  money6 = new Intl.NumberFormat(loc, { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 6 });
+  money6Fixed = new Intl.NumberFormat(loc, { style: 'currency', currency: 'USD', minimumFractionDigits: 6, maximumFractionDigits: 6 });
+}
 function formatUsd(value) {
   if (!Number.isFinite(value)) return '-';
   const abs = Math.abs(value);
@@ -56,7 +63,7 @@ function trimCredentialSuffix(value) {
 function sourceLabel(detail) { const s = trimCredentialSuffix(detail.source); if (s && !looksLikeKey(s)) return s; const p = trimCredentialSuffix(detail.provider); if (p && !looksLikeKey(p)) return p; return t('unknown_source') }
 function sourceKey(detail) { return sourceLabel(detail) }
 function friendlyApiName(apiName) { const clean = trimCredentialSuffix(apiName); if (!clean) return t('unknown_interface'); const parts = clean.split(' · ').filter(function (p) { return !looksLikeKey(p) && !isCredentialMarker(p) && !isCredentialLabel(p) && !looksLikeCredentialId(p) }); return parts.length ? parts.join(' · ') : clean }
-function clientApiLabel(detail) { const label = String((detail && detail.api_key) || '').trim(); return label || '未知 API' }
+function clientApiLabel(detail) { const label = String((detail && detail.api_key) || '').trim(); return label || t('unknown_api') }
 function clientApiGroupKey(detail) {
   const label = String((detail && detail.api_key) || '').trim();
   if (label) return 'api_key:' + label;
@@ -145,7 +152,7 @@ function unwrapPluginPayloadWithMeta(payload) {
   const unwrapResponse = (value) => {
     if (value && typeof value === 'object' && typeof value.status_code === 'number' && Object.prototype.hasOwnProperty.call(value, 'body')) {
       const bodyText = decodeManagementBody(value.body);
-      if (value.status_code >= 400) throw new Error(bodyText || ('请求失败：' + value.status_code));
+      if (value.status_code >= 400) throw new Error(bodyText || (t('request_failed_colon') + value.status_code));
       let body = bodyText;
       if (bodyText) {
         try { body = JSON.parse(bodyText) } catch {}
@@ -156,7 +163,7 @@ function unwrapPluginPayloadWithMeta(payload) {
   };
   if (!payload || typeof payload !== 'object' || !Object.prototype.hasOwnProperty.call(payload, 'ok')) return unwrapResponse(payload);
   if (!payload.ok) {
-    const message = payload.error && payload.error.message ? payload.error.message : '请求失败';
+    const message = payload.error && payload.error.message ? payload.error.message : t('request_failed');
     throw new Error(message);
   }
   let result = payload.result;
