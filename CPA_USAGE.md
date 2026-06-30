@@ -30,6 +30,46 @@ CPA（CLIProxyAPI）通常以 Docker 方式运行，镜像为 `eceasy/cli-proxy-
 └── logs/                 # 日志目录
 ```
 
+### macOS 二进制部署（本机直跑，非 Docker）
+
+如果你的 CPA 是直接下载二进制文件在 macOS 上运行（不通过 Docker），目录结构通常如下：
+
+```
+~/Downloads/edit/CLIProxyAPI/
+├── cli-proxy-api         # CPA 可执行文件
+├── config.yaml           # CPA 主配置
+├── plugins/              # 插件目录（需手动创建）
+├── data/                 # 数据目录（持久化，需手动创建）
+├── auths/                # 认证目录
+└── ...
+```
+
+部署步骤：
+
+```bash
+# 1. 创建目录
+mkdir -p ~/Downloads/edit/CLIProxyAPI/plugins
+mkdir -p ~/Downloads/edit/CLIProxyAPI/data
+
+# 2. 下载 macOS arm64 插件（Apple Silicon）
+# 从 GitHub Releases 或 Actions artifact 获取 usage-statistics-darwin-arm64.dylib
+# GitHub Actions 下载示例：
+gh run download <run-id> -D /tmp/cpa-plugin-artifact
+cp /tmp/cpa-plugin-artifact/usage-statistics-plugin-darwin-arm64/usage-statistics-darwin-arm64.dylib \
+   ~/Downloads/edit/CLIProxyAPI/plugins/usage-statistics.dylib
+chmod 755 ~/Downloads/edit/CLIProxyAPI/plugins/usage-statistics.dylib
+
+# 如果是 Intel Mac，使用 usage-statistics-darwin-amd64.dylib
+
+# 3. 在 config.yaml 中启用插件（见第 3 节配置说明）
+
+# 4. 启动 CPA
+cd ~/Downloads/edit/CLIProxyAPI
+./cli-proxy-api
+```
+
+> **注意**：macOS 上插件文件扩展名必须是 `.dylib`，不能用 `.so`。配置中 `dir: plugins` 指向放置 `.dylib` 的目录即可。
+
 ### Docker Compose 部署（推荐）
 
 在 `docker-compose.yml` 中通过 `volumes` 将宿主插件目录挂载到容器：
@@ -80,11 +120,23 @@ docker restart cli-proxy-api
 
 ### 直接部署（非 Docker）
 
-如果 CPA 直接运行在宿主机上，将 `usage-statistics.so` 放到 CPA 工作目录下的 `plugins` 子目录：
+如果 CPA 直接运行在宿主机上（Linux/macOS/Windows），将对应架构的插件文件放到 CPA 工作目录下的 `plugins` 子目录：
 
 ```bash
+# Linux
 cp usage-statistics-linux-amd64.so /path/to/CLIProxyAPI/plugins/usage-statistics.so
 chmod 755 /path/to/CLIProxyAPI/plugins/usage-statistics.so
+
+# macOS (Apple Silicon)
+cp usage-statistics-darwin-arm64.dylib /path/to/CLIProxyAPI/plugins/usage-statistics.dylib
+chmod 755 /path/to/CLIProxyAPI/plugins/usage-statistics.dylib
+
+# macOS (Intel)
+cp usage-statistics-darwin-amd64.dylib /path/to/CLIProxyAPI/plugins/usage-statistics.dylib
+chmod 755 /path/to/CLIProxyAPI/plugins/usage-statistics.dylib
+
+# Windows
+copy usage-statistics-windows-amd64.dll C:\path\to\CLIProxyAPI\plugins\usage-statistics.dll
 ```
 
 ## 3. 启用插件
@@ -137,6 +189,11 @@ plugins:
 ```bash
 # Docker 方式
 docker restart cli-proxy-api
+
+# 直接二进制部署方式（macOS/Linux）
+# Ctrl+C 停止当前进程后重新启动：
+cd /path/to/CLIProxyAPI
+./cli-proxy-api
 ```
 
 启动后查看日志确认插件加载成功：
