@@ -2,6 +2,17 @@
 
 本文件用于维护每个 GitHub Release 的人工说明。发布 tag 前必须把 `Unreleased` 中本次要发布的内容整理到对应版本小节，例如 `## v1.2.19 - 2026-07-01`。
 
+## v2.2.1 - 2026-06-30
+
+### 新增功能
+- 仪表盘面板自动跟随 CPA 日间/夜间主题切换
+- CSS 颜色全面重构为自定义属性（`—cpa-bg-*`, `—cpa-text-*`, `—cpa-border-*` 等），支持三层主题覆盖
+
+### 问题修复
+- 修复插件运行在 iframe 中无法检测 CPA 管理面板主题的问题：通过 `window.parent.document` 跨 iframe 读取 `data-theme`，并以 `localStorage(cli-proxy-theme)` + OS `prefers-color-scheme` 作为回退策略
+- 修复 `MutationObserver` 监听父窗口 `data-theme` 属性变化，CPA 切换主题时实时跟随
+- 修复 `storage` 事件监听跨窗口主题变更
+
 ## v2.2.0 - 2026-06-30
 
 ### 插件商店集成
