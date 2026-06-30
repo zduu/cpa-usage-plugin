@@ -1,0 +1,15 @@
+{
+    "schema_version": 1,
+    "plugins": [
+        {
+            "id": "usage-statistics",
+            "name": "用量统计",
+            "description": "CPA 用量统计插件，记录请求用量、Token 消耗、延迟等统计信息，提供可视化管理面板。",
+            "author": "zduu",
+            "repository": "https://github.com/zduu/cpa-usage-plugin",
+            "homepage": "https://github.com/zduu/cpa-usage-plugin",
+            "license": "MIT",
+            "tags": ["Usage", "Statistics", "Dashboard", "Management"]
+        }
+    ]
+}
