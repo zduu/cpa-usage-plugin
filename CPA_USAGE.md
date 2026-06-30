@@ -35,7 +35,7 @@ CPA（CLIProxyAPI）通常以 Docker 方式运行，镜像为 `eceasy/cli-proxy-
 如果你的 CPA 是直接下载二进制文件在 macOS 上运行（不通过 Docker），目录结构通常如下：
 
 ```
-~/Downloads/edit/CLIProxyAPI/
+CLIProxyAPI/
 ├── cli-proxy-api         # CPA 可执行文件
 ├── config.yaml           # CPA 主配置
 ├── plugins/              # 插件目录（需手动创建）
@@ -48,23 +48,20 @@ CPA（CLIProxyAPI）通常以 Docker 方式运行，镜像为 `eceasy/cli-proxy-
 
 ```bash
 # 1. 创建目录
-mkdir -p ~/Downloads/edit/CLIProxyAPI/plugins
-mkdir -p ~/Downloads/edit/CLIProxyAPI/data
+mkdir -p CLIProxyAPI/plugins
+mkdir -p CLIProxyAPI/data
 
 # 2. 下载 macOS arm64 插件（Apple Silicon）
 # 从 GitHub Releases 或 Actions artifact 获取 usage-statistics-darwin-arm64.dylib
-# GitHub Actions 下载示例：
-gh run download <run-id> -D /tmp/cpa-plugin-artifact
-cp /tmp/cpa-plugin-artifact/usage-statistics-plugin-darwin-arm64/usage-statistics-darwin-arm64.dylib \
-   ~/Downloads/edit/CLIProxyAPI/plugins/usage-statistics.dylib
-chmod 755 ~/Downloads/edit/CLIProxyAPI/plugins/usage-statistics.dylib
+cp usage-statistics-darwin-arm64.dylib CLIProxyAPI/plugins/usage-statistics.dylib
+chmod 755 CLIProxyAPI/plugins/usage-statistics.dylib
 
 # 如果是 Intel Mac，使用 usage-statistics-darwin-amd64.dylib
 
 # 3. 在 config.yaml 中启用插件（见第 3 节配置说明）
 
 # 4. 启动 CPA
-cd ~/Downloads/edit/CLIProxyAPI
+cd CLIProxyAPI
 ./cli-proxy-api
 ```
 
@@ -124,19 +121,19 @@ docker restart cli-proxy-api
 
 ```bash
 # Linux
-cp usage-statistics-linux-amd64.so /path/to/CLIProxyAPI/plugins/usage-statistics.so
-chmod 755 /path/to/CLIProxyAPI/plugins/usage-statistics.so
+cp usage-statistics-linux-amd64.so CLIProxyAPI/plugins/usage-statistics.so
+chmod 755 CLIProxyAPI/plugins/usage-statistics.so
 
 # macOS (Apple Silicon)
-cp usage-statistics-darwin-arm64.dylib /path/to/CLIProxyAPI/plugins/usage-statistics.dylib
-chmod 755 /path/to/CLIProxyAPI/plugins/usage-statistics.dylib
+cp usage-statistics-darwin-arm64.dylib CLIProxyAPI/plugins/usage-statistics.dylib
+chmod 755 CLIProxyAPI/plugins/usage-statistics.dylib
 
 # macOS (Intel)
-cp usage-statistics-darwin-amd64.dylib /path/to/CLIProxyAPI/plugins/usage-statistics.dylib
-chmod 755 /path/to/CLIProxyAPI/plugins/usage-statistics.dylib
+cp usage-statistics-darwin-amd64.dylib CLIProxyAPI/plugins/usage-statistics.dylib
+chmod 755 CLIProxyAPI/plugins/usage-statistics.dylib
 
 # Windows
-copy usage-statistics-windows-amd64.dll C:\path\to\CLIProxyAPI\plugins\usage-statistics.dll
+copy usage-statistics-windows-amd64.dll CLIProxyAPI\plugins\usage-statistics.dll
 ```
 
 ## 3. 启用插件
@@ -192,7 +189,7 @@ docker restart cli-proxy-api
 
 # 直接二进制部署方式（macOS/Linux）
 # Ctrl+C 停止当前进程后重新启动：
-cd /path/to/CLIProxyAPI
+cd CLIProxyAPI
 ./cli-proxy-api
 ```
 
