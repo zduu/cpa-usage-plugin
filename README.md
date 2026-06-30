@@ -4,6 +4,8 @@ CPA 用量统计插件，用于在 CLIProxyAPI/CPA v7 插件系统中记录请�
 
 当前代码版本：`2.2.1`。
 
+`v1.0.0` 到 `v1.2.18` 属于规范化发布流程建立前的 legacy 历史版本；tag、release 和资产下载地址保持不变，说明见 [docs/releases/v1-history.md](docs/releases/v1-history.md)。
+
 ## 功能
 
 - 记录请求数、成功/失败、延迟、TTFT。
@@ -48,6 +50,8 @@ CPA 用量统计插件，用于在 CLIProxyAPI/CPA v7 插件系统中记录请�
 4. Release 中会上传按平台命名的资产，例如 `usage-statistics-linux-amd64.so`、`usage-statistics-darwin-arm64.dylib`、`usage-statistics-windows-amd64.dll`，并保留 `usage-statistics.so` 作为 `linux-amd64` 兼容别名。
 5. CI 同时生成插件商店兼容的 zip 资产（`usage-statistics_{version}_{goos}_{goarch}.zip`）和 `checksums.txt`，可直接用于 CPA 插件商店一键安装。
 
+自 `v2.0.0` 起，发布说明以 [docs/releases/changelog.md](docs/releases/changelog.md) 为准，并由 workflow 在打 `vX.Y.Z` tag 时校验版本号并生成 GitHub Release。
+
 本地构建（需要 Go 1.26+ 和 CGO）：
 
 ```bash
@@ -76,11 +80,14 @@ node --test go/dashboard/*.test.js
 cpa-usage-plugin/
 ├── .github/workflows/build.yml
 ├── registry.json           # 插件商店注册表
-├── CHANGELOG.md
-├── CPA_USAGE.md
 ├── README.md
 ├── docs/
-│   ├── optimization-recommendations.md
+│   ├── README.md
+│   ├── guides/
+│   │   └── cpa-usage.md
+│   ├── releases/
+│   │   ├── changelog.md
+│   │   └── v1-history.md
 │   └── images/
 │       └── readme/
 │           ├── plugin-management.png
@@ -156,4 +163,4 @@ GET  /v0/management/plugins/usage-statistics/health
 
 ## 使用说明
 
-安装和启用步骤见 [CPA_USAGE.md](CPA_USAGE.md)。
+安装和启用步骤见 [docs/guides/cpa-usage.md](docs/guides/cpa-usage.md)。

@@ -2,7 +2,9 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 
-// Load helpers in a way that simulates browser globals
+// Load i18n map first so t() polyfill in helpers.js can resolve keys
+const i18n = require('./i18n.js');
+global.I18N_MAP = i18n.I18N_MAP;
 global.fmt = new Intl.NumberFormat('zh-CN');
 const helpers = require('./helpers.js');
 
@@ -31,8 +33,9 @@ test('pct formats percentage', () => {
 test('formatMs formats milliseconds', () => {
   assert.strictEqual(helpers.formatMs(500), '500ms');
   assert.strictEqual(helpers.formatMs(113.25), '113.25ms');
-  assert.strictEqual(helpers.formatMs(1500), '1s500ms');
-  assert.strictEqual(helpers.formatMs(1500.5), '1s500.5ms');
+  assert.strictEqual(helpers.formatMs(1000), '1.00s');
+  assert.strictEqual(helpers.formatMs(1500), '1.50s');
+  assert.strictEqual(helpers.formatMs(1500.5), '1.50s');
   assert.strictEqual(helpers.formatMs(0), '-');
   assert.strictEqual(helpers.formatMs(-1), '-');
 });

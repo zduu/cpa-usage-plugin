@@ -21,6 +21,9 @@ var dashboardPageHTML string
 //go:embed dashboard/style.css
 var dashboardPageCSS string
 
+//go:embed dashboard/i18n.js
+var dashboardI18nJS string
+
 //go:embed dashboard/helpers.js
 var dashboardHelpersJS string
 
@@ -47,7 +50,7 @@ func init() {
 	h := strings.Replace(dashboardPageHTML, "</head>",
 		"<style>\n"+dashboardPageCSS+"\n</style></head>", 1)
 	h = strings.Replace(h, "</body>",
-		"<script>\n"+dashboardHelpersJS+"\n"+dashboardPageJS+"\n</script></body>", 1)
+		"<script>\n"+dashboardI18nJS+"\n"+dashboardHelpersJS+"\n"+dashboardPageJS+"\n</script></body>", 1)
 	completeDashboardHTML = h
 }
 

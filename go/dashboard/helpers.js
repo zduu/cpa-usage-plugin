@@ -1,4 +1,18 @@
 // Pure helper functions - usable in tests without DOM.
+// i18n polyfill: always provide t() so helpers remain callable.
+// In browser, i18n.js defines I18N_MAP and t() — polyfill is skipped.
+// In test, I18N_MAP must be pre-defined; otherwise t() returns the key as-is.
+if (typeof t !== 'function') {
+  var t = function(key) {
+    var args = arguments;
+    if (typeof I18N_MAP !== 'undefined' && I18N_MAP['zh-CN'] && I18N_MAP['zh-CN'][key]) {
+      return I18N_MAP['zh-CN'][key].replace(/\{(\d+)\}/g, function(m, i) {
+        var v = args[+i+1]; return v != null ? String(v) : m;
+      });
+    }
+    return key;
+  };
+}
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 const num = (value) => Number.isFinite(Number(value)) ? Number(value) : 0;
 function compact(value) { const n = num(value), abs = Math.abs(n); const trim = (v) => v.toFixed(1).replace(/\.0$/, ''); if (abs >= 1e6) return trim(n / 1e6) + 'M'; if (abs >= 1e3) return trim(n / 1e3) + 'k'; return fmt.format(n) }
@@ -7,10 +21,7 @@ const trimFixed = (value, digits) => Number(value).toFixed(digits).replace(/\.0+
 const formatMs = (value) => {
   if (!(Number.isFinite(value) && value > 0)) return '-';
   if (value < 1000) return trimFixed(value, 2) + 'ms';
-  const seconds = Math.floor(value / 1000);
-  const milliseconds = value - seconds * 1000;
-  if (milliseconds < 0.005) return seconds + 's';
-  return seconds + 's' + trimFixed(milliseconds, 2) + 'ms';
+  return (value / 1000).toFixed(2) + 's';
 };
 const money2 = new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const money6 = new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 6 });
@@ -42,9 +53,9 @@ function trimCredentialSuffix(value) {
   if (colon.length >= 3 && looksLikeCredentialId(colon[colon.length - 1])) return colon.slice(0, -1).join(':');
   return s;
 }
-function sourceLabel(detail) { const s = trimCredentialSuffix(detail.source); if (s && !looksLikeKey(s)) return s; const p = trimCredentialSuffix(detail.provider); if (p && !looksLikeKey(p)) return p; return '未知来源' }
+function sourceLabel(detail) { const s = trimCredentialSuffix(detail.source); if (s && !looksLikeKey(s)) return s; const p = trimCredentialSuffix(detail.provider); if (p && !looksLikeKey(p)) return p; return t('unknown_source') }
 function sourceKey(detail) { return sourceLabel(detail) }
-function friendlyApiName(apiName) { const clean = trimCredentialSuffix(apiName); if (!clean) return '未知接口'; const parts = clean.split(' · ').filter(function (p) { return !looksLikeKey(p) && !isCredentialMarker(p) && !isCredentialLabel(p) && !looksLikeCredentialId(p) }); return parts.length ? parts.join(' · ') : clean }
+function friendlyApiName(apiName) { const clean = trimCredentialSuffix(apiName); if (!clean) return t('unknown_interface'); const parts = clean.split(' · ').filter(function (p) { return !looksLikeKey(p) && !isCredentialMarker(p) && !isCredentialLabel(p) && !looksLikeCredentialId(p) }); return parts.length ? parts.join(' · ') : clean }
 function clientApiLabel(detail) { const label = String((detail && detail.api_key) || '').trim(); return label || '未知 API' }
 function clientApiGroupKey(detail) {
   const label = String((detail && detail.api_key) || '').trim();

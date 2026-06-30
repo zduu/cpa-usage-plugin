@@ -255,7 +255,7 @@ jobs:
           cat checksums.txt
 
       - name: Prepare release notes
-        run: sh scripts/extract-release-notes.sh "$GITHUB_REF_NAME" CHANGELOG.md dist/release-notes.md
+        run: sh scripts/extract-release-notes.sh "$GITHUB_REF_NAME" docs/releases/changelog.md dist/release-notes.md
 
       - name: Create Release
         uses: softprops/action-gh-release@v3
