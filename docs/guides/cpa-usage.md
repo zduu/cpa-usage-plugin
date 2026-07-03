@@ -31,8 +31,8 @@ plugins:
     usage-statistics:
       enabled: true
       store:
-        version: "2.2.4"
-        release-tag: "v2.2.4"
+        version: "2.2.5"
+        release-tag: "v2.2.5"
         repository: "https://github.com/zduu/cpa-usage-plugin"
       # 其他配置项见第 3 节 ...
 ```
@@ -181,8 +181,8 @@ plugins:
     usage-statistics:
       enabled: true
       store:
-        version: "2.2.4"
-        release-tag: "v2.2.4"
+        version: "2.2.5"
+        release-tag: "v2.2.5"
         repository: "https://github.com/zduu/cpa-usage-plugin"
       # 每个上游接口/模型最多保留的请求明细条数。默认 5000。
       max_details_per_model: 5000
@@ -220,7 +220,7 @@ plugins:
       models_dev_prices_refresh_interval_seconds: 43200
       # 可选：允许外部脚本更新插件文件。默认 false。
       update_enabled: false
-      # 可选：latest 或指定版本号，例如 v2.2.4。
+      # 可选：latest 或指定版本号，例如 v2.2.5。
       update_version: latest
 ```
 
@@ -239,8 +239,8 @@ cd CLIProxyAPI
 启动后查看日志确认插件加载成功：
 
 ```text
-pluginhost: plugin loaded plugin_id=usage-statistics version=2.2.4 path=plugins/usage-statistics-v2.2.4.so
-pluginhost: plugin registered plugin_id=usage-statistics plugin_name=用量统计 version=2.2.4 path=plugins/usage-statistics-v2.2.4.so
+pluginhost: plugin loaded plugin_id=usage-statistics version=2.2.5 path=plugins/usage-statistics-v2.2.5.so
+pluginhost: plugin registered plugin_id=usage-statistics plugin_name=用量统计 version=2.2.5 path=plugins/usage-statistics-v2.2.5.so
 ```
 
 > `store-sources` 引入插件商店注册表，管理面板可浏览安装。`store` 块标记当前期望版本，pluginhost 会匹配 `usage-statistics-v{版本号}.{ext}` 文件名，并自动清理旧版本文件。
@@ -448,7 +448,7 @@ plugins:
     usage-statistics:
       enabled: true
       update_enabled: true
-      update_version: latest   # 或 v2.2.4
+      update_version: latest   # 或 v2.2.5
 ```
 
 执行脚本：
