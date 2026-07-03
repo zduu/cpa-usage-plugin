@@ -71,6 +71,51 @@ test('detailCost computes cost', () => {
   assert.ok(Math.abs(cost - 57) < 0.01, 'cost should be ~57, got ' + cost);
 });
 
+test('detailCost matches model prices case-insensitively', () => {
+  const prices = { 'gpt-5.5': { prompt: 1, completion: 2, cache: 0.5 } };
+  const detail = {
+    model: 'GPT-5.5',
+    tokens: { input_tokens: 1000000, output_tokens: 1000000, cached_tokens: 100000 }
+  };
+  const cost = helpers.detailCost(detail, prices);
+  assert.ok(Math.abs(cost - 2.95) < 0.01, 'cost should be ~2.95, got ' + cost);
+});
+
+test('detailCost uses provider-specific prices with manual override first', () => {
+  const prices = {
+    'gpt-5.5': { prompt: 1, completion: 2, cache: 0.5 },
+    'openai/gpt-5.5': { prompt: 1, completion: 2, cache: 0.5 },
+    'openrouter/openai/gpt-5.5': { prompt: 9, completion: 99, cache: 0.9 },
+  };
+  const detail = {
+    provider: 'OpenRouter',
+    model: 'openai/gpt-5.5',
+    tokens: { input_tokens: 1000000, output_tokens: 1000000, cached_tokens: 100000 }
+  };
+  const providerCost = helpers.detailCost(detail, prices);
+  assert.ok(Math.abs(providerCost - 107.19) < 0.01, 'cost should use openrouter pricing, got ' + providerCost);
+
+  const manual = { 'OPENAI/GPT-5.5': { prompt: 3, completion: 4, cache: 1 } };
+  const manualCost = helpers.detailCost(detail, prices, manual);
+  assert.ok(Math.abs(manualCost - 6.8) < 0.01, 'cost should use manual pricing, got ' + manualCost);
+});
+
+test('aggregateCost splits mixed-provider model totals by provider', () => {
+  const prices = {
+    'openai/gpt-5.5': { prompt: 1, completion: 2, cache: 0.5 },
+    'openrouter/openai/gpt-5.5': { prompt: 9, completion: 99, cache: 0.9 },
+  };
+  const row = {
+    model: 'openai/gpt-5.5',
+    providers: [
+      { provider: 'openai', input_tokens: 1000000, output_tokens: 1000000, cached_tokens: 100000 },
+      { provider: 'openrouter', input_tokens: 1000000, output_tokens: 1000000, cached_tokens: 100000 },
+    ]
+  };
+  const cost = helpers.aggregateCost(row, prices);
+  assert.ok(Math.abs(cost - 110.14) < 0.01, 'cost should split provider pricing, got ' + cost);
+});
+
 test('detailCost returns 0 for unknown model', () => {
   const detail = { model: 'unknown', tokens: { total_tokens: 1000 } };
   assert.strictEqual(helpers.detailCost(detail, {}), 0);

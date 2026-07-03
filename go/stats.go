@@ -3,13 +3,16 @@ package main
 import (
 	"bufio"
 	"container/heap"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -107,6 +110,17 @@ type RequestStatistics struct {
 	priceStorageLastError  string
 	modelPrices            map[string]ModelPrice
 	modelPricesUpdatedAt   time.Time
+	modelsDevPricesEnabled bool
+	modelsDevPricesURL     string
+	modelsDevRefresh       time.Duration
+	modelsDevPrices        map[string]ModelPrice
+	modelsDevUpdatedAt     time.Time
+	modelsDevLastAttempt   time.Time
+	modelsDevLastSuccess   time.Time
+	modelsDevLastError     string
+	modelsDevETag          string
+	modelsDevStop          chan struct{}
+	modelsDevDone          chan struct{}
 
 	lastImportResult *ImportResponse
 	evictedTotal     int64
@@ -180,6 +194,7 @@ type modelStats struct {
 	latencySum      int64
 	latencyN        int64
 	Details         []RequestDetail
+	providerStats   map[string]*ModelProviderStat
 }
 
 type detailTotals struct {
@@ -190,6 +205,114 @@ type detailTotals struct {
 	reasoningTokens int64
 	latencySum      int64
 	latencyN        int64
+}
+
+func modelProviderStatsKey(provider string) string {
+	return strings.ToLower(strings.TrimSpace(provider))
+}
+
+func incrementModelProviderStats(stats map[string]*ModelProviderStat, provider string, failed bool, totals detailTotals) map[string]*ModelProviderStat {
+	if stats == nil {
+		stats = make(map[string]*ModelProviderStat)
+	}
+	key := modelProviderStatsKey(provider)
+	stat, ok := stats[key]
+	if !ok {
+		stat = &ModelProviderStat{Provider: strings.TrimSpace(provider)}
+		stats[key] = stat
+	}
+	stat.TotalRequests++
+	if failed {
+		stat.FailureCount++
+	} else {
+		stat.SuccessCount++
+	}
+	stat.TotalTokens += totals.totalTokens
+	stat.InputTokens += totals.inputTokens
+	stat.OutputTokens += totals.outputTokens
+	stat.CachedTokens += totals.cachedTokens
+	stat.ReasoningTokens += totals.reasoningTokens
+	return stats
+}
+
+func decrementModelProviderStats(stats map[string]*ModelProviderStat, provider string, failed bool, totals detailTotals) {
+	if stats == nil {
+		return
+	}
+	key := modelProviderStatsKey(provider)
+	stat, ok := stats[key]
+	if !ok {
+		return
+	}
+	stat.TotalRequests--
+	if failed {
+		stat.FailureCount--
+	} else {
+		stat.SuccessCount--
+	}
+	stat.TotalTokens -= totals.totalTokens
+	stat.InputTokens -= totals.inputTokens
+	stat.OutputTokens -= totals.outputTokens
+	stat.CachedTokens -= totals.cachedTokens
+	stat.ReasoningTokens -= totals.reasoningTokens
+	if stat.TotalRequests <= 0 {
+		delete(stats, key)
+	}
+}
+
+func finalizedModelProviderStats(stats map[string]*ModelProviderStat, totalRequests, successCount, failureCount, totalTokens, inputTokens, outputTokens, cachedTokens, reasoningTokens int64) []ModelProviderStat {
+	providers := make([]ModelProviderStat, 0, len(stats)+1)
+	var providerRequests, providerSuccess, providerFailure, providerTotal, providerInput, providerOutput, providerCached, providerReasoning int64
+	for _, stat := range stats {
+		if stat != nil && stat.TotalRequests > 0 {
+			providers = append(providers, *stat)
+			providerRequests += stat.TotalRequests
+			providerSuccess += stat.SuccessCount
+			providerFailure += stat.FailureCount
+			providerTotal += stat.TotalTokens
+			providerInput += stat.InputTokens
+			providerOutput += stat.OutputTokens
+			providerCached += stat.CachedTokens
+			providerReasoning += stat.ReasoningTokens
+		}
+	}
+	remainder := ModelProviderStat{
+		TotalRequests:   maxInt64(totalRequests-providerRequests, 0),
+		SuccessCount:    maxInt64(successCount-providerSuccess, 0),
+		FailureCount:    maxInt64(failureCount-providerFailure, 0),
+		TotalTokens:     maxInt64(totalTokens-providerTotal, 0),
+		InputTokens:     maxInt64(inputTokens-providerInput, 0),
+		OutputTokens:    maxInt64(outputTokens-providerOutput, 0),
+		CachedTokens:    maxInt64(cachedTokens-providerCached, 0),
+		ReasoningTokens: maxInt64(reasoningTokens-providerReasoning, 0),
+	}
+	if remainder.TotalRequests > 0 || remainder.TotalTokens > 0 || remainder.InputTokens > 0 || remainder.OutputTokens > 0 || remainder.CachedTokens > 0 || remainder.ReasoningTokens > 0 {
+		providers = append(providers, remainder)
+	}
+	sort.SliceStable(providers, func(i, j int) bool {
+		if providers[i].TotalRequests != providers[j].TotalRequests {
+			return providers[i].TotalRequests > providers[j].TotalRequests
+		}
+		return providers[i].Provider < providers[j].Provider
+	})
+	return providers
+}
+
+func finalizeModelStat(stat ModelStat) ModelStat {
+	if stat.latencyN > 0 {
+		stat.AvgLatencyMs = float64(stat.latencySum) / float64(stat.latencyN)
+	}
+	stat.Providers = finalizedModelProviderStats(stat.providerStats, stat.TotalRequests, stat.SuccessCount, stat.FailureCount, stat.TotalTokens, stat.InputTokens, stat.OutputTokens, stat.CachedTokens, stat.ReasoningTokens)
+	stat.latencySum = 0
+	stat.latencyN = 0
+	stat.providerStats = nil
+	return stat
+}
+
+func finalizeClientAPIModelStat(stat ClientAPIModelStat) ClientAPIModelStat {
+	stat.Providers = finalizedModelProviderStats(stat.providerStats, stat.TotalRequests, stat.SuccessCount, stat.FailureCount, stat.TotalTokens, stat.InputTokens, stat.OutputTokens, stat.CachedTokens, stat.ReasoningTokens)
+	stat.providerStats = nil
+	return stat
 }
 
 type healthBucket struct {
@@ -282,6 +405,9 @@ func NewRequestStatistics() *RequestStatistics {
 		exportMaxRecords:              defaultExportMaxRecords,
 		priceStoragePath:              defaultRuntimeConfig().PriceStoragePath,
 		modelPrices:                   make(map[string]ModelPrice),
+		modelsDevPricesURL:            defaultRuntimeConfig().ModelsDevPricesURL,
+		modelsDevRefresh:              time.Duration(defaultRuntimeConfig().ModelsDevRefreshSeconds) * time.Second,
+		modelsDevPrices:               make(map[string]ModelPrice),
 		conditionalRequests:           make(map[string]conditionalRequestCounter),
 		startedAt:                     time.Now(),
 	}
@@ -303,6 +429,9 @@ func (s *RequestStatistics) Configure(cfg runtimeConfig) {
 		StorageSyncRecordInterval:     intPtr(cfg.StorageSyncRecordInterval),
 		ExportMaxRecords:              intPtr(cfg.ExportMaxRecords),
 		PriceStoragePath:              stringPtr(cfg.PriceStoragePath),
+		ModelsDevPricesEnabled:        boolPtr(cfg.ModelsDevPricesEnabled),
+		ModelsDevPricesURL:            stringPtr(cfg.ModelsDevPricesURL),
+		ModelsDevRefreshSeconds:       positiveIntPtr(cfg.ModelsDevRefreshSeconds),
 		UpdateEnabled:                 boolPtr(cfg.UpdateEnabled),
 		UpdateVersion:                 stringPtr(cfg.UpdateVersion),
 	})
@@ -321,6 +450,12 @@ func (s *RequestStatistics) ConfigurePatch(cfg runtimeConfigPatch) {
 		cfg.StorageSyncRecordInterval != nil
 	if storageConfigTouched {
 		s.stopStorageWorker()
+	}
+	modelsDevConfigTouched := cfg.ModelsDevPricesEnabled != nil ||
+		cfg.ModelsDevPricesURL != nil ||
+		cfg.ModelsDevRefreshSeconds != nil
+	if modelsDevConfigTouched {
+		s.stopModelsDevPriceWorker()
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -363,9 +498,29 @@ func (s *RequestStatistics) ConfigurePatch(cfg runtimeConfigPatch) {
 	if cfg.PriceStoragePath != nil && strings.TrimSpace(*cfg.PriceStoragePath) != "" {
 		s.priceStoragePath = strings.TrimSpace(*cfg.PriceStoragePath)
 	}
+	oldModelsDevEnabled := s.modelsDevPricesEnabled
+	oldModelsDevURL := s.modelsDevPricesURL
+	if cfg.ModelsDevPricesURL != nil && strings.TrimSpace(*cfg.ModelsDevPricesURL) != "" {
+		s.modelsDevPricesURL = strings.TrimSpace(*cfg.ModelsDevPricesURL)
+	}
+	if cfg.ModelsDevRefreshSeconds != nil && *cfg.ModelsDevRefreshSeconds > 0 {
+		s.modelsDevRefresh = time.Duration(*cfg.ModelsDevRefreshSeconds) * time.Second
+	}
+	if cfg.ModelsDevPricesEnabled != nil {
+		s.modelsDevPricesEnabled = *cfg.ModelsDevPricesEnabled
+	}
+	if oldModelsDevEnabled != s.modelsDevPricesEnabled || oldModelsDevURL != s.modelsDevPricesURL {
+		s.modelsDevPrices = make(map[string]ModelPrice)
+		s.modelsDevUpdatedAt = time.Time{}
+		s.modelsDevLastAttempt = time.Time{}
+		s.modelsDevLastSuccess = time.Time{}
+		s.modelsDevLastError = ""
+		s.modelsDevETag = ""
+	}
 	if cfg.StorageEnabled != nil {
 		s.storageEnabled = *cfg.StorageEnabled
 	}
+	s.configureModelsDevPriceWorkerLocked()
 	s.configureStorageLocked()
 	s.loadModelPricesLocked()
 	s.pruneLocked(time.Now(), true)
@@ -1237,6 +1392,7 @@ func (s *RequestStatistics) restoreStorageSnapshotLocked(snapshot StatisticsSnap
 				detailAggregates.latencySum += totals.latencySum
 				detailAggregates.latencyN += totals.latencyN
 				incrementAPISourceStats(apiSt, detail, totals)
+				modelSt.providerStats = incrementModelProviderStats(modelSt.providerStats, detail.Provider, detail.Failed, totals)
 				s.incrementSummaryDimensionStatsLocked(modelName, detail, totals)
 				s.incrementHealthBucketLocked(detail)
 				if detail.Timestamp.After(s.lastRecordedAt) {
@@ -1366,6 +1522,28 @@ func (s *RequestStatistics) mergeModelSummaryAggregateLocked(modelName string, m
 	stat.ReasoningTokens += modelSt.ReasoningTokens
 	stat.latencySum += modelSt.latencySum
 	stat.latencyN += modelSt.latencyN
+	for provider, providerStat := range modelSt.providerStats {
+		if providerStat == nil {
+			continue
+		}
+		if stat.providerStats == nil {
+			stat.providerStats = make(map[string]*ModelProviderStat)
+		}
+		existing, ok := stat.providerStats[provider]
+		if !ok {
+			copy := *providerStat
+			stat.providerStats[provider] = &copy
+			continue
+		}
+		existing.TotalRequests += providerStat.TotalRequests
+		existing.SuccessCount += providerStat.SuccessCount
+		existing.FailureCount += providerStat.FailureCount
+		existing.TotalTokens += providerStat.TotalTokens
+		existing.InputTokens += providerStat.InputTokens
+		existing.OutputTokens += providerStat.OutputTokens
+		existing.CachedTokens += providerStat.CachedTokens
+		existing.ReasoningTokens += providerStat.ReasoningTokens
+	}
 }
 
 func copyStringInt64Map(values map[string]int64) map[string]int64 {
@@ -1705,6 +1883,301 @@ func (s *RequestStatistics) closeStorageLocked() {
 	}
 }
 
+type modelsDevProviderPayload struct {
+	ID     string                           `json:"id"`
+	Name   string                           `json:"name"`
+	Models map[string]modelsDevModelPayload `json:"models"`
+}
+
+type modelsDevModelPayload struct {
+	ID          string                `json:"id"`
+	Name        string                `json:"name"`
+	LastUpdated string                `json:"last_updated"`
+	Cost        *modelsDevCostPayload `json:"cost"`
+}
+
+type modelsDevCostPayload struct {
+	Input     *float64 `json:"input"`
+	Output    *float64 `json:"output"`
+	CacheRead *float64 `json:"cache_read"`
+}
+
+func (s *RequestStatistics) configureModelsDevPriceWorkerLocked() {
+	if s == nil {
+		return
+	}
+	if !s.modelsDevPricesEnabled {
+		stop := s.modelsDevStop
+		done := s.modelsDevDone
+		s.modelsDevStop = nil
+		s.modelsDevDone = nil
+		s.modelsDevPrices = make(map[string]ModelPrice)
+		s.modelsDevUpdatedAt = time.Time{}
+		s.modelsDevLastAttempt = time.Time{}
+		s.modelsDevLastSuccess = time.Time{}
+		s.modelsDevLastError = ""
+		s.modelsDevETag = ""
+		if stop != nil {
+			close(stop)
+			go waitModelsDevPriceWorker(done)
+		}
+		return
+	}
+	if s.modelsDevRefresh <= 0 {
+		s.modelsDevRefresh = time.Duration(defaultModelsDevRefreshSeconds) * time.Second
+	}
+	if strings.TrimSpace(s.modelsDevPricesURL) == "" {
+		s.modelsDevPricesURL = defaultModelsDevPricesURL
+	}
+	if s.modelsDevStop != nil {
+		return
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	s.modelsDevStop = stop
+	s.modelsDevDone = done
+	go s.modelsDevPriceWorker(stop, done)
+}
+
+func waitModelsDevPriceWorker(done <-chan struct{}) {
+	if done != nil {
+		<-done
+	}
+}
+
+func (s *RequestStatistics) stopModelsDevPriceWorker() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	stop := s.modelsDevStop
+	done := s.modelsDevDone
+	s.modelsDevStop = nil
+	s.modelsDevDone = nil
+	s.mu.Unlock()
+	if stop != nil {
+		close(stop)
+	}
+	if done != nil {
+		<-done
+	}
+}
+
+func (s *RequestStatistics) modelsDevPriceWorker(stop <-chan struct{}, done chan<- struct{}) {
+	defer close(done)
+	s.refreshModelsDevPricesOnceWithStop(stop)
+	for {
+		s.mu.RLock()
+		interval := s.modelsDevRefresh
+		s.mu.RUnlock()
+		if interval <= 0 {
+			interval = time.Duration(defaultModelsDevRefreshSeconds) * time.Second
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-stop:
+			timer.Stop()
+			return
+		case <-timer.C:
+			s.refreshModelsDevPricesOnceWithStop(stop)
+		}
+	}
+}
+
+func (s *RequestStatistics) refreshModelsDevPricesOnce() {
+	s.refreshModelsDevPricesOnceWithStop(nil)
+}
+
+func (s *RequestStatistics) refreshModelsDevPricesOnceWithStop(stop <-chan struct{}) {
+	if s == nil {
+		return
+	}
+	s.mu.RLock()
+	enabled := s.modelsDevPricesEnabled
+	url := strings.TrimSpace(s.modelsDevPricesURL)
+	etag := s.modelsDevETag
+	s.mu.RUnlock()
+	if !enabled {
+		return
+	}
+	if url == "" {
+		url = defaultModelsDevPricesURL
+	}
+	attemptAt := time.Now().UTC()
+	ctx := context.Background()
+	var cancel context.CancelFunc
+	if stop != nil {
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		go func() {
+			select {
+			case <-stop:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		s.recordModelsDevPriceFetchError(attemptAt, err)
+		return
+	}
+	if etag != "" {
+		req.Header.Set("If-None-Match", etag)
+	}
+	resp, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
+	if err != nil {
+		s.recordModelsDevPriceFetchError(attemptAt, err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotModified {
+		s.mu.Lock()
+		s.modelsDevLastAttempt = attemptAt
+		s.modelsDevLastSuccess = attemptAt
+		s.modelsDevLastError = ""
+		s.mu.Unlock()
+		return
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		s.recordModelsDevPriceFetchError(attemptAt, fmt.Errorf("models.dev returned HTTP %d", resp.StatusCode))
+		return
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 20<<20))
+	if err != nil {
+		s.recordModelsDevPriceFetchError(attemptAt, err)
+		return
+	}
+	prices, updatedAt, err := parseModelsDevPrices(raw)
+	if err != nil {
+		s.recordModelsDevPriceFetchError(attemptAt, err)
+		return
+	}
+	s.mu.Lock()
+	if !s.modelsDevPricesEnabled || strings.TrimSpace(s.modelsDevPricesURL) != url {
+		s.mu.Unlock()
+		return
+	}
+	s.modelsDevPrices = prices
+	s.modelsDevUpdatedAt = updatedAt
+	s.modelsDevLastAttempt = attemptAt
+	s.modelsDevLastSuccess = attemptAt
+	s.modelsDevLastError = ""
+	s.modelsDevETag = resp.Header.Get("ETag")
+	s.mu.Unlock()
+}
+
+func (s *RequestStatistics) recordModelsDevPriceFetchError(attemptAt time.Time, err error) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.modelsDevLastAttempt = attemptAt
+	if err != nil {
+		s.modelsDevLastError = err.Error()
+	}
+}
+
+func parseModelsDevPrices(raw []byte) (map[string]ModelPrice, time.Time, error) {
+	var root map[string]modelsDevProviderPayload
+	if err := json.Unmarshal(raw, &root); err != nil {
+		return nil, time.Time{}, err
+	}
+	prices := make(map[string]ModelPrice)
+	seen := make(map[string]struct{})
+	var updatedAt time.Time
+	for _, providerID := range modelsDevProviderOrder(root) {
+		provider := root[providerID]
+		modelKeys := make([]string, 0, len(provider.Models))
+		for modelKey := range provider.Models {
+			modelKeys = append(modelKeys, modelKey)
+		}
+		sort.Strings(modelKeys)
+		for _, modelKey := range modelKeys {
+			model := provider.Models[modelKey]
+			price, ok := modelPriceFromModelsDevCost(model.Cost)
+			if !ok {
+				continue
+			}
+			for _, key := range modelsDevPriceKeys(providerID, modelKey, model.ID) {
+				norm := normalizeModelPriceKey(key)
+				if norm == "" {
+					continue
+				}
+				if _, exists := seen[norm]; exists {
+					continue
+				}
+				prices[key] = price
+				seen[norm] = struct{}{}
+			}
+			if t := parseModelsDevDate(model.LastUpdated); t.After(updatedAt) {
+				updatedAt = t
+			}
+		}
+	}
+	return prices, updatedAt, nil
+}
+
+func modelsDevProviderOrder(providers map[string]modelsDevProviderPayload) []string {
+	priority := []string{"openai", "anthropic", "google", "google-vertex", "xai", "deepseek", "alibaba", "moonshotai", "mistral", "cohere", "perplexity", "groq", "cerebras", "openrouter"}
+	seen := make(map[string]struct{}, len(providers))
+	ordered := make([]string, 0, len(providers))
+	for _, provider := range priority {
+		if _, ok := providers[provider]; ok {
+			ordered = append(ordered, provider)
+			seen[provider] = struct{}{}
+		}
+	}
+	rest := make([]string, 0, len(providers))
+	for provider := range providers {
+		if _, ok := seen[provider]; !ok {
+			rest = append(rest, provider)
+		}
+	}
+	sort.Strings(rest)
+	return append(ordered, rest...)
+}
+
+func modelPriceFromModelsDevCost(cost *modelsDevCostPayload) (ModelPrice, bool) {
+	if cost == nil || cost.Input == nil || cost.Output == nil {
+		return ModelPrice{}, false
+	}
+	cache := *cost.Input
+	if cost.CacheRead != nil {
+		cache = *cost.CacheRead
+	}
+	price := ModelPrice{Prompt: *cost.Input, Completion: *cost.Output, Cache: cache}
+	return price, validModelPrice(price)
+}
+
+func modelsDevPriceKeys(providerID, modelKey, modelID string) []string {
+	keys := []string{}
+	for _, key := range []string{modelKey, modelID} {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		keys = append(keys, key)
+		providerID = strings.TrimSpace(providerID)
+		if providerID != "" {
+			keys = append(keys, providerID+"/"+key)
+		}
+	}
+	return keys
+}
+
+func parseModelsDevDate(value string) time.Time {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}
+	}
+	if t, err := time.Parse("2006-01-02", value); err == nil {
+		return t
+	}
+	return parseRFC3339OrZero(value)
+}
+
 func (s *RequestStatistics) loadModelPricesLocked() {
 	if s == nil {
 		return
@@ -1748,7 +2221,7 @@ func (s *RequestStatistics) loadModelPricesLocked() {
 		if name == "" || !validModelPrice(price) {
 			continue
 		}
-		prices[name] = price
+		setModelPriceCaseInsensitive(prices, name, price)
 	}
 	s.priceStoragePath = path
 	s.priceStorageLoadedPath = abs
@@ -1828,6 +2301,39 @@ func copyModelPrices(source map[string]ModelPrice) map[string]ModelPrice {
 	return copy
 }
 
+func normalizeModelPriceKey(model string) string {
+	return strings.ToLower(strings.TrimSpace(model))
+}
+
+func setModelPriceCaseInsensitive(prices map[string]ModelPrice, model string, price ModelPrice) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return
+	}
+	deleteModelPriceCaseInsensitive(prices, model)
+	prices[model] = price
+}
+
+func deleteModelPriceCaseInsensitive(prices map[string]ModelPrice, model string) {
+	norm := normalizeModelPriceKey(model)
+	if norm == "" {
+		return
+	}
+	for existing := range prices {
+		if normalizeModelPriceKey(existing) == norm {
+			delete(prices, existing)
+		}
+	}
+}
+
+func effectiveModelPrices(modelsDevPrices, manualPrices map[string]ModelPrice) map[string]ModelPrice {
+	result := copyModelPrices(modelsDevPrices)
+	for model, price := range manualPrices {
+		setModelPriceCaseInsensitive(result, model, price)
+	}
+	return result
+}
+
 func (s *RequestStatistics) ModelPrices() ModelPricesResponse {
 	if s == nil {
 		return ModelPricesResponse{Prices: map[string]ModelPrice{}}
@@ -1836,6 +2342,27 @@ func (s *RequestStatistics) ModelPrices() ModelPricesResponse {
 	defer s.mu.Unlock()
 	s.loadModelPricesLocked()
 	return s.modelPricesResponseLocked()
+}
+
+func (s *RequestStatistics) modelsDevPriceStatusLocked() ModelsDevPriceStatus {
+	status := ModelsDevPriceStatus{
+		Enabled:        s.modelsDevPricesEnabled,
+		URL:            s.modelsDevPricesURL,
+		RefreshSeconds: int(s.modelsDevRefresh.Seconds()),
+		ETag:           s.modelsDevETag,
+		PriceCount:     len(s.modelsDevPrices),
+		LastError:      s.modelsDevLastError,
+	}
+	if !s.modelsDevLastAttempt.IsZero() {
+		status.LastAttemptAt = s.modelsDevLastAttempt.UTC().Format(time.RFC3339)
+	}
+	if !s.modelsDevLastSuccess.IsZero() {
+		status.LastSuccessAt = s.modelsDevLastSuccess.UTC().Format(time.RFC3339)
+	}
+	if !s.modelsDevUpdatedAt.IsZero() {
+		status.UpdatedAt = s.modelsDevUpdatedAt.UTC().Format(time.RFC3339)
+	}
+	return status
 }
 
 func (s *RequestStatistics) UpsertModelPrice(model string, price ModelPrice) (ModelPricesResponse, error) {
@@ -1855,7 +2382,7 @@ func (s *RequestStatistics) UpsertModelPrice(model string, price ModelPrice) (Mo
 	if s.modelPrices == nil {
 		s.modelPrices = make(map[string]ModelPrice)
 	}
-	s.modelPrices[model] = price
+	setModelPriceCaseInsensitive(s.modelPrices, model, price)
 	if err := s.saveModelPricesLocked(); err != nil {
 		return ModelPricesResponse{}, err
 	}
@@ -1876,7 +2403,7 @@ func (s *RequestStatistics) DeleteModelPrice(model string) (ModelPricesResponse,
 	if s.modelPrices == nil {
 		s.modelPrices = make(map[string]ModelPrice)
 	}
-	delete(s.modelPrices, model)
+	deleteModelPriceCaseInsensitive(s.modelPrices, model)
 	if err := s.saveModelPricesLocked(); err != nil {
 		return ModelPricesResponse{}, err
 	}
@@ -1885,12 +2412,14 @@ func (s *RequestStatistics) DeleteModelPrice(model string) (ModelPricesResponse,
 
 func (s *RequestStatistics) modelPricesResponseLocked() ModelPricesResponse {
 	response := ModelPricesResponse{
-		Prices: copyModelPrices(s.modelPrices),
+		Prices:       effectiveModelPrices(s.modelsDevPrices, s.modelPrices),
+		ManualPrices: copyModelPrices(s.modelPrices),
 		Storage: ModelPriceStorageStatus{
 			Path:       s.priceStoragePath,
 			LoadedPath: s.priceStorageLoadedPath,
 			LastError:  s.priceStorageLastError,
 		},
+		ModelsDev: s.modelsDevPriceStatusLocked(),
 	}
 	if !s.modelPricesUpdatedAt.IsZero() {
 		response.UpdatedAt = s.modelPricesUpdatedAt.UTC().Format(time.RFC3339)
@@ -1932,6 +2461,7 @@ func (s *RequestStatistics) updateAPIStats(apiSt *apiStats, model string, detail
 	modelSt.ReasoningTokens += totals.reasoningTokens
 	modelSt.latencySum += totals.latencySum
 	modelSt.latencyN += totals.latencyN
+	modelSt.providerStats = incrementModelProviderStats(modelSt.providerStats, detail.Provider, detail.Failed, totals)
 	modelSt.Details = append(modelSt.Details, detail)
 	return totals
 }
@@ -2021,6 +2551,7 @@ func (s *RequestStatistics) incrementModelSummaryStatsLocked(modelName string, d
 	modelStat.ReasoningTokens += totals.reasoningTokens
 	modelStat.latencySum += totals.latencySum
 	modelStat.latencyN += totals.latencyN
+	modelStat.providerStats = incrementModelProviderStats(modelStat.providerStats, detail.Provider, detail.Failed, totals)
 }
 
 func (s *RequestStatistics) decrementModelSummaryStatsLocked(modelName string, detail RequestDetail, totals detailTotals) {
@@ -2041,6 +2572,7 @@ func (s *RequestStatistics) decrementModelSummaryStatsLocked(modelName string, d
 	modelStat.ReasoningTokens -= totals.reasoningTokens
 	modelStat.latencySum -= totals.latencySum
 	modelStat.latencyN -= totals.latencyN
+	decrementModelProviderStats(modelStat.providerStats, detail.Provider, detail.Failed, totals)
 	if modelStat.TotalRequests <= 0 {
 		delete(s.modelSummaryStats, modelName)
 	}
@@ -2132,6 +2664,7 @@ func (s *RequestStatistics) incrementSummaryDimensionStatsLocked(modelName strin
 	clientModel.OutputTokens += totals.outputTokens
 	clientModel.CachedTokens += totals.cachedTokens
 	clientModel.ReasoningTokens += totals.reasoningTokens
+	clientModel.providerStats = incrementModelProviderStats(clientModel.providerStats, detail.Provider, detail.Failed, totals)
 }
 
 func (s *RequestStatistics) decrementSummaryDimensionStatsLocked(modelName string, detail RequestDetail, totals detailTotals) {
@@ -2200,6 +2733,7 @@ func (s *RequestStatistics) decrementSummaryDimensionStatsLocked(modelName strin
 			clientModel.OutputTokens -= totals.outputTokens
 			clientModel.CachedTokens -= totals.cachedTokens
 			clientModel.ReasoningTokens -= totals.reasoningTokens
+			decrementModelProviderStats(clientModel.providerStats, detail.Provider, detail.Failed, totals)
 			if clientModel.TotalRequests <= 0 {
 				delete(clientAgg.models, modelName)
 			}
@@ -2351,6 +2885,7 @@ func (s *RequestStatistics) decrementCounters(d RequestDetail, apiSt *apiStats, 
 	modelSt.ReasoningTokens -= totals.reasoningTokens
 	modelSt.latencySum -= totals.latencySum
 	modelSt.latencyN -= totals.latencyN
+	decrementModelProviderStats(modelSt.providerStats, d.Provider, d.Failed, totals)
 
 	dayKey := d.Timestamp.Format("2006-01-02")
 	hourKey := d.Timestamp.Hour()
@@ -2409,6 +2944,7 @@ func (s *RequestStatistics) rebuildAggregatesLocked() {
 			modelSt.ReasoningTokens = 0
 			modelSt.latencySum = 0
 			modelSt.latencyN = 0
+			modelSt.providerStats = nil
 			for _, detail := range modelSt.Details {
 				totals := detailTotalsFromRequest(detail)
 				s.totalRequests++
@@ -2445,6 +2981,7 @@ func (s *RequestStatistics) rebuildAggregatesLocked() {
 				modelSt.ReasoningTokens += totals.reasoningTokens
 				modelSt.latencySum += totals.latencySum
 				modelSt.latencyN += totals.latencyN
+				modelSt.providerStats = incrementModelProviderStats(modelSt.providerStats, detail.Provider, detail.Failed, totals)
 				dayKey := detail.Timestamp.Format("2006-01-02")
 				hourKey := detail.Timestamp.Hour()
 				s.requestsByDay[dayKey]++
@@ -2894,9 +3431,9 @@ func cloneDashboardSummary(summary DashboardSummary) DashboardSummary {
 	cloned.ClientAPIStats = make([]ClientAPIStat, len(summary.ClientAPIStats))
 	for i, stat := range summary.ClientAPIStats {
 		cloned.ClientAPIStats[i] = stat
-		cloned.ClientAPIStats[i].Models = append([]ClientAPIModelStat(nil), stat.Models...)
+		cloned.ClientAPIStats[i].Models = cloneClientAPIModelStats(stat.Models)
 	}
-	cloned.ModelStats = append([]ModelStat(nil), summary.ModelStats...)
+	cloned.ModelStats = cloneModelStats(summary.ModelStats)
 	if summary.Meta.LastImport != nil {
 		lastImport := *summary.Meta.LastImport
 		cloned.Meta.LastImport = &lastImport
@@ -2911,6 +3448,7 @@ func cloneStatisticsSnapshotWithoutDetails(snapshot StatisticsSnapshotWithoutDet
 		apiClone := apiSnapshot
 		apiClone.Models = make(map[string]ModelSnapshotWithoutDetails, len(apiSnapshot.Models))
 		for modelName, modelSnapshot := range apiSnapshot.Models {
+			modelSnapshot.Providers = cloneModelProviderStats(modelSnapshot.Providers)
 			apiClone.Models[modelName] = modelSnapshot
 		}
 		cloned.APIs[apiName] = apiClone
@@ -2920,6 +3458,28 @@ func cloneStatisticsSnapshotWithoutDetails(snapshot StatisticsSnapshotWithoutDet
 	cloned.TokensByDay = cloneInt64Map(snapshot.TokensByDay)
 	cloned.TokensByHour = cloneInt64Map(snapshot.TokensByHour)
 	return cloned
+}
+
+func cloneModelStats(stats []ModelStat) []ModelStat {
+	cloned := make([]ModelStat, len(stats))
+	for i, stat := range stats {
+		cloned[i] = stat
+		cloned[i].Providers = cloneModelProviderStats(stat.Providers)
+	}
+	return cloned
+}
+
+func cloneClientAPIModelStats(stats []ClientAPIModelStat) []ClientAPIModelStat {
+	cloned := make([]ClientAPIModelStat, len(stats))
+	for i, stat := range stats {
+		cloned[i] = stat
+		cloned[i].Providers = cloneModelProviderStats(stat.Providers)
+	}
+	return cloned
+}
+
+func cloneModelProviderStats(stats []ModelProviderStat) []ModelProviderStat {
+	return append([]ModelProviderStat(nil), stats...)
 }
 
 func cloneInt64Map(values map[string]int64) map[string]int64 {
@@ -2977,6 +3537,7 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsLocked(now time.Time, heal
 				OutputTokens:    modelSt.OutputTokens,
 				CachedTokens:    modelSt.CachedTokens,
 				ReasoningTokens: modelSt.ReasoningTokens,
+				Providers:       finalizedModelProviderStats(modelSt.providerStats, modelSt.TotalRequests, modelSt.SuccessCount, modelSt.FailureCount, modelSt.TotalTokens, modelSt.InputTokens, modelSt.OutputTokens, modelSt.CachedTokens, modelSt.ReasoningTokens),
 			}
 			if modelSt.latencyN > 0 {
 				modelSnap.AvgLatencyMs = float64(modelSt.latencySum) / float64(modelSt.latencyN)
@@ -2990,13 +3551,7 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsLocked(now time.Time, heal
 	// Finalize model average latencies from accumulated sums.
 	summary.ModelStats = make([]ModelStat, 0, len(s.modelSummaryStats))
 	for _, m := range s.modelSummaryStats {
-		stat := *m
-		if stat.latencyN > 0 {
-			stat.AvgLatencyMs = float64(stat.latencySum) / float64(stat.latencyN)
-		}
-		stat.latencySum = 0
-		stat.latencyN = 0
-		summary.ModelStats = append(summary.ModelStats, stat)
+		summary.ModelStats = append(summary.ModelStats, finalizeModelStat(*m))
 	}
 	sort.SliceStable(summary.ModelStats, func(i, j int) bool {
 		return summary.ModelStats[i].TotalRequests > summary.ModelStats[j].TotalRequests
@@ -3025,7 +3580,7 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsLocked(now time.Time, heal
 		stat := agg.stat
 		stat.Models = make([]ClientAPIModelStat, 0, len(agg.models))
 		for _, model := range agg.models {
-			stat.Models = append(stat.Models, *model)
+			stat.Models = append(stat.Models, finalizeClientAPIModelStat(*model))
 		}
 		sort.SliceStable(stat.Models, func(i, j int) bool {
 			return stat.Models[i].TotalRequests > stat.Models[j].TotalRequests
@@ -3192,6 +3747,7 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Ti
 				ms.OutputTokens += totals.outputTokens
 				ms.CachedTokens += totals.cachedTokens
 				ms.ReasoningTokens += totals.reasoningTokens
+				ms.providerStats = incrementModelProviderStats(ms.providerStats, detail.Provider, detail.Failed, totals)
 				if detail.LatencyMs > 0 {
 					ms.latencySum += detail.LatencyMs
 					ms.latencyN++
@@ -3302,6 +3858,7 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Ti
 				OutputTokens:    m.OutputTokens,
 				CachedTokens:    m.CachedTokens,
 				ReasoningTokens: m.ReasoningTokens,
+				Providers:       finalizedModelProviderStats(m.providerStats, m.TotalRequests, m.SuccessCount, m.FailureCount, m.TotalTokens, m.InputTokens, m.OutputTokens, m.CachedTokens, m.ReasoningTokens),
 			}
 			if m.latencyN > 0 {
 				modelSnap.AvgLatencyMs = float64(m.latencySum) / float64(m.latencyN)
@@ -3314,12 +3871,7 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Ti
 	// Build model stats
 	summary.ModelStats = make([]ModelStat, 0, len(modelAgg))
 	for _, m := range modelAgg {
-		if m.latencyN > 0 {
-			m.AvgLatencyMs = float64(m.latencySum) / float64(m.latencyN)
-		}
-		m.latencySum = 0
-		m.latencyN = 0
-		summary.ModelStats = append(summary.ModelStats, *m)
+		summary.ModelStats = append(summary.ModelStats, finalizeModelStat(*m))
 	}
 	sort.SliceStable(summary.ModelStats, func(i, j int) bool {
 		return summary.ModelStats[i].TotalRequests > summary.ModelStats[j].TotalRequests
@@ -3349,7 +3901,7 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Ti
 		stat := agg.stat
 		stat.Models = make([]ClientAPIModelStat, 0, len(agg.models))
 		for _, model := range agg.models {
-			stat.Models = append(stat.Models, *model)
+			stat.Models = append(stat.Models, finalizeClientAPIModelStat(*model))
 		}
 		sort.SliceStable(stat.Models, func(i, j int) bool {
 			return stat.Models[i].TotalRequests > stat.Models[j].TotalRequests
@@ -3447,6 +3999,7 @@ type modelRangeAgg struct {
 	ReasoningTokens int64
 	latencySum      int64
 	latencyN        int64
+	providerStats   map[string]*ModelProviderStat
 }
 
 func getOrCreateAPIRangeAgg(apiAgg map[string]*apiRangeAgg, apiName string) *apiRangeAgg {
@@ -3475,6 +4028,7 @@ func rangeIncrementAPIModel(api *apiRangeAgg, modelName string, detail RequestDe
 	m.OutputTokens += totals.outputTokens
 	m.CachedTokens += totals.cachedTokens
 	m.ReasoningTokens += totals.reasoningTokens
+	m.providerStats = incrementModelProviderStats(m.providerStats, detail.Provider, detail.Failed, totals)
 	if detail.LatencyMs > 0 {
 		m.latencySum += detail.LatencyMs
 		m.latencyN++
@@ -3498,6 +4052,7 @@ func rangeIncrementClientModel(client *clientAPIStatAccumulator, modelName strin
 	cm.OutputTokens += totals.outputTokens
 	cm.CachedTokens += totals.cachedTokens
 	cm.ReasoningTokens += totals.reasoningTokens
+	cm.providerStats = incrementModelProviderStats(cm.providerStats, detail.Provider, detail.Failed, totals)
 }
 
 func detailModel(modelName string, detail RequestDetail) string {
@@ -4215,6 +4770,13 @@ func (s *RequestStatistics) QueryAPIDetail(api string, rangeKey string, recentLi
 			ms.OutputTokens += outputTokens
 			ms.CachedTokens += cachedTokens
 			ms.ReasoningTokens += reasoningTokens
+			ms.providerStats = incrementModelProviderStats(ms.providerStats, d.Provider, d.Failed, detailTotals{
+				totalTokens:     totalTokens,
+				inputTokens:     inputTokens,
+				outputTokens:    outputTokens,
+				cachedTokens:    cachedTokens,
+				reasoningTokens: reasoningTokens,
+			})
 			if d.LatencyMs > 0 {
 				ms.latencySum += d.LatencyMs
 				ms.latencyN++
@@ -4262,12 +4824,7 @@ func (s *RequestStatistics) QueryAPIDetail(api string, rangeKey string, recentLi
 		}
 		result.ModelStats = make([]ModelStat, 0, len(modelAgg))
 		for _, ms := range modelAgg {
-			if ms.latencyN > 0 {
-				ms.AvgLatencyMs = float64(ms.latencySum) / float64(ms.latencyN)
-			}
-			ms.latencySum = 0
-			ms.latencyN = 0
-			result.ModelStats = append(result.ModelStats, *ms)
+			result.ModelStats = append(result.ModelStats, finalizeModelStat(*ms))
 		}
 		sort.SliceStable(result.ModelStats, func(i, j int) bool {
 			return result.ModelStats[i].TotalRequests > result.ModelStats[j].TotalRequests
@@ -4343,6 +4900,7 @@ func apiDetailModelStatsFromAPIStats(apiSt *apiStats) []ModelStat {
 			OutputTokens:    modelSt.OutputTokens,
 			CachedTokens:    modelSt.CachedTokens,
 			ReasoningTokens: modelSt.ReasoningTokens,
+			Providers:       finalizedModelProviderStats(modelSt.providerStats, modelSt.TotalRequests, modelSt.SuccessCount, modelSt.FailureCount, modelSt.TotalTokens, modelSt.InputTokens, modelSt.OutputTokens, modelSt.CachedTokens, modelSt.ReasoningTokens),
 		}
 		if modelSt.latencyN > 0 {
 			stat.AvgLatencyMs = float64(modelSt.latencySum) / float64(modelSt.latencyN)
@@ -4414,6 +4972,7 @@ func (s *RequestStatistics) Close() {
 		return
 	}
 	s.stopStorageWorker()
+	s.stopModelsDevPriceWorker()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closeStorageLocked()
@@ -4439,6 +4998,9 @@ func (s *RequestStatistics) ConfigSnapshot() ExportConfig {
 		StorageSyncRecordInterval:     s.storageSyncRecordInterval,
 		ExportMaxRecords:              s.exportMaxRecords,
 		PriceStoragePath:              s.priceStoragePath,
+		ModelsDevPricesEnabled:        s.modelsDevPricesEnabled,
+		ModelsDevPricesURL:            s.modelsDevPricesURL,
+		ModelsDevRefreshSeconds:       int(s.modelsDevRefresh.Seconds()),
 	}
 }
 

@@ -5,6 +5,7 @@ var _lastFmtLocale = 'zh-CN';
 let summaryData = null;         // DashboardSummary from /dashboard-summary
 let eventsData = null;          // EventsResult from /dashboard-events
 let modelPrices = {};
+let manualModelPrices = {};
 let selectedApi = '';
 let clientApiSort = 'requests';
 let pollTimer = null, pollFailures = 0;
@@ -18,6 +19,10 @@ const apiDetailCache = new Map();
 const conditionalPayloadCache = new Map();
 let apiDetailLastRender = null;
 let updatedState = { type: 'loading', generatedAt: null, message: '' };
+
+function manualPricesFromResponse(data) {
+  return data && Object.prototype.hasOwnProperty.call(data, 'manual_prices') ? (data.manual_prices || {}) : modelPrices;
+}
 
 // Dom helpers
 const $ = (id) => document.getElementById(id);
@@ -290,6 +295,7 @@ function fetchManagementJsonPayload(path, options) {
 async function loadModelPrices() {
   const data = await fetchJsonPayload(pluginEndpoint('model-prices'), { cache: 'no-store' });
   modelPrices = (data && data.prices) || {};
+  manualModelPrices = manualPricesFromResponse(data);
   return modelPrices;
 }
 
@@ -300,6 +306,7 @@ async function saveModelPrice(model, price) {
     body: JSON.stringify({ model, price })
   });
   modelPrices = (data && data.prices) || {};
+  manualModelPrices = manualPricesFromResponse(data);
   return modelPrices;
 }
 
@@ -308,6 +315,7 @@ async function deleteModelPrice(model) {
   params.set('model', model);
   const data = await fetchManagementJsonPayload('model-prices?' + params.toString(), { method: 'DELETE' });
   modelPrices = (data && data.prices) || {};
+  manualModelPrices = manualPricesFromResponse(data);
   return modelPrices;
 }
 
@@ -334,7 +342,7 @@ function renderStats() {
   const recentReq = recentHours.length ? recentHours[0] : 0;
   setText('rpm', (recentReq / 60).toFixed(2));
   setText('rpmMeta', withLabel('recent_requests_label', formatInteger(recentReq)));
-  const cost = (summaryData.model_stats || []).reduce((s, m) => s + aggregateCost(m, modelPrices), 0);
+  const cost = (summaryData.model_stats || []).reduce((s, m) => s + aggregateCost(m, modelPrices, manualModelPrices), 0);
   setText('totalCost', formatUsd(cost));
   setText('costMeta', withLabel('total_tokens_label', compact(u.total_tokens)));
   // Sparklines from hourly data
@@ -515,12 +523,12 @@ function modelNames() {
 }
 
 function priceModelOptions() {
-  return [...new Set([...modelNames(), ...Object.keys(modelPrices || {})])].filter(Boolean).sort((a, b) => a.localeCompare(b));
+  return [...new Set([...modelNames(), ...Object.keys(manualModelPrices || {})])].filter(Boolean).sort((a, b) => a.localeCompare(b));
 }
 
 function fillPriceForm(model) {
   $('priceModel').value = model || '';
-  const p = modelPrices[$('priceModel').value] || {};
+  const p = priceForModel($('priceModel').value, manualModelPrices) || {};
   $('pricePrompt').value = p.prompt ?? '';
   $('priceCompletion').value = p.completion ?? '';
   $('priceCache').value = p.cache ?? '';
@@ -531,14 +539,14 @@ function syncPriceFormForModel(model) {
     fillPriceForm('');
     return;
   }
-  if (modelPrices[model]) fillPriceForm(model);
+  if (priceForModel(model, manualModelPrices)) fillPriceForm(model);
 }
 
 function renderPrices() {
   const selected = $('priceModel').value;
   $('priceModelOptions').innerHTML = priceModelOptions().map((m) => '<option value="' + esc(m) + '"></option>').join('');
   $('priceModel').value = selected;
-  const entries = Object.entries(modelPrices).sort(([a], [b]) => a.localeCompare(b));
+  const entries = Object.entries(manualModelPrices).sort(([a], [b]) => a.localeCompare(b));
   $('priceList').innerHTML = entries.length ? entries.map(([m, p]) => '<div class="priceItem"><div><strong>' + esc(m) + '</strong><div class="priceMeta"><span>' + t('input_price') + ' ' + num(p.prompt).toFixed(4) + '</span><span>' + t('output_price') + ' ' + num(p.completion).toFixed(4) + '</span><span>' + t('cache_price') + ' ' + num(p.cache).toFixed(4) + '</span></div></div><div class="priceActions"><button class="btn" data-edit-price="' + esc(m) + '">' + t('edit') + '</button><button class="btn danger" data-del-price="' + esc(m) + '">' + t('delete') + '</button></div></div>').join('') : '<div class="empty">' + t('no_prices') + '</div>';
   document.querySelectorAll('[data-edit-price]').forEach((btn) => btn.onclick = () => fillPriceForm(btn.dataset.editPrice));
   document.querySelectorAll('[data-del-price]').forEach((btn) => btn.onclick = async () => {
@@ -561,7 +569,7 @@ function renderClientApiStats() {
     success: r.success_count,
     failure: r.failure_count,
     tokens: r.total_tokens,
-    cost: (r.models || []).reduce((s, m) => s + aggregateCost(m, modelPrices), 0)
+    cost: (r.models || []).reduce((s, m) => s + aggregateCost(m, modelPrices, manualModelPrices), 0)
   }));
   if (clientApiSort === 'tokens') rows.sort((a, b) => b.tokens - a.tokens);
   else if (clientApiSort === 'cost') rows.sort((a, b) => b.cost - a.cost);
@@ -612,7 +620,7 @@ function normalizeApiDetailEvent(d) {
     total_tokens: totalTokens(d),
     cached_tokens: Math.max(num(tokens.cached_tokens), num(tokens.cache_tokens)),
     reasoning_tokens: num(tokens.reasoning_tokens),
-    cost: detailCost(d, modelPrices)
+    cost: detailCost(d, modelPrices, manualModelPrices)
   });
 }
 
@@ -658,11 +666,11 @@ function renderApiDetailContent(apiData, detailState) {
   const requests = num(summary.total_requests), success = num(summary.success_count), failure = num(summary.failure_count);
   const knownFailureCount = num(apiData && apiData.failure_count);
   const rate = requests ? success / requests * 100 : 100;
-  const models = detail ? (detail.model_stats || []).map((m) => ({ name: m.model || 'unknown', requests: num(m.total_requests), success: num(m.success_count), failure: num(m.failure_count), tokens: num(m.total_tokens), input_tokens: num(m.input_tokens), output_tokens: num(m.output_tokens), cached_tokens: num(m.cached_tokens), reasoning_tokens: num(m.reasoning_tokens), avgLatency: num(m.avg_latency_ms) })) : Object.entries(apiData.models || {}).map(([name, m]) => ({ name, requests: num(m.total_requests), success: num(m.success_count), failure: num(m.failure_count), tokens: num(m.total_tokens), input_tokens: num(m.input_tokens), output_tokens: num(m.output_tokens), cached_tokens: num(m.cached_tokens), reasoning_tokens: num(m.reasoning_tokens), avgLatency: num(m.avg_latency_ms) }));
+  const models = detail ? (detail.model_stats || []).map((m) => ({ name: m.model || 'unknown', requests: num(m.total_requests), success: num(m.success_count), failure: num(m.failure_count), tokens: num(m.total_tokens), input_tokens: num(m.input_tokens), output_tokens: num(m.output_tokens), cached_tokens: num(m.cached_tokens), reasoning_tokens: num(m.reasoning_tokens), providers: m.providers || [], avgLatency: num(m.avg_latency_ms) })) : Object.entries(apiData.models || {}).map(([name, m]) => ({ name, requests: num(m.total_requests), success: num(m.success_count), failure: num(m.failure_count), tokens: num(m.total_tokens), input_tokens: num(m.input_tokens), output_tokens: num(m.output_tokens), cached_tokens: num(m.cached_tokens), reasoning_tokens: num(m.reasoning_tokens), providers: m.providers || [], avgLatency: num(m.avg_latency_ms) }));
   models.sort((a, b) => b.requests - a.requests);
   const sources = detail ? (detail.source_stats || []).map((s) => ({ name: s.source || t('unknown_source'), requests: num(s.total_requests), success: num(s.success_count), failure: num(s.failure_count), tokens: num(s.total_tokens) })) : [];
   const errorRows = (detail && detail.error_stats) || [];
-  const totalCost = models.reduce((s, m) => s + aggregateCost({ model: m.name, input_tokens: m.input_tokens, output_tokens: m.output_tokens, cached_tokens: m.cached_tokens, reasoning_tokens: m.reasoning_tokens }, modelPrices), 0);
+  const totalCost = models.reduce((s, m) => s + aggregateCost({ model: m.name, input_tokens: m.input_tokens, output_tokens: m.output_tokens, cached_tokens: m.cached_tokens, reasoning_tokens: m.reasoning_tokens, providers: m.providers }, modelPrices, manualModelPrices), 0);
   $('apiDetail').innerHTML = '<div class="detailGrid">' +
     metricHtml(t('requests_label'), formatInteger(requests), '<span class="ok">' + t('success_label') + ' ' + formatInteger(success) + '</span>&nbsp;<span class="bad">' + t('failure_label') + ' ' + formatInteger(failure) + '</span>') +
     metricHtml(t('success_rate'), '<span class="' + (rate >= 95 ? 'ok' : rate >= 80 ? 'neutral' : 'bad') + '">' + pct(rate) + '</span>') +
@@ -723,7 +731,7 @@ function renderModelStats() {
   const rows = summaryData.model_stats;
   $('modelStats').innerHTML = rows.length ? '<table><thead><tr><th>' + t('col_model') + '</th><th>' + t('col_requests') + '</th><th>' + t('col_tokens') + '</th><th>' + t('col_avg_latency') + '</th><th>' + t('col_success_rate') + '</th><th>' + t('col_cost') + '</th></tr></thead><tbody>' + rows.map((r) => {
     const rate = r.total_requests ? r.success_count / r.total_requests * 100 : 100;
-    const cost = aggregateCost(r, modelPrices);
+    const cost = aggregateCost(r, modelPrices, manualModelPrices);
     return '<tr><td class="nameCell">' + esc(r.model) + '</td><td>' + formatInteger(r.total_requests) + ' <span class="ok">(' + formatInteger(r.success_count) + '</span> <span class="bad">' + formatInteger(r.failure_count) + ')</span></td><td>' + compact(r.total_tokens) + '</td><td>' + formatMs(r.avg_latency_ms) + '</td><td class="' + (rate >= 95 ? 'ok' : rate >= 80 ? 'neutral' : 'bad') + '">' + pct(rate) + '</td><td>' + formatUsd(cost) + '</td></tr>';
   }).join('') + '</tbody></table>' : '<div class="empty">' + t('no_model_data') + '</div>';
 }

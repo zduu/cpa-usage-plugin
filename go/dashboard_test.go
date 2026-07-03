@@ -57,6 +57,62 @@ func TestDashboardSummaryReturnsNoDetails(t *testing.T) {
 	}
 }
 
+func TestDashboardModelStatsIncludeProviderBreakdown(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0})
+	stats.Record(UsageRecord{
+		Provider: "openai",
+		Model:    "openai/gpt-5.5",
+		Detail: UsageDetail{
+			InputTokens:  100,
+			OutputTokens: 50,
+			CachedTokens: 10,
+		},
+	})
+	stats.Record(UsageRecord{
+		Provider: "openrouter",
+		Model:    "openai/gpt-5.5",
+		Detail: UsageDetail{
+			InputTokens:  200,
+			OutputTokens: 80,
+			CachedTokens: 20,
+		},
+	})
+
+	summary := stats.SummaryWithoutDetails()
+	if len(summary.ModelStats) != 1 {
+		t.Fatalf("model stats = %#v, want one model", summary.ModelStats)
+	}
+	providers := summary.ModelStats[0].Providers
+	if len(providers) != 2 {
+		t.Fatalf("model providers = %#v, want two providers", providers)
+	}
+	providerTotals := map[string]int64{}
+	for _, provider := range providers {
+		providerTotals[provider.Provider] = provider.InputTokens
+	}
+	if providerTotals["openai"] != 100 || providerTotals["openrouter"] != 200 {
+		t.Fatalf("model provider input totals = %#v", providerTotals)
+	}
+	apiModel := summary.Usage.APIs["openai"].Models["openai/gpt-5.5"]
+	if len(apiModel.Providers) != 1 || apiModel.Providers[0].Provider != "openai" {
+		t.Fatalf("api model providers = %#v, want openai provider", apiModel.Providers)
+	}
+
+	if len(summary.ClientAPIStats) != 1 || len(summary.ClientAPIStats[0].Models) != 1 {
+		t.Fatalf("client API stats = %#v, want one model", summary.ClientAPIStats)
+	}
+	clientProviders := summary.ClientAPIStats[0].Models[0].Providers
+	if len(clientProviders) != 2 {
+		t.Fatalf("client model providers = %#v, want two providers", clientProviders)
+	}
+
+	detail := stats.QueryAPIDetail("openai", "all", 10, 10)
+	if len(detail.ModelStats) != 1 || len(detail.ModelStats[0].Providers) != 1 || detail.ModelStats[0].Providers[0].Provider != "openai" {
+		t.Fatalf("api detail model stats = %#v, want current provider breakdown", detail.ModelStats)
+	}
+}
+
 func TestDashboardSummaryHasHealthGrid(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0})

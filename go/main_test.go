@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1551,6 +1552,9 @@ configs:
     storage_sync_interval_seconds: 13
     storage_sync_record_interval: 17
     price_storage_path: "/tmp/usage-statistics-prices.json"
+    models_dev_prices_enabled: true
+    models_dev_prices_url: "https://example.test/models-dev.json"
+    models_dev_prices_refresh_interval_seconds: 19
 `)
 	raw := []byte(`{"config_yaml":"` + base64.StdEncoding.EncodeToString(yaml) + `"}`)
 
@@ -1578,6 +1582,15 @@ configs:
 	}
 	if cfg.PriceStoragePath != "/tmp/usage-statistics-prices.json" {
 		t.Fatalf("price_storage_path = %q", cfg.PriceStoragePath)
+	}
+	if !cfg.ModelsDevPricesEnabled {
+		t.Fatal("models_dev_prices_enabled should be true")
+	}
+	if cfg.ModelsDevPricesURL != "https://example.test/models-dev.json" {
+		t.Fatalf("models_dev_prices_url = %q", cfg.ModelsDevPricesURL)
+	}
+	if cfg.ModelsDevRefreshSeconds != 19 {
+		t.Fatalf("models_dev_prices_refresh_interval_seconds = %d, want 19", cfg.ModelsDevRefreshSeconds)
 	}
 }
 
@@ -1733,6 +1746,189 @@ func TestManagementModelPricesCRUDAndPersistence(t *testing.T) {
 	if _, ok := deleted.Prices["gpt-4.1"]; ok {
 		t.Fatalf("deleted price still present: %#v", deleted.Prices)
 	}
+}
+
+func TestModelPricesUseModelsDevDefaultsWithManualOverride(t *testing.T) {
+	previousStats := stats
+	pricePath := filepath.Join(t.TempDir(), "prices.json")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+		  "openai": {
+		    "id": "openai",
+		    "models": {
+		      "gpt-5.5": {
+		        "id": "gpt-5.5",
+		        "last_updated": "2026-06-30",
+		        "cost": {"input": 1.25, "output": 10, "cache_read": 0.125, "cache_write": 1.25,
+		          "tiers": [{"input": 2.5, "output": 15, "cache_read": 0.25, "tier": {"type": "context", "size": 200000}}]
+		        }
+		      }
+		    }
+		  },
+		  "openrouter": {
+		    "id": "openrouter",
+		    "models": {
+		      "openai/gpt-5.5": {
+		        "id": "openai/gpt-5.5",
+		        "cost": {"input": 9, "output": 99, "cache_read": 0.9}
+		      }
+		    }
+		  }
+		}`))
+	}))
+	defer server.Close()
+
+	stats = NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		PriceStoragePath:        pricePath,
+		ModelsDevPricesEnabled:  true,
+		ModelsDevPricesURL:      server.URL,
+		ModelsDevRefreshSeconds: 3600,
+	})
+	t.Cleanup(func() {
+		stats.Close()
+		stats = previousStats
+	})
+	stats.refreshModelsDevPricesOnce()
+
+	initial := stats.ModelPrices()
+	if got := initial.Prices["gpt-5.5"]; got.Prompt != 1.25 || got.Completion != 10 || got.Cache != 0.125 {
+		t.Fatalf("models.dev price = %#v", got)
+	}
+	if got := initial.Prices["openai/gpt-5.5"]; got.Prompt != 1.25 || got.Completion != 10 || got.Cache != 0.125 {
+		t.Fatalf("provider-prefixed models.dev price = %#v", got)
+	}
+	if got := initial.Prices["openrouter/openai/gpt-5.5"]; got.Prompt != 9 || got.Completion != 99 || got.Cache != 0.9 {
+		t.Fatalf("openrouter models.dev price = %#v", got)
+	}
+	if initial.ModelsDev.PriceCount != 3 || initial.ModelsDev.LastError != "" {
+		t.Fatalf("models.dev status = %#v", initial.ModelsDev)
+	}
+
+	body, err := json.Marshal(map[string]interface{}{
+		"model": "GPT-5.5",
+		"price": ModelPrice{Prompt: 3, Completion: 9, Cache: 1},
+	})
+	if err != nil {
+		t.Fatalf("marshal price payload: %v", err)
+	}
+	var saved ModelPricesResponse
+	decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "PUT",
+		Path:   "/v0/management/plugins/usage-statistics/model-prices",
+		Body:   body,
+	}), &saved)
+	if got := priceForModelCaseInsensitive(saved.Prices, "gpt-5.5"); got.Prompt != 3 || got.Completion != 9 || got.Cache != 1 {
+		t.Fatalf("manual override effective price = %#v", got)
+	}
+	if got := priceForModelCaseInsensitive(saved.ManualPrices, "Gpt-5.5"); got.Prompt != 3 || got.Completion != 9 || got.Cache != 1 {
+		t.Fatalf("manual price = %#v", got)
+	}
+}
+
+func TestModelsDevPriceWorkerReconfiguresURL(t *testing.T) {
+	stats := NewRequestStatistics()
+	t.Cleanup(func() { stats.Close() })
+
+	serverA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"openai":{"models":{"gpt-old":{"id":"gpt-old","cost":{"input":1,"output":2}}}}}`))
+	}))
+	defer serverA.Close()
+	serverB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"openai":{"models":{"gpt-new":{"id":"gpt-new","cost":{"input":3,"output":4}}}}}`))
+	}))
+	defer serverB.Close()
+
+	stats.Configure(runtimeConfig{
+		PriceStoragePath:        filepath.Join(t.TempDir(), "prices.json"),
+		ModelsDevPricesEnabled:  true,
+		ModelsDevPricesURL:      serverA.URL,
+		ModelsDevRefreshSeconds: 3600,
+	})
+	stats.refreshModelsDevPricesOnce()
+	if _, ok := stats.ModelPrices().Prices["gpt-old"]; !ok {
+		t.Fatalf("initial models.dev prices = %#v, want gpt-old", stats.ModelPrices().Prices)
+	}
+
+	stats.ConfigurePatch(runtimeConfigPatch{
+		ModelsDevPricesEnabled:  boolPtr(true),
+		ModelsDevPricesURL:      stringPtr(serverB.URL),
+		ModelsDevRefreshSeconds: intPtr(3600),
+	})
+	stats.refreshModelsDevPricesOnce()
+	prices := stats.ModelPrices().Prices
+	if _, ok := prices["gpt-new"]; !ok {
+		t.Fatalf("reconfigured models.dev prices = %#v, want gpt-new", prices)
+	}
+	if _, ok := prices["gpt-old"]; ok {
+		t.Fatalf("reconfigured models.dev prices still include old source: %#v", prices)
+	}
+}
+
+func TestModelsDevPriceWorkerCloseCancelsFetch(t *testing.T) {
+	requestStarted := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-requestStarted:
+		default:
+			close(requestStarted)
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		PriceStoragePath:        filepath.Join(t.TempDir(), "prices.json"),
+		ModelsDevPricesEnabled:  true,
+		ModelsDevPricesURL:      server.URL,
+		ModelsDevRefreshSeconds: 3600,
+	})
+
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("models.dev test server did not receive fetch")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		stats.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("Close() did not cancel in-flight models.dev fetch")
+	}
+}
+
+func TestModelPriceDeleteIsCaseInsensitive(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{PriceStoragePath: filepath.Join(t.TempDir(), "prices.json")})
+	t.Cleanup(func() { stats.Close() })
+
+	if _, err := stats.UpsertModelPrice("GPT-5.5", ModelPrice{Prompt: 1, Completion: 2, Cache: 0.5}); err != nil {
+		t.Fatalf("UpsertModelPrice() error = %v", err)
+	}
+	if _, err := stats.DeleteModelPrice("gpt-5.5"); err != nil {
+		t.Fatalf("DeleteModelPrice() error = %v", err)
+	}
+	if got := stats.ModelPrices().Prices; len(got) != 0 {
+		t.Fatalf("prices after delete = %#v, want empty", got)
+	}
+}
+
+func priceForModelCaseInsensitive(prices map[string]ModelPrice, model string) ModelPrice {
+	for key, price := range prices {
+		if normalizeModelPriceKey(key) == normalizeModelPriceKey(model) {
+			return price
+		}
+	}
+	return ModelPrice{}
 }
 
 func TestDashboardManagementEndpointsReturnNotModifiedForMatchingETag(t *testing.T) {

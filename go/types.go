@@ -6,19 +6,21 @@ import (
 )
 
 const (
-	abiVersion                    uint32 = 1
-	defaultMaxDetailsPerModel            = 5000
-	defaultRetentionDays                 = 30
-	defaultDedupWindowMinutes            = 24 * 60
-	defaultStorageFlushSeconds           = 30
-	defaultStorageSnapshotSeconds        = 300
-	defaultStorageSnapshotRecords        = 1000
-	defaultStorageSyncSeconds            = 0
-	defaultStorageSyncRecords            = 0
-	defaultStorageWriteQueueSize         = 4096
-	defaultStorageWriteBatchSize         = 128
-	defaultExportMaxRecords              = 100000
-	defaultPriceStoragePath              = "usage-statistics-prices.json"
+	abiVersion                     uint32 = 1
+	defaultMaxDetailsPerModel             = 5000
+	defaultRetentionDays                  = 30
+	defaultDedupWindowMinutes             = 24 * 60
+	defaultStorageFlushSeconds            = 30
+	defaultStorageSnapshotSeconds         = 300
+	defaultStorageSnapshotRecords         = 1000
+	defaultStorageSyncSeconds             = 0
+	defaultStorageSyncRecords             = 0
+	defaultStorageWriteQueueSize          = 4096
+	defaultStorageWriteBatchSize          = 128
+	defaultExportMaxRecords               = 100000
+	defaultPriceStoragePath               = "usage-statistics-prices.json"
+	defaultModelsDevPricesURL             = "https://models.dev/api.json"
+	defaultModelsDevRefreshSeconds        = 12 * 60 * 60
 )
 
 type envelope struct {
@@ -47,6 +49,9 @@ type runtimeConfig struct {
 	StorageSyncRecordInterval     int
 	ExportMaxRecords              int
 	PriceStoragePath              string
+	ModelsDevPricesEnabled        bool
+	ModelsDevPricesURL            string
+	ModelsDevRefreshSeconds       int
 	UpdateEnabled                 bool
 	UpdateVersion                 string
 }
@@ -66,6 +71,9 @@ type runtimeConfigPatch struct {
 	StorageSyncRecordInterval     *int
 	ExportMaxRecords              *int
 	PriceStoragePath              *string
+	ModelsDevPricesEnabled        *bool
+	ModelsDevPricesURL            *string
+	ModelsDevRefreshSeconds       *int
 	UpdateEnabled                 *bool
 	UpdateVersion                 *string
 }
@@ -86,6 +94,9 @@ func defaultRuntimeConfig() runtimeConfig {
 		StorageSyncRecordInterval:     defaultStorageSyncRecords,
 		ExportMaxRecords:              defaultExportMaxRecords,
 		PriceStoragePath:              defaultPriceStoragePath,
+		ModelsDevPricesEnabled:        false,
+		ModelsDevPricesURL:            defaultModelsDevPricesURL,
+		ModelsDevRefreshSeconds:       defaultModelsDevRefreshSeconds,
 		UpdateEnabled:                 false,
 		UpdateVersion:                 "latest",
 	}
@@ -394,6 +405,9 @@ type ExportConfig struct {
 	StorageSyncRecordInterval     int    `json:"storage_sync_record_interval,omitempty"`
 	ExportMaxRecords              int    `json:"export_max_records,omitempty"`
 	PriceStoragePath              string `json:"price_storage_path,omitempty"`
+	ModelsDevPricesEnabled        bool   `json:"models_dev_prices_enabled,omitempty"`
+	ModelsDevPricesURL            string `json:"models_dev_prices_url,omitempty"`
+	ModelsDevRefreshSeconds       int    `json:"models_dev_prices_refresh_interval_seconds,omitempty"`
 }
 
 type StorageStatus struct {
@@ -438,15 +452,29 @@ type ModelPrice struct {
 }
 
 type ModelPricesResponse struct {
-	Prices    map[string]ModelPrice   `json:"prices"`
-	UpdatedAt string                  `json:"updated_at,omitempty"`
-	Storage   ModelPriceStorageStatus `json:"storage"`
+	Prices       map[string]ModelPrice   `json:"prices"`
+	ManualPrices map[string]ModelPrice   `json:"manual_prices"`
+	UpdatedAt    string                  `json:"updated_at,omitempty"`
+	Storage      ModelPriceStorageStatus `json:"storage"`
+	ModelsDev    ModelsDevPriceStatus    `json:"models_dev,omitempty"`
 }
 
 type ModelPriceStorageStatus struct {
 	Path       string `json:"path,omitempty"`
 	LoadedPath string `json:"loaded_path,omitempty"`
 	LastError  string `json:"last_error,omitempty"`
+}
+
+type ModelsDevPriceStatus struct {
+	Enabled        bool   `json:"enabled"`
+	URL            string `json:"url,omitempty"`
+	RefreshSeconds int    `json:"refresh_seconds,omitempty"`
+	LastAttemptAt  string `json:"last_attempt_at,omitempty"`
+	LastSuccessAt  string `json:"last_success_at,omitempty"`
+	UpdatedAt      string `json:"updated_at,omitempty"`
+	ETag           string `json:"etag,omitempty"`
+	PriceCount     int    `json:"price_count,omitempty"`
+	LastError      string `json:"last_error,omitempty"`
 }
 
 type RuntimeStatus struct {
@@ -630,15 +658,16 @@ type APISnapshotWithoutDetails struct {
 }
 
 type ModelSnapshotWithoutDetails struct {
-	TotalRequests   int64   `json:"total_requests"`
-	SuccessCount    int64   `json:"success_count"`
-	FailureCount    int64   `json:"failure_count"`
-	TotalTokens     int64   `json:"total_tokens"`
-	InputTokens     int64   `json:"input_tokens"`
-	OutputTokens    int64   `json:"output_tokens"`
-	CachedTokens    int64   `json:"cached_tokens"`
-	ReasoningTokens int64   `json:"reasoning_tokens"`
-	AvgLatencyMs    float64 `json:"avg_latency_ms"`
+	TotalRequests   int64               `json:"total_requests"`
+	SuccessCount    int64               `json:"success_count"`
+	FailureCount    int64               `json:"failure_count"`
+	TotalTokens     int64               `json:"total_tokens"`
+	InputTokens     int64               `json:"input_tokens"`
+	OutputTokens    int64               `json:"output_tokens"`
+	CachedTokens    int64               `json:"cached_tokens"`
+	ReasoningTokens int64               `json:"reasoning_tokens"`
+	AvgLatencyMs    float64             `json:"avg_latency_ms"`
+	Providers       []ModelProviderStat `json:"providers,omitempty"`
 }
 
 // HealthGridSlot is one 15-minute bucket for the health grid (672 slots = 7 days).
@@ -687,7 +716,22 @@ type ClientAPIStat struct {
 }
 
 type ClientAPIModelStat struct {
-	Model           string `json:"model"`
+	Model           string              `json:"model"`
+	TotalRequests   int64               `json:"total_requests"`
+	SuccessCount    int64               `json:"success_count"`
+	FailureCount    int64               `json:"failure_count"`
+	TotalTokens     int64               `json:"total_tokens"`
+	InputTokens     int64               `json:"input_tokens"`
+	OutputTokens    int64               `json:"output_tokens"`
+	CachedTokens    int64               `json:"cached_tokens"`
+	ReasoningTokens int64               `json:"reasoning_tokens"`
+	Providers       []ModelProviderStat `json:"providers,omitempty"`
+
+	providerStats map[string]*ModelProviderStat `json:"-"`
+}
+
+type ModelProviderStat struct {
+	Provider        string `json:"provider"`
 	TotalRequests   int64  `json:"total_requests"`
 	SuccessCount    int64  `json:"success_count"`
 	FailureCount    int64  `json:"failure_count"`
@@ -700,20 +744,22 @@ type ClientAPIModelStat struct {
 
 // ModelStat aggregates request stats by model name across all APIs.
 type ModelStat struct {
-	Model           string  `json:"model"`
-	TotalRequests   int64   `json:"total_requests"`
-	SuccessCount    int64   `json:"success_count"`
-	FailureCount    int64   `json:"failure_count"`
-	TotalTokens     int64   `json:"total_tokens"`
-	InputTokens     int64   `json:"input_tokens"`
-	OutputTokens    int64   `json:"output_tokens"`
-	AvgLatencyMs    float64 `json:"avg_latency_ms"`
-	CachedTokens    int64   `json:"cached_tokens"`
-	ReasoningTokens int64   `json:"reasoning_tokens"`
+	Model           string              `json:"model"`
+	TotalRequests   int64               `json:"total_requests"`
+	SuccessCount    int64               `json:"success_count"`
+	FailureCount    int64               `json:"failure_count"`
+	TotalTokens     int64               `json:"total_tokens"`
+	InputTokens     int64               `json:"input_tokens"`
+	OutputTokens    int64               `json:"output_tokens"`
+	AvgLatencyMs    float64             `json:"avg_latency_ms"`
+	CachedTokens    int64               `json:"cached_tokens"`
+	ReasoningTokens int64               `json:"reasoning_tokens"`
+	Providers       []ModelProviderStat `json:"providers,omitempty"`
 
 	// Internal accumulators for computing AvgLatencyMs; not serialized.
-	latencySum int64 `json:"-"`
-	latencyN   int64 `json:"-"`
+	latencySum    int64                         `json:"-"`
+	latencyN      int64                         `json:"-"`
+	providerStats map[string]*ModelProviderStat `json:"-"`
 }
 
 // DashboardSummary is the full lightweight dashboard response with metadata.

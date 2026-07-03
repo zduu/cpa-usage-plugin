@@ -9,7 +9,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const pluginVersion = "2.2.3"
+const pluginVersion = "2.2.4"
 
 func handleRegister(requestBody []byte) ([]byte, error) {
 	applyRuntimeConfig(requestBody)
@@ -108,6 +108,24 @@ func handleRegister(requestBody []byte) ([]byte, error) {
 					Description: "模型价格表 JSON 文件路径。相对路径基于 CPA 工作目录。",
 				},
 				{
+					Name:        "models_dev_prices_enabled",
+					Type:        "boolean",
+					Default:     false,
+					Description: "是否启用 models.dev 默认模型价格。手动设置的价格优先级更高。",
+				},
+				{
+					Name:        "models_dev_prices_url",
+					Type:        "string",
+					Default:     defaultModelsDevPricesURL,
+					Description: "models.dev 价格 JSON 地址。默认读取 api.json。",
+				},
+				{
+					Name:        "models_dev_prices_refresh_interval_seconds",
+					Type:        "integer",
+					Default:     defaultModelsDevRefreshSeconds,
+					Description: "models.dev 价格表刷新间隔秒数。",
+				},
+				{
 					Name:        "update_enabled",
 					Type:        "boolean",
 					Default:     false,
@@ -188,6 +206,15 @@ func parseRuntimeConfig(requestBody []byte) runtimeConfig {
 	if patch.PriceStoragePath != nil {
 		cfg.PriceStoragePath = *patch.PriceStoragePath
 	}
+	if patch.ModelsDevPricesEnabled != nil {
+		cfg.ModelsDevPricesEnabled = *patch.ModelsDevPricesEnabled
+	}
+	if patch.ModelsDevPricesURL != nil {
+		cfg.ModelsDevPricesURL = *patch.ModelsDevPricesURL
+	}
+	if patch.ModelsDevRefreshSeconds != nil {
+		cfg.ModelsDevRefreshSeconds = *patch.ModelsDevRefreshSeconds
+	}
 	if patch.UpdateEnabled != nil {
 		cfg.UpdateEnabled = *patch.UpdateEnabled
 	}
@@ -214,6 +241,9 @@ func parseRuntimeConfigPatch(requestBody []byte) runtimeConfigPatch {
 		StorageSyncRecordInterval:     intPtr(defaults.StorageSyncRecordInterval),
 		ExportMaxRecords:              intPtr(defaults.ExportMaxRecords),
 		PriceStoragePath:              stringPtr(defaults.PriceStoragePath),
+		ModelsDevPricesEnabled:        boolPtr(defaults.ModelsDevPricesEnabled),
+		ModelsDevPricesURL:            stringPtr(defaults.ModelsDevPricesURL),
+		ModelsDevRefreshSeconds:       intPtr(defaults.ModelsDevRefreshSeconds),
 		UpdateEnabled:                 boolPtr(defaults.UpdateEnabled),
 		UpdateVersion:                 stringPtr(defaults.UpdateVersion),
 	}
@@ -265,6 +295,15 @@ func parseRuntimeConfigPatch(requestBody []byte) runtimeConfigPatch {
 	}
 	if s, ok := stringConfig(values, "price_storage_path"); ok {
 		patch.PriceStoragePath = stringPtr(s)
+	}
+	if v, ok := boolConfig(values, "models_dev_prices_enabled"); ok {
+		patch.ModelsDevPricesEnabled = boolPtr(v)
+	}
+	if s, ok := stringConfig(values, "models_dev_prices_url"); ok && s != "" {
+		patch.ModelsDevPricesURL = stringPtr(s)
+	}
+	if v, ok := intConfig(values, "models_dev_prices_refresh_interval_seconds"); ok {
+		patch.ModelsDevRefreshSeconds = intPtr(v)
 	}
 	if v, ok := boolConfig(values, "update_enabled"); ok {
 		patch.UpdateEnabled = boolPtr(v)

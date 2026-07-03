@@ -31,8 +31,8 @@ plugins:
     usage-statistics:
       enabled: true
       store:
-        version: "2.2.2"
-        release-tag: "v2.2.2"
+        version: "2.2.4"
+        release-tag: "v2.2.4"
         repository: "https://github.com/zduu/cpa-usage-plugin"
       # 其他配置项见第 3 节 ...
 ```
@@ -181,8 +181,8 @@ plugins:
     usage-statistics:
       enabled: true
       store:
-        version: "2.2.2"
-        release-tag: "v2.2.2"
+        version: "2.2.4"
+        release-tag: "v2.2.4"
         repository: "https://github.com/zduu/cpa-usage-plugin"
       # 每个上游接口/模型最多保留的请求明细条数。默认 5000。
       max_details_per_model: 5000
@@ -212,9 +212,15 @@ plugins:
       export_max_records: 100000
       # 可选：模型价格表 JSON 文件路径。相对路径基于 CPA 工作目录。
       price_storage_path: usage-statistics-prices.json
+      # 可选：启用 models.dev 默认价格。手动价格优先级更高，模型名大小写不敏感。默认 false。
+      models_dev_prices_enabled: false
+      # 可选：models.dev 价格 JSON 地址。默认 https://models.dev/api.json。
+      models_dev_prices_url: https://models.dev/api.json
+      # 可选：models.dev 价格刷新间隔秒数。默认 43200（12小时）。
+      models_dev_prices_refresh_interval_seconds: 43200
       # 可选：允许外部脚本更新插件文件。默认 false。
       update_enabled: false
-      # 可选：latest 或指定版本号，例如 v2.2.2。
+      # 可选：latest 或指定版本号，例如 v2.2.4。
       update_version: latest
 ```
 
@@ -233,8 +239,8 @@ cd CLIProxyAPI
 启动后查看日志确认插件加载成功：
 
 ```text
-pluginhost: plugin loaded plugin_id=usage-statistics version=2.2.2 path=plugins/usage-statistics-v2.2.2.so
-pluginhost: plugin registered plugin_id=usage-statistics plugin_name=用量统计 version=2.2.2 path=plugins/usage-statistics-v2.2.2.so
+pluginhost: plugin loaded plugin_id=usage-statistics version=2.2.4 path=plugins/usage-statistics-v2.2.4.so
+pluginhost: plugin registered plugin_id=usage-statistics plugin_name=用量统计 version=2.2.4 path=plugins/usage-statistics-v2.2.4.so
 ```
 
 > `store-sources` 引入插件商店注册表，管理面板可浏览安装。`store` 块标记当前期望版本，pluginhost 会匹配 `usage-statistics-v{版本号}.{ext}` 文件名，并自动清理旧版本文件。
@@ -252,7 +258,7 @@ pluginhost: plugin registered plugin_id=usage-statistics plugin_name=用量统�
 - **API 详细统计**：按调用 CPA 服务的客户端 API key 聚合。页面显示脱敏 key；导入不同实例导出的同一脱敏 key 时会合并展示。
 - **上游接口统计**：按上游接口聚合，点击查看模型分布详情。
 - **模型统计**：跨接口的模型汇总，包含请求数、token、平均延迟、成功率和费用。
-- **模型价格设置**：在后端全局保存输入/输出/缓存 token 价格（US$/M token），跨设备访问看板可见同一份最新价格。
+- **模型价格设置**：在后端全局保存输入/输出/缓存 token 价格（US$/M token），跨设备访问看板可见同一份最新价格。可启用 models.dev 默认价格源，后端定时拉取 `input`/`output`/`cache_read` 基础价格；手动价格覆盖默认价格，模型名匹配大小写不敏感。models.dev 的分层价格需要当前请求上下文长度等字段，CPA v7 当前 usage 插件接口未提供这些字段，因此本插件暂不使用 `tiers`/`context_over_200k`。
 - **请求事件明细**：按模型、来源、凭证筛选，滚动表格查看。默认最多显示 500 条。
 - **导出**：当前接口明细或全量事件的 CSV/JSON 导出。
 - **导入**：上传 JSON 文件导入统计数据，完成后显示新增/跳过/过期忽略的明细数；导入后摘要会重新聚合客户端 API、模型、来源和健康网格。
@@ -442,7 +448,7 @@ plugins:
     usage-statistics:
       enabled: true
       update_enabled: true
-      update_version: latest   # 或 v2.2.2
+      update_version: latest   # 或 v2.2.4
 ```
 
 执行脚本：
