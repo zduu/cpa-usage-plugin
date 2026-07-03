@@ -223,7 +223,7 @@ var I18N_MAP = {
     // ---- model stats extra ----
     col_cache_rate: '缓存命中率',
     col_cost_per_m: '实际单价',
-    cost_per_m_unit: '/M tok',
+    cost_per_m_unit: '/M token',
   },
 
   'zh-TW': {
@@ -424,7 +424,7 @@ var I18N_MAP = {
 
     col_cache_rate: '快取命中率',
     col_cost_per_m: '實際單價',
-    cost_per_m_unit: '/M tok',
+    cost_per_m_unit: '/M token',
   },
 
   'en': {
@@ -625,7 +625,7 @@ var I18N_MAP = {
 
     col_cache_rate: 'Cache Hit Rate',
     col_cost_per_m: 'Unit Cost',
-    cost_per_m_unit: '/M tok',
+    cost_per_m_unit: '/M token',
   },
 
   'ru': {
@@ -826,7 +826,7 @@ var I18N_MAP = {
 
     col_cache_rate: 'Попадание в кэш',
     col_cost_per_m: 'Цена за ед.',
-    cost_per_m_unit: '/M ток',
+    cost_per_m_unit: '/M токенов',
   },
 };
 
