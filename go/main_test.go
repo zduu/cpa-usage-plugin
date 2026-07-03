@@ -797,11 +797,14 @@ func TestStorageSnapshotWritesByRecordInterval(t *testing.T) {
 		RequestedAt: time.Now().Add(time.Second),
 		Detail:      UsageDetail{TotalTokens: 2},
 	})
+	var status StorageStatus
 	waitForTestCondition(t, func() bool {
-		_, err := os.Stat(snapshotPath)
-		return err == nil
+		if _, err := os.Stat(snapshotPath); err != nil {
+			return false
+		}
+		status = stats.StorageStatus()
+		return status.LastSnapshotAt != "" && status.PendingSnapshotRecords == 0
 	})
-	status := stats.StorageStatus()
 	if status.LastSnapshotAt == "" {
 		t.Fatalf("last snapshot time should be reported: %#v", status)
 	}
@@ -1805,6 +1808,9 @@ func TestModelPricesUseModelsDevDefaultsWithManualOverride(t *testing.T) {
 	if initial.ModelsDev.PriceCount != 3 || initial.ModelsDev.LastError != "" {
 		t.Fatalf("models.dev status = %#v", initial.ModelsDev)
 	}
+	if got, ok := priceForDetailFromMap(initial.Prices, "openai/gpt-5.5", "openai-compatible"); !ok || got.Prompt != 1.25 || got.Completion != 10 || got.Cache != 0.125 {
+		t.Fatalf("models.dev fallback price = %#v ok=%v, want bare gpt-5.5 price", got, ok)
+	}
 
 	body, err := json.Marshal(map[string]interface{}{
 		"model": "GPT-5.5",
@@ -2120,6 +2126,84 @@ func TestDashboardEventsExportSupportsCSVJSONLAndGzip(t *testing.T) {
 	}
 	if runtime.LastEventsExportDurationMs <= 0 || runtime.LastEventsExportRawBytes <= 0 || runtime.LastEventsExportBodyBytes <= 0 {
 		t.Fatalf("last export pressure metrics should be reported: %#v", runtime)
+	}
+}
+
+func TestDashboardEventsExportAsyncJobFiltersByAPI(t *testing.T) {
+	previousStats := stats
+	previousJobs := dashboardExportJobs
+	stats = NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0, ExportMaxRecords: 100})
+	dashboardExportJobs = newDashboardExportJobManager()
+	t.Cleanup(func() {
+		dashboardExportJobs = previousJobs
+		stats = previousStats
+	})
+
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-4.1",
+		RequestedAt: time.Now().Add(-2 * time.Minute),
+		Detail:      UsageDetail{InputTokens: 10, OutputTokens: 5},
+	})
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-4.1",
+		RequestedAt: time.Now().Add(-time.Minute),
+		Detail:      UsageDetail{InputTokens: 20, OutputTokens: 10},
+	})
+	stats.Record(UsageRecord{
+		Provider:    "anthropic",
+		Model:       "claude-sonnet",
+		RequestedAt: time.Now(),
+		Detail:      UsageDetail{InputTokens: 30, OutputTokens: 15},
+	})
+
+	var created dashboardExportJobResponse
+	createResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "POST",
+		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export-jobs",
+		Query:  map[string][]string{"api": {"openai"}, "format": {"json"}},
+	}), &created)
+	if createResp.StatusCode != http.StatusAccepted || created.ID == "" {
+		t.Fatalf("created filtered export = status %d body %#v, want 202 with job id", createResp.StatusCode, created)
+	}
+
+	var status dashboardExportJobResponse
+	waitForTestCondition(t, func() bool {
+		decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+			Method: "GET",
+			Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export-jobs",
+			Query:  map[string][]string{"id": {created.ID}},
+		}), &status)
+		return status.Status == dashboardExportJobSucceeded
+	})
+	if status.Total != 2 || status.Exported != 2 {
+		t.Fatalf("filtered export status = %#v, want only two openai rows", status)
+	}
+
+	downloadResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "GET",
+		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export-download",
+		Query:  map[string][]string{"id": {created.ID}},
+	}), nil)
+	if downloadResp.StatusCode != http.StatusOK {
+		t.Fatalf("download status = %d, want 200", downloadResp.StatusCode)
+	}
+	var payload struct {
+		Events []RequestDetail `json:"events"`
+		Total  int             `json:"total"`
+	}
+	if err := json.Unmarshal(downloadResp.Body, &payload); err != nil {
+		t.Fatalf("unmarshal filtered export body: %v; body=%q", err, string(downloadResp.Body))
+	}
+	if payload.Total != 2 || len(payload.Events) != 2 {
+		t.Fatalf("filtered export payload = total %d rows %d, want 2", payload.Total, len(payload.Events))
+	}
+	for _, event := range payload.Events {
+		if event.Provider != "openai" || event.Model != "gpt-4.1" {
+			t.Fatalf("filtered export included wrong event: %#v", event)
+		}
 	}
 }
 

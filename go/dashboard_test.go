@@ -1953,6 +1953,24 @@ func TestSummaryRangeETagUsesMinuteBucket(t *testing.T) {
 	}
 }
 
+func TestAPIDetailRangeETagUsesMinuteBucket(t *testing.T) {
+	now := time.Date(2026, 7, 3, 10, 15, 0, 0, time.UTC)
+	etagNow := dashboardAPIDetailETag("openai", "24h", 120, 20, now)
+	etagSameBucket := dashboardAPIDetailETag("openai", "24h", 120, 20, now.Add(30*time.Second))
+	etagNextBucket := dashboardAPIDetailETag("openai", "24h", 120, 20, now.Add(time.Minute))
+	etagAll := dashboardAPIDetailETag("openai", "all", 120, 20, now.Add(time.Hour))
+
+	if etagNow != etagSameBucket {
+		t.Fatalf("range API detail ETag should stay stable within minute bucket: %q vs %q", etagNow, etagSameBucket)
+	}
+	if etagNow == etagNextBucket {
+		t.Fatalf("range API detail ETag should vary across minute buckets: %q", etagNow)
+	}
+	if etagAll != dashboardAPIDetailETag("openai", "all", 120, 20, now) {
+		t.Fatalf("all-range API detail ETag should not include a time bucket")
+	}
+}
+
 func TestSummaryRangeCacheIsBounded(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.summaryRangeCache = make(map[string]DashboardSummary)

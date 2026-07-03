@@ -293,8 +293,12 @@ function fetchManagementJsonPayload(path, options) {
   return fetchJsonPayload(managementEndpoint(path), managementFetchOptions(options));
 }
 
+function pluginFetchOptions(options) {
+  return managementFetchOptions(options);
+}
+
 async function loadModelPrices() {
-  const data = await fetchJsonPayload(pluginEndpoint('model-prices'), { cache: 'no-store' });
+  const data = await fetchJsonPayload(pluginEndpoint('model-prices'), pluginFetchOptions({ cache: 'no-store' }));
   modelPrices = (data && data.prices) || {};
   manualModelPrices = manualPricesFromResponse(data);
   return modelPrices;
@@ -524,12 +528,12 @@ function modelNames() {
 }
 
 function priceModelOptions() {
-  return [...new Set([...modelNames(), ...Object.keys(manualModelPrices || {})])].filter(Boolean).sort((a, b) => a.localeCompare(b));
+  return [...new Set([...modelNames(), ...Object.keys(modelPrices || {}), ...Object.keys(manualModelPrices || {})])].filter(Boolean).sort((a, b) => a.localeCompare(b));
 }
 
 function fillPriceForm(model) {
   $('priceModel').value = model || '';
-  const p = priceForModel($('priceModel').value, manualModelPrices) || {};
+  const p = priceForModel($('priceModel').value, modelPrices, '', manualModelPrices) || {};
   $('pricePrompt').value = p.prompt ?? '';
   $('priceCompletion').value = p.completion ?? '';
   $('priceCache').value = p.cache ?? '';
@@ -540,7 +544,7 @@ function syncPriceFormForModel(model) {
     fillPriceForm('');
     return;
   }
-  if (priceForModel(model, manualModelPrices)) fillPriceForm(model);
+  if (priceForModel(model, modelPrices, '', manualModelPrices)) fillPriceForm(model);
 }
 
 function renderPrices() {
@@ -631,7 +635,7 @@ async function fetchApiDetailData(api) {
   params.set('api', api);
   params.set('recent_limit', String(apiDetailRecentLimit));
   const url = pluginEndpoint('dashboard-api-detail') + '?' + params.toString();
-  const data = requireObjectPayload(await fetchConditionalJsonPayload('dashboard-api-detail:' + url, url, { cache: 'no-store' }), 'dashboard-api-detail');
+  const data = requireObjectPayload(await fetchConditionalJsonPayload('dashboard-api-detail:' + url, url, pluginFetchOptions({ cache: 'no-store' })), 'dashboard-api-detail');
   data.recent_events = (data.recent_events || []).map(normalizeApiDetailEvent);
   return data;
 }
@@ -949,7 +953,7 @@ async function renderEvents() {
   const fa = $('filterAuth').value; if (fa) params.set('auth', fa);
   try {
     const url = pluginEndpoint('dashboard-events') + '?' + params.toString();
-    eventsData = normalizeEventsPayload(await fetchConditionalJsonPayload('dashboard-events:' + url, url, { cache: 'no-store' }));
+    eventsData = normalizeEventsPayload(await fetchConditionalJsonPayload('dashboard-events:' + url, url, pluginFetchOptions({ cache: 'no-store' })));
   } catch (e) {
     eventsData = { events: [], total: 0, limit: eventsLimit, offset: 0 };
   }
@@ -963,16 +967,16 @@ function delay(ms) {
 }
 
 async function createExportJob(params) {
-  return fetchJsonPayload(pluginEndpoint('dashboard-events-export-jobs') + '?' + params.toString(), { method: 'POST', cache: 'no-store' });
+  return fetchJsonPayload(managementEndpoint('dashboard-events-export-jobs') + '?' + params.toString(), pluginFetchOptions({ method: 'POST', cache: 'no-store' }));
 }
 
 async function getExportJob(id) {
-  return fetchJsonPayload(pluginEndpoint('dashboard-events-export-jobs?id=' + encodeURIComponent(id)), { cache: 'no-store' });
+  return fetchJsonPayload(managementEndpoint('dashboard-events-export-jobs?id=' + encodeURIComponent(id)), pluginFetchOptions({ cache: 'no-store' }));
 }
 
 async function deleteExportJob(id) {
   try {
-    await fetchJsonPayload(pluginEndpoint('dashboard-events-export-jobs?id=' + encodeURIComponent(id)), { method: 'DELETE', cache: 'no-store' });
+    await fetchJsonPayload(managementEndpoint('dashboard-events-export-jobs?id=' + encodeURIComponent(id)), pluginFetchOptions({ method: 'DELETE', cache: 'no-store' }));
   } catch {}
 }
 
@@ -993,7 +997,7 @@ async function fetchExportJobResult(params) {
   try {
     const completed = await waitForExportJob(job);
     const downloadPath = completed.download_path || ('dashboard-events-export-download?id=' + encodeURIComponent(job.id));
-    return await fetchTextPayloadWithMeta(pluginEndpoint(downloadPath), { cache: 'no-store' });
+    return await fetchTextPayloadWithMeta(managementEndpoint(downloadPath), pluginFetchOptions({ cache: 'no-store' }));
   } finally {
     await deleteExportJob(job.id);
   }
@@ -1179,7 +1183,6 @@ async function exportApiRows(kind) {
     const meta = await fetchExportJobResult(params);
     const data = typeof meta.data === 'string' ? JSON.parse(meta.data || '{}') : meta.data;
     const rows = data.events || [];
-    if (!rows.length) return;
     notifyExportTruncated({ truncated: !!data.truncated, total: data.total, exported: rows.length });
     if (kind === 'json') { download('usage-api-' + name + '-' + stamp + '.json', JSON.stringify(rows, null, 2), 'application/json;charset=utf-8'); return }
     download('usage-api-' + name + '-' + stamp + '.csv', rowsCsv(rows), 'text/csv;charset=utf-8');
@@ -1263,7 +1266,7 @@ async function load(options) {
     // Try new summary endpoint first with current range
     const summaryUrl = pluginEndpoint('dashboard-summary') + '?range=' + encodeURIComponent(selectedRange);
     const [data] = await Promise.all([
-      fetchConditionalJsonPayload('dashboard-summary:' + summaryUrl, summaryUrl, { cache: 'no-store' }),
+      fetchConditionalJsonPayload('dashboard-summary:' + summaryUrl, summaryUrl, pluginFetchOptions({ cache: 'no-store' })),
       loadModelPrices()
     ]);
     summaryData = requireObjectPayload(data, 'dashboard-summary');
@@ -1279,7 +1282,7 @@ async function load(options) {
       const previousSummary = summaryData;
       const selectedRange = $('range').value;
       const [data] = await Promise.all([
-        fetchJsonPayload(pluginEndpoint('dashboard-data'), { cache: 'no-store' }),
+        fetchJsonPayload(pluginEndpoint('dashboard-data'), pluginFetchOptions({ cache: 'no-store' })),
         loadModelPrices()
       ]);
       summaryData = buildSummaryFromFullUsage(data);
@@ -1328,7 +1331,7 @@ $('exportRowsCsv').onclick = () => exportRows('csv'); $('exportRowsJson').onclic
 $('exportApiCsv').onclick = () => exportApiRows('csv'); $('exportApiJson').onclick = () => exportApiRows('json');
 $('exportBtn').onclick = async () => {
   try {
-    const data = await fetchJsonPayload(pluginEndpoint('usage/export'), { cache: 'no-store' });
+    const data = await fetchJsonPayload(pluginEndpoint('usage/export'), pluginFetchOptions({ cache: 'no-store' }));
     download('usage-export-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json', JSON.stringify(data, null, 2), 'application/json;charset=utf-8');
   } catch (e) { alert(t('export_failed_msg') + (e && e.message ? e.message : t('unknown_error'))) }
 };

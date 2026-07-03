@@ -54,7 +54,8 @@ function createDashboardHarness(options = {}) {
   const timeoutDelays = [];
   let summaryLastRecordedAt = options.lastRecordedAt || '2023-11-15T06:13:20Z';
   let summaryVersion = options.summaryVersion || 1;
-  let prices = { 'gpt-4.1': { prompt: 2, completion: 8, cache: 0.5 } };
+  let prices = options.prices || { 'gpt-4.1': { prompt: 2, completion: 8, cache: 0.5 } };
+  let manualPrices = options.manualPrices;
   const dashboardEtags = !!options.dashboardEtags;
   const wrapDashboardResponses = !!options.wrapDashboardResponses;
   const failDashboardSummary = !!options.failDashboardSummary;
@@ -485,6 +486,7 @@ function createDashboardHarness(options = {}) {
           delete prices[parsed.searchParams.get('model')];
         }
         payload = { prices, updated_at: new Date().toISOString(), storage: {} };
+        if (manualPrices) payload.manual_prices = manualPrices;
       } else if (String(url).includes('dashboard-summary')) {
         if (failDashboardSummary) {
           return {
@@ -716,6 +718,70 @@ test('dashboard trend chart escapes data labels', async () => {
   const html = document.getElementById('trendChart').innerHTML;
   assert.doesNotMatch(html, /<script>/);
   assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+});
+
+test('dashboard api detail export buttons create filtered export jobs', async () => {
+  const { document, fetchRequests, downloads } = createDashboardHarness();
+
+  await waitFor(() => document.getElementById('apiSelect').value === 'openai');
+  await document.getElementById('exportApiCsv').onclick();
+  await waitFor(() => downloads.some((d) => d.text && d.text.startsWith('时间,模型')));
+  await document.getElementById('exportApiJson').onclick();
+  await waitFor(() => downloads.some((d) => d.text && d.text.startsWith('[')));
+
+  const creates = fetchRequests.filter((request) => request.url.includes('dashboard-events-export-jobs') && request.options.method === 'POST');
+  const apiCreates = creates.filter((request) => new URL(request.url, 'http://test.local').searchParams.get('api') === 'openai');
+  assert.strictEqual(apiCreates.length, 2);
+  assert.deepStrictEqual(
+    apiCreates.map((request) => new URL(request.url, 'http://test.local').searchParams.get('format')).sort(),
+    ['csv', 'json']
+  );
+  assert.ok(downloads.some((d) => d.text && d.text.startsWith('[') && JSON.parse(d.text).length === 8));
+  assert.strictEqual(downloads.some((d) => d.alert === '导出失败'), false);
+});
+
+test('dashboard api detail export uses management endpoints from management shell', async () => {
+  const { document, fetchRequests, downloads } = createDashboardHarness({ pathname: '/management.html', managementKey: 'test-management-key' });
+
+  await waitFor(() => document.getElementById('apiSelect').value === 'openai');
+  await document.getElementById('exportApiCsv').onclick();
+  await waitFor(() => downloads.some((d) => d.text && d.text.startsWith('时间,模型')));
+
+  const create = fetchRequests.find((request) => request.url.includes('dashboard-events-export-jobs') && request.options.method === 'POST');
+  assert.ok(create, 'expected an export job create request');
+  assert.match(create.url, /^\/v0\/management\/plugins\/usage-statistics\/dashboard-events-export-jobs\?/);
+  assert.strictEqual(create.options.headers.Authorization, 'Bearer test-management-key');
+  assert.strictEqual(create.options.headers['x-management-key'], 'test-management-key');
+});
+
+test('dashboard api detail export uses management endpoints from resource iframe', async () => {
+  const { document, fetchRequests, downloads } = createDashboardHarness({ pathname: '/v0/resource/plugins/usage-statistics/dashboard', managementKey: 'test-management-key' });
+
+  await waitFor(() => document.getElementById('apiSelect').value === 'openai');
+  await document.getElementById('exportApiJson').onclick();
+  await waitFor(() => downloads.some((d) => d.text && d.text.startsWith('[')));
+
+  const creates = fetchRequests.filter((request) => request.url.includes('dashboard-events-export-jobs') && request.options.method === 'POST');
+  const downloadsReq = fetchRequests.filter((request) => request.url.includes('dashboard-events-export-download'));
+  assert.ok(creates.length > 0, 'expected an export job create request');
+  assert.ok(downloadsReq.length > 0, 'expected an export job download request');
+  assert.match(creates[0].url, /^\/v0\/management\/plugins\/usage-statistics\/dashboard-events-export-jobs\?/);
+  assert.match(downloadsReq[0].url, /^\/v0\/management\/plugins\/usage-statistics\/dashboard-events-export-download\?/);
+});
+
+test('dashboard price form shows models.dev effective prices', async () => {
+  const { document } = createDashboardHarness({
+    prices: { 'gpt-4.1': { prompt: 1.25, completion: 10, cache: 0.125 } },
+    manualPrices: {},
+  });
+
+  await waitFor(() => document.getElementById('priceModelOptions').innerHTML.includes('gpt-4.1'));
+  document.getElementById('priceModel').value = 'gpt-4.1';
+  document.getElementById('priceModel').onchange();
+
+  assert.strictEqual(document.getElementById('pricePrompt').value, 1.25);
+  assert.strictEqual(document.getElementById('priceCompletion').value, 10);
+  assert.strictEqual(document.getElementById('priceCache').value, 0.125);
 });
 
 test('dashboard export truncation headers produce a user notice', () => {

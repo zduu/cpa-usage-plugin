@@ -100,6 +100,17 @@ test('detailCost uses provider-specific prices with manual override first', () =
   assert.ok(Math.abs(manualCost - 6.8) < 0.01, 'cost should use manual pricing, got ' + manualCost);
 });
 
+test('detailCost falls back from provider-prefixed model to bare model price', () => {
+  const prices = { 'gpt-5.5': { prompt: 1.25, completion: 10, cache: 0.125 } };
+  const detail = {
+    provider: 'openai-compatible',
+    model: 'openai/gpt-5.5',
+    tokens: { input_tokens: 1000000, output_tokens: 1000000, cached_tokens: 100000 }
+  };
+  const cost = helpers.detailCost(detail, prices);
+  assert.ok(Math.abs(cost - 11.1375) < 0.01, 'cost should fall back to bare model pricing, got ' + cost);
+});
+
 test('aggregateCost splits mixed-provider model totals by provider', () => {
   const prices = {
     'openai/gpt-5.5': { prompt: 1, completion: 2, cache: 0.5 },
@@ -269,6 +280,14 @@ test('pluginEndpoint builds management URLs from plugin resource paths', () => {
   assert.strictEqual(
     helpers.managementEndpoint('model-prices?model=gpt-4.1', '/v0/resource/plugins/usage-statistics/dashboard'),
     '/v0/management/plugins/usage-statistics/model-prices?model=gpt-4.1'
+  );
+  assert.strictEqual(
+    helpers.pluginEndpoint('dashboard-events-export-jobs', '/management.html'),
+    '/v0/management/plugins/usage-statistics/dashboard-events-export-jobs'
+  );
+  assert.strictEqual(
+    helpers.managementEndpoint('model-prices', '/management.html'),
+    '/v0/management/plugins/usage-statistics/model-prices'
   );
   assert.strictEqual(
     helpers.pluginEndpoint('usage/export', '/standalone/dashboard.html'),

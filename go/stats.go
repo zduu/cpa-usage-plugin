@@ -3530,20 +3530,46 @@ func (s *RequestStatistics) timeSeriesTokenCostLocked(stat TimeSeriesTokenStat) 
 func (s *RequestStatistics) priceForDetailLocked(modelName, provider string) (ModelPrice, bool) {
 	provider = strings.TrimSpace(provider)
 	modelName = strings.TrimSpace(modelName)
-	if provider != "" && modelName != "" {
-		if price, ok := modelPriceCaseInsensitive(s.modelPrices, provider+"/"+modelName); ok {
-			return price, true
-		}
-	}
-	if price, ok := modelPriceCaseInsensitive(s.modelPrices, modelName); ok {
+	if price, ok := priceForDetailFromMap(s.modelPrices, modelName, provider); ok {
 		return price, true
 	}
-	if provider != "" && modelName != "" {
-		if price, ok := modelPriceCaseInsensitive(s.modelsDevPrices, provider+"/"+modelName); ok {
+	return priceForDetailFromMap(s.modelsDevPrices, modelName, provider)
+}
+
+func priceForDetailFromMap(prices map[string]ModelPrice, modelName, provider string) (ModelPrice, bool) {
+	for _, key := range modelPriceLookupKeys(modelName, provider) {
+		if price, ok := modelPriceCaseInsensitive(prices, key); ok {
 			return price, true
 		}
 	}
-	return modelPriceCaseInsensitive(s.modelsDevPrices, modelName)
+	return ModelPrice{}, false
+}
+
+func modelPriceLookupKeys(modelName, provider string) []string {
+	modelName = strings.TrimSpace(modelName)
+	provider = strings.TrimSpace(provider)
+	keys := make([]string, 0, 3)
+	seen := make(map[string]struct{}, 3)
+	add := func(key string) {
+		key = strings.TrimSpace(key)
+		norm := normalizeModelPriceKey(key)
+		if norm == "" {
+			return
+		}
+		if _, ok := seen[norm]; ok {
+			return
+		}
+		keys = append(keys, key)
+		seen[norm] = struct{}{}
+	}
+	if provider != "" && modelName != "" {
+		add(provider + "/" + modelName)
+	}
+	add(modelName)
+	if idx := strings.Index(modelName, "/"); idx > 0 && idx < len(modelName)-1 {
+		add(modelName[idx+1:])
+	}
+	return keys
 }
 
 func modelPriceCaseInsensitive(prices map[string]ModelPrice, model string) (ModelPrice, bool) {

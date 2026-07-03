@@ -451,7 +451,7 @@ func handleDashboardAPIDetail(query map[string][]string, headers map[string][]st
 func dashboardAPIDetailETag(api string, rangeKey string, recentLimit int, errorLimit int, now time.Time) string {
 	timeBucket := int64(0)
 	if rangeKey != "" && rangeKey != "all" {
-		timeBucket = now.UTC().Unix()
+		timeBucket = summaryRangeCacheBucket(now).Unix()
 	}
 	return dashboardWeakETag(
 		"api-detail",

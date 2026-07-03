@@ -43,7 +43,8 @@ function formatUsd(value) {
 }
 function totalTokens(detail) { const t = detail.tokens || {}; return num(t.total_tokens) || num(t.input_tokens) + num(t.output_tokens) }
 function directPriceForModel(model, prices) { if (!prices) return null; if (prices[model]) return prices[model]; const key = String(model || '').trim().toLowerCase(); if (!key) return null; const found = Object.keys(prices).find((m) => String(m || '').trim().toLowerCase() === key); return found ? prices[found] : null }
-function priceForModel(model, prices, provider, manualPrices) { const providerKey = String(provider || '').trim(); const modelKey = String(model || '').trim(); const providerModel = providerKey && modelKey ? providerKey + '/' + modelKey : ''; return directPriceForModel(providerModel, manualPrices) || directPriceForModel(modelKey, manualPrices) || directPriceForModel(providerModel, prices) || directPriceForModel(modelKey, prices) }
+function priceLookupKeys(model, provider) { const providerKey = String(provider || '').trim(); const modelKey = String(model || '').trim(); const keys = []; const seen = new Set(); const add = (key) => { key = String(key || '').trim(); const norm = key.toLowerCase(); if (!norm || seen.has(norm)) return; keys.push(key); seen.add(norm); }; if (providerKey && modelKey) add(providerKey + '/' + modelKey); add(modelKey); const slash = modelKey.indexOf('/'); if (slash > 0 && slash < modelKey.length - 1) add(modelKey.slice(slash + 1)); return keys }
+function priceForModel(model, prices, provider, manualPrices) { const keys = priceLookupKeys(model, provider); for (const key of keys) { const price = directPriceForModel(key, manualPrices); if (price) return price; } for (const key of keys) { const price = directPriceForModel(key, prices); if (price) return price; } return null }
 function tokenCost(model, inputTokens, outputTokens, cachedTokens, reasoningTokens, prices, provider, manualPrices) { const p = priceForModel(model, prices, provider, manualPrices); if (!p) return 0; const cached = Math.max(num(cachedTokens), 0); const input = Math.max(num(inputTokens) - cached, 0); return input / 1e6 * num(p.prompt) + Math.max(num(outputTokens), 0) / 1e6 * num(p.completion) + cached / 1e6 * num(p.cache) }
 function detailCost(detail, prices, manualPrices) { const t = detail.tokens || {}; return tokenCost(detail.model, t.input_tokens, t.output_tokens, Math.max(num(t.cached_tokens), num(t.cache_tokens)), t.reasoning_tokens, prices, detail.provider, manualPrices) }
 function aggregateCost(row, prices, manualPrices) { const providers = Array.isArray(row.providers) ? row.providers : []; if (providers.length) return providers.reduce((sum, p) => sum + tokenCost(row.model, p.input_tokens, p.output_tokens, p.cached_tokens, p.reasoning_tokens, prices, p.provider, manualPrices), 0); return tokenCost(row.model, row.input_tokens, row.output_tokens, row.cached_tokens, row.reasoning_tokens, prices, row.provider, manualPrices) }
@@ -85,6 +86,7 @@ function timestampMs(value) { const ms = Date.parse(value); return Number.isFini
 function pluginEndpoint(path, pathname) {
   const clean = String(path || '').replace(/^\/+/, '');
   const current = String(pathname || (typeof location !== 'undefined' ? location.pathname : ''));
+  if (/\/management\.html\/?$/.test(current)) return '/v0/management/plugins/usage-statistics/' + clean;
   const resourceMarker = '/resource/plugins/usage-statistics/';
   const resourceIdx = current.indexOf(resourceMarker);
   if (resourceIdx >= 0) return current.slice(0, resourceIdx + resourceMarker.length) + clean;
@@ -96,6 +98,7 @@ function pluginEndpoint(path, pathname) {
 function managementEndpoint(path, pathname) {
   const clean = String(path || '').replace(/^\/+/, '');
   const current = String(pathname || (typeof location !== 'undefined' ? location.pathname : ''));
+  if (/\/management\.html\/?$/.test(current)) return '/v0/management/plugins/usage-statistics/' + clean;
   const resourceMarker = '/resource/plugins/usage-statistics/';
   const resourceIdx = current.indexOf(resourceMarker);
   if (resourceIdx >= 0) return current.slice(0, resourceIdx) + '/management/plugins/usage-statistics/' + clean;
