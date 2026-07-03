@@ -678,9 +678,9 @@ test('dashboard language changes do not translate API key labels', async () => {
   const { document, setLanguage } = createDashboardHarness({
     clientApiStats: [{
       api_key: apiLabel,
-      total_requests: 3,
-      success_count: 2,
-      failure_count: 1,
+      total_requests: 1296,
+      success_count: 1230,
+      failure_count: 66,
       total_tokens: 99,
       models: [],
     }],
@@ -691,6 +691,8 @@ test('dashboard language changes do not translate API key labels', async () => {
 
   await waitFor(() => document.getElementById('clientApiStats').innerHTML.includes('Requests'));
   assert.match(document.getElementById('clientApiStats').innerHTML, /<div class="apiName">成功模型凭证<\/div>/);
+  assert.doesNotMatch(document.getElementById('clientApiStats').innerHTML, /apiArrow|▶/);
+  assert.match(document.getElementById('clientApiStats').innerHTML, /<span class="ok">1,230<\/span>&nbsp;<span class="bad">66<\/span>/);
 });
 
 test('dashboard export truncation headers produce a user notice', () => {

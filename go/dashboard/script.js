@@ -567,7 +567,7 @@ function renderClientApiStats() {
   else if (clientApiSort === 'cost') rows.sort((a, b) => b.cost - a.cost);
   else rows.sort((a, b) => b.requests - a.requests);
   document.querySelectorAll('[data-api-sort]').forEach((btn) => btn.classList.toggle('active', btn.dataset.apiSort === clientApiSort));
-  $('clientApiStats').innerHTML = rows.length ? '<div class="apiCardGrid">' + rows.map((r) => '<div class="apiCard"><div><div class="apiName">' + esc(r.name) + '</div><div class="apiChips"><span class="chip">' + withLabel('sort_requests', formatInteger(r.requests)) + ' (<span class="ok">' + formatInteger(r.success) + '</span> <span class="bad">' + formatInteger(r.failure) + '</span>)</span><span class="chip">' + withLabel('sort_tokens', compact(r.tokens)) + '</span><span class="chip">' + withLabel('sort_cost', formatUsd(r.cost)) + '</span></div></div><div class="apiArrow">▶</div></div>').join('') + '</div>' : '<div class="empty">' + t('no_api_data') + '</div>';
+  $('clientApiStats').innerHTML = rows.length ? '<div class="apiCardGrid">' + rows.map((r) => '<div class="apiCard"><div><div class="apiName">' + esc(r.name) + '</div><div class="apiChips"><span class="chip">' + withLabel('sort_requests', formatInteger(r.requests)) + ' (<span class="ok">' + formatInteger(r.success) + '</span>&nbsp;<span class="bad">' + formatInteger(r.failure) + '</span>)</span><span class="chip">' + withLabel('sort_tokens', compact(r.tokens)) + '</span><span class="chip">' + withLabel('sort_cost', formatUsd(r.cost)) + '</span></div></div></div>').join('') + '</div>' : '<div class="empty">' + t('no_api_data') + '</div>';
 }
 
 function renderApiStats() {
@@ -664,7 +664,7 @@ function renderApiDetailContent(apiData, detailState) {
   const errorRows = (detail && detail.error_stats) || [];
   const totalCost = models.reduce((s, m) => s + aggregateCost({ model: m.name, input_tokens: m.input_tokens, output_tokens: m.output_tokens, cached_tokens: m.cached_tokens, reasoning_tokens: m.reasoning_tokens }, modelPrices), 0);
   $('apiDetail').innerHTML = '<div class="detailGrid">' +
-    metricHtml(t('requests_label'), formatInteger(requests), '<span class="ok">' + t('success_label') + ' ' + formatInteger(success) + '</span><span class="bad">' + t('failure_label') + ' ' + formatInteger(failure) + '</span>') +
+    metricHtml(t('requests_label'), formatInteger(requests), '<span class="ok">' + t('success_label') + ' ' + formatInteger(success) + '</span>&nbsp;<span class="bad">' + t('failure_label') + ' ' + formatInteger(failure) + '</span>') +
     metricHtml(t('success_rate'), '<span class="' + (rate >= 95 ? 'ok' : rate >= 80 ? 'neutral' : 'bad') + '">' + pct(rate) + '</span>') +
     metricHtml(t('total_tokens_label'), compact(summary.total_tokens), '<span>' + withLabel('cached_tokens', compact(summary.cached_tokens)) + '</span><span>' + withLabel('reasoning_tokens', compact(summary.reasoning_tokens)) + '</span>') +
     metricHtml(t('avg_latency'), formatMs(summary.avg_latency_ms)) +
