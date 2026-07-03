@@ -8,6 +8,7 @@ let modelPrices = {};
 let manualModelPrices = {};
 let selectedApi = '';
 let clientApiSort = 'requests';
+let trendMetric = 'cost'; // 'cost' | 'requests' | 'tokens' | 'rpm'
 let pollTimer = null, pollFailures = 0;
 let currentRange = '';
 const eventsLimit = 500;
@@ -729,11 +730,180 @@ function renderApiDetailFromCache() {
 function renderModelStats() {
   if (!summaryData || !summaryData.model_stats) { $('modelStats').innerHTML = '<div class="empty">' + t('no_model_data') + '</div>'; return }
   const rows = summaryData.model_stats;
-  $('modelStats').innerHTML = rows.length ? '<table><thead><tr><th>' + t('col_model') + '</th><th>' + t('col_requests') + '</th><th>' + t('col_tokens') + '</th><th>' + t('col_avg_latency') + '</th><th>' + t('col_success_rate') + '</th><th>' + t('col_cost') + '</th></tr></thead><tbody>' + rows.map((r) => {
+  $('modelStats').innerHTML = rows.length ? '<table><thead><tr><th>' + t('col_model') + '</th><th>' + t('col_requests') + '</th><th>' + t('col_tokens') + '</th><th>' + t('col_avg_latency') + '</th><th>' + t('col_success_rate') + '</th><th>' + t('col_cache_rate') + '</th><th>' + t('col_cost') + '</th><th>' + t('col_cost_per_m') + '</th></tr></thead><tbody>' + rows.map((r) => {
     const rate = r.total_requests ? r.success_count / r.total_requests * 100 : 100;
     const cost = aggregateCost(r, modelPrices, manualModelPrices);
-    return '<tr><td class="nameCell">' + esc(r.model) + '</td><td>' + formatInteger(r.total_requests) + ' <span class="ok">(' + formatInteger(r.success_count) + '</span> <span class="bad">' + formatInteger(r.failure_count) + ')</span></td><td>' + compact(r.total_tokens) + '</td><td>' + formatMs(r.avg_latency_ms) + '</td><td class="' + (rate >= 95 ? 'ok' : rate >= 80 ? 'neutral' : 'bad') + '">' + pct(rate) + '</td><td>' + formatUsd(cost) + '</td></tr>';
+    const cRate = cacheRate(r);
+    const cpM = costPerMillion(r, modelPrices, manualModelPrices);
+    return '<tr><td class="nameCell">' + esc(r.model) + '</td><td>' + formatInteger(r.total_requests) + ' <span class="ok">(' + formatInteger(r.success_count) + '</span> <span class="bad">' + formatInteger(r.failure_count) + ')</span></td><td>' + compact(r.total_tokens) + '</td><td>' + formatMs(r.avg_latency_ms) + '</td><td class="' + (rate >= 95 ? 'ok' : rate >= 80 ? 'neutral' : 'bad') + '">' + pct(rate) + '</td><td class="' + (cRate >= 50 ? 'ok' : cRate >= 20 ? 'neutral' : '') + '">' + pct(cRate) + '</td><td>' + formatUsd(cost) + '</td><td>' + (cpM ? formatUsd(cpM) + ' ' + t('cost_per_m_unit') : '-') + '</td></tr>';
   }).join('') + '</tbody></table>' : '<div class="empty">' + t('no_model_data') + '</div>';
+}
+
+function renderTrendChart() {
+  var usage = summaryData && summaryData.usage;
+  if (!usage) { $('trendChart').innerHTML = '<text x="50%" y="50%" text-anchor="middle" class="trendAxisText">' + t('no_trend_data') + '</text>'; $('anomalyBar').className = 'anomalyBar'; return }
+
+  var range = $('range').value;
+  var useHourly = (range === '7h' || range === '24h');
+  var color, barColor;
+  if (trendMetric === 'cost') { color = '#f59e0b'; barColor = 'rgba(245,158,11,0.18)'; }
+  else if (trendMetric === 'tokens') { color = '#8b5cf6'; barColor = 'rgba(139,92,246,0.18)'; }
+  else if (trendMetric === 'rpm') { color = '#22c55e'; barColor = 'rgba(34,197,94,0.18)'; }
+  else { color = '#3b82f6'; barColor = 'rgba(59,130,246,0.18)'; }
+
+  // ---- hourly mode (7h / 24h) ----
+  if (useHourly) {
+    var reqHour = usage.requests_by_hour || {};
+    var tokHour = usage.tokens_by_hour || {};
+    var costHour = usage.cost_by_hour || {};
+    var hours = Object.keys(reqHour).concat(Object.keys(tokHour)).concat(Object.keys(costHour));
+    var hourSet = new Set();
+    hours.forEach(function(k) { hourSet.add(k); });
+    var ordered = Array.from(hourSet).map(Number).filter(function(v) { return !isNaN(v); }).sort(function(a, b) { return a - b; });
+    if (!ordered.length) { $('trendChart').innerHTML = '<text x="50%" y="50%" text-anchor="middle" class="trendAxisText">' + t('no_trend_data') + '</text>'; $('anomalyBar').className = 'anomalyBar'; return }
+
+    var totalCost = 0, totalToks = 0;
+    (summaryData.model_stats || []).forEach(function(r) {
+      var t = num(r.total_tokens); if (t > 0) totalToks += t;
+      var c = aggregateCost(r, modelPrices, manualModelPrices); if (Number.isFinite(c)) totalCost += c;
+    });
+    var blendedPrice = totalToks > 0 ? totalCost / totalToks * 1e6 : 0;
+
+    var points = ordered.map(function(h) {
+      var reqs = hourBucketValue(reqHour, h);
+      var toks = hourBucketValue(tokHour, h);
+      var cost = hourBucketValue(costHour, h);
+      var hasCost = Object.prototype.hasOwnProperty.call(costHour, String(h).padStart(2, '0')) || Object.prototype.hasOwnProperty.call(costHour, String(h));
+      var label = String(h).padStart(2, '0') + ':00';
+      return { label: label, requests: reqs, tokens: toks, cost: hasCost ? cost : (blendedPrice && toks ? toks / 1e6 * blendedPrice : 0), rpm: reqs / 60 };
+    });
+
+    return renderTrendSvg(points, range, color, barColor, 'hour');
+  }
+
+  // ---- daily mode (7d / all) ----
+  var tokensDay = usage.tokens_by_day || {};
+  var requestsDay = usage.requests_by_day || {};
+  var costDay = usage.cost_by_day || {};
+  var allDays = new Set();
+  Object.keys(tokensDay).forEach(function(k) { allDays.add(k); });
+  Object.keys(requestsDay).forEach(function(k) { allDays.add(k); });
+  Object.keys(costDay).forEach(function(k) { allDays.add(k); });
+  var ordered = Array.from(allDays).sort();
+  if (range === 'all' && ordered.length > 30) ordered = ordered.slice(-30);
+  if (!ordered.length) { $('trendChart').innerHTML = '<text x="50%" y="50%" text-anchor="middle" class="trendAxisText">' + t('no_trend_data') + '</text>'; $('anomalyBar').className = 'anomalyBar'; return }
+
+  var totalCost = 0, totalToks = 0;
+  (summaryData.model_stats || []).forEach(function(r) {
+    var t = num(r.total_tokens); if (t > 0) totalToks += t;
+    var c = aggregateCost(r, modelPrices, manualModelPrices); if (Number.isFinite(c)) totalCost += c;
+  });
+  var blendedPrice = totalToks > 0 ? totalCost / totalToks * 1e6 : 0;
+
+  var points = ordered.map(function(day) {
+    var reqs = num(requestsDay[day]);
+    var toks = num(tokensDay[day]);
+    var hasCost = Object.prototype.hasOwnProperty.call(costDay, day);
+    return { label: day.length > 7 ? day.slice(5) : day, requests: reqs, tokens: toks, cost: hasCost ? num(costDay[day]) : (blendedPrice && toks ? toks / 1e6 * blendedPrice : 0), rpm: reqs / 1440 };
+  });
+
+  renderTrendSvg(points, range, color, barColor, 'day');
+}
+
+function renderTrendSvg(points, range, color, barColor, mode) {
+  var valueFn, formatVal;
+  if (trendMetric === 'requests') {
+    valueFn = function(p) { return p.requests; }; formatVal = function(v) { return formatInteger(Math.round(v)); };
+  } else if (trendMetric === 'tokens') {
+    valueFn = function(p) { return p.tokens; }; formatVal = function(v) { return compact(v); };
+  } else if (trendMetric === 'rpm') {
+    valueFn = function(p) { return p.rpm; }; formatVal = function(v) { return Number(v).toFixed(1); };
+  } else {
+    valueFn = function(p) { return p.cost; }; formatVal = function(v) { return formatUsd(v); };
+  }
+
+  var values = points.map(valueFn);
+  var maxVal = Math.max.apply(null, values.concat([1]));
+  var minVal = Math.min.apply(null, values.concat([0]));
+  var n = points.length;
+  if (n < 2) n = 2;
+
+  var W = 1200, H = 240, PL = 70, PR = 20, PT = 24, PB = 36;
+  var chartW = W - PL - PR, chartH = H - PT - PB;
+  var barW = Math.max(3, Math.min(60, chartW / n - (mode === 'hour' ? 4 : 6)));
+
+  var html = '';
+  // Y axis grid lines
+  var ySteps = 4;
+  for (var i = 0; i <= ySteps; i++) {
+    var yVal = minVal + (maxVal - minVal) * i / ySteps;
+    var y = PT + chartH - (i / ySteps) * chartH;
+    html += '<line x1="' + PL + '" x2="' + (W - PR) + '" y1="' + y + '" y2="' + y + '" class="trendAxisLine"/>';
+    html += '<text x="' + (PL - 8) + '" y="' + (y + 4) + '" text-anchor="end" class="trendAxisText">' + esc(formatVal(yVal)) + '</text>';
+  }
+
+  // Bars with color
+  points.forEach(function(p, i) {
+    var v = valueFn(p);
+    var title = esc(p.label + ': ' + formatVal(v));
+    var barH = maxVal > 0 ? Math.max(2, (v / maxVal) * chartH) : 2;
+    var barX = PL + (i + 0.5) * (chartW / n) - barW / 2;
+    var barY = PT + chartH - barH;
+    html += '<rect x="' + barX + '" y="' + barY + '" width="' + barW + '" height="' + barH + '" fill="' + barColor + '" rx="2"><title>' + title + '</title></rect>';
+  });
+
+  // Line
+  var lineD = '';
+  points.forEach(function(p, i) {
+    var v = valueFn(p);
+    var lx = PL + (i + 0.5) * (chartW / n);
+    var ly = PT + chartH - (maxVal > 0 ? (v / maxVal) * chartH : 0);
+    lineD += (i ? 'L' : 'M') + lx + ' ' + ly;
+  });
+  html += '<path d="' + lineD + '" fill="none" stroke="' + color + '" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>';
+
+  // Points
+  points.forEach(function(p, i) {
+    var v = valueFn(p);
+    var title = esc(p.label + ': ' + formatVal(v));
+    var lx = PL + (i + 0.5) * (chartW / n);
+    var ly = PT + chartH - (maxVal > 0 ? (v / maxVal) * chartH : 0);
+    html += '<circle cx="' + lx + '" cy="' + ly + '" r="4" fill="' + color + '"><title>' + title + '</title></circle>';
+  });
+
+  // X axis labels — show every Nth point
+  var xStep = mode === 'hour' ? Math.max(1, Math.ceil(n / 12)) : Math.max(1, Math.ceil(n / 14));
+  points.forEach(function(p, i) {
+    if (i % xStep !== 0 && i !== n - 1) return;
+    var lx = PL + (i + 0.5) * (chartW / n);
+    html += '<text x="' + lx + '" y="' + (H - 6) + '" text-anchor="middle" class="trendAxisText">' + esc(p.label) + '</text>';
+  });
+
+  $('trendChart').setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+  $('trendChart').innerHTML = html;
+
+  // ---- anomaly detection ----
+  var anomaly = detectAnomaly(points, valueFn, function(w) {
+    return w < 2 ? t('anomaly_day') : t('anomaly_days', w);
+  });
+  var bar = $('anomalyBar');
+  if (anomaly.type === 'warning') { bar.className = 'anomalyBar warning'; bar.innerHTML = anomaly.message; }
+  else if (anomaly.type === 'info') { bar.className = 'anomalyBar info'; bar.innerHTML = anomaly.message; }
+  else if (points.length >= 10) { bar.className = 'anomalyBar muted'; bar.innerHTML = t('anomaly_stable'); }
+  else { bar.className = 'anomalyBar'; bar.innerHTML = ''; }
+}
+
+function initTrendChart() {
+  var select = $('trendMetric');
+  var options = [
+    { value: 'cost', label: t('trend_daily_cost') },
+    { value: 'requests', label: t('trend_daily_requests') },
+    { value: 'tokens', label: t('trend_daily_tokens') },
+    { value: 'rpm', label: t('trend_daily_rpm') }
+  ];
+  select.innerHTML = options.map(function(o) { return '<option value="' + o.value + '"' + (trendMetric === o.value ? ' selected' : '') + '>' + o.label + '</option>'; }).join('');
+  select.value = trendMetric;
+  select.onchange = function() { trendMetric = select.value; renderTrendChart(); };
 }
 
 function renderFilters() {
@@ -1072,6 +1242,8 @@ async function rerender(options) {
   renderClientApiStats();
   renderApiStats();
   renderModelStats();
+  initTrendChart();
+  renderTrendChart();
   if (opts.refreshEvents) await renderEvents();
   else renderEventsContent();
   if (opts.refreshApiDetail || previousApi !== selectedApi) await renderApiDetail();
@@ -1177,4 +1349,5 @@ $('importFile').onchange = async (e) => {
 };
 if (document.addEventListener) document.addEventListener('visibilitychange', handleVisibilityChange);
 renderUpdated();
+initTrendChart();
 load();

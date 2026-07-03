@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"math"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -1350,6 +1352,290 @@ func TestSummaryWithoutDetailsKeepsAggregatesAfterDetailTrim(t *testing.T) {
 	assertSummary("incremental", stats.SummaryWithoutDetails())
 }
 
+func TestCostSeriesRepricesAfterDetailTrim(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		MaxDetailsPerModel: 1,
+		RetentionDays:      0,
+		DedupWindowMinutes: 0,
+		PriceStoragePath:   filepath.Join(t.TempDir(), "prices.json"),
+	})
+	if _, err := stats.UpsertModelPrice("gpt-4.1", ModelPrice{Prompt: 1, Completion: 0, Cache: 0}); err != nil {
+		t.Fatalf("UpsertModelPrice() error = %v", err)
+	}
+
+	base := time.Date(2026, 7, 3, 10, 0, 0, 0, time.UTC)
+	for i := 1; i <= 3; i++ {
+		stats.Record(UsageRecord{
+			Provider:    "openai",
+			Model:       "gpt-4.1",
+			RequestedAt: base.Add(time.Duration(i) * time.Minute),
+			Detail: UsageDetail{
+				InputTokens: int64(i * 100),
+			},
+		})
+	}
+
+	summary := stats.SummaryWithoutDetails()
+	if got := len(summary.Usage.APIs["openai"].Models["gpt-4.1"].Providers); got != 1 {
+		t.Fatalf("provider stats count = %d, want 1", got)
+	}
+	assertFloatNear(t, "initial daily cost", summary.Usage.CostByDay["2026-07-03"], 0.0006)
+
+	if _, err := stats.UpsertModelPrice("gpt-4.1", ModelPrice{Prompt: 2, Completion: 0, Cache: 0}); err != nil {
+		t.Fatalf("UpsertModelPrice() update error = %v", err)
+	}
+	summary = stats.SummaryWithoutDetails()
+	if summary.Usage.TotalRequests != 3 || summary.Usage.InputTokens != 600 {
+		t.Fatalf("summary aggregate changed after trim/reprice: %#v", summary.Usage)
+	}
+	assertFloatNear(t, "repriced daily cost", summary.Usage.CostByDay["2026-07-03"], 0.0012)
+}
+
+func TestCostTokenSeriesSurvivesSnapshotWithTrimmedDetails(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		MaxDetailsPerModel: 1,
+		RetentionDays:      0,
+		DedupWindowMinutes: 0,
+		PriceStoragePath:   filepath.Join(t.TempDir(), "source-prices.json"),
+	})
+	if _, err := stats.UpsertModelPrice("gpt-4.1", ModelPrice{Prompt: 1, Completion: 0, Cache: 0}); err != nil {
+		t.Fatalf("UpsertModelPrice() error = %v", err)
+	}
+
+	base := time.Date(2026, 7, 3, 10, 0, 0, 0, time.UTC)
+	for i := 1; i <= 3; i++ {
+		stats.Record(UsageRecord{
+			Provider:    "openai",
+			Model:       "gpt-4.1",
+			RequestedAt: base.Add(time.Duration(i) * time.Minute),
+			Detail: UsageDetail{
+				InputTokens: int64(i * 100),
+			},
+		})
+	}
+	snapshot := stats.Snapshot()
+	if len(snapshot.CostTokensByDay["2026-07-03"]) != 1 {
+		t.Fatalf("snapshot cost token series = %#v", snapshot.CostTokensByDay)
+	}
+	if got := snapshot.CostTokensByDay["2026-07-03"][0].InputTokens; got != 600 {
+		t.Fatalf("snapshot cost input tokens = %d, want 600", got)
+	}
+
+	restored := NewRequestStatistics()
+	restored.Configure(runtimeConfig{
+		MaxDetailsPerModel: 1,
+		RetentionDays:      0,
+		DedupWindowMinutes: 0,
+		PriceStoragePath:   filepath.Join(t.TempDir(), "restored-prices.json"),
+	})
+	restored.mu.Lock()
+	restored.restoreStorageSnapshotLocked(snapshot, time.Now())
+	restored.mu.Unlock()
+	if _, err := restored.UpsertModelPrice("gpt-4.1", ModelPrice{Prompt: 2, Completion: 0, Cache: 0}); err != nil {
+		t.Fatalf("restored UpsertModelPrice() error = %v", err)
+	}
+
+	summary := restored.SummaryWithoutDetails()
+	if summary.Usage.TotalRequests != 3 || summary.Usage.InputTokens != 600 {
+		t.Fatalf("restored summary aggregate = %#v", summary.Usage)
+	}
+	assertFloatNear(t, "restored repriced daily cost", summary.Usage.CostByDay["2026-07-03"], 0.0012)
+}
+
+func TestCostTokenSnapshotMergesDuplicateNormalizedEntries(t *testing.T) {
+	restored := NewRequestStatistics()
+	restored.Configure(runtimeConfig{
+		MaxDetailsPerModel: 100,
+		DedupWindowMinutes: 0,
+		PriceStoragePath:   filepath.Join(t.TempDir(), "prices.json"),
+	})
+	snapshot := StatisticsSnapshot{
+		TotalRequests: 2,
+		SuccessCount:  2,
+		InputTokens:   300,
+		APIs: map[string]APISnapshot{
+			"openai": {
+				TotalRequests: 2,
+				SuccessCount:  2,
+				InputTokens:   300,
+				Models: map[string]ModelSnapshot{
+					"gpt-4.1": {
+						TotalRequests: 2,
+						SuccessCount:  2,
+						InputTokens:   300,
+					},
+				},
+			},
+		},
+		CostTokensByDay: map[string][]TimeSeriesTokenStat{
+			"2026-07-03": {
+				{Model: "GPT-4.1", Provider: "OpenAI", InputTokens: 100},
+				{Model: " gpt-4.1 ", Provider: " openai ", InputTokens: 200},
+			},
+		},
+		CostTokensByHour: map[string][]TimeSeriesTokenStat{
+			"10": {
+				{Model: "GPT-4.1", Provider: "OpenAI", InputTokens: 100},
+				{Model: "gpt-4.1", Provider: "openai", InputTokens: 200},
+			},
+		},
+	}
+	restored.mu.Lock()
+	restored.restoreStorageSnapshotLocked(snapshot, time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC))
+	restored.mu.Unlock()
+
+	if _, err := restored.UpsertModelPrice("openai/gpt-4.1", ModelPrice{Prompt: 2, Completion: 0, Cache: 0}); err != nil {
+		t.Fatalf("UpsertModelPrice() error = %v", err)
+	}
+	summary := restored.SummaryWithoutDetails()
+	assertFloatNear(t, "merged duplicate daily cost", summary.Usage.CostByDay["2026-07-03"], 0.0006)
+	assertFloatNear(t, "merged duplicate hourly cost", summary.Usage.CostByHour["10"], 0.0006)
+}
+
+func TestLegacySnapshotCostSeriesPruneDoesNotGoNegative(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		MaxDetailsPerModel: 100,
+		RetentionDays:      1,
+		DedupWindowMinutes: 0,
+		PriceStoragePath:   filepath.Join(t.TempDir(), "prices.json"),
+	})
+	if _, err := stats.UpsertModelPrice("openai/gpt-4.1", ModelPrice{Prompt: 1, Completion: 0, Cache: 0}); err != nil {
+		t.Fatalf("UpsertModelPrice() error = %v", err)
+	}
+
+	oldTime := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	snapshot := StatisticsSnapshot{
+		TotalRequests: 1,
+		SuccessCount:  1,
+		TotalTokens:   100,
+		InputTokens:   100,
+		APIs: map[string]APISnapshot{
+			"openai": {
+				TotalRequests: 1,
+				SuccessCount:  1,
+				TotalTokens:   100,
+				InputTokens:   100,
+				Models: map[string]ModelSnapshot{
+					"gpt-4.1": {
+						TotalRequests: 1,
+						SuccessCount:  1,
+						TotalTokens:   100,
+						InputTokens:   100,
+						Details: []RequestDetail{{
+							Model:     "gpt-4.1",
+							Timestamp: oldTime,
+							Provider:  "openai",
+							Tokens: TokenStats{
+								InputTokens: 100,
+								TotalTokens: 100,
+							},
+						}},
+					},
+				},
+			},
+		},
+		RequestsByDay:  map[string]int64{"2026-07-01": 1},
+		RequestsByHour: map[string]int64{"10": 1},
+		TokensByDay:    map[string]int64{"2026-07-01": 100},
+		TokensByHour:   map[string]int64{"10": 100},
+	}
+
+	stats.mu.Lock()
+	stats.restoreStorageSnapshotLocked(snapshot, now)
+	if got := stats.costByDay["2026-07-01"]; got <= 0 {
+		stats.mu.Unlock()
+		t.Fatalf("legacy restore daily cost = %.12f, want positive rebuilt cost", got)
+	}
+	stats.pruneLocked(now, true)
+	costByDay := stats.costByDay["2026-07-01"]
+	costByHour := stats.costByHour[10]
+	stats.mu.Unlock()
+
+	if costByDay < -0.000000001 || costByHour < -0.000000001 {
+		t.Fatalf("pruned legacy costs went negative: day %.12f hour %.12f", costByDay, costByHour)
+	}
+	assertFloatNear(t, "pruned legacy daily cost", costByDay, 0)
+	assertFloatNear(t, "pruned legacy hourly cost", costByHour, 0)
+}
+
+func TestLegacySnapshotWithCostMapsPruneRebuildsMissingCostTokens(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		MaxDetailsPerModel: 100,
+		RetentionDays:      1,
+		DedupWindowMinutes: 0,
+		PriceStoragePath:   filepath.Join(t.TempDir(), "prices.json"),
+	})
+	if _, err := stats.UpsertModelPrice("openai/gpt-4.1", ModelPrice{Prompt: 1, Completion: 0, Cache: 0}); err != nil {
+		t.Fatalf("UpsertModelPrice() error = %v", err)
+	}
+
+	oldTime := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	snapshot := StatisticsSnapshot{
+		TotalRequests: 1,
+		SuccessCount:  1,
+		TotalTokens:   100,
+		InputTokens:   100,
+		APIs: map[string]APISnapshot{
+			"openai": {
+				TotalRequests: 1,
+				SuccessCount:  1,
+				TotalTokens:   100,
+				InputTokens:   100,
+				Models: map[string]ModelSnapshot{
+					"gpt-4.1": {
+						TotalRequests: 1,
+						SuccessCount:  1,
+						TotalTokens:   100,
+						InputTokens:   100,
+						Details: []RequestDetail{{
+							Model:     "gpt-4.1",
+							Timestamp: oldTime,
+							Provider:  "openai",
+							Tokens: TokenStats{
+								InputTokens: 100,
+								TotalTokens: 100,
+							},
+						}},
+					},
+				},
+			},
+		},
+		RequestsByDay:  map[string]int64{"2026-07-01": 1},
+		RequestsByHour: map[string]int64{"10": 1},
+		TokensByDay:    map[string]int64{"2026-07-01": 100},
+		TokensByHour:   map[string]int64{"10": 100},
+		CostByDay:      map[string]float64{"2026-07-01": 0.0001},
+		CostByHour:     map[string]float64{"10": 0.0001},
+	}
+
+	stats.mu.Lock()
+	stats.restoreStorageSnapshotLocked(snapshot, now)
+	if len(stats.costTokensByDay["2026-07-01"]) != 1 || len(stats.costTokensByHour[10]) != 1 {
+		stats.mu.Unlock()
+		t.Fatalf("legacy restore did not rebuild missing cost token series: day %#v hour %#v", stats.costTokensByDay, stats.costTokensByHour)
+	}
+	stats.pruneLocked(now, true)
+	costByDay := stats.costByDay["2026-07-01"]
+	costByHour := stats.costByHour[10]
+	stats.mu.Unlock()
+
+	assertFloatNear(t, "pruned legacy cost-map daily cost", costByDay, 0)
+	assertFloatNear(t, "pruned legacy cost-map hourly cost", costByHour, 0)
+}
+
+func assertFloatNear(t *testing.T, label string, got, want float64) {
+	t.Helper()
+	if math.Abs(got-want) > 0.000000001 {
+		t.Fatalf("%s = %.12f, want %.12f", label, got, want)
+	}
+}
+
 func TestSummaryWithoutDetailsCacheReturnsCopyAndInvalidates(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0})
@@ -1653,13 +1939,37 @@ func TestSummaryETagVariesByRange(t *testing.T) {
 	}
 }
 
-func TestSummaryRangeETagVariesByTimeBucket(t *testing.T) {
-	now := time.Now()
+func TestSummaryRangeETagUsesMinuteBucket(t *testing.T) {
+	now := time.Date(2026, 7, 3, 10, 15, 0, 0, time.UTC)
 	etagNow := dashboardSummaryETag(now, "24h")
-	etagNext := dashboardSummaryETag(now.Add(time.Second), "24h")
+	etagSameBucket := dashboardSummaryETag(now.Add(30*time.Second), "24h")
+	etagNextBucket := dashboardSummaryETag(now.Add(time.Minute), "24h")
 
-	if etagNow == etagNext {
-		t.Fatalf("range summary ETag should vary by time bucket: %q", etagNow)
+	if etagNow != etagSameBucket {
+		t.Fatalf("range summary ETag should stay stable within minute bucket: %q vs %q", etagNow, etagSameBucket)
+	}
+	if etagNow == etagNextBucket {
+		t.Fatalf("range summary ETag should vary across minute buckets: %q", etagNow)
+	}
+}
+
+func TestSummaryRangeCacheIsBounded(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.summaryRangeCache = make(map[string]DashboardSummary)
+	stats.summaryRangeCacheWindow = make(map[string]time.Time)
+
+	base := time.Date(2026, 7, 3, 10, 0, 0, 0, time.UTC)
+	for i := 0; i < dashboardSummaryRangeCacheMax*2; i++ {
+		key := summaryRangeCacheKey("24h", base.Add(time.Duration(i)*dashboardSummaryRangeCacheStep))
+		stats.summaryRangeCache[key] = DashboardSummary{}
+		stats.summaryRangeCacheWindow[key] = base
+		stats.pruneSummaryRangeCacheLocked(key)
+		if len(stats.summaryRangeCache) > dashboardSummaryRangeCacheMax {
+			t.Fatalf("range cache size = %d, want <= %d", len(stats.summaryRangeCache), dashboardSummaryRangeCacheMax)
+		}
+	}
+	if len(stats.summaryRangeCacheWindow) != len(stats.summaryRangeCache) {
+		t.Fatalf("range cache window size = %d, cache size = %d", len(stats.summaryRangeCacheWindow), len(stats.summaryRangeCache))
 	}
 }
 

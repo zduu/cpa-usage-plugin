@@ -138,6 +138,15 @@ test('aggregateCost uses the original model key, not an alias', () => {
   assert.ok(Math.abs(cost - 29.1) < 0.01, 'cost should use gpt-4 pricing, got ' + cost);
 });
 
+test('hourBucketValue reads padded and plain hour keys', () => {
+  assert.strictEqual(helpers.hourBucketValue({ '09': 12 }, 9), 12);
+  assert.strictEqual(helpers.hourBucketValue({ '9': 13 }, 9), 13);
+  assert.strictEqual(helpers.hourBucketValue({ '00': 5 }, 0), 5);
+  assert.strictEqual(helpers.hourBucketValue({ '0': 6 }, 0), 6);
+  assert.strictEqual(helpers.hourBucketValue({ '10': '7' }, '10'), 7);
+  assert.strictEqual(helpers.hourBucketValue({}, 10), 0);
+});
+
 test('looksLikeKey detects API key patterns', () => {
   assert.strictEqual(helpers.looksLikeKey('sk-abc123def456'), true);
   assert.strictEqual(helpers.looksLikeKey('AIzaSyABC123XYZ'), true);

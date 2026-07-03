@@ -86,7 +86,7 @@ func dashboardSummaryETag(now time.Time, rangeKey string) string {
 		parts = append(parts, rangeKey)
 	}
 	if rangeKey != "" && rangeKey != "all" {
-		parts = append(parts, strconv.FormatInt(now.UTC().Unix(), 10))
+		parts = append(parts, strconv.FormatInt(summaryRangeCacheBucket(now).Unix(), 10))
 	}
 	return dashboardWeakETag(parts...)
 }

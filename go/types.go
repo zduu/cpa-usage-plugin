@@ -583,10 +583,14 @@ type StatisticsSnapshot struct {
 
 	APIs map[string]APISnapshot `json:"apis"`
 
-	RequestsByDay  map[string]int64 `json:"requests_by_day"`
-	RequestsByHour map[string]int64 `json:"requests_by_hour"`
-	TokensByDay    map[string]int64 `json:"tokens_by_day"`
-	TokensByHour   map[string]int64 `json:"tokens_by_hour"`
+	RequestsByDay    map[string]int64                 `json:"requests_by_day"`
+	RequestsByHour   map[string]int64                 `json:"requests_by_hour"`
+	TokensByDay      map[string]int64                 `json:"tokens_by_day"`
+	TokensByHour     map[string]int64                 `json:"tokens_by_hour"`
+	CostByDay        map[string]float64               `json:"cost_by_day,omitempty"`
+	CostByHour       map[string]float64               `json:"cost_by_hour,omitempty"`
+	CostTokensByDay  map[string][]TimeSeriesTokenStat `json:"cost_tokens_by_day,omitempty"`
+	CostTokensByHour map[string][]TimeSeriesTokenStat `json:"cost_tokens_by_hour,omitempty"`
 }
 
 type APISnapshot struct {
@@ -600,6 +604,16 @@ type APISnapshot struct {
 	ReasoningTokens int64                    `json:"reasoning_tokens,omitempty"`
 	AvgLatencyMs    float64                  `json:"avg_latency_ms,omitempty"`
 	Models          map[string]ModelSnapshot `json:"models"`
+}
+
+type TimeSeriesTokenStat struct {
+	Model           string `json:"model"`
+	Provider        string `json:"provider,omitempty"`
+	TotalTokens     int64  `json:"total_tokens"`
+	InputTokens     int64  `json:"input_tokens"`
+	OutputTokens    int64  `json:"output_tokens"`
+	CachedTokens    int64  `json:"cached_tokens"`
+	ReasoningTokens int64  `json:"reasoning_tokens"`
 }
 
 type ModelSnapshot struct {
@@ -642,6 +656,8 @@ type StatisticsSnapshotWithoutDetails struct {
 	RequestsByHour  map[string]int64                     `json:"requests_by_hour"`
 	TokensByDay     map[string]int64                     `json:"tokens_by_day"`
 	TokensByHour    map[string]int64                     `json:"tokens_by_hour"`
+	CostByDay       map[string]float64                   `json:"cost_by_day,omitempty"`
+	CostByHour      map[string]float64                   `json:"cost_by_hour,omitempty"`
 }
 
 type APISnapshotWithoutDetails struct {

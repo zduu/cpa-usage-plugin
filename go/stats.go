@@ -52,11 +52,15 @@ type RequestStatistics struct {
 
 	apis map[string]*apiStats
 
-	requestsByDay  map[string]int64
-	requestsByHour map[int]int64
-	tokensByDay    map[string]int64
-	tokensByHour   map[int]int64
-	healthBuckets  map[int64]healthBucket
+	requestsByDay    map[string]int64
+	requestsByHour   map[int]int64
+	tokensByDay      map[string]int64
+	tokensByHour     map[int]int64
+	costByDay        map[string]float64
+	costByHour       map[int]float64
+	costTokensByDay  map[string]map[string]*TimeSeriesTokenStat
+	costTokensByHour map[int]map[string]*TimeSeriesTokenStat
+	healthBuckets    map[int64]healthBucket
 
 	modelSummaryStats map[string]*ModelStat
 	sourceStats       map[string]*sourceStatAccumulator
@@ -207,6 +211,50 @@ type detailTotals struct {
 	latencyN        int64
 }
 
+func timeSeriesTokenKey(model, provider string) string {
+	return normalizeModelPriceKey(provider) + "\x00" + normalizeModelPriceKey(model)
+}
+
+func incrementTimeSeriesTokenStats(stats map[string]*TimeSeriesTokenStat, model, provider string, totals detailTotals) map[string]*TimeSeriesTokenStat {
+	if stats == nil {
+		stats = make(map[string]*TimeSeriesTokenStat)
+	}
+	model = strings.TrimSpace(model)
+	provider = strings.TrimSpace(provider)
+	key := timeSeriesTokenKey(model, provider)
+	stat, ok := stats[key]
+	if !ok {
+		stat = &TimeSeriesTokenStat{Model: model, Provider: provider}
+		stats[key] = stat
+	}
+	stat.TotalTokens += totals.totalTokens
+	stat.InputTokens += totals.inputTokens
+	stat.OutputTokens += totals.outputTokens
+	stat.CachedTokens += totals.cachedTokens
+	stat.ReasoningTokens += totals.reasoningTokens
+	return stats
+}
+
+func decrementTimeSeriesTokenStats(stats map[string]*TimeSeriesTokenStat, model, provider string, totals detailTotals) bool {
+	if stats == nil {
+		return false
+	}
+	key := timeSeriesTokenKey(model, provider)
+	stat, ok := stats[key]
+	if !ok || stat == nil {
+		return false
+	}
+	stat.TotalTokens -= totals.totalTokens
+	stat.InputTokens -= totals.inputTokens
+	stat.OutputTokens -= totals.outputTokens
+	stat.CachedTokens -= totals.cachedTokens
+	stat.ReasoningTokens -= totals.reasoningTokens
+	if stat.TotalTokens <= 0 && stat.InputTokens <= 0 && stat.OutputTokens <= 0 && stat.CachedTokens <= 0 && stat.ReasoningTokens <= 0 {
+		delete(stats, key)
+	}
+	return true
+}
+
 func modelProviderStatsKey(provider string) string {
 	return strings.ToLower(strings.TrimSpace(provider))
 }
@@ -352,10 +400,12 @@ var hourKeys = [24]string{
 }
 
 const (
-	dashboardHealthSlotCount = 672
-	dashboardHealthStep      = 15 * time.Minute
-	dashboardEventCacheMax   = 16
-	storageWriteSampleMax    = 256
+	dashboardHealthSlotCount       = 672
+	dashboardHealthStep            = 15 * time.Minute
+	dashboardEventCacheMax         = 16
+	dashboardSummaryRangeCacheMax  = 16
+	dashboardSummaryRangeCacheStep = time.Minute
+	storageWriteSampleMax          = 256
 )
 
 func init() {
@@ -390,6 +440,10 @@ func NewRequestStatistics() *RequestStatistics {
 		requestsByHour:                make(map[int]int64),
 		tokensByDay:                   make(map[string]int64),
 		tokensByHour:                  make(map[int]int64),
+		costByDay:                     make(map[string]float64),
+		costByHour:                    make(map[int]float64),
+		costTokensByDay:               make(map[string]map[string]*TimeSeriesTokenStat),
+		costTokensByHour:              make(map[int]map[string]*TimeSeriesTokenStat),
 		healthBuckets:                 make(map[int64]healthBucket),
 		modelSummaryStats:             make(map[string]*ModelStat),
 		sourceStats:                   make(map[string]*sourceStatAccumulator),
@@ -523,6 +577,7 @@ func (s *RequestStatistics) ConfigurePatch(cfg runtimeConfigPatch) {
 	s.configureModelsDevPriceWorkerLocked()
 	s.configureStorageLocked()
 	s.loadModelPricesLocked()
+	s.rebuildCostSeriesLocked()
 	s.pruneLocked(time.Now(), true)
 	s.rebuildSeenLocked(time.Now())
 	s.invalidateSummaryLocked()
@@ -1175,10 +1230,15 @@ func (s *RequestStatistics) recordDetailLocked(apiName, modelName string, detail
 	s.latencyN += totals.latencyN
 	dayKey := detail.Timestamp.Format("2006-01-02")
 	hourKey := detail.Timestamp.Hour()
+	cost := s.detailCostLocked(modelName, detail, totals)
 	s.requestsByDay[dayKey]++
 	s.requestsByHour[hourKey]++
 	s.tokensByDay[dayKey] += totals.totalTokens
 	s.tokensByHour[hourKey] += totals.totalTokens
+	s.costByDay[dayKey] += cost
+	s.costByHour[hourKey] += cost
+	s.costTokensByDay[dayKey] = incrementTimeSeriesTokenStats(s.costTokensByDay[dayKey], detailModel(modelName, detail), detail.Provider, totals)
+	s.costTokensByHour[hourKey] = incrementTimeSeriesTokenStats(s.costTokensByHour[hourKey], detailModel(modelName, detail), detail.Provider, totals)
 	s.incrementModelSummaryStatsLocked(modelName, detail, totals)
 	s.incrementSummaryDimensionStatsLocked(modelName, detail, totals)
 	s.incrementHealthBucketLocked(detail)
@@ -1325,6 +1385,10 @@ func (s *RequestStatistics) restoreStorageSnapshotLocked(snapshot StatisticsSnap
 	s.requestsByHour = hourStringMapToIntMap(snapshot.RequestsByHour)
 	s.tokensByDay = copyStringInt64Map(snapshot.TokensByDay)
 	s.tokensByHour = hourStringMapToIntMap(snapshot.TokensByHour)
+	s.costByDay = copyStringFloat64Map(snapshot.CostByDay)
+	s.costByHour = hourStringMapToFloat64Map(snapshot.CostByHour)
+	s.costTokensByDay = timeSeriesTokenStatsByDayFromSnapshot(snapshot.CostTokensByDay)
+	s.costTokensByHour = timeSeriesTokenStatsByHourFromSnapshot(snapshot.CostTokensByHour)
 	s.healthBuckets = make(map[int64]healthBucket)
 	s.modelSummaryStats = make(map[string]*ModelStat)
 	s.sourceStats = make(map[string]*sourceStatAccumulator)
@@ -1416,6 +1480,27 @@ func (s *RequestStatistics) restoreStorageSnapshotLocked(snapshot StatisticsSnap
 	restoreSnapshotAggregatesFromAPIs(s)
 	if s.totalRequests == 0 && restoredDetails > 0 {
 		s.rebuildAggregatesLocked()
+	} else {
+		s.restoreMissingCostSeriesLocked(restoredDetails)
+	}
+}
+
+func (s *RequestStatistics) restoreMissingCostSeriesLocked(restoredDetails int64) {
+	if s == nil {
+		return
+	}
+	if restoredDetails > 0 {
+		rebuildDayTokens := len(s.costTokensByDay) == 0
+		rebuildHourTokens := len(s.costTokensByHour) == 0
+		if rebuildDayTokens || rebuildHourTokens {
+			s.rebuildCostTokenSeriesFromDetailsLocked(rebuildDayTokens, rebuildHourTokens)
+		}
+	}
+	if len(s.costByDay) == 0 && len(s.costTokensByDay) > 0 {
+		s.costByDay = s.costByDayFromTokenSeriesLocked()
+	}
+	if len(s.costByHour) == 0 && len(s.costTokensByHour) > 0 {
+		s.costByHour = s.costByHourFromTokenSeriesLocked()
 	}
 }
 
@@ -1557,6 +1642,17 @@ func copyStringInt64Map(values map[string]int64) map[string]int64 {
 	return copied
 }
 
+func copyStringFloat64Map(values map[string]float64) map[string]float64 {
+	if values == nil {
+		return make(map[string]float64)
+	}
+	copied := make(map[string]float64, len(values))
+	for key, value := range values {
+		copied[key] = value
+	}
+	return copied
+}
+
 func hourStringMapToIntMap(values map[string]int64) map[int]int64 {
 	result := make(map[int]int64, len(values))
 	for key, value := range values {
@@ -1565,6 +1661,76 @@ func hourStringMapToIntMap(values map[string]int64) map[int]int64 {
 			continue
 		}
 		result[hour] = value
+	}
+	return result
+}
+
+func hourStringMapToFloat64Map(values map[string]float64) map[int]float64 {
+	result := make(map[int]float64, len(values))
+	for key, value := range values {
+		hour, err := strconv.Atoi(key)
+		if err != nil || hour < 0 || hour >= 24 {
+			continue
+		}
+		result[hour] = value
+	}
+	return result
+}
+
+func timeSeriesTokenStatsByDayFromSnapshot(values map[string][]TimeSeriesTokenStat) map[string]map[string]*TimeSeriesTokenStat {
+	result := make(map[string]map[string]*TimeSeriesTokenStat, len(values))
+	for bucket, stats := range values {
+		if len(stats) == 0 {
+			continue
+		}
+		parsed := timeSeriesTokenStatsFromSnapshot(stats)
+		if len(parsed) > 0 {
+			result[bucket] = parsed
+		}
+	}
+	return result
+}
+
+func timeSeriesTokenStatsByHourFromSnapshot(values map[string][]TimeSeriesTokenStat) map[int]map[string]*TimeSeriesTokenStat {
+	result := make(map[int]map[string]*TimeSeriesTokenStat, len(values))
+	for key, stats := range values {
+		hour, err := strconv.Atoi(key)
+		if err != nil || hour < 0 || hour >= 24 || len(stats) == 0 {
+			continue
+		}
+		parsed := timeSeriesTokenStatsFromSnapshot(stats)
+		if len(parsed) > 0 {
+			result[hour] = parsed
+		}
+	}
+	return result
+}
+
+func timeSeriesTokenStatsFromSnapshot(values []TimeSeriesTokenStat) map[string]*TimeSeriesTokenStat {
+	result := make(map[string]*TimeSeriesTokenStat, len(values))
+	for _, value := range values {
+		value.Model = strings.TrimSpace(value.Model)
+		value.Provider = strings.TrimSpace(value.Provider)
+		if value.Model == "" {
+			continue
+		}
+		key := timeSeriesTokenKey(value.Model, value.Provider)
+		if existing, ok := result[key]; ok {
+			existing.TotalTokens += value.TotalTokens
+			existing.InputTokens += value.InputTokens
+			existing.OutputTokens += value.OutputTokens
+			existing.CachedTokens += value.CachedTokens
+			existing.ReasoningTokens += value.ReasoningTokens
+			if existing.Model == "" {
+				existing.Model = value.Model
+			}
+			if existing.Provider == "" {
+				existing.Provider = value.Provider
+			}
+			continue
+		}
+		stat := value
+		result[key] = &stat
 	}
 	return result
 }
@@ -2064,6 +2230,8 @@ func (s *RequestStatistics) refreshModelsDevPricesOnceWithStop(stop <-chan struc
 	s.modelsDevLastSuccess = attemptAt
 	s.modelsDevLastError = ""
 	s.modelsDevETag = resp.Header.Get("ETag")
+	s.rebuildCostSeriesLocked()
+	s.invalidateSummaryLocked()
 	s.mu.Unlock()
 }
 
@@ -2386,6 +2554,8 @@ func (s *RequestStatistics) UpsertModelPrice(model string, price ModelPrice) (Mo
 	if err := s.saveModelPricesLocked(); err != nil {
 		return ModelPricesResponse{}, err
 	}
+	s.rebuildCostSeriesLocked()
+	s.invalidateSummaryLocked()
 	return s.modelPricesResponseLocked(), nil
 }
 
@@ -2407,6 +2577,8 @@ func (s *RequestStatistics) DeleteModelPrice(model string) (ModelPricesResponse,
 	if err := s.saveModelPricesLocked(); err != nil {
 		return ModelPricesResponse{}, err
 	}
+	s.rebuildCostSeriesLocked()
+	s.invalidateSummaryLocked()
 	return s.modelPricesResponseLocked(), nil
 }
 
@@ -2889,10 +3061,23 @@ func (s *RequestStatistics) decrementCounters(d RequestDetail, apiSt *apiStats, 
 
 	dayKey := d.Timestamp.Format("2006-01-02")
 	hourKey := d.Timestamp.Hour()
+	cost := s.detailCostLocked(modelName, d, totals)
 	s.requestsByDay[dayKey]--
 	s.requestsByHour[hourKey]--
 	s.tokensByDay[dayKey] -= totals.totalTokens
 	s.tokensByHour[hourKey] -= totals.totalTokens
+	if decrementTimeSeriesTokenStats(s.costTokensByDay[dayKey], detailModel(modelName, d), d.Provider, totals) {
+		s.costByDay[dayKey] -= cost
+	}
+	if len(s.costTokensByDay[dayKey]) == 0 {
+		delete(s.costTokensByDay, dayKey)
+	}
+	if decrementTimeSeriesTokenStats(s.costTokensByHour[hourKey], detailModel(modelName, d), d.Provider, totals) {
+		s.costByHour[hourKey] -= cost
+	}
+	if len(s.costTokensByHour[hourKey]) == 0 {
+		delete(s.costTokensByHour, hourKey)
+	}
 	s.decrementModelSummaryStatsLocked(modelName, d, totals)
 	s.decrementSummaryDimensionStatsLocked(modelName, d, totals)
 	s.decrementHealthBucketLocked(d)
@@ -2916,6 +3101,10 @@ func (s *RequestStatistics) rebuildAggregatesLocked() {
 	s.requestsByHour = make(map[int]int64)
 	s.tokensByDay = make(map[string]int64)
 	s.tokensByHour = make(map[int]int64)
+	s.costByDay = make(map[string]float64)
+	s.costByHour = make(map[int]float64)
+	s.costTokensByDay = make(map[string]map[string]*TimeSeriesTokenStat)
+	s.costTokensByHour = make(map[int]map[string]*TimeSeriesTokenStat)
 	s.healthBuckets = make(map[int64]healthBucket)
 	s.modelSummaryStats = make(map[string]*ModelStat)
 	s.sourceStats = make(map[string]*sourceStatAccumulator)
@@ -2984,16 +3173,95 @@ func (s *RequestStatistics) rebuildAggregatesLocked() {
 				modelSt.providerStats = incrementModelProviderStats(modelSt.providerStats, detail.Provider, detail.Failed, totals)
 				dayKey := detail.Timestamp.Format("2006-01-02")
 				hourKey := detail.Timestamp.Hour()
+				cost := s.detailCostLocked(modelName, detail, totals)
 				s.requestsByDay[dayKey]++
 				s.requestsByHour[hourKey]++
 				s.tokensByDay[dayKey] += totals.totalTokens
 				s.tokensByHour[hourKey] += totals.totalTokens
+				s.costByDay[dayKey] += cost
+				s.costByHour[hourKey] += cost
+				s.costTokensByDay[dayKey] = incrementTimeSeriesTokenStats(s.costTokensByDay[dayKey], detailModel(modelName, detail), detail.Provider, totals)
+				s.costTokensByHour[hourKey] = incrementTimeSeriesTokenStats(s.costTokensByHour[hourKey], detailModel(modelName, detail), detail.Provider, totals)
 				s.incrementModelSummaryStatsLocked(modelName, detail, totals)
 				s.incrementSummaryDimensionStatsLocked(modelName, detail, totals)
 				s.incrementHealthBucketLocked(detail)
 			}
 		}
 	}
+}
+
+func (s *RequestStatistics) rebuildCostSeriesLocked() {
+	if s == nil {
+		return
+	}
+	if len(s.costTokensByDay) == 0 && len(s.costTokensByHour) == 0 {
+		return
+	}
+	if len(s.costTokensByDay) > 0 {
+		s.costByDay = s.costByDayFromTokenSeriesLocked()
+	}
+	if len(s.costTokensByHour) > 0 {
+		s.costByHour = s.costByHourFromTokenSeriesLocked()
+	}
+}
+
+func (s *RequestStatistics) rebuildCostTokenSeriesFromDetailsLocked(rebuildDay, rebuildHour bool) {
+	if s == nil || (!rebuildDay && !rebuildHour) {
+		return
+	}
+	if rebuildDay {
+		s.costTokensByDay = make(map[string]map[string]*TimeSeriesTokenStat)
+	}
+	if rebuildHour {
+		s.costTokensByHour = make(map[int]map[string]*TimeSeriesTokenStat)
+	}
+	for _, apiSt := range s.apis {
+		if apiSt == nil {
+			continue
+		}
+		for modelName, modelSt := range apiSt.Models {
+			if modelSt == nil {
+				continue
+			}
+			for _, detail := range modelSt.Details {
+				totals := detailTotalsFromRequest(detail)
+				if rebuildDay {
+					dayKey := detail.Timestamp.Format("2006-01-02")
+					s.costTokensByDay[dayKey] = incrementTimeSeriesTokenStats(s.costTokensByDay[dayKey], detailModel(modelName, detail), detail.Provider, totals)
+				}
+				if rebuildHour {
+					hourKey := detail.Timestamp.Hour()
+					s.costTokensByHour[hourKey] = incrementTimeSeriesTokenStats(s.costTokensByHour[hourKey], detailModel(modelName, detail), detail.Provider, totals)
+				}
+			}
+		}
+	}
+}
+
+func (s *RequestStatistics) costByDayFromTokenSeriesLocked() map[string]float64 {
+	result := make(map[string]float64, len(s.costTokensByDay))
+	for day, stats := range s.costTokensByDay {
+		for _, stat := range stats {
+			if stat == nil {
+				continue
+			}
+			result[day] += s.timeSeriesTokenCostLocked(*stat)
+		}
+	}
+	return result
+}
+
+func (s *RequestStatistics) costByHourFromTokenSeriesLocked() map[int]float64 {
+	result := make(map[int]float64, len(s.costTokensByHour))
+	for hour, stats := range s.costTokensByHour {
+		for _, stat := range stats {
+			if stat == nil {
+				continue
+			}
+			result[hour] += s.timeSeriesTokenCostLocked(*stat)
+		}
+	}
+	return result
 }
 
 // Snapshot returns a full deep-copy of all statistics including details.
@@ -3084,6 +3352,20 @@ func (s *RequestStatistics) snapshotLocked() StatisticsSnapshot {
 			result.TokensByHour[hourKeys[hour]] = v
 		}
 	}
+
+	result.CostByDay = make(map[string]float64, len(s.costByDay))
+	for k, v := range s.costByDay {
+		result.CostByDay[k] = v
+	}
+
+	result.CostByHour = make(map[string]float64, 24)
+	for hour, v := range s.costByHour {
+		if hour >= 0 && hour < 24 {
+			result.CostByHour[hourKeys[hour]] = v
+		}
+	}
+	result.CostTokensByDay = timeSeriesTokenStatsByDaySnapshot(s.costTokensByDay)
+	result.CostTokensByHour = timeSeriesTokenStatsByHourSnapshot(s.costTokensByHour)
 
 	return result
 }
@@ -3213,6 +3495,68 @@ func detailTotalsFromRequest(detail RequestDetail) detailTotals {
 		totals.latencyN = 1
 	}
 	return totals
+}
+
+func (s *RequestStatistics) detailCostLocked(modelName string, detail RequestDetail, totals detailTotals) float64 {
+	if s == nil {
+		return 0
+	}
+	return s.timeSeriesTokenCostLocked(TimeSeriesTokenStat{
+		Model:        detailModel(modelName, detail),
+		Provider:     detail.Provider,
+		TotalTokens:  totals.totalTokens,
+		InputTokens:  totals.inputTokens,
+		OutputTokens: totals.outputTokens,
+		CachedTokens: totals.cachedTokens,
+	})
+}
+
+func (s *RequestStatistics) timeSeriesTokenCostLocked(stat TimeSeriesTokenStat) float64 {
+	if s == nil {
+		return 0
+	}
+	price, ok := s.priceForDetailLocked(stat.Model, stat.Provider)
+	if !ok {
+		return 0
+	}
+	cached := float64(nonNegativeInt64(stat.CachedTokens))
+	input := float64(nonNegativeInt64(stat.InputTokens)) - cached
+	if input < 0 {
+		input = 0
+	}
+	return input/1e6*price.Prompt + float64(nonNegativeInt64(stat.OutputTokens))/1e6*price.Completion + cached/1e6*price.Cache
+}
+
+func (s *RequestStatistics) priceForDetailLocked(modelName, provider string) (ModelPrice, bool) {
+	provider = strings.TrimSpace(provider)
+	modelName = strings.TrimSpace(modelName)
+	if provider != "" && modelName != "" {
+		if price, ok := modelPriceCaseInsensitive(s.modelPrices, provider+"/"+modelName); ok {
+			return price, true
+		}
+	}
+	if price, ok := modelPriceCaseInsensitive(s.modelPrices, modelName); ok {
+		return price, true
+	}
+	if provider != "" && modelName != "" {
+		if price, ok := modelPriceCaseInsensitive(s.modelsDevPrices, provider+"/"+modelName); ok {
+			return price, true
+		}
+	}
+	return modelPriceCaseInsensitive(s.modelsDevPrices, modelName)
+}
+
+func modelPriceCaseInsensitive(prices map[string]ModelPrice, model string) (ModelPrice, bool) {
+	norm := normalizeModelPriceKey(model)
+	if norm == "" || len(prices) == 0 {
+		return ModelPrice{}, false
+	}
+	for key, price := range prices {
+		if normalizeModelPriceKey(key) == norm {
+			return price, true
+		}
+	}
+	return ModelPrice{}, false
 }
 
 func summarySourceKey(detail RequestDetail) string {
@@ -3404,12 +3748,35 @@ func (s *RequestStatistics) SummaryWithoutDetailsForRange(rangeKey string) Dashb
 	summary := s.buildSummaryWithoutDetailsForRangeLocked(now, healthWindow, cutoff)
 	s.summaryRangeCache[cacheKey] = cloneDashboardSummary(summary)
 	s.summaryRangeCacheWindow[cacheKey] = healthWindow
+	s.pruneSummaryRangeCacheLocked(cacheKey)
 	s.lastSummaryDuration = time.Since(startedAt)
 	return summary
 }
 
 func summaryRangeCacheKey(rangeKey string, now time.Time) string {
-	return rangeKey + "|" + strconv.FormatInt(now.UTC().Unix(), 10)
+	return rangeKey + "|" + strconv.FormatInt(summaryRangeCacheBucket(now).Unix(), 10)
+}
+
+func summaryRangeCacheBucket(now time.Time) time.Time {
+	return now.UTC().Truncate(dashboardSummaryRangeCacheStep)
+}
+
+func (s *RequestStatistics) pruneSummaryRangeCacheLocked(keepKey string) {
+	if s == nil || len(s.summaryRangeCache) <= dashboardSummaryRangeCacheMax {
+		return
+	}
+	for key := range s.summaryRangeCache {
+		if len(s.summaryRangeCache) <= dashboardSummaryRangeCacheMax {
+			break
+		}
+		if key == keepKey && len(s.summaryRangeCache) > 1 {
+			continue
+		}
+		delete(s.summaryRangeCache, key)
+		if s.summaryRangeCacheWindow != nil {
+			delete(s.summaryRangeCacheWindow, key)
+		}
+	}
 }
 
 func summaryHealthWindow(now time.Time) time.Time {
@@ -3457,6 +3824,8 @@ func cloneStatisticsSnapshotWithoutDetails(snapshot StatisticsSnapshotWithoutDet
 	cloned.RequestsByHour = cloneInt64Map(snapshot.RequestsByHour)
 	cloned.TokensByDay = cloneInt64Map(snapshot.TokensByDay)
 	cloned.TokensByHour = cloneInt64Map(snapshot.TokensByHour)
+	cloned.CostByDay = cloneFloat64Map(snapshot.CostByDay)
+	cloned.CostByHour = cloneFloat64Map(snapshot.CostByHour)
 	return cloned
 }
 
@@ -3491,6 +3860,62 @@ func cloneInt64Map(values map[string]int64) map[string]int64 {
 		cloned[k] = v
 	}
 	return cloned
+}
+
+func cloneFloat64Map(values map[string]float64) map[string]float64 {
+	if values == nil {
+		return nil
+	}
+	cloned := make(map[string]float64, len(values))
+	for k, v := range values {
+		cloned[k] = v
+	}
+	return cloned
+}
+
+func timeSeriesTokenStatsByDaySnapshot(values map[string]map[string]*TimeSeriesTokenStat) map[string][]TimeSeriesTokenStat {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make(map[string][]TimeSeriesTokenStat, len(values))
+	for bucket, stats := range values {
+		result[bucket] = timeSeriesTokenStatsSnapshot(stats)
+	}
+	return result
+}
+
+func timeSeriesTokenStatsByHourSnapshot(values map[int]map[string]*TimeSeriesTokenStat) map[string][]TimeSeriesTokenStat {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make(map[string][]TimeSeriesTokenStat, len(values))
+	for hour, stats := range values {
+		if hour < 0 || hour >= 24 {
+			continue
+		}
+		result[hourKeys[hour]] = timeSeriesTokenStatsSnapshot(stats)
+	}
+	return result
+}
+
+func timeSeriesTokenStatsSnapshot(values map[string]*TimeSeriesTokenStat) []TimeSeriesTokenStat {
+	if len(values) == 0 {
+		return nil
+	}
+	stats := make([]TimeSeriesTokenStat, 0, len(values))
+	for _, stat := range values {
+		if stat == nil {
+			continue
+		}
+		stats = append(stats, *stat)
+	}
+	sort.SliceStable(stats, func(i, j int) bool {
+		if stats[i].Model != stats[j].Model {
+			return stats[i].Model < stats[j].Model
+		}
+		return stats[i].Provider < stats[j].Provider
+	})
+	return stats
 }
 
 func (s *RequestStatistics) buildSummaryWithoutDetailsLocked(now time.Time, healthWindow time.Time) DashboardSummary {
@@ -3627,6 +4052,16 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsLocked(now time.Time, heal
 			summary.Usage.TokensByHour[hourKeys[hour]] = v
 		}
 	}
+	summary.Usage.CostByDay = make(map[string]float64, len(s.costByDay))
+	for k, v := range s.costByDay {
+		summary.Usage.CostByDay[k] = v
+	}
+	summary.Usage.CostByHour = make(map[string]float64, 24)
+	for hour, v := range s.costByHour {
+		if hour >= 0 && hour < 24 {
+			summary.Usage.CostByHour[hourKeys[hour]] = v
+		}
+	}
 
 	// Metadata
 	summary.Meta.RetentionDays = int(s.retention.Hours() / 24)
@@ -3664,6 +4099,8 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Ti
 	requestsByHour := make(map[int]int64)
 	tokensByDay := make(map[string]int64)
 	tokensByHour := make(map[int]int64)
+	costByDay := make(map[string]float64)
+	costByHour := make(map[int]float64)
 
 	// Dimension aggregators
 	modelAgg := make(map[string]*ModelStat)
@@ -3706,10 +4143,14 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Ti
 
 				// Day/hour time series
 				dayKey := detail.Timestamp.Format("2006-01-02")
+				hourKey := detail.Timestamp.Hour()
+				cost := s.detailCostLocked(modelName, detail, totals)
 				requestsByDay[dayKey]++
-				requestsByHour[detail.Timestamp.Hour()]++
+				requestsByHour[hourKey]++
 				tokensByDay[dayKey] += totals.totalTokens
-				tokensByHour[detail.Timestamp.Hour()] += totals.totalTokens
+				tokensByHour[hourKey] += totals.totalTokens
+				costByDay[dayKey] += cost
+				costByHour[hourKey] += cost
 
 				// Per-API aggregation
 				api := getOrCreateAPIRangeAgg(apiAgg, apiName)
@@ -3947,6 +4388,16 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Ti
 	for hour, v := range tokensByHour {
 		if hour >= 0 && hour < 24 {
 			summary.Usage.TokensByHour[hourKeys[hour]] = v
+		}
+	}
+	summary.Usage.CostByDay = make(map[string]float64, len(costByDay))
+	for k, v := range costByDay {
+		summary.Usage.CostByDay[k] = v
+	}
+	summary.Usage.CostByHour = make(map[string]float64, 24)
+	for hour, v := range costByHour {
+		if hour >= 0 && hour < 24 {
+			summary.Usage.CostByHour[hourKeys[hour]] = v
 		}
 	}
 

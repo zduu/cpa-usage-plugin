@@ -40,6 +40,14 @@
     <div class="healthScroller"><div class="healthGrid" id="healthGrid"></div></div>
     <div class="legend"><span data-i18n="legend_less">少</span><span class="legendDot" style="background:#ef4444"></span><span class="legendDot" style="background:#facc15"></span><span class="legendDot" style="background:#22c55e"></span><span data-i18n="legend_more">多</span><span data-i18n="legend_empty">灰色为无请求</span></div>
   </section>
+  <section class="panel full">
+    <div class="panelHead">
+      <div><h2 data-i18n="trend_title">用量趋势</h2><div class="subtle" data-i18n="trend_subtle">按日聚合的趋势图，可切换查看不同指标。</div></div>
+      <div class="toolbar"><label for="trendMetric" data-i18n="trend_metric_label">指标</label><select id="trendMetric" class="select"></select></div>
+    </div>
+    <div id="anomalyBar"></div>
+    <div class="trendChartWrap"><svg id="trendChart" class="trendSvg"></svg></div>
+  </section>
   <section class="layout">
     <div class="panel">
       <div class="panelHead"><h2 data-i18n="price_title">模型价格设置</h2><span class="subtle" data-i18n="price_unit">单位：US$/M token</span></div>
@@ -75,7 +83,7 @@
       <div id="apiDetail"></div>
     </div>
     <div class="panel">
-      <div class="panelHead"><h2 data-i18n="model_stats_title">模型统计</h2><span class="subtle" data-i18n="model_stats_subtle">请求数、token、平均延迟、成功率和估算花费</span></div>
+      <div class="panelHead"><h2 data-i18n="model_stats_title">模型统计</h2><span class="subtle" data-i18n="model_stats_subtle">请求数、token、延迟、成功率、缓存命中、花费和实际单价</span></div>
       <div class="tableWrap" id="modelStats"></div>
     </div>
     <div class="panel full">

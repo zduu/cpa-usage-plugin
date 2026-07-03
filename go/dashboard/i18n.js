@@ -76,7 +76,7 @@ var I18N_MAP = {
 
     // ---- model stats ----
     model_stats_title: '模型统计',
-    model_stats_subtle: '请求数、token、平均延迟、成功率和估算花费',
+    model_stats_subtle: '请求数、token、延迟、成功率、缓存命中、花费和实际单价',
 
     // ---- events ----
     events_title: '请求事件明细',
@@ -202,6 +202,28 @@ var I18N_MAP = {
     source_distribution: '来源分布',
     error_stats: '错误统计',
     recent_requests: '最近请求',
+
+    // ---- trend chart ----
+    trend_title: '用量趋势',
+    trend_subtle: '按日聚合的趋势图，可切换查看不同指标。',
+    trend_metric_label: '指标',
+    trend_daily_cost: '每日成本',
+    trend_daily_requests: '每日请求',
+    trend_daily_tokens: '每日 token',
+    trend_daily_rpm: '每日平均 RPM',
+    no_trend_data: '暂无趋势数据',
+
+    // ---- anomaly detection ----
+    anomaly_increase: '⚠️ 用量突增：近{0}较前期增长 {1}%（{2} → {3}）',
+    anomaly_decrease: '📉 用量下降：近{0}较前期下降 {1}%（{2} → {3}）',
+    anomaly_stable: '✅ 用量稳定，无明显波动',
+    anomaly_day: '1天',
+    anomaly_days: '{0}天',
+
+    // ---- model stats extra ----
+    col_cache_rate: '缓存命中率',
+    col_cost_per_m: '实际单价',
+    cost_per_m_unit: '/M tok',
   },
 
   'zh-TW': {
@@ -263,17 +285,17 @@ var I18N_MAP = {
     no_upstream_data: '暫無介面資料',
 
     upstream_detail_title: '上游介面詳情',
-    upstream_detail_select_hint: '選擇一個上游介面檢視模型、來源、錯誤和最近請求。',
+    upstream_detail_select_hint: '選擇一個上游介面查看模型、來源、錯誤和最近請求。',
     upstream_api_label: '上游介面',
     input_model_placeholder: '輸入或選擇模型',
-    export_api_csv: '匯出當前介面表格',
-    export_api_json: '匯出當前介面明細',
+    export_api_csv: '匯出目前介面表格',
+    export_api_json: '匯出目前介面明細',
 
     model_stats_title: '模型統計',
-    model_stats_subtle: '請求數、token、平均延遲、成功率和估算花費',
+    model_stats_subtle: '請求數、token、延遲、成功率、快取命中、花費和實際單價',
 
     events_title: '請求事件明細',
-    events_subtle: '可按模型、來源、憑證篩選並匯出。列表保持捲動檢視。',
+    events_subtle: '可按模型、來源、憑證篩選並匯出。列表保持捲動查看。',
     clear_filters: '清除篩選',
     export_csv: '匯出表格',
     export_json: '匯出明細',
@@ -343,7 +365,7 @@ var I18N_MAP = {
     request_failed: '請求失敗',
     request_failed_colon: '請求失敗：',
     unknown_error: '未知錯誤',
-    no_304_cache: '伺服器回傳 304，但本地沒有可複用快取',
+    no_304_cache: '伺服器返回 304，但本地沒有可復用快取',
     unknown_api: '未知 API',
     unknown_interface: '未知介面',
     unknown_source: '未知來源',
@@ -380,10 +402,29 @@ var I18N_MAP = {
     success_label: '成功',
     failure_label: '失敗',
     unknown: '未知',
-    model_distribution: '模型分佈',
-    source_distribution: '來源分佈',
+    model_distribution: '模型分布',
+    source_distribution: '來源分布',
     error_stats: '錯誤統計',
     recent_requests: '最近請求',
+
+    trend_title: '用量趨勢',
+    trend_subtle: '按日聚合的趨勢圖，可切換查看不同指標。',
+    trend_metric_label: '指標',
+    trend_daily_cost: '每日成本',
+    trend_daily_requests: '每日請求',
+    trend_daily_tokens: '每日 token',
+    trend_daily_rpm: '每日平均 RPM',
+    no_trend_data: '暫無趨勢資料',
+
+    anomaly_increase: '⚠️ 用量突增：近{0}較前期增長 {1}%（{2} → {3}）',
+    anomaly_decrease: '📉 用量下降：近{0}較前期下降 {1}%（{2} → {3}）',
+    anomaly_stable: '✅ 用量穩定，無明顯波動',
+    anomaly_day: '1天',
+    anomaly_days: '{0}天',
+
+    col_cache_rate: '快取命中率',
+    col_cost_per_m: '實際單價',
+    cost_per_m_unit: '/M tok',
   },
 
   'en': {
@@ -404,58 +445,58 @@ var I18N_MAP = {
     failure_requests: 'Failure requests',
     avg_latency: 'Avg Latency',
     total_tokens: 'Total Tokens',
-    cached_tokens: 'Cached Tokens',
+    cached_tokens: 'Cache Tokens',
     reasoning_tokens: 'Reasoning Tokens',
-    rpm: 'Requests/min',
-    rpm_meta: 'Last 30 min',
+    rpm: 'RPM',
+    rpm_meta: 'Recent 30 min requests',
     total_cost: 'Total Cost',
-    cost_meta: 'Estimated using model prices',
+    cost_meta: 'Estimated with model prices on this page',
 
     health_title: 'Service Health',
-    health_subtle: 'Last 7 days, 15-minute slots. Green = high success rate, red = high failure rate.',
+    health_subtle: 'Last 7 days, 15-min slots. Green = high success rate, red = failures.',
     success_rate: 'Success Rate',
     success: 'Success',
     failure: 'Failure',
-    legend_less: 'Low',
-    legend_more: 'High',
+    legend_less: 'Few',
+    legend_more: 'Many',
     legend_empty: 'Gray = no requests',
 
-    price_title: 'Model Pricing',
-    price_unit: 'Unit: US$/M token',
+    price_title: 'Model Prices',
+    price_unit: 'Unit: US$/M tokens',
     model_label: 'Model',
     input_price: 'Input Price',
     output_price: 'Output Price',
     cache_price: 'Cache Price',
-    cache_placeholder: 'Same as input',
+    cache_placeholder: 'Default to input',
     save: 'Save',
     edit: 'Edit',
     delete: 'Delete',
-    no_prices: 'No prices set. Set prices to see cost estimates.',
+    no_prices: 'No prices set. Estimated cost will be shown after setting prices.',
 
-    api_stats_title: 'API Key Stats',
-    api_stats_subtle: 'Grouped by API key calling CPA.',
+    api_stats_title: 'API Stats',
+    api_stats_subtle: 'Grouped by the API key used to call CPA.',
     sort_requests: 'Requests',
     sort_tokens: 'Tokens',
     sort_cost: 'Cost',
     no_api_data: 'No API key request data',
 
-    upstream_title: 'Upstream API Stats',
+    upstream_title: 'Upstream APIs',
     upstream_subtle: 'Grouped by upstream provider and source',
-    upstream_select_none: 'No upstream API',
-    no_upstream_data: 'No upstream API data',
+    upstream_select_none: 'No upstream APIs',
+    no_upstream_data: 'No API data',
 
     upstream_detail_title: 'Upstream API Detail',
-    upstream_detail_select_hint: 'Select an upstream API to view models, sources, errors, and recent requests.',
+    upstream_detail_select_hint: 'Select an upstream API to view models, sources, errors and recent requests.',
     upstream_api_label: 'Upstream API',
     input_model_placeholder: 'Enter or select model',
-    export_api_csv: 'Export API CSV',
-    export_api_json: 'Export API JSON',
+    export_api_csv: 'Export API Table',
+    export_api_json: 'Export API Details',
 
     model_stats_title: 'Model Stats',
-    model_stats_subtle: 'Requests, tokens, avg latency, success rate, and estimated cost',
+    model_stats_subtle: 'Requests, tokens, latency, success rate, cache hit, cost and unit cost',
 
     events_title: 'Request Events',
-    events_subtle: 'Filter by model, source, or credential and export. Scroll to browse.',
+    events_subtle: 'Filter by model, source or credential. Export supported.',
     clear_filters: 'Clear Filters',
     export_csv: 'Export CSV',
     export_json: 'Export JSON',
@@ -486,17 +527,17 @@ var I18N_MAP = {
     filter_all_credentials: 'All Credentials',
 
     updated_at: 'Updated at',
-    loading_api_detail: 'Loading API detail...',
+    loading_api_detail: 'Loading API request details...',
     loading_source_data: 'Loading source data...',
-    compat_mode: 'compat mode',
+    compat_mode: 'Compat Mode',
     no_events: 'No request events',
     no_model_data: 'No model data',
     no_source_data: 'No source data',
-    no_failures: 'No failed requests',
-    no_detail: 'No request detail',
+    no_failures: 'No failures',
+    no_detail: 'No details',
     no_detail_data: 'No API detail',
-    detail_load_failed: 'Failed to load detail',
-    detail_load_failed_msg: 'Failed to load detail: ',
+    detail_load_failed: 'Detail load failed',
+    detail_load_failed_msg: 'Detail load failed: ',
 
     storage_enabled: 'Storage enabled',
     storage_disabled: 'Storage disabled',
@@ -506,48 +547,48 @@ var I18N_MAP = {
     write_queued: 'Queued',
     write_slow: 'Write slow',
     write_normal: 'Normal',
-    write_pressure: 'Write pressure',
+    write_pressure: 'Write Pressure',
 
     events_count: 'Total {0}, showing {1}',
-    export_truncated: 'Export truncated: {0} total, {1} exported',
+    export_truncated: 'Export truncated: total {0}, exported {1}',
     export_failed: 'Export failed',
     export_failed_msg: 'Export failed: ',
-    export_job_timeout: 'Export job timed out',
+    export_job_timeout: 'Export job timeout',
     export_job_failed: 'Export job failed',
     export_no_id: 'Export job returned no ID',
-    import_complete: 'Import complete: {0} added, {1} skipped, {2} expired ignored',
+    import_complete: 'Import complete: added {0}, skipped {1}, ignored {2}',
     import_failed: 'Import failed: ',
-    import_no_key: 'Management key not found. Please return to the management center, log in, and enable "Remember login".',
+    import_no_key: 'No management login state. Return to management panel and log in with "remember me" checked.',
 
-    load_usage_failed: 'Failed to load usage statistics',
+    load_usage_failed: 'Failed to load usage stats',
     response_not_json: 'Response is not valid JSON',
     empty_response: 'Empty response',
     request_failed: 'Request failed',
     request_failed_colon: 'Request failed: ',
     unknown_error: 'Unknown error',
-    no_304_cache: 'Server returned 304 but no local cache available',
+    no_304_cache: 'Server returned 304 but no local cache to reuse',
     unknown_api: 'Unknown API',
     unknown_interface: 'Unknown interface',
     unknown_source: 'Unknown source',
     credential: 'Credential',
     no_body_returned: 'No error body returned',
 
-    storage_batch_title: 'Last batch write: {0} records',
-    storage_batch_duration: 'took',
-    storage_batch_avg: 'avg',
+    storage_batch_title: 'Last batch wrote {0} records',
+    storage_batch_duration: 'Duration',
+    storage_batch_avg: 'Avg',
     storage_batch_p95: 'p95',
     storage_batch_p99: 'p99',
-    storage_batch_wait: 'max queue wait',
-    storage_batch_avg_wait: 'avg queue wait',
-    storage_batch_wait_p95: 'queue p95',
+    storage_batch_wait: 'Max wait',
+    storage_batch_avg_wait: 'Avg wait',
+    storage_batch_wait_p95: 'Wait p95',
     storage_pending_snapshot: ' records pending snapshot',
     storage_pending_flush: ' records pending flush',
     storage_pending_sync: ' records pending sync',
     storage_pending_queue_no_capacity: ' records pending write',
     storage_pending_queue: ' records pending write, queue capacity {0}',
 
-    price_save_failed: 'Failed to save price: ',
-    price_delete_failed: 'Failed to delete price: ',
+    price_save_failed: 'Save price failed: ',
+    price_delete_failed: 'Delete price failed: ',
 
     requests_label: 'Requests',
     model_count: 'Models',
@@ -566,15 +607,34 @@ var I18N_MAP = {
     source_distribution: 'Source Distribution',
     error_stats: 'Error Stats',
     recent_requests: 'Recent Requests',
+
+    trend_title: 'Usage Trends',
+    trend_subtle: 'Aggregated trend chart with switchable metrics.',
+    trend_metric_label: 'Metric',
+    trend_daily_cost: 'Daily Cost',
+    trend_daily_requests: 'Daily Requests',
+    trend_daily_tokens: 'Daily Tokens',
+    trend_daily_rpm: 'Daily Avg RPM',
+    no_trend_data: 'No trend data',
+
+    anomaly_increase: '⚠️ Spike: last {0} up {1}% from previous ({2} → {3})',
+    anomaly_decrease: '📉 Drop: last {0} down {1}% from previous ({2} → {3})',
+    anomaly_stable: '✅ Usage stable, no significant change',
+    anomaly_day: '1 day',
+    anomaly_days: '{0} days',
+
+    col_cache_rate: 'Cache Hit Rate',
+    col_cost_per_m: 'Unit Cost',
+    cost_per_m_unit: '/M tok',
   },
 
   'ru': {
     page_title: 'Статистика использования',
     dashboard_heading: 'Статистика использования',
     time_range: 'Период',
-    range_7h: 'Последние 7 ч.',
-    range_24h: 'Последние 24 ч.',
-    range_7d: 'Последние 7 дн.',
+    range_7h: 'Последние 7 часов',
+    range_24h: 'Последние 24 часа',
+    range_7d: 'Последние 7 дней',
     range_all: 'Всё',
     export_data: 'Экспорт',
     import_data: 'Импорт',
@@ -586,15 +646,15 @@ var I18N_MAP = {
     failure_requests: 'Ошибок',
     avg_latency: 'Средняя задержка',
     total_tokens: 'Всего токенов',
-    cached_tokens: 'Кэшировано',
-    reasoning_tokens: 'Токенов размышления',
+    cached_tokens: 'Кэш токенов',
+    reasoning_tokens: 'Токены рассуждения',
     rpm: 'Запросов/мин',
-    rpm_meta: 'Последние 30 мин',
+    rpm_meta: 'За последние 30 мин',
     total_cost: 'Общая стоимость',
     cost_meta: 'Оценка по ценам моделей',
 
-    health_title: 'Мониторинг сервиса',
-    health_subtle: 'Последние 7 дней, интервалы 15 мин. Зелёный = высокая успешность, красный = много ошибок.',
+    health_title: 'Здоровье сервиса',
+    health_subtle: 'Последние 7 дней, интервалы по 15 мин. Зелёный = высокий успех, красный = много ошибок.',
     success_rate: 'Успешность',
     success: 'Успешно',
     failure: 'Ошибок',
@@ -603,45 +663,45 @@ var I18N_MAP = {
     legend_empty: 'Серый = нет запросов',
 
     price_title: 'Цены моделей',
-    price_unit: 'Единица: US$/M токенов',
+    price_unit: 'Ед.: US$/M токенов',
     model_label: 'Модель',
     input_price: 'Цена ввода',
     output_price: 'Цена вывода',
     cache_price: 'Цена кэша',
-    cache_placeholder: 'Как ввод',
+    cache_placeholder: 'По умолч. как ввод',
     save: 'Сохранить',
-    edit: 'Изменить',
+    edit: 'Ред.',
     delete: 'Удалить',
-    no_prices: 'Цены не заданы. Установите цены для оценки стоимости.',
+    no_prices: 'Цены не заданы. Стоимость будет показана после установки цен.',
 
-    api_stats_title: 'Статистика API ключей',
-    api_stats_subtle: 'Сгруппировано по API ключу, вызывающему CPA.',
+    api_stats_title: 'Статистика API',
+    api_stats_subtle: 'Сгруппировано по API-ключу для вызова CPA.',
     sort_requests: 'Запросы',
     sort_tokens: 'Токены',
     sort_cost: 'Стоимость',
-    no_api_data: 'Нет данных API ключей',
+    no_api_data: 'Нет данных по API-ключам',
 
-    upstream_title: 'Статистика API',
+    upstream_title: 'Входящие API',
     upstream_subtle: 'Сгруппировано по провайдеру и источнику',
-    upstream_select_none: 'Нет API',
-    no_upstream_data: 'Нет данных API',
+    upstream_select_none: 'Нет входящих API',
+    no_upstream_data: 'Нет данных',
 
-    upstream_detail_title: 'Детали API',
+    upstream_detail_title: 'Детали входящего API',
     upstream_detail_select_hint: 'Выберите API для просмотра моделей, источников, ошибок и последних запросов.',
-    upstream_api_label: 'API',
+    upstream_api_label: 'Входящий API',
     input_model_placeholder: 'Введите или выберите модель',
-    export_api_csv: 'Экспорт CSV',
-    export_api_json: 'Экспорт JSON',
+    export_api_csv: 'Экспорт таблицы API',
+    export_api_json: 'Экспорт деталей API',
 
     model_stats_title: 'Статистика моделей',
-    model_stats_subtle: 'Запросы, токены, средняя задержка, успешность и оценка стоимости',
+    model_stats_subtle: 'Запросы, токены, задержка, успешность, кэш, стоимость и удельная цена',
 
     events_title: 'События запросов',
-    events_subtle: 'Фильтр по модели, источнику или учётным данным. Прокрутка для просмотра.',
-    clear_filters: 'Сброс фильтров',
+    events_subtle: 'Фильтр по модели, источнику или учётным данным. Поддерживается экспорт.',
+    clear_filters: 'Сбросить',
     export_csv: 'Экспорт CSV',
     export_json: 'Экспорт JSON',
-    events_latency_unit: 'Единица задержки: мс',
+    events_latency_unit: 'Задержка: мс',
 
     col_time: 'Время',
     col_model: 'Модель',
@@ -651,7 +711,7 @@ var I18N_MAP = {
     col_latency: 'Задержка',
     col_input: 'Ввод',
     col_output: 'Вывод',
-    col_thinking: 'Размышление',
+    col_thinking: 'Рассуждение',
     col_cache: 'Кэш',
     col_total: 'Всего',
     col_api: 'API',
@@ -668,41 +728,41 @@ var I18N_MAP = {
     filter_all_credentials: 'Все учётные данные',
 
     updated_at: 'Обновлено',
-    loading_api_detail: 'Загрузка деталей API...',
-    loading_source_data: 'Загрузка источников...',
-    compat_mode: 'режим совместимости',
-    no_events: 'Нет событий запросов',
-    no_model_data: 'Нет данных моделей',
-    no_source_data: 'Нет данных источников',
+    loading_api_detail: 'Загрузка деталей запросов API...',
+    loading_source_data: 'Загрузка данных источников...',
+    compat_mode: 'Режим совм.',
+    no_events: 'Нет событий',
+    no_model_data: 'Нет данных по моделям',
+    no_source_data: 'Нет данных по источникам',
     no_failures: 'Нет ошибок',
-    no_detail: 'Нет деталей запросов',
+    no_detail: 'Нет деталей',
     no_detail_data: 'Нет деталей API',
     detail_load_failed: 'Ошибка загрузки деталей',
     detail_load_failed_msg: 'Ошибка загрузки деталей: ',
 
-    storage_enabled: 'Хранилище включено',
-    storage_disabled: 'Хранилище отключено',
-    storage_error: 'Ошибка хранилища',
+    storage_enabled: 'Персистентность включена',
+    storage_disabled: 'Персистентность выключена',
+    storage_error: 'Ошибка персистентности',
     write_queue_full: 'Очередь заполнена',
-    write_queue_backlog: 'Задержка очереди',
+    write_queue_backlog: 'Задолженность очереди',
     write_queued: 'В очереди',
     write_slow: 'Медленная запись',
     write_normal: 'Нормально',
     write_pressure: 'Нагрузка записи',
 
     events_count: 'Всего {0}, показано {1}',
-    export_truncated: 'Экспорт усечён: всего {0}, экспортировано {1}',
+    export_truncated: 'Экспорт обрезан: всего {0}, экспортировано {1}',
     export_failed: 'Ошибка экспорта',
     export_failed_msg: 'Ошибка экспорта: ',
-    export_job_timeout: 'Тайм-аут задачи экспорта',
+    export_job_timeout: 'Таймаут задачи экспорта',
     export_job_failed: 'Задача экспорта не удалась',
     export_no_id: 'Задача экспорта не вернула ID',
-    import_complete: 'Импорт завершён: добавлено {0}, пропущено {1}, устарело {2}',
+    import_complete: 'Импорт завершён: добавлено {0}, пропущено {1}, проигнорировано {2}',
     import_failed: 'Ошибка импорта: ',
-    import_no_key: 'Ключ управления не найден. Вернитесь в центр управления, войдите и включите «Запомнить вход».',
+    import_no_key: 'Состояние входа не найдено. Вернитесь в панель управления и войдите с опцией "запомнить".',
 
     load_usage_failed: 'Не удалось загрузить статистику',
-    response_not_json: 'Ответ не является валидным JSON',
+    response_not_json: 'Ответ не является JSON',
     empty_response: 'Пустой ответ',
     request_failed: 'Ошибка запроса',
     request_failed_colon: 'Ошибка запроса: ',
@@ -715,13 +775,13 @@ var I18N_MAP = {
     no_body_returned: 'Тело ошибки не возвращено',
 
     storage_batch_title: 'Последняя пакетная запись: {0} записей',
-    storage_batch_duration: 'заняло',
-    storage_batch_avg: 'среднее',
+    storage_batch_duration: 'Длит.',
+    storage_batch_avg: 'Средн.',
     storage_batch_p95: 'p95',
     storage_batch_p99: 'p99',
-    storage_batch_wait: 'макс. ожидание',
-    storage_batch_avg_wait: 'среднее ожидание',
-    storage_batch_wait_p95: 'ожидание p95',
+    storage_batch_wait: 'Макс. ожидание',
+    storage_batch_avg_wait: 'Средн. ожидание',
+    storage_batch_wait_p95: 'Ожидание p95',
     storage_pending_snapshot: ' записей ожидают снимка',
     storage_pending_flush: ' записей ожидают сброса',
     storage_pending_sync: ' записей ожидают синхронизации',
@@ -748,21 +808,38 @@ var I18N_MAP = {
     source_distribution: 'Распределение источников',
     error_stats: 'Статистика ошибок',
     recent_requests: 'Последние запросы',
-  }
+
+    trend_title: 'Тренды использования',
+    trend_subtle: 'Агрегированный тренд с переключаемыми метриками.',
+    trend_metric_label: 'Метрика',
+    trend_daily_cost: 'Стоимость по дням',
+    trend_daily_requests: 'Запросы по дням',
+    trend_daily_tokens: 'Токены по дням',
+    trend_daily_rpm: 'Средн. RPM по дням',
+    no_trend_data: 'Нет данных тренда',
+
+    anomaly_increase: '⚠️ Всплеск: посл. {0} рост на {1}%（{2} → {3}）',
+    anomaly_decrease: '📉 Спад: посл. {0} снижение на {1}%（{2} → {3}）',
+    anomaly_stable: '✅ Использование стабильно',
+    anomaly_day: '1 день',
+    anomaly_days: '{0} дней',
+
+    col_cache_rate: 'Попадание в кэш',
+    col_cost_per_m: 'Цена за ед.',
+    cost_per_m_unit: '/M ток',
+  },
 };
 
-
-// Locale codes for locale-aware formatting (NumberFormat, Date, etc.)
-var I18N_LOCALE = {
+// Format locale mapping
+var FORMAT_LOCALES = {
   'zh-CN': 'zh-CN',
   'zh-TW': 'zh-TW',
   'en': 'en-US',
   'ru': 'ru-RU'
 };
 
-// Returns the locale code for the current language, for Intl formatters
 function getFormatLocale() {
-  return I18N_LOCALE[I18N_LANG] || 'zh-CN';
+  return FORMAT_LOCALES[I18N_LANG] || 'zh-CN';
 }
 
 // ---- i18n runtime ----
@@ -785,17 +862,14 @@ function languageFromStorageValue(value) {
 
 function detectCPALanguage() {
   try {
-    // Strategy 1: parent iframe (CPA management panel)
     if (window.parent && window.parent !== window) {
       try {
         var parentLang = languageFromStorageValue(window.parent.localStorage.getItem('cli-proxy-language'));
         if (parentLang) return parentLang;
       } catch (e) { /* cross-origin */ }
     }
-    // Strategy 2: shared localStorage
     var stored = languageFromStorageValue(localStorage.getItem('cli-proxy-language'));
     if (stored) return stored;
-    // Strategy 3: browser language
     var nav = (typeof navigator !== 'undefined' && navigator.language) || 'zh-CN';
     var short = nav.split('-')[0];
     if (nav === 'zh-TW' || nav === 'zh-HK') return 'zh-TW';
@@ -809,10 +883,7 @@ function t(key) {
   var args = Array.prototype.slice.call(arguments, 1);
   var dict = I18N_MAP[I18N_LANG] || I18N_MAP['zh-CN'];
   var template = dict[key];
-  if (!template) {
-    // Fallback to zh-CN
-    template = I18N_MAP['zh-CN'][key];
-  }
+  if (!template) template = I18N_MAP['zh-CN'][key];
   if (!template) return key;
   if (!args.length) return template;
   return template.replace(/\{(\d+)\}/g, function(match, idx) {
@@ -821,9 +892,7 @@ function t(key) {
   });
 }
 
-// Apply i18n to explicitly marked static elements.
 function applyI18N() {
-  // Update html lang attribute so the page declares the correct language
   if (document.documentElement) {
     document.documentElement.lang = I18N_LANG;
   }
@@ -842,22 +911,14 @@ function applyI18N() {
   }
 }
 
-// Initialize i18n — runs synchronously at script load time.
 (function() {
   try {
     I18N_LANG = detectCPALanguage();
-
-    // Apply translations immediately for any pre-existing static HTML.
-    // Note: script.js render functions will call applyI18N() again after
-    // each re-render; this call covers the initial static skeleton.
     if (typeof document !== 'undefined' && document.body) {
       applyI18N();
     } else if (typeof document !== 'undefined' && document.addEventListener) {
-      // DOM not ready yet — wait for it
       document.addEventListener('DOMContentLoaded', function() { applyI18N(); });
     }
-
-    // Listen for language changes via storage event (covers both iframe and parent)
     if (typeof window.addEventListener === 'function') {
       window.addEventListener('storage', function(e) {
         if (e.key !== 'cli-proxy-language') return;
@@ -865,16 +926,12 @@ function applyI18N() {
         if (newLang !== I18N_LANG) {
           I18N_LANG = newLang;
           applyI18N();
-          // Also re-render to refresh dynamic labels and locale-aware formatters
           if (typeof rerender === 'function') {
             rerender({ refreshEvents: false, refreshApiDetail: false });
           }
         }
       });
     }
-
-    // Poll for language changes — the only reliable cross-frame mechanism because
-    // CPA writes to localStorage, not to the <html> lang attribute.
     var pollParentInterval = setInterval(function() {
       var current = detectCPALanguage();
       if (current !== I18N_LANG) {
@@ -885,15 +942,12 @@ function applyI18N() {
         }
       }
     }, 2000);
-
-    // Cleanup on unload
     if (typeof window.addEventListener === 'function') {
       window.addEventListener('beforeunload', function() { clearInterval(pollParentInterval); });
     }
   } catch (e) { /* i18n failure should not break dashboard */ }
 })();
 
-// Node.js test compatibility — only I18N_MAP is global-scoped; t()/applyI18N are inside the IIFE below
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = { I18N_MAP: I18N_MAP };
 }

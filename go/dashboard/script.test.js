@@ -100,6 +100,7 @@ function createDashboardHarness(options = {}) {
     },
   };
   if (options.language) localStorage.setItem('cli-proxy-language', options.language);
+  if (options.range) localStorage.setItem('cpa-usage-range-v1', options.range);
 
   const summary = {
     generated_at: new Date().toISOString(),
@@ -164,6 +165,7 @@ function createDashboardHarness(options = {}) {
   summary.model_stats[0].success_count = summary.model_stats[0].total_requests - apiFailureCount;
   if (options.storage) summary._meta.storage = options.storage;
   if (options.clientApiStats) summary.client_api_stats = options.clientApiStats;
+  if (options.summaryUsage) Object.assign(summary.usage, options.summaryUsage);
 
   function eventsPage(url) {
     const parsed = new URL(url, 'http://test.local/v0/management/plugins/usage-statistics/dashboard');
@@ -671,6 +673,7 @@ test('dashboard follows runtime language changes', async () => {
   assert.strictEqual(document.getElementById('costMeta').textContent, 'Total tokens: 24k');
   assert.strictEqual(document.getElementById('apiDetailTitle').textContent, 'openai');
   assert.match(document.getElementById('storageStatus').textContent, /Storage disabled/);
+  assert.match(document.getElementById('trendMetric').innerHTML, /Daily Cost/);
 });
 
 test('dashboard language changes do not translate API key labels', async () => {
@@ -693,6 +696,26 @@ test('dashboard language changes do not translate API key labels', async () => {
   assert.match(document.getElementById('clientApiStats').innerHTML, /<div class="apiName">成功模型凭证<\/div>/);
   assert.doesNotMatch(document.getElementById('clientApiStats').innerHTML, /apiArrow|▶/);
   assert.match(document.getElementById('clientApiStats').innerHTML, /<span class="ok">1,230<\/span>&nbsp;<span class="bad">66<\/span>/);
+});
+
+test('dashboard trend chart escapes data labels', async () => {
+  const maliciousDay = '2026-07-03<script>alert(1)</script>';
+  const { document } = createDashboardHarness({
+    range: '7d',
+    summaryUsage: {
+      requests_by_day: { [maliciousDay]: 3 },
+      tokens_by_day: { [maliciousDay]: 30 },
+      cost_by_day: { [maliciousDay]: 0.00003 },
+      requests_by_hour: {},
+      tokens_by_hour: {},
+      cost_by_hour: {},
+    },
+  });
+
+  await waitFor(() => document.getElementById('trendChart').innerHTML.includes('&lt;script&gt;'));
+  const html = document.getElementById('trendChart').innerHTML;
+  assert.doesNotMatch(html, /<script>/);
+  assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
 });
 
 test('dashboard export truncation headers produce a user notice', () => {

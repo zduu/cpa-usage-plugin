@@ -195,7 +195,70 @@ async function fetchAllEventPages(fetchPage, baseParams, pageLimit) {
   return { events, total: total === null ? events.length : total };
 }
 
+// ---- cache rate & cost-per-million helpers ----
+function cacheRate(row) {
+  // input_tokens includes cached tokens (API convention: input = non-cached + cached)
+  var cached = Math.max(0, num(row.cached_tokens));
+  var input = num(row.input_tokens);
+  if (input <= 0) return 0;
+  return Math.min(100, cached / input * 100);
+}
+function costPerMillion(row, prices, manualPrices) {
+  var cost = aggregateCost(row, prices, manualPrices);
+  var tokens = num(row.total_tokens);
+  if (!tokens || !Number.isFinite(cost)) return 0;
+  return cost / tokens * 1e6;
+}
+function hourBucketValue(values, hour) {
+  if (!values || typeof values !== 'object') return 0;
+  var n = Number(hour);
+  if (!Number.isFinite(n)) return 0;
+  var padded = String(n).padStart(2, '0');
+  var plain = String(n);
+  if (Object.prototype.hasOwnProperty.call(values, padded)) return num(values[padded]);
+  if (Object.prototype.hasOwnProperty.call(values, plain)) return num(values[plain]);
+  return 0;
+}
+
+// ---- anomaly detection ----
+// Called from renderTrendChart in script.js.
+// Note: relies on global t() and formatInteger(), which are available at call time.
+function detectAnomaly(points, valueFn, labelFn) {
+  if (points.length < 2) return { type: 'stable', message: '' };
+  var valid = points.filter(function(p) { return valueFn(p) > 0; });
+  if (valid.length < 2) return { type: 'stable', message: '' };
+
+  // Compare last N points vs previous N points (at most 7)
+  var window = Math.min(Math.max(1, Math.floor(valid.length / 3)), 7);
+  var recent = valid.slice(-window);
+  var previous = valid.slice(-2 * window, -window);
+  if (!recent.length || !previous.length) return { type: 'stable', message: '' };
+
+  var recentAvg = recent.reduce(function(s, p) { return s + valueFn(p); }, 0) / recent.length;
+  var prevAvg = previous.reduce(function(s, p) { return s + valueFn(p); }, 0) / previous.length;
+  if (prevAvg <= 0) return { type: 'stable', message: '' };
+
+  var change = (recentAvg - prevAvg) / prevAvg * 100;
+  var threshold = 100;
+  if (Math.abs(change) < threshold) return { type: 'stable', message: '' };
+
+  var label = labelFn ? labelFn(window) : String(window) + ' days';
+  var pctStr = Math.round(change);
+  var prevStr = formatInteger(Math.round(prevAvg));
+  var recentStr = formatInteger(Math.round(recentAvg));
+  if (change > 0) {
+    return {
+      type: 'warning',
+      message: t('anomaly_increase', label, pctStr, prevStr, recentStr)
+    };
+  }
+  return {
+    type: 'info',
+    message: t('anomaly_decrease', label, -pctStr, prevStr, recentStr)
+  };
+}
+
 // Export for Node.js test environment
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { esc, num, compact, pct, formatMs, formatUsd, totalTokens, priceForModel, tokenCost, detailCost, aggregateCost, looksLikeKey, looksLikeCredentialId, isCredentialMarker, isCredentialLabel, trimCredentialSuffix, sourceLabel, sourceKey, friendlyApiName, clientApiLabel, clientApiGroupKey, avg, bucketSeries, healthColor, healthCellStyle, timestampMs, pluginEndpoint, managementEndpoint, decodeManagementStorage, parseManagementStorage, currentManagementKey, groupedRows, decodeManagementBody, unwrapPluginPayloadWithMeta, unwrapPluginPayload, fetchAllEventPages };
+  module.exports = { esc, num, compact, pct, formatMs, formatUsd, totalTokens, priceForModel, tokenCost, detailCost, aggregateCost, looksLikeKey, looksLikeCredentialId, isCredentialMarker, isCredentialLabel, trimCredentialSuffix, sourceLabel, sourceKey, friendlyApiName, clientApiLabel, clientApiGroupKey, avg, bucketSeries, healthColor, healthCellStyle, timestampMs, pluginEndpoint, managementEndpoint, decodeManagementStorage, parseManagementStorage, currentManagementKey, groupedRows, decodeManagementBody, unwrapPluginPayloadWithMeta, unwrapPluginPayload, fetchAllEventPages, cacheRate, costPerMillion, hourBucketValue, detectAnomaly };
 }
