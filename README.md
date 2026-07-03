@@ -14,10 +14,12 @@ CPA 用量统计插件，用于在 CLIProxyAPI/CPA v7 插件系统中记录请�
 - 轻量级首屏摘要：看板数据不含请求明细，首包体积不随记录数增长。
 - 请求事件明细支持按模型、来源、凭证、时间范围筛选，页面以滚动表格展示。
 - 服务健康网格按 15 分钟展示最近 7 天状态，鼠标悬停显示窗口信息。
+- 用量趋势图支持切换每日成本、请求数、token 和平均 RPM，并提示近期用量突增或下降。
 - 支持导入/导出统计数据，导出包含版本、插件版本、明细数和配置摘要；导入返回输入/接收/拒绝/新增/跳过/过期忽略明细。
 - API key 只保存脱敏显示值和分组 hash；导入不同实例导出的同一脱敏 API key 时会合并到同一客户端 API 统计。
 - 支持后端全局模型价格表并估算成本，跨设备打开看板可见同一份最新价格。
 - 可选启用 models.dev 默认价格源，后端定时拉取价格表；手动设置的模型价格优先级更高，模型名匹配大小写不敏感。
+- 模型统计展示成功率、缓存命中率、估算花费和实际单价（US$/M token），便于比较不同模型效率。
 - 默认使用内存统计；可通过 `storage_enabled` + `storage_path` 开启后台队列 JSONL 持久化，配合周期 snapshot、旧分片清理和可选 fsync 在重启或更新插件后恢复保留窗口内的统计。
 - 运行时元数据：页面可见当前保留策略、存储明细数、淘汰数、最近导入结果。
 - 健康检查端点 `/health` 可查看插件运行状态、顶层 `alerts` 告警、持久化状态、后台 writer 批次/滑动平均/p95/p99/压力指标、看板查询/缓存指标、条件请求命中率和事件导出压力指标。
@@ -29,9 +31,17 @@ CPA 用量统计插件，用于在 CLIProxyAPI/CPA v7 插件系统中记录请�
 
 ![插件管理中的用量统计插件](docs/images/readme/plugin-management.png)
 
+### 插件配置面板
+
+![用量统计插件配置面板](docs/images/readme/plugin-configuration.png)
+
 ### 概览看板与服务健康网格
 
 ![用量统计概览看板](docs/images/readme/dashboard-overview.png)
+
+### 用量趋势图
+
+![用量趋势图](docs/images/readme/usage-trends.png)
 
 ### 模型价格与接口统计
 
@@ -92,7 +102,9 @@ cpa-usage-plugin/
 │   └── images/
 │       └── readme/
 │           ├── plugin-management.png
+│           ├── plugin-configuration.png
 │           ├── dashboard-overview.png
+│           ├── usage-trends.png
 │           ├── pricing-and-api-stats.png
 │           └── model-and-events.png
 ├── scripts/
