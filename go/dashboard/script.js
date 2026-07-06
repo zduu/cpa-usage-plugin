@@ -745,7 +745,7 @@ function renderModelStats() {
 
 function renderTrendChart() {
   var usage = summaryData && summaryData.usage;
-  if (!usage) { $('trendChart').innerHTML = '<text x="50%" y="50%" text-anchor="middle" class="trendAxisText">' + t('no_trend_data') + '</text>'; $('anomalyBar').className = 'anomalyBar'; return }
+  if (!usage) { $('trendChart').innerHTML = '<text x="50%" y="50%" text-anchor="middle" class="trendAxisText">' + t('no_trend_data') + '</text>'; clearAnomalyBar(); return }
 
   var range = $('range').value;
   var useHourly = (range === '7h' || range === '24h');
@@ -764,7 +764,7 @@ function renderTrendChart() {
     var hourSet = new Set();
     hours.forEach(function(k) { hourSet.add(k); });
     var ordered = Array.from(hourSet).map(Number).filter(function(v) { return !isNaN(v); }).sort(function(a, b) { return a - b; });
-    if (!ordered.length) { $('trendChart').innerHTML = '<text x="50%" y="50%" text-anchor="middle" class="trendAxisText">' + t('no_trend_data') + '</text>'; $('anomalyBar').className = 'anomalyBar'; return }
+    if (!ordered.length) { $('trendChart').innerHTML = '<text x="50%" y="50%" text-anchor="middle" class="trendAxisText">' + t('no_trend_data') + '</text>'; clearAnomalyBar(); return }
 
     var totalCost = 0, totalToks = 0;
     (summaryData.model_stats || []).forEach(function(r) {
@@ -795,7 +795,7 @@ function renderTrendChart() {
   Object.keys(costDay).forEach(function(k) { allDays.add(k); });
   var ordered = Array.from(allDays).sort();
   if (range === 'all' && ordered.length > 30) ordered = ordered.slice(-30);
-  if (!ordered.length) { $('trendChart').innerHTML = '<text x="50%" y="50%" text-anchor="middle" class="trendAxisText">' + t('no_trend_data') + '</text>'; $('anomalyBar').className = 'anomalyBar'; return }
+  if (!ordered.length) { $('trendChart').innerHTML = '<text x="50%" y="50%" text-anchor="middle" class="trendAxisText">' + t('no_trend_data') + '</text>'; clearAnomalyBar(); return }
 
   var totalCost = 0, totalToks = 0;
   (summaryData.model_stats || []).forEach(function(r) {
@@ -812,6 +812,13 @@ function renderTrendChart() {
   });
 
   renderTrendSvg(points, range, color, barColor, 'day');
+}
+
+function clearAnomalyBar() {
+  var bar = $('anomalyBar');
+  if (!bar) return;
+  bar.className = 'anomalyBar';
+  bar.innerHTML = '';
 }
 
 function renderTrendSvg(points, range, color, barColor, mode) {
@@ -886,15 +893,7 @@ function renderTrendSvg(points, range, color, barColor, mode) {
   $('trendChart').setAttribute('viewBox', '0 0 ' + W + ' ' + H);
   $('trendChart').innerHTML = html;
 
-  // ---- anomaly detection ----
-  var anomaly = detectAnomaly(points, valueFn, function(w) {
-    return w < 2 ? t('anomaly_day') : t('anomaly_days', w);
-  });
-  var bar = $('anomalyBar');
-  if (anomaly.type === 'warning') { bar.className = 'anomalyBar warning'; bar.innerHTML = anomaly.message; }
-  else if (anomaly.type === 'info') { bar.className = 'anomalyBar info'; bar.innerHTML = anomaly.message; }
-  else if (points.length >= 10) { bar.className = 'anomalyBar muted'; bar.innerHTML = t('anomaly_stable'); }
-  else { bar.className = 'anomalyBar'; bar.innerHTML = ''; }
+  clearAnomalyBar();
 }
 
 function initTrendChart() {
@@ -1008,7 +1007,37 @@ function rowsCsv(rows) {
   return [head, ...rows.map((d) => [d.timestamp, d.model, sourceLabel(d), d.auth_index || '', statusText(d.failed), num(d.latency_ms), num(d.ttft_ms), num(d.tokens && d.tokens.input_tokens), num(d.tokens && d.tokens.output_tokens), num(d.tokens && d.tokens.reasoning_tokens), num(d.tokens && Math.max(d.tokens.cached_tokens || 0, d.tokens.cache_tokens || 0)), num(d.tokens && d.tokens.total_tokens), d.status_code || '', d.failure || ''])].map((row) => row.map((v) => '"' + String(v ?? '').replace(/"/g, '""') + '"').join(',')).join('\n');
 }
 
-function makeCounterRow(name) { return { model: name, total_requests: 0, success_count: 0, failure_count: 0, total_tokens: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, reasoning_tokens: 0, latency: [] } }
+function makeCounterRow(name) { return { model: name, total_requests: 0, success_count: 0, failure_count: 0, total_tokens: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, reasoning_tokens: 0, latency: [], providerMap: new Map() } }
+function mergeProviderStat(target, stat) {
+  if (!target || !target.providerMap || !stat) return;
+  const provider = String(stat.provider || '').trim();
+  const key = provider.toLowerCase();
+  const row = target.providerMap.get(key) || { provider, total_requests: 0, success_count: 0, failure_count: 0, total_tokens: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, reasoning_tokens: 0 };
+  row.total_requests += num(stat.total_requests);
+  row.success_count += num(stat.success_count);
+  row.failure_count += num(stat.failure_count);
+  row.total_tokens += num(stat.total_tokens);
+  row.input_tokens += num(stat.input_tokens);
+  row.output_tokens += num(stat.output_tokens);
+  row.cached_tokens += num(stat.cached_tokens);
+  row.reasoning_tokens += num(stat.reasoning_tokens);
+  target.providerMap.set(key, row);
+}
+function addDetailProviderToCounter(row, d) {
+  if (!row || !row.providerMap) return;
+  const tokens = d.tokens || {};
+  mergeProviderStat(row, {
+    provider: d.provider,
+    total_requests: 1,
+    success_count: d.failed ? 0 : 1,
+    failure_count: d.failed ? 1 : 0,
+    total_tokens: totalTokens(d),
+    input_tokens: num(tokens.input_tokens),
+    output_tokens: num(tokens.output_tokens),
+    cached_tokens: Math.max(num(tokens.cached_tokens), num(tokens.cache_tokens)),
+    reasoning_tokens: num(tokens.reasoning_tokens),
+  });
+}
 function addDetailToCounter(row, d) {
   const tokens = d.tokens || {};
   row.total_requests++;
@@ -1019,10 +1048,33 @@ function addDetailToCounter(row, d) {
   row.cached_tokens += Math.max(num(tokens.cached_tokens), num(tokens.cache_tokens));
   row.reasoning_tokens += num(tokens.reasoning_tokens);
   if (num(d.latency_ms) > 0) row.latency.push(num(d.latency_ms));
+  addDetailProviderToCounter(row, d);
+}
+function providerHasValues(provider) {
+  return num(provider.total_requests) > 0 || num(provider.total_tokens) > 0 || num(provider.input_tokens) > 0 || num(provider.output_tokens) > 0 || num(provider.cached_tokens) > 0 || num(provider.reasoning_tokens) > 0;
 }
 function finalizeCounterRow(row) {
   if (row.latency && row.latency.length) row.avg_latency_ms = row.latency.reduce((a, b) => a + b, 0) / row.latency.length;
+  if (row.providerMap) {
+    const providers = [...row.providerMap.values()].filter(providerHasValues);
+    const summed = providers.reduce((acc, p) => mergeCounterRow(acc, p), { total_requests: 0, success_count: 0, failure_count: 0, total_tokens: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, reasoning_tokens: 0 });
+    const remainder = {
+      provider: '',
+      total_requests: Math.max(num(row.total_requests) - num(summed.total_requests), 0),
+      success_count: Math.max(num(row.success_count) - num(summed.success_count), 0),
+      failure_count: Math.max(num(row.failure_count) - num(summed.failure_count), 0),
+      total_tokens: Math.max(num(row.total_tokens) - num(summed.total_tokens), 0),
+      input_tokens: Math.max(num(row.input_tokens) - num(summed.input_tokens), 0),
+      output_tokens: Math.max(num(row.output_tokens) - num(summed.output_tokens), 0),
+      cached_tokens: Math.max(num(row.cached_tokens) - num(summed.cached_tokens), 0),
+      reasoning_tokens: Math.max(num(row.reasoning_tokens) - num(summed.reasoning_tokens), 0),
+    };
+    if (providerHasValues(remainder)) providers.push(remainder);
+    providers.sort((a, b) => num(b.total_requests) - num(a.total_requests) || String(a.provider || '').localeCompare(String(b.provider || '')));
+    if (providers.length) row.providers = providers;
+  }
   delete row.latency;
+  delete row.providerMap;
   return row;
 }
 function applySnapshotCounter(row, raw) {
@@ -1041,51 +1093,139 @@ function mergeCounterRow(target, row) {
   target.output_tokens += num(row.output_tokens);
   target.cached_tokens += num(row.cached_tokens);
   target.reasoning_tokens += num(row.reasoning_tokens);
+  if (target.providerMap && Array.isArray(row.providers)) row.providers.forEach((provider) => mergeProviderStat(target, provider));
+  if (target.providerMap && row.providerMap) row.providerMap.forEach((provider) => mergeProviderStat(target, provider));
+  if (Array.isArray(target.latency) && Array.isArray(row.latency)) row.latency.forEach((value) => { if (num(value) > 0) target.latency.push(num(value)); });
   return target;
 }
-function buildSummaryFromFullUsage(data) {
+function dashboardRangeCutoffMs(rangeKey, referenceMs) {
+  const now = num(referenceMs) || Date.now();
+  switch (rangeKey) {
+    case '7h': return now - 7 * 60 * 60 * 1000;
+    case '24h': return now - 24 * 60 * 60 * 1000;
+    case '7d': return now - 7 * 24 * 60 * 60 * 1000;
+    default: return 0;
+  }
+}
+function detailMatchesRange(d, cutoffMs) {
+  if (!cutoffMs) return true;
+  const ms = timestampMs(d && d.timestamp);
+  // Exclude details whose timestamp we cannot parse: 0 means "invalid date"
+  // and blindly including them would inflate range-scoped aggregates.
+  return ms > 0 && ms >= cutoffMs;
+}
+function incrementSeriesValue(values, key, amount) {
+  values[key] = num(values[key]) + num(amount);
+}
+function detailModelName(fallback, d) {
+  const model = String(d && d.model || '').trim();
+  if (model) return model;
+  const fallbackModel = String(fallback || '').trim();
+  return fallbackModel || 'unknown';
+}
+function credentialStatKey(d) {
+  const raw = d && d.auth_index;
+  const value = raw == null ? '' : String(raw);
+  return value || '(空)';
+}
+function addDetailToCredentialAgg(credentialAgg, d) {
+  const key = credentialStatKey(d);
+  const row = credentialAgg.get(key) || { auth_index: key, total_requests: 0, success_count: 0, failure_count: 0, total_tokens: 0 };
+  row.total_requests++;
+  d.failed ? row.failure_count++ : row.success_count++;
+  row.total_tokens += totalTokens(d);
+  credentialAgg.set(key, row);
+}
+function detailSeriesBucket(d) {
+  const raw = String(d && d.timestamp || '');
+  const ms = timestampMs(raw);
+  if (!ms) return null;
+  const match = raw.match(/^(\d{4}-\d{2}-\d{2})T([01]\d|2[0-3])/);
+  if (match) return { day: match[1], hour: match[2] };
+  const dt = new Date(ms);
+  return { day: dt.toISOString().slice(0, 10), hour: String(dt.getUTCHours()).padStart(2, '0') };
+}
+function addDetailToUsageTotals(usage, d, latency) {
+  const tokens = d.tokens || {};
+  usage.total_requests++;
+  d.failed ? usage.failure_count++ : usage.success_count++;
+  usage.total_tokens += totalTokens(d);
+  usage.input_tokens += num(tokens.input_tokens);
+  usage.output_tokens += num(tokens.output_tokens);
+  usage.cached_tokens += Math.max(num(tokens.cached_tokens), num(tokens.cache_tokens));
+  usage.reasoning_tokens += num(tokens.reasoning_tokens);
+  if (latency && num(d.latency_ms) > 0) latency.push(num(d.latency_ms));
+}
+function addDetailToUsageSeries(usage, d) {
+  const bucket = detailSeriesBucket(d);
+  if (!bucket) return;
+  const tokens = totalTokens(d);
+  const cost = detailCost(d, modelPrices, manualModelPrices);
+  incrementSeriesValue(usage.requests_by_day, bucket.day, 1);
+  incrementSeriesValue(usage.requests_by_hour, bucket.hour, 1);
+  incrementSeriesValue(usage.tokens_by_day, bucket.day, tokens);
+  incrementSeriesValue(usage.tokens_by_hour, bucket.hour, tokens);
+  incrementSeriesValue(usage.cost_by_day, bucket.day, cost);
+  incrementSeriesValue(usage.cost_by_hour, bucket.hour, cost);
+}
+function buildSummaryFromFullUsage(data, rangeKey) {
   data = requireObjectPayload(data, 'dashboard-data');
   const rawUsage = data.usage || {};
+  const cutoffMs = dashboardRangeCutoffMs(rangeKey, timestampMs(data.generated_at) || Date.now());
+  const rangeScoped = cutoffMs > 0;
   const usage = {
-    total_requests: rawUsage.total_requests || 0,
-    success_count: rawUsage.success_count || 0,
-    failure_count: rawUsage.failure_count || 0,
-    total_tokens: rawUsage.total_tokens || 0,
+    total_requests: rangeScoped ? 0 : rawUsage.total_requests || 0,
+    success_count: rangeScoped ? 0 : rawUsage.success_count || 0,
+    failure_count: rangeScoped ? 0 : rawUsage.failure_count || 0,
+    total_tokens: rangeScoped ? 0 : rawUsage.total_tokens || 0,
     input_tokens: 0,
     output_tokens: 0,
     cached_tokens: 0,
     reasoning_tokens: 0,
     avg_latency_ms: 0,
     apis: {},
-    requests_by_day: rawUsage.requests_by_day || {},
-    requests_by_hour: rawUsage.requests_by_hour || {},
-    tokens_by_day: rawUsage.tokens_by_day || {},
-    tokens_by_hour: rawUsage.tokens_by_hour || {}
+    requests_by_day: rangeScoped ? {} : rawUsage.requests_by_day || {},
+    requests_by_hour: rangeScoped ? {} : rawUsage.requests_by_hour || {},
+    tokens_by_day: rangeScoped ? {} : rawUsage.tokens_by_day || {},
+    tokens_by_hour: rangeScoped ? {} : rawUsage.tokens_by_hour || {},
+    cost_by_day: rangeScoped ? {} : rawUsage.cost_by_day || {},
+    cost_by_hour: rangeScoped ? {} : rawUsage.cost_by_hour || {}
   };
-  const modelAgg = new Map(), sourceAgg = new Map(), clientAgg = new Map();
+  const modelAgg = new Map(), sourceAgg = new Map(), credentialAgg = new Map(), clientAgg = new Map();
   const latency = [];
-  const details = [];
+  const healthDetails = [];
   Object.entries(rawUsage.apis || {}).forEach(([api, a]) => {
     const apiRow = { total_requests: 0, success_count: 0, failure_count: 0, total_tokens: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, reasoning_tokens: 0, avg_latency_ms: 0, models: {}, latency: [] };
+    const apiModelRows = new Map();
     Object.entries(a.models || {}).forEach(([model, m]) => {
       const modelRow = makeCounterRow(model);
       (m.details || []).forEach((d) => {
-        d.model = d.model || model;
-        details.push(d);
+        d.model = rangeScoped ? detailModelName(model, d) : (d.model || model);
+        healthDetails.push(d);
+        if (!detailMatchesRange(d, cutoffMs)) return;
         const tokens = d.tokens || {};
         const cached = Math.max(num(tokens.cached_tokens), num(tokens.cache_tokens));
-        addDetailToCounter(modelRow, d);
+        const detailModelRow = rangeScoped ? (apiModelRows.get(d.model) || makeCounterRow(d.model)) : modelRow;
+        addDetailToCounter(detailModelRow, d);
+        if (rangeScoped) apiModelRows.set(d.model, detailModelRow);
         addDetailToCounter(apiRow, d);
-        usage.input_tokens += num(tokens.input_tokens);
-        usage.output_tokens += num(tokens.output_tokens);
-        usage.cached_tokens += cached;
-        usage.reasoning_tokens += num(tokens.reasoning_tokens);
-        if (num(d.latency_ms) > 0) latency.push(num(d.latency_ms));
+        if (rangeScoped) {
+          addDetailToUsageTotals(usage, d, latency);
+          addDetailToUsageSeries(usage, d);
+        } else {
+          usage.input_tokens += num(tokens.input_tokens);
+          usage.output_tokens += num(tokens.output_tokens);
+          usage.cached_tokens += cached;
+          usage.reasoning_tokens += num(tokens.reasoning_tokens);
+          if (num(d.latency_ms) > 0) latency.push(num(d.latency_ms));
+        }
 
         const src = sourceLabel(d);
         const sourceRow = sourceAgg.get(src) || { source: src, provider: d.provider || '', total_requests: 0, success_count: 0, failure_count: 0, total_tokens: 0 };
         sourceRow.total_requests++; d.failed ? sourceRow.failure_count++ : sourceRow.success_count++; sourceRow.total_tokens += totalTokens(d);
         sourceAgg.set(src, sourceRow);
+
+        addDetailToCredentialAgg(credentialAgg, d);
 
         const clientKey = clientApiGroupKey(d);
         const clientRow = clientAgg.get(clientKey) || { api_key: clientApiLabel(d), api_key_hash: d.api_key_hash || '', total_requests: 0, success_count: 0, failure_count: 0, total_tokens: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, reasoning_tokens: 0, modelMap: new Map() };
@@ -1095,22 +1235,35 @@ function buildSummaryFromFullUsage(data) {
         clientRow.modelMap.set(d.model, clientModel);
         clientAgg.set(clientKey, clientRow);
       });
-      const finalizedModel = finalizeCounterRow(applySnapshotCounter(modelRow, m));
-      apiRow.models[model] = finalizedModel;
+      if (rangeScoped) return;
+      applySnapshotCounter(modelRow, m);
       const globalModel = modelAgg.get(model) || makeCounterRow(model);
-      mergeCounterRow(globalModel, finalizedModel);
+      mergeCounterRow(globalModel, modelRow);
       modelAgg.set(model, globalModel);
+      apiRow.models[model] = finalizeCounterRow(modelRow);
     });
-    usage.apis[api] = finalizeCounterRow(applySnapshotCounter(apiRow, a));
+    if (rangeScoped) {
+      apiModelRows.forEach((modelRow, model) => {
+        const globalModel = modelAgg.get(model) || makeCounterRow(model);
+        mergeCounterRow(globalModel, modelRow);
+        modelAgg.set(model, globalModel);
+        const finalizedModel = finalizeCounterRow(modelRow);
+        if (!finalizedModel.total_requests) return;
+        apiRow.models[model] = finalizedModel;
+      });
+    }
+    const finalizedAPI = finalizeCounterRow(rangeScoped ? apiRow : applySnapshotCounter(apiRow, a));
+    if (!rangeScoped || finalizedAPI.total_requests) usage.apis[api] = finalizedAPI;
   });
-  applySnapshotCounter(usage, rawUsage);
+  if (!rangeScoped) applySnapshotCounter(usage, rawUsage);
   usage.avg_latency_ms = latency.length ? latency.reduce((a, b) => a + b, 0) / latency.length : 0;
-  if (Object.prototype.hasOwnProperty.call(rawUsage, 'avg_latency_ms')) usage.avg_latency_ms = num(rawUsage.avg_latency_ms);
+  if (!rangeScoped && Object.prototype.hasOwnProperty.call(rawUsage, 'avg_latency_ms')) usage.avg_latency_ms = num(rawUsage.avg_latency_ms);
+  const credentialStats = [...credentialAgg.values()].sort((a, b) => b.total_requests - a.total_requests);
   return {
     usage,
-    health_grid: buildHealthGridFromDetails(details, data.generated_at),
+    health_grid: buildHealthGridFromDetails(healthDetails, data.generated_at),
     source_stats: [...sourceAgg.values()].sort((a, b) => b.total_requests - a.total_requests),
-    credential_stats: [],
+    credential_stats: rangeScoped ? credentialStats : [],
     client_api_stats: [...clientAgg.values()].map((r) => { r.models = [...r.modelMap.values()].map(finalizeCounterRow).sort((a, b) => b.total_requests - a.total_requests); delete r.modelMap; return r }).sort((a, b) => b.total_requests - a.total_requests),
     model_stats: [...modelAgg.values()].map(finalizeCounterRow).sort((a, b) => b.total_requests - a.total_requests),
     generated_at: data.generated_at || new Date().toISOString(),
@@ -1265,9 +1418,12 @@ async function load(options) {
     const selectedRange = $('range').value;
     // Try new summary endpoint first with current range
     const summaryUrl = pluginEndpoint('dashboard-summary') + '?range=' + encodeURIComponent(selectedRange);
+    // A transient model-prices error must not send the page through the
+    // compatibility data path; stale prices are better than replacing
+    // range-scoped stats with reconstructed fallback data.
     const [data] = await Promise.all([
       fetchConditionalJsonPayload('dashboard-summary:' + summaryUrl, summaryUrl, pluginFetchOptions({ cache: 'no-store' })),
-      loadModelPrices()
+      loadModelPrices().catch(function() { /* prices failure tolerated; stale prices beat wrong stats */ }),
     ]);
     summaryData = requireObjectPayload(data, 'dashboard-summary');
     updatedState = { type: 'success', generatedAt: data.generated_at || Date.now(), message: '' };
@@ -1283,9 +1439,9 @@ async function load(options) {
       const selectedRange = $('range').value;
       const [data] = await Promise.all([
         fetchJsonPayload(pluginEndpoint('dashboard-data'), pluginFetchOptions({ cache: 'no-store' })),
-        loadModelPrices()
+        loadModelPrices().catch(function() { /* prices failure tolerated */ }),
       ]);
-      summaryData = buildSummaryFromFullUsage(data);
+      summaryData = buildSummaryFromFullUsage(data, selectedRange);
       updatedState = { type: 'compat', generatedAt: data.generated_at || Date.now(), message: '' };
       renderUpdated();
       const refreshDetails = shouldRefreshDetails(previousSummary, summaryData, forceDetails);

@@ -213,13 +213,6 @@ var I18N_MAP = {
     trend_daily_rpm: '每日平均 RPM',
     no_trend_data: '暂无趋势数据',
 
-    // ---- anomaly detection ----
-    anomaly_increase: '⚠️ 用量突增：近{0}较前期增长 {1}%（{2} → {3}）',
-    anomaly_decrease: '📉 用量下降：近{0}较前期下降 {1}%（{2} → {3}）',
-    anomaly_stable: '✅ 用量稳定，无明显波动',
-    anomaly_day: '1天',
-    anomaly_days: '{0}天',
-
     // ---- model stats extra ----
     col_cache_rate: '缓存命中率',
     col_cost_per_m: '实际单价',
@@ -416,12 +409,6 @@ var I18N_MAP = {
     trend_daily_rpm: '每日平均 RPM',
     no_trend_data: '暫無趨勢資料',
 
-    anomaly_increase: '⚠️ 用量突增：近{0}較前期增長 {1}%（{2} → {3}）',
-    anomaly_decrease: '📉 用量下降：近{0}較前期下降 {1}%（{2} → {3}）',
-    anomaly_stable: '✅ 用量穩定，無明顯波動',
-    anomaly_day: '1天',
-    anomaly_days: '{0}天',
-
     col_cache_rate: '快取命中率',
     col_cost_per_m: '實際單價',
     cost_per_m_unit: '/M token',
@@ -617,12 +604,6 @@ var I18N_MAP = {
     trend_daily_rpm: 'Daily Avg RPM',
     no_trend_data: 'No trend data',
 
-    anomaly_increase: '⚠️ Spike: last {0} up {1}% from previous ({2} → {3})',
-    anomaly_decrease: '📉 Drop: last {0} down {1}% from previous ({2} → {3})',
-    anomaly_stable: '✅ Usage stable, no significant change',
-    anomaly_day: '1 day',
-    anomaly_days: '{0} days',
-
     col_cache_rate: 'Cache Hit Rate',
     col_cost_per_m: 'Unit Cost',
     cost_per_m_unit: '/M token',
@@ -817,12 +798,6 @@ var I18N_MAP = {
     trend_daily_tokens: 'Токены по дням',
     trend_daily_rpm: 'Средн. RPM по дням',
     no_trend_data: 'Нет данных тренда',
-
-    anomaly_increase: '⚠️ Всплеск: посл. {0} рост на {1}%（{2} → {3}）',
-    anomaly_decrease: '📉 Спад: посл. {0} снижение на {1}%（{2} → {3}）',
-    anomaly_stable: '✅ Использование стабильно',
-    anomaly_day: '1 день',
-    anomaly_days: '{0} дней',
 
     col_cache_rate: 'Попадание в кэш',
     col_cost_per_m: 'Цена за ед.',

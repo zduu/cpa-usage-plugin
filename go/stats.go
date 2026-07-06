@@ -4144,7 +4144,7 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Ti
 				continue
 			}
 			for _, detail := range modelSt.Details {
-				if !cutoff.IsZero() && !detail.Timestamp.IsZero() && detail.Timestamp.Before(cutoff) {
+				if !cutoff.IsZero() && (detail.Timestamp.IsZero() || detail.Timestamp.Before(cutoff)) {
 					continue
 				}
 				totals := detailTotalsFromRequest(detail)
@@ -4889,7 +4889,10 @@ func dashboardEventQueryHasFilters(params EventsQuery) bool {
 }
 
 func dashboardEventPastCutoff(d RequestDetail, cutoff time.Time) bool {
-	return !cutoff.IsZero() && !d.Timestamp.IsZero() && d.Timestamp.Before(cutoff)
+	if cutoff.IsZero() {
+		return false
+	}
+	return d.Timestamp.IsZero() || d.Timestamp.Before(cutoff)
 }
 
 func dashboardEventMatches(d RequestDetail, params EventsQuery, cutoff time.Time) bool {

@@ -59,6 +59,7 @@ function createDashboardHarness(options = {}) {
   const dashboardEtags = !!options.dashboardEtags;
   const wrapDashboardResponses = !!options.wrapDashboardResponses;
   const failDashboardSummary = !!options.failDashboardSummary;
+  const failModelPrices = !!options.failModelPrices;
   const forceSummaryNotModified = !!options.forceSummaryNotModified;
   const nullDashboardSummary = !!options.nullDashboardSummary;
   const nullDashboardData = !!options.nullDashboardData;
@@ -300,7 +301,9 @@ function createDashboardHarness(options = {}) {
   }
 
   function dashboardDataPayload() {
-    const now = Date.now();
+    const now = Number.isFinite(Number(options.dashboardDataNowMs)) ? Number(options.dashboardDataNowMs) : Date.now();
+    const dashboardDataDetailModel = options.dashboardDataDetailModel || 'gpt-4.1';
+    const dashboardDataModelKey = options.dashboardDataModelKey || dashboardDataDetailModel;
     const aggregateRequests = options.trimmedDashboardData ? 4 : 2;
     const aggregateSuccess = options.trimmedDashboardData ? 3 : 1;
     const aggregateTokens = options.trimmedDashboardData ? 45 : 15;
@@ -311,8 +314,8 @@ function createDashboardHarness(options = {}) {
     const aggregateLatency = options.trimmedDashboardData ? 110 : 100;
     const details = [
       {
-        timestamp: new Date(now - 5 * 60 * 1000).toISOString(),
-        model: 'gpt-4.1',
+        timestamp: options.dashboardDataRecentTimestamp || new Date(now - 5 * 60 * 1000).toISOString(),
+        model: dashboardDataDetailModel,
         source: 'openai-prod',
         provider: 'openai',
         auth_index: 'auth-1',
@@ -322,7 +325,7 @@ function createDashboardHarness(options = {}) {
       },
       {
         timestamp: new Date(now - 10 * 60 * 1000).toISOString(),
-        model: 'gpt-4.1',
+        model: dashboardDataDetailModel,
         source: 'openai-prod',
         provider: 'openai',
         auth_index: 'auth-1',
@@ -333,8 +336,11 @@ function createDashboardHarness(options = {}) {
         tokens: { total_tokens: 0 },
       },
     ];
+    if (options.dashboardDataOldDetailHours) {
+      details[1].timestamp = new Date(now - options.dashboardDataOldDetailHours * 60 * 60 * 1000).toISOString();
+    }
     return {
-      generated_at: new Date(now).toISOString(),
+      generated_at: options.dashboardDataGeneratedAt || new Date(now).toISOString(),
       usage: {
         total_requests: aggregateRequests,
         success_count: aggregateSuccess,
@@ -361,7 +367,7 @@ function createDashboardHarness(options = {}) {
             reasoning_tokens: aggregateReasoning,
             avg_latency_ms: aggregateLatency,
             models: {
-              'gpt-4.1': {
+              [dashboardDataModelKey]: {
                 total_requests: aggregateRequests,
                 success_count: aggregateSuccess,
                 failure_count: 1,
@@ -478,6 +484,14 @@ function createDashboardHarness(options = {}) {
       let payload;
       const route = dashboardRoute(url);
       if (String(url).includes('model-prices')) {
+        if (failModelPrices) {
+          return {
+            ok: false,
+            status: 503,
+            headers: fetchHeaders({}),
+            text: async () => 'prices failed',
+          };
+        }
         if (options.method === 'PUT') {
           const body = JSON.parse(options.body || '{}');
           prices[body.model] = body.price;
@@ -718,6 +732,25 @@ test('dashboard trend chart escapes data labels', async () => {
   const html = document.getElementById('trendChart').innerHTML;
   assert.doesNotMatch(html, /<script>/);
   assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+});
+
+test('dashboard trend chart does not show anomaly spike banner', async () => {
+  const costByDay = {};
+  for (let i = 1; i <= 6; i++) costByDay['2026-06-0' + i] = 1;
+  for (let i = 7; i <= 9; i++) costByDay['2026-06-0' + i] = 10;
+  const { document } = createDashboardHarness({
+    range: 'all',
+    summaryUsage: {
+      requests_by_day: Object.fromEntries(Object.keys(costByDay).map((day) => [day, costByDay[day]])),
+      tokens_by_day: Object.fromEntries(Object.keys(costByDay).map((day) => [day, costByDay[day] * 100])),
+      cost_by_day: costByDay,
+    },
+  });
+
+  await waitFor(() => document.getElementById('trendChart').innerHTML.includes('06-09'));
+
+  assert.strictEqual(document.getElementById('anomalyBar').className, 'anomalyBar');
+  assert.strictEqual(document.getElementById('anomalyBar').innerHTML, '');
 });
 
 test('dashboard api detail export buttons create filtered export jobs', async () => {
@@ -1093,6 +1126,76 @@ test('dashboard fallback handles null summary payload', async () => {
   assert.match(document.getElementById('updated').textContent, /兼容模式/);
 });
 
+test('dashboard fallback keeps selected range instead of full aggregates', async () => {
+  const { document, fetchCalls } = createDashboardHarness({
+    failDashboardSummary: true,
+    range: '7h',
+    dashboardDataOldDetailHours: 8,
+    prices: { 'openai/gpt-4.1': { prompt: 100000, completion: 200000, cache: 0 } },
+  });
+
+  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-data')) && document.getElementById('updated').textContent.includes('兼容模式'));
+
+  assert.strictEqual(document.getElementById('range').value, '7h');
+  assert.strictEqual(document.getElementById('totalRequests').textContent, '1');
+  assert.strictEqual(document.getElementById('totalTokens').textContent, '15');
+  assert.strictEqual(document.getElementById('totalCost').textContent, 'US$2.00');
+  assert.match(document.getElementById('successText').textContent, /成功请求：1/);
+  assert.match(document.getElementById('failureText').textContent, /失败请求：0/);
+  assert.match(document.getElementById('modelStats').innerHTML, /120ms/);
+});
+
+test('dashboard fallback range uses detail model instead of outer alias key', async () => {
+  const { context, document, fetchCalls } = createDashboardHarness({
+    failDashboardSummary: true,
+    range: '7h',
+    dashboardDataModelKey: 'claude-sonnet',
+    dashboardDataDetailModel: 'gpt-4.1',
+    dashboardDataOldDetailHours: 8,
+    prices: { 'openai/gpt-4.1': { prompt: 100000, completion: 200000, cache: 0 } },
+  });
+
+  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-data')) && document.getElementById('modelStats').innerHTML.includes('gpt-4.1'));
+
+  assert.strictEqual(document.getElementById('totalRequests').textContent, '1');
+  assert.strictEqual(document.getElementById('totalCost').textContent, 'US$2.00');
+  assert.match(document.getElementById('modelStats').innerHTML, /gpt-4\.1/);
+  assert.doesNotMatch(document.getElementById('modelStats').innerHTML, /claude-sonnet/);
+  const credentialStats = JSON.parse(vm.runInContext('JSON.stringify(summaryData.credential_stats)', context));
+  assert.deepStrictEqual(credentialStats, [{ auth_index: 'auth-1', total_requests: 1, success_count: 1, failure_count: 0, total_tokens: 15 }]);
+});
+
+test('dashboard fallback buckets offset timestamps by their source hour', async () => {
+  const generatedAt = '2026-01-03T00:00:00+08:00';
+  const { document, fetchCalls } = createDashboardHarness({
+    failDashboardSummary: true,
+    range: '7h',
+    dashboardDataNowMs: Date.parse(generatedAt),
+    dashboardDataGeneratedAt: generatedAt,
+    dashboardDataRecentTimestamp: '2026-01-02T23:30:00+08:00',
+    dashboardDataOldDetailHours: 8,
+  });
+
+  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-data')) && document.getElementById('trendChart').innerHTML.includes('23:00'));
+
+  assert.match(document.getElementById('trendChart').innerHTML, /23:00/);
+  assert.doesNotMatch(document.getElementById('trendChart').innerHTML, /15:00/);
+});
+
+test('dashboard keeps summary path when model prices fail', async () => {
+  const { document, fetchCalls } = createDashboardHarness({
+    failModelPrices: true,
+    range: '7h',
+    summaryUsage: { total_requests: 7, success_count: 7, failure_count: 0, total_tokens: 70 },
+  });
+
+  await waitFor(() => fetchCalls.some((url) => url.includes('model-prices')) && document.getElementById('totalRequests').textContent === '7');
+
+  assert.ok(fetchCalls.some((url) => url.includes('dashboard-summary?range=7h')));
+  assert.ok(!fetchCalls.some((url) => url.includes('dashboard-data')), 'model price failure must not trigger dashboard-data fallback');
+  assert.strictEqual(document.getElementById('updated').textContent.includes('兼容模式'), false);
+});
+
 test('dashboard summary retries without falling back when browser returns 304 without local cache', async () => {
   const { document, fetchCalls } = createDashboardHarness({ forceSummaryNotModified: true });
 
@@ -1110,13 +1213,14 @@ test('dashboard load reports null fallback payload without throwing', async () =
 });
 
 test('dashboard fallback keeps upstream aggregates when details are trimmed', async () => {
-  const { document, fetchCalls } = createDashboardHarness({ failDashboardSummary: true, trimmedDashboardData: true });
+  const { document, fetchCalls } = createDashboardHarness({ failDashboardSummary: true, trimmedDashboardData: true, range: 'all' });
 
   await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-data')) && document.getElementById('apiStats').innerHTML.includes('openai'));
 
   assert.strictEqual(document.getElementById('totalRequests').textContent, '4');
   assert.strictEqual(document.getElementById('totalCost').textContent, 'US$0.000177');
   assert.match(document.getElementById('apiStats').innerHTML, /4 <span class="ok">\(3<\/span> <span class="bad">1\)<\/span>/);
+  assert.match(document.getElementById('modelStats').innerHTML, /100ms/);
 });
 
 test('dashboard detail refresh sends conditional requests for events and api detail', async () => {

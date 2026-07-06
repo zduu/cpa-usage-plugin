@@ -915,6 +915,29 @@ func TestDashboardEventsRangeFilter(t *testing.T) {
 	}
 }
 
+func TestDashboardEventsRangeExcludesZeroTimestampEvents(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0, RetentionDays: 30})
+
+	stats.mu.Lock()
+	stats.recordDetailLocked("openai", "gpt-4", RequestDetail{
+		Model:     "gpt-4",
+		Provider:  "openai",
+		Timestamp: time.Time{},
+		Tokens:    TokenStats{TotalTokens: 100},
+	}, "", time.Now(), false)
+	stats.mu.Unlock()
+
+	all := stats.QueryEvents(EventsQuery{Limit: 50, Range: "all"})
+	if all.Total != 1 {
+		t.Fatalf("all range total = %d, want 1", all.Total)
+	}
+	rangeResult := stats.QueryEvents(EventsQuery{Limit: 50, Range: "24h"})
+	if rangeResult.Total != 0 {
+		t.Fatalf("24h range total = %d, want zero timestamp event excluded", rangeResult.Total)
+	}
+}
+
 func TestDashboardAPIDetailAggregatesErrorsAndRecentEvents(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{MaxDetailsPerModel: 200, DedupWindowMinutes: 0, RetentionDays: 30})
@@ -1040,6 +1063,29 @@ func TestDashboardAPIDetailRecentEventsTieBreaksByModel(t *testing.T) {
 	}
 	if result.RecentEvents[0].Model != "a-model" || result.RecentEvents[1].Model != "z-model" {
 		t.Fatalf("recent events = %#v, want same timestamp sorted by model", result.RecentEvents)
+	}
+}
+
+func TestDashboardAPIDetailRangeExcludesZeroTimestampEvents(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0, RetentionDays: 30})
+
+	stats.mu.Lock()
+	stats.recordDetailLocked("openai", "gpt-4", RequestDetail{
+		Model:     "gpt-4",
+		Provider:  "openai",
+		Timestamp: time.Time{},
+		Tokens:    TokenStats{TotalTokens: 100},
+	}, "", time.Now(), false)
+	stats.mu.Unlock()
+
+	all := stats.QueryAPIDetail("openai", "all", 10, 10)
+	if all.Summary.TotalRequests != 1 || all.TotalEvents != 1 {
+		t.Fatalf("all api detail = %#v, total_events = %d, want one zero timestamp event", all.Summary, all.TotalEvents)
+	}
+	rangeResult := stats.QueryAPIDetail("openai", "24h", 10, 10)
+	if rangeResult.Summary.TotalRequests != 0 || rangeResult.TotalEvents != 0 || len(rangeResult.RecentEvents) != 0 {
+		t.Fatalf("24h api detail summary = %#v, total_events = %d, recent = %#v; want zero timestamp event excluded", rangeResult.Summary, rangeResult.TotalEvents, rangeResult.RecentEvents)
 	}
 }
 
@@ -1732,6 +1778,29 @@ func TestSummaryRange24hOnlyCountsRecentEvents(t *testing.T) {
 	}
 	if summary.Usage.TotalTokens != 50 {
 		t.Fatalf("24h range: total_tokens = %d, want 50", summary.Usage.TotalTokens)
+	}
+}
+
+func TestSummaryRangeExcludesZeroTimestampEvents(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0, RetentionDays: 30})
+
+	stats.mu.Lock()
+	stats.recordDetailLocked("openai", "gpt-4", RequestDetail{
+		Model:     "gpt-4",
+		Provider:  "openai",
+		Timestamp: time.Time{},
+		Tokens:    TokenStats{TotalTokens: 100},
+	}, "", time.Now(), false)
+	stats.mu.Unlock()
+
+	fullSummary := stats.SummaryWithoutDetails()
+	if fullSummary.Usage.TotalRequests != 1 {
+		t.Fatalf("full summary total_requests = %d, want 1", fullSummary.Usage.TotalRequests)
+	}
+	rangeSummary := stats.SummaryWithoutDetailsForRange("24h")
+	if rangeSummary.Usage.TotalRequests != 0 {
+		t.Fatalf("range summary total_requests = %d, want zero timestamp event excluded", rangeSummary.Usage.TotalRequests)
 	}
 }
 
