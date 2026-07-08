@@ -31,8 +31,8 @@ plugins:
     usage-statistics:
       enabled: true
       store:
-        version: "2.2.6"
-        release-tag: "v2.2.6"
+        version: "2.2.7"
+        release-tag: "v2.2.7"
         repository: "https://github.com/zduu/cpa-usage-plugin"
       # 其他配置项见第 3 节 ...
 ```
@@ -181,8 +181,8 @@ plugins:
     usage-statistics:
       enabled: true
       store:
-        version: "2.2.6"
-        release-tag: "v2.2.6"
+        version: "2.2.7"
+        release-tag: "v2.2.7"
         repository: "https://github.com/zduu/cpa-usage-plugin"
       # 每个上游接口/模型最多保留的请求明细条数。默认 5000。
       max_details_per_model: 5000
@@ -220,7 +220,7 @@ plugins:
       models_dev_prices_refresh_interval_seconds: 43200
       # 可选：允许外部脚本更新插件文件。默认 false。
       update_enabled: false
-      # 可选：latest 或指定版本号，例如 v2.2.6。
+      # 可选：latest 或指定版本号，例如 v2.2.7。
       update_version: latest
 ```
 
@@ -239,8 +239,8 @@ cd CLIProxyAPI
 启动后查看日志确认插件加载成功：
 
 ```text
-pluginhost: plugin loaded plugin_id=usage-statistics version=2.2.6 path=plugins/usage-statistics-v2.2.6.so
-pluginhost: plugin registered plugin_id=usage-statistics plugin_name=用量统计 version=2.2.6 path=plugins/usage-statistics-v2.2.6.so
+pluginhost: plugin loaded plugin_id=usage-statistics version=2.2.7 path=plugins/usage-statistics-v2.2.7.so
+pluginhost: plugin registered plugin_id=usage-statistics plugin_name=用量统计 version=2.2.7 path=plugins/usage-statistics-v2.2.7.so
 ```
 
 > `store-sources` 引入插件商店注册表，管理面板可浏览安装。`store` 块标记当前期望版本，pluginhost 会匹配 `usage-statistics-v{版本号}.{ext}` 文件名，并自动清理旧版本文件。
@@ -267,6 +267,7 @@ pluginhost: plugin registered plugin_id=usage-statistics plugin_name=用量统�
 
 - 看板首页使用 `/dashboard-summary` 端点，**不传输请求明细**，首包体积极小，即使存储数十万条记录也能快速打开。
 - 事件明细表格通过 `/dashboard-events` 加载，页面以滚动表格展示，单次最多 500 条。
+- 事件明细刷新会复用 ETag 条件请求缓存；如果遇到等价的 304 空响应、临时网络错误或 5xx 响应，内置看板会保留上一次成功加载的明细和总数，避免短暂失败后误显示为 0 条。
 - 保留策略自动控制内存占用：`retention_days` 定义统计保留窗口，`max_details_per_model` 只限制每个上游接口/模型保留的最近请求明细数量。
 - 可选 JSONL 持久化通过 `storage_enabled` 开启，重启后会 replay 持久化事件并继续应用保留策略。
 - 页面底部 `_meta` 区域可见当前保留配置、已存储明细数和累积淘汰数。
@@ -448,7 +449,7 @@ plugins:
     usage-statistics:
       enabled: true
       update_enabled: true
-      update_version: latest   # 或 v2.2.6
+      update_version: latest   # 或 v2.2.7
 ```
 
 执行脚本：

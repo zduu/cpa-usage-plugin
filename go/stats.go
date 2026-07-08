@@ -1444,6 +1444,7 @@ func (s *RequestStatistics) restoreStorageSnapshotLocked(snapshot StatisticsSnap
 					detail.TTFTMs = 0
 				}
 				detail.Tokens.TotalTokens = detailTotalTokens(detail.Tokens)
+				detail.Source = cleanImportedDetailSource(detail)
 				modelSt.Details = append(modelSt.Details, detail)
 				restoredDetails++
 
@@ -1576,6 +1577,7 @@ func restoreSnapshotAggregatesFromAPIs(s *RequestStatistics) {
 func storageSnapshotAPIName(apiName string, apiSnapshot APISnapshot) string {
 	for _, modelSnapshot := range apiSnapshot.Models {
 		for _, detail := range modelSnapshot.Details {
+			detail.Source = cleanImportedDetailSource(detail)
 			if key := usageGroupKeyFromDetail(apiName, detail); strings.TrimSpace(key) != "" {
 				return key
 			}
@@ -1980,6 +1982,7 @@ func (s *RequestStatistics) replayStorageLocked(path string) error {
 			detail.Timestamp = now
 		}
 		detail.Tokens.TotalTokens = detailTotalTokens(detail.Tokens)
+		detail.Source = cleanImportedDetailSource(detail)
 		apiName = usageGroupKeyFromDetail(apiName, detail)
 		key := dedupKey(apiName, modelName, detail)
 		if _, ok := existing[key]; ok {
@@ -3439,6 +3442,7 @@ func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, per
 					continue
 				}
 
+				detail.Source = cleanImportedDetailSource(detail)
 				importAPIName := usageGroupKeyFromDetail(apiName, detail)
 				key := dedupKey(importAPIName, importModelName, detail)
 				if _, exists := seen[key]; exists {
@@ -3587,7 +3591,7 @@ func modelPriceCaseInsensitive(prices map[string]ModelPrice, model string) (Mode
 
 func summarySourceKey(detail RequestDetail) string {
 	source := detail.Source
-	if source == "" {
+	if source == "" || looksLikeCredentialID(source) || looksLikeSecretKey(source) {
 		return "未知来源"
 	}
 	return source
@@ -3812,6 +3816,7 @@ func summaryHealthWindow(now time.Time) time.Time {
 func cloneDashboardSummaryWithGeneratedAt(summary DashboardSummary, now time.Time) DashboardSummary {
 	cloned := cloneDashboardSummary(summary)
 	cloned.GeneratedAt = now.UTC().Format(time.RFC3339)
+	cloned.Meta.CurrentHour = now.Hour()
 	return cloned
 }
 
@@ -4093,6 +4098,7 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsLocked(now time.Time, heal
 	summary.Meta.RetentionDays = int(s.retention.Hours() / 24)
 	summary.Meta.MaxDetailsPerModel = s.maxDetailsPerModel
 	summary.Meta.CurrentDetailCount = s.countDetailsLocked()
+	summary.Meta.CurrentHour = now.Hour()
 	summary.Meta.EvictedTotal = s.evictedTotal
 	summary.Meta.SummaryVersion = s.summaryVersion
 	summary.Meta.Storage = s.storageStatusLocked()
@@ -4431,6 +4437,7 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Ti
 	summary.Meta.RetentionDays = int(s.retention.Hours() / 24)
 	summary.Meta.MaxDetailsPerModel = s.maxDetailsPerModel
 	summary.Meta.CurrentDetailCount = s.countDetailsLocked()
+	summary.Meta.CurrentHour = now.Hour()
 	summary.Meta.EvictedTotal = s.evictedTotal
 	summary.Meta.SummaryVersion = s.summaryVersion
 	summary.Meta.Storage = s.storageStatusLocked()

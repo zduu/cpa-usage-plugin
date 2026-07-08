@@ -73,6 +73,33 @@ func stripCredentialSuffix(raw string) string {
 	return value
 }
 
+func stripRecordCredentialSuffix(raw string, record UsageRecord) string {
+	return stripAPIKeySuffix(raw, record.APIKey, record.AuthIndex, record.AuthID)
+}
+
+func stripDetailCredentialSuffix(raw string, detail RequestDetail) string {
+	return stripAPIKeySuffix(raw, detail.APIKey, detail.AuthIndex, detail.AuthID)
+}
+
+func stripAPIKeySuffix(raw string, rawAPIKey string, rawAuthIndex string, rawAuthID string) string {
+	value := stripCredentialSuffix(raw)
+	apiKey := strings.TrimSpace(rawAPIKey)
+	if value == "" || apiKey == "" {
+		return value
+	}
+	authIndex := strings.TrimSpace(rawAuthIndex)
+	authID := strings.TrimSpace(rawAuthID)
+	if value == apiKey && value != authIndex && value != authID {
+		return ""
+	}
+	parts := splitBySeparators(value)
+	last := strings.TrimSpace(parts[len(parts)-1])
+	if len(parts) > 1 && last == apiKey && last != authIndex && last != authID {
+		return strings.Join(parts[:len(parts)-1], " · ")
+	}
+	return value
+}
+
 // splitBySeparators splits s on " · ", " - ", " | ", or "/" in priority order.
 func splitBySeparators(s string) []string {
 	if strings.Contains(s, " · ") {
@@ -104,6 +131,22 @@ func looksLikeCredentialID(raw string) bool {
 			return true
 		}
 	}
+	// Hyphenated UUID-style credential IDs (e.g., ms-3d8d5e49-d6c7-4830-a2cd-b9a94cf7ff2e).
+	// Strip hyphens and check if the result is ≥30 chars and ≥80% hex.
+	if strings.Contains(s, "-") && len(s) >= 30 {
+		hyphenless := strings.ReplaceAll(s, "-", "")
+		if len(hyphenless) >= 30 {
+			hexCount := 0
+			for _, ch := range hyphenless {
+				if (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F') {
+					hexCount++
+				}
+			}
+			if hexCount >= 30 || hexCount*5 >= len(hyphenless)*4 {
+				return true
+			}
+		}
+	}
 	return len(s) >= 32 && !strings.ContainsAny(s, " /.-_")
 }
 
@@ -114,9 +157,13 @@ func looksLikeCredentialID(raw string) bool {
 func friendlySourceName(record UsageRecord) string {
 	provider := strings.TrimSpace(record.Provider)
 	executor := strings.TrimSpace(record.ExecutorType)
-	source := stripCredentialSuffix(record.Source)
+	source := stripRecordCredentialSuffix(record.Source, record)
 
-	if source != "" && !looksLikeSecretKey(source) {
+	if isProviderSpecificOpenAICompatible(provider) {
+		return provider
+	}
+
+	if source != "" && !looksLikeSecretKey(source) && !looksLikeCredentialID(source) {
 		return source
 	}
 	name := provider
@@ -132,7 +179,7 @@ func friendlySourceName(record UsageRecord) string {
 func usageGroupKey(record UsageRecord) string {
 	provider := strings.TrimSpace(record.Provider)
 	executor := strings.TrimSpace(record.ExecutorType)
-	source := stripCredentialSuffix(record.Source)
+	source := stripRecordCredentialSuffix(record.Source, record)
 	baseURL := strings.TrimSpace(record.BaseURL)
 	primary := provider
 	if primary == "" {
@@ -143,11 +190,15 @@ func usageGroupKey(record UsageRecord) string {
 	if primary != "" {
 		parts = append(parts, primary)
 	}
-	if baseURL != "" && !isOpenAICompatibleProvider(primary) {
+	if baseURL != "" && (!isOpenAICompatibleProvider(primary) || isGenericOpenAICompatibleProvider(primary)) {
 		return joinNameParts(primary, baseURL)
 	}
+	if looksLikeCredentialID(source) {
+		source = ""
+	}
+	source = trimLeadingNamePart(source, primary)
 	sourceAdded := false
-	if source != "" && !looksLikeSecretKey(source) {
+	if source != "" && !looksLikeSecretKey(source) && (!isOpenAICompatibleProvider(primary) || isGenericOpenAICompatibleProvider(primary)) {
 		dup := false
 		for _, p := range parts {
 			if p == source {
@@ -169,21 +220,52 @@ func usageGroupKey(record UsageRecord) string {
 	return joinNameParts(parts...)
 }
 
+// cleanImportedDetailSource returns a safe source label for an imported detail
+// whose original source may contain credential IDs or provider-specific labels.
+func cleanImportedDetailSource(detail RequestDetail) string {
+	source := stripDetailCredentialSuffix(detail.Source, detail)
+	provider := strings.TrimSpace(detail.Provider)
+	if isProviderSpecificOpenAICompatible(provider) {
+		return provider
+	}
+	if source != "" && !looksLikeSecretKey(source) && !looksLikeCredentialID(source) {
+		return source
+	}
+	if provider != "" && !looksLikeSecretKey(provider) && !looksLikeCredentialID(provider) {
+		return provider
+	}
+	return ""
+}
+
+func trimLeadingNamePart(value string, leading string) string {
+	leading = strings.TrimSpace(leading)
+	if leading == "" {
+		return value
+	}
+	parts := splitBySeparators(value)
+	if len(parts) > 1 && strings.TrimSpace(parts[0]) == leading {
+		return strings.Join(parts[1:], " · ")
+	}
+	return value
+}
+
 func usageGroupKeyFromDetail(fallback string, detail RequestDetail) string {
+	cleanFallback := stripAPIKeySuffix(fallback, detail.APIKey, detail.AuthIndex, detail.AuthID)
 	key := usageGroupKey(UsageRecord{
 		Provider:     detail.Provider,
 		Source:       detail.Source,
+		APIKey:       detail.APIKey,
 		AuthID:       detail.AuthID,
 		AuthIndex:    detail.AuthIndex,
 		AuthType:     detail.AuthType,
 		BaseURL:      detail.BaseURL,
-		ExecutorType: strings.TrimSpace(fallback),
+		ExecutorType: strings.TrimSpace(cleanFallback),
 	})
 	if strings.TrimSpace(key) != "" && key != "未知接口" {
 		return key
 	}
-	if fallback = strings.TrimSpace(fallback); fallback != "" {
-		return fallback
+	if cleanFallback = strings.TrimSpace(cleanFallback); cleanFallback != "" {
+		return cleanFallback
 	}
 	return key
 }
@@ -198,6 +280,15 @@ func shouldAppendChannel(primary string, sourceAdded bool) bool {
 func isOpenAICompatibleProvider(provider string) bool {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	return strings.HasPrefix(provider, "openai-compatible") || strings.HasPrefix(provider, "openai-compatibility")
+}
+
+func isGenericOpenAICompatibleProvider(provider string) bool {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	return provider == "openai-compatible" || provider == "openai-compatibility"
+}
+
+func isProviderSpecificOpenAICompatible(provider string) bool {
+	return isOpenAICompatibleProvider(provider) && !isGenericOpenAICompatibleProvider(provider)
 }
 
 func joinNameParts(parts ...string) string {

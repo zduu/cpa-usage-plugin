@@ -397,6 +397,9 @@ func TestDashboardSummaryHasMetadata(t *testing.T) {
 	if summary.Meta.CurrentDetailCount != 1 {
 		t.Fatalf("detail_count = %d, want 1", summary.Meta.CurrentDetailCount)
 	}
+	if summary.Meta.CurrentHour < 0 || summary.Meta.CurrentHour >= 24 {
+		t.Fatalf("current_hour = %d, want 0..23", summary.Meta.CurrentHour)
+	}
 	if summary.Meta.SummaryVersion == 0 {
 		t.Fatal("summary_version should be populated after recording a request")
 	}
@@ -414,6 +417,26 @@ func TestDashboardSummaryHasMetadata(t *testing.T) {
 	}
 	if summary.GeneratedAt == "" {
 		t.Fatal("generated_at should not be empty")
+	}
+}
+
+func TestCloneDashboardSummaryWithGeneratedAtRefreshesCurrentHour(t *testing.T) {
+	loc := time.FixedZone("test", 8*60*60)
+	now := time.Date(2026, 1, 3, 0, 30, 0, 0, loc)
+	summary := DashboardSummary{
+		GeneratedAt: "2026-01-02T00:00:00Z",
+		Meta:        DashboardMeta{CurrentHour: 16},
+	}
+
+	cloned := cloneDashboardSummaryWithGeneratedAt(summary, now)
+	if cloned.GeneratedAt != "2026-01-02T16:30:00Z" {
+		t.Fatalf("generated_at = %q, want UTC timestamp", cloned.GeneratedAt)
+	}
+	if cloned.Meta.CurrentHour != 0 {
+		t.Fatalf("current_hour = %d, want refreshed local hour 0", cloned.Meta.CurrentHour)
+	}
+	if summary.Meta.CurrentHour != 16 {
+		t.Fatalf("source summary current_hour mutated to %d", summary.Meta.CurrentHour)
 	}
 }
 

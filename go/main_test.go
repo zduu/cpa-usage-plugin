@@ -493,6 +493,121 @@ func TestRecordStoresMaskedClientAPIKeyAndCleanSource(t *testing.T) {
 	}
 }
 
+func TestRecordStripsNonStandardAPIKeyFromOpenAICompatibleSource(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Record(UsageRecord{
+		Provider:  "openai-compatible-opencode-free",
+		AuthType:  "apikey",
+		AuthIndex: "public",
+		Source:    "openai-compatible-opencode-free · public · opencode-free-client-key",
+		APIKey:    "opencode-free-client-key",
+		Model:     "deepseek-v3.1",
+		Detail: UsageDetail{
+			InputTokens:  10,
+			OutputTokens: 5,
+			TotalTokens:  15,
+		},
+	})
+
+	snapshot := stats.Snapshot()
+	wantAPI := "openai-compatible-opencode-free"
+	api, ok := snapshot.APIs[wantAPI]
+	if !ok {
+		t.Fatalf("snapshot APIs = %#v, want upstream key %q", snapshot.APIs, wantAPI)
+	}
+	details := api.Models["deepseek-v3.1"].Details
+	if len(details) != 1 {
+		t.Fatalf("details len = %d, want 1", len(details))
+	}
+	if strings.Contains(details[0].Source, "opencode-free-client-key") {
+		t.Fatalf("non-standard api key leaked into upstream name: source=%q", details[0].Source)
+	}
+}
+
+func TestRecordKeepsPublicSourceWhenAPIKeyEqualsAuthIndex(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Record(UsageRecord{
+		Provider:  "openai-compatible-opencode-free",
+		AuthType:  "apikey",
+		AuthIndex: "public",
+		Source:    "openai-compatible-opencode-free · public",
+		APIKey:    "public",
+		Model:     "deepseek-v3.1",
+		Detail: UsageDetail{
+			InputTokens:  10,
+			OutputTokens: 5,
+			TotalTokens:  15,
+		},
+	})
+
+	snapshot := stats.Snapshot()
+	wantAPI := "openai-compatible-opencode-free"
+	if _, ok := snapshot.APIs[wantAPI]; !ok {
+		t.Fatalf("snapshot APIs = %#v, want public source key %q", snapshot.APIs, wantAPI)
+	}
+}
+
+func TestCleanImportedDetailSourceStripsCredentialSuffixes(t *testing.T) {
+	tests := []struct {
+		name   string
+		detail RequestDetail
+		want   string
+	}{
+		{
+			name:   "standard secret suffix",
+			detail: RequestDetail{Provider: "vendor", Source: "vendor · sk-import-secret-123456"},
+			want:   "vendor",
+		},
+		{
+			name:   "raw secret without provider",
+			detail: RequestDetail{Source: "sk-import-secret-123456"},
+			want:   "",
+		},
+		{
+			name: "non standard api key suffix",
+			detail: RequestDetail{
+				Provider:  "vendor",
+				Source:    "vendor · public · raw-client-key",
+				APIKey:    "raw-client-key",
+				AuthIndex: "public",
+			},
+			want: "vendor · public",
+		},
+		{
+			name:   "two part non standard api key suffix",
+			detail: RequestDetail{Provider: "vendor", Source: "vendor · raw-client-key", APIKey: "raw-client-key"},
+			want:   "vendor",
+		},
+		{
+			name:   "bare non standard api key with provider",
+			detail: RequestDetail{Provider: "vendor", Source: "raw-client-key", APIKey: "raw-client-key"},
+			want:   "vendor",
+		},
+		{
+			name:   "bare non standard api key without provider",
+			detail: RequestDetail{Source: "raw-client-key", APIKey: "raw-client-key"},
+			want:   "",
+		},
+		{
+			name:   "provider specific openai compatible",
+			detail: RequestDetail{Provider: "openai-compatible-opencode-free", Source: "openai-compatible-opencode-free · public · raw-client-key", APIKey: "raw-client-key"},
+			want:   "openai-compatible-opencode-free",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := cleanImportedDetailSource(tt.detail)
+			if got != tt.want {
+				t.Fatalf("cleanImportedDetailSource() = %q, want %q", got, tt.want)
+			}
+			if strings.Contains(got, "raw-client-key") || strings.Contains(got, "sk-import-secret") {
+				t.Fatalf("clean source leaked credential: %q", got)
+			}
+		})
+	}
+}
+
 func TestConfiguredAPIKeyHashSaltIsStable(t *testing.T) {
 	previousSalt := apiKeySalt
 	t.Cleanup(func() { apiKeySalt = previousSalt })
@@ -554,6 +669,111 @@ func TestStorageReplayRestoresRecords(t *testing.T) {
 	}
 	if status := second.StorageStatus(); !status.Enabled || status.LoadedPath == "" || status.LastError != "" {
 		t.Fatalf("storage status after replay = %#v", status)
+	}
+}
+
+func TestStorageReplayCleansImportedSourceCredentials(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage-statistics.jsonl")
+	rawKey := "raw-client-storage-key"
+	detail := RequestDetail{
+		Model:     "gpt-4",
+		Timestamp: time.Now().Add(-time.Minute).UTC(),
+		Provider:  "vendor",
+		Source:    "vendor · " + rawKey,
+		APIKey:    rawKey,
+		Tokens:    TokenStats{TotalTokens: 1},
+	}
+	line := mustMarshal(persistedDetail{API: "vendor · " + rawKey, Model: "gpt-4", Detail: detail})
+	if err := os.WriteFile(path, append(line, '\n'), 0o600); err != nil {
+		t.Fatalf("write storage fixture: %v", err)
+	}
+
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		MaxDetailsPerModel: 100,
+		RetentionDays:      0,
+		DedupWindowMinutes: 0,
+		StorageEnabled:     true,
+		StoragePath:        path,
+	})
+	defer stats.Close()
+
+	snapshot := stats.Snapshot()
+	api, ok := snapshot.APIs["vendor"]
+	if !ok {
+		t.Fatalf("snapshot APIs = %#v, want cleaned vendor API", snapshot.APIs)
+	}
+	details := api.Models["gpt-4"].Details
+	if len(details) != 1 {
+		t.Fatalf("details len = %d, want 1", len(details))
+	}
+	if details[0].Source != "vendor" {
+		t.Fatalf("detail source = %q, want cleaned vendor", details[0].Source)
+	}
+	for apiName := range snapshot.APIs {
+		if strings.Contains(apiName, rawKey) {
+			t.Fatalf("api name leaked raw key: %q", apiName)
+		}
+	}
+}
+
+func TestStorageSnapshotCleansImportedSourceCredentials(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "usage-statistics")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir storage dir: %v", err)
+	}
+	rawKey := "raw-client-snapshot-key"
+	detail := RequestDetail{
+		Model:     "gpt-4",
+		Timestamp: time.Now().Add(-time.Minute).UTC(),
+		Provider:  "vendor",
+		Source:    "vendor · " + rawKey,
+		APIKey:    rawKey,
+		Tokens:    TokenStats{TotalTokens: 1},
+	}
+	payload := persistedStorageSnapshot{
+		Version:     1,
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		Usage: StatisticsSnapshot{
+			APIs: map[string]APISnapshot{
+				"vendor · " + rawKey: {
+					Models: map[string]ModelSnapshot{
+						"gpt-4": {Details: []RequestDetail{detail}},
+					},
+				},
+			},
+		},
+	}
+	if err := os.WriteFile(storageSnapshotPath(dir), mustMarshal(payload), 0o600); err != nil {
+		t.Fatalf("write storage snapshot: %v", err)
+	}
+
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		MaxDetailsPerModel: 100,
+		RetentionDays:      0,
+		DedupWindowMinutes: 0,
+		StorageEnabled:     true,
+		StoragePath:        dir,
+	})
+	defer stats.Close()
+
+	snapshot := stats.Snapshot()
+	api, ok := snapshot.APIs["vendor"]
+	if !ok {
+		t.Fatalf("snapshot APIs = %#v, want cleaned vendor API", snapshot.APIs)
+	}
+	details := api.Models["gpt-4"].Details
+	if len(details) != 1 {
+		t.Fatalf("details len = %d, want 1", len(details))
+	}
+	if details[0].Source != "vendor" {
+		t.Fatalf("detail source = %q, want cleaned vendor", details[0].Source)
+	}
+	for apiName := range snapshot.APIs {
+		if strings.Contains(apiName, rawKey) {
+			t.Fatalf("api name leaked raw key: %q", apiName)
+		}
 	}
 }
 
@@ -2847,8 +3067,43 @@ func TestUsageGroupKey_OpenAICompatibleDoesNotShowCredential(t *testing.T) {
 		AuthIndex: "02bffe66b8460c3e",
 		AuthType:  "apikey",
 	})
-	if got != "openai-compatible-opencode-free · public" {
-		t.Fatalf("key = %q, want provider and source without credential", got)
+	if got != "openai-compatible-opencode-free" {
+		t.Fatalf("key = %q, want provider-only without credential source/appended", got)
+	}
+}
+
+func TestUsageGroupKey_GenericOpenAICompatibleUsesBaseURL(t *testing.T) {
+	got := usageGroupKey(UsageRecord{
+		Provider:  "openai-compatible",
+		Source:    "public",
+		AuthIndex: "public",
+		BaseURL:   "https://upstream-a.example/v1",
+	})
+	if got != "openai-compatible · https://upstream-a.example/v1" {
+		t.Fatalf("key = %q, want generic provider plus base URL", got)
+	}
+}
+
+func TestUsageGroupKey_GenericOpenAICompatibleDifferentiatesSafeSource(t *testing.T) {
+	k1 := usageGroupKey(UsageRecord{Provider: "openai-compatible", Source: "upstream-a"})
+	k2 := usageGroupKey(UsageRecord{Provider: "openai-compatible", Source: "upstream-b"})
+	if k1 == k2 {
+		t.Fatalf("generic openai-compatible source keys should differ: %q vs %q", k1, k2)
+	}
+	if k1 != "openai-compatible · upstream-a" {
+		t.Fatalf("first key = %q, want provider and safe source", k1)
+	}
+	if k2 != "openai-compatible · upstream-b" {
+		t.Fatalf("second key = %q, want provider and safe source", k2)
+	}
+}
+
+func TestUsageGroupKeyFromDetailCleansFallbackAPIName(t *testing.T) {
+	got := usageGroupKeyFromDetail("vendor · raw-client-key", RequestDetail{
+		APIKey: "raw-client-key",
+	})
+	if got != "vendor" {
+		t.Fatalf("key = %q, want cleaned fallback API name", got)
 	}
 }
 

@@ -4,6 +4,7 @@ var fmt = new Intl.NumberFormat(typeof getFormatLocale === 'function' ? getForma
 var _lastFmtLocale = 'zh-CN';
 let summaryData = null;         // DashboardSummary from /dashboard-summary
 let eventsData = null;          // EventsResult from /dashboard-events
+let eventsDataUrl = '';
 let modelPrices = {};
 let manualModelPrices = {};
 let selectedApi = '';
@@ -197,6 +198,16 @@ function headerValue(headers, name) {
   return '';
 }
 
+function etagMatches(ifNoneMatch, etag) {
+  const current = String(etag || '').trim();
+  if (!current) return false;
+  const weakValue = (value) => String(value || '').trim().replace(/^W\//i, '');
+  return String(ifNoneMatch || '').split(',').some((candidate) => {
+    const value = candidate.trim();
+    return value === '*' || value === current || weakValue(value) === weakValue(current);
+  });
+}
+
 async function fetchJsonPayloadWithMeta(url, options) {
   const response = await fetch(url, options);
   const text = await response.text();
@@ -204,6 +215,9 @@ async function fetchJsonPayloadWithMeta(url, options) {
   const responseEtag = headerValue(response.headers, 'ETag');
   if (responseEtag) responseHeaders.ETag = [responseEtag];
   if (response.status === 304) {
+    return { data: '', statusCode: 304, headers: responseHeaders };
+  }
+  if (!text && response.ok && responseEtag && etagMatches(headerValue(options && options.headers, 'If-None-Match'), responseEtag)) {
     return { data: '', statusCode: 304, headers: responseHeaders };
   }
   let payload = null;
@@ -763,7 +777,7 @@ function renderTrendChart() {
     var hours = Object.keys(reqHour).concat(Object.keys(tokHour)).concat(Object.keys(costHour));
     var hourSet = new Set();
     hours.forEach(function(k) { hourSet.add(k); });
-    var ordered = Array.from(hourSet).map(Number).filter(function(v) { return !isNaN(v); }).sort(function(a, b) { return a - b; });
+    var ordered = orderedRecentHours(Array.from(hourSet), dashboardCurrentHour(summaryData));
     if (!ordered.length) { $('trendChart').innerHTML = '<text x="50%" y="50%" text-anchor="middle" class="trendAxisText">' + t('no_trend_data') + '</text>'; clearAnomalyBar(); return }
 
     var totalCost = 0, totalToks = 0;
@@ -953,8 +967,13 @@ async function renderEvents() {
   try {
     const url = pluginEndpoint('dashboard-events') + '?' + params.toString();
     eventsData = normalizeEventsPayload(await fetchConditionalJsonPayload('dashboard-events:' + url, url, pluginFetchOptions({ cache: 'no-store' })));
+    eventsDataUrl = url;
   } catch (e) {
-    eventsData = { events: [], total: 0, limit: eventsLimit, offset: 0 };
+    const url = pluginEndpoint('dashboard-events') + '?' + params.toString();
+    if (!eventsData || eventsDataUrl !== url) {
+      eventsData = { events: [], total: 0, limit: eventsLimit, offset: 0 };
+      eventsDataUrl = url;
+    }
   }
   renderEventsContent();
 }

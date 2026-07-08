@@ -796,6 +796,7 @@ type DashboardMeta struct {
 	RetentionDays      int            `json:"retention_days"`
 	MaxDetailsPerModel int            `json:"max_details_per_model"`
 	CurrentDetailCount int64          `json:"current_detail_count"`
+	CurrentHour        int            `json:"current_hour"`
 	LastRecordedAt     string         `json:"last_recorded_at,omitempty"`
 	SummaryVersion     uint64         `json:"summary_version,omitempty"`
 	Storage            StorageStatus  `json:"storage"`

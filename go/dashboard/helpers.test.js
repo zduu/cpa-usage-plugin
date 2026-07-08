@@ -158,6 +158,21 @@ test('hourBucketValue reads padded and plain hour keys', () => {
   assert.strictEqual(helpers.hourBucketValue({}, 10), 0);
 });
 
+test('orderedRecentHours rotates hours so the current hour is last', () => {
+  assert.deepStrictEqual(helpers.orderedRecentHours(['00', '17', '18', '23'], 0), [17, 18, 23, 0]);
+  assert.deepStrictEqual(helpers.orderedRecentHours(['00', '17', '18', '23'], 17), [18, 23, 0, 17]);
+});
+
+test('hourFromTimestamp parses zoned timestamps in local time', () => {
+  assert.strictEqual(helpers.hourFromTimestamp('2026-01-02T16:30:00Z'), new Date('2026-01-02T16:30:00Z').getHours());
+  assert.strictEqual(helpers.hourFromTimestamp('2026-01-03T00:30:00+08:00'), new Date('2026-01-03T00:30:00+08:00').getHours());
+});
+
+test('dashboardCurrentHour prefers backend metadata over generated_at', () => {
+  assert.strictEqual(helpers.dashboardCurrentHour({ generated_at: '2026-01-02T16:30:00Z', _meta: { current_hour: 0 } }), 0);
+  assert.strictEqual(helpers.dashboardCurrentHour({ generated_at: '2026-01-02T16:30:00Z', _meta: { current_hour: 24 } }), new Date('2026-01-02T16:30:00Z').getHours());
+});
+
 test('looksLikeKey detects API key patterns', () => {
   assert.strictEqual(helpers.looksLikeKey('sk-abc123def456'), true);
   assert.strictEqual(helpers.looksLikeKey('AIzaSyABC123XYZ'), true);

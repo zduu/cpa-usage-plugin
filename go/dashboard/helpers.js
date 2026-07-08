@@ -80,6 +80,34 @@ function bucketSeries(rows, metric, minutes, count) {
   rows.forEach((d) => { const idx = Math.floor((d.timestamp_ms - start) / step); if (idx >= 0 && idx < count) arr[idx] += metric === 'tokens' ? d.total_tokens : metric === 'cost' ? d.cost : 1 });
   return arr;
 }
+function hourFromTimestamp(value, fallbackDate) {
+  if (typeof value === 'string') {
+    const hasZone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value);
+    if (!hasZone) {
+      const match = value.match(/[T\s](\d{1,2})(?::\d{2})?/);
+      if (match) {
+        const hour = Number(match[1]);
+        if (Number.isFinite(hour) && hour >= 0 && hour < 24) return hour;
+      }
+    }
+  }
+  const date = value ? new Date(value) : (fallbackDate || new Date());
+  const hour = date && typeof date.getHours === 'function' ? date.getHours() : NaN;
+  return Number.isFinite(hour) && hour >= 0 && hour < 24 ? hour : new Date().getHours();
+}
+function dashboardCurrentHour(summary) {
+  const metaHour = Number(summary && summary._meta && summary._meta.current_hour);
+  if (Number.isFinite(metaHour) && metaHour >= 0 && metaHour < 24) return Math.floor(metaHour);
+  return hourFromTimestamp(summary && summary.generated_at);
+}
+function orderedRecentHours(hours, currentHour) {
+  const ordered = Array.from(new Set((hours || []).map(Number).filter((v) => Number.isFinite(v) && v >= 0 && v < 24))).sort((a, b) => a - b);
+  const hour = Number(currentHour);
+  if (!ordered.length || !Number.isFinite(hour)) return ordered;
+  const start = (Math.floor(hour) + 1) % 24;
+  const distance = (v) => (v - start + 24) % 24;
+  return ordered.sort((a, b) => distance(a) - distance(b));
+}
 function healthColor(rate) { if (rate < 0) return ''; const stops = [[239, 68, 68], [250, 204, 21], [34, 197, 94]]; const seg = rate < .5 ? 0 : 1; const t = seg === 0 ? rate * 2 : (rate - .5) * 2; const a = stops[seg], b = stops[seg + 1]; return 'rgb(' + a.map((v, i) => Math.round(v + (b[i] - v) * t)).join(',') + ')' }
 function healthCellStyle(i, count, total, rate) { const rows = 7, cols = Math.ceil(count / rows), age = count - 1 - i, col = cols - Math.floor(age / rows), row = rows - (age % rows); return 'grid-column:' + col + ';grid-row:' + row + ';' + (total ? 'background:' + healthColor(rate) : '') }
 function timestampMs(value) { const ms = Date.parse(value); return Number.isFinite(ms) ? ms : 0 }
@@ -225,5 +253,5 @@ function hourBucketValue(values, hour) {
 
 // Export for Node.js test environment
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { esc, num, compact, pct, formatMs, formatUsd, totalTokens, priceForModel, tokenCost, detailCost, aggregateCost, looksLikeKey, looksLikeCredentialId, isCredentialMarker, isCredentialLabel, trimCredentialSuffix, sourceLabel, sourceKey, friendlyApiName, clientApiLabel, clientApiGroupKey, avg, bucketSeries, healthColor, healthCellStyle, timestampMs, pluginEndpoint, managementEndpoint, decodeManagementStorage, parseManagementStorage, currentManagementKey, groupedRows, decodeManagementBody, unwrapPluginPayloadWithMeta, unwrapPluginPayload, fetchAllEventPages, cacheRate, costPerMillion, hourBucketValue };
+  module.exports = { esc, num, compact, pct, formatMs, formatUsd, totalTokens, priceForModel, tokenCost, detailCost, aggregateCost, looksLikeKey, looksLikeCredentialId, isCredentialMarker, isCredentialLabel, trimCredentialSuffix, sourceLabel, sourceKey, friendlyApiName, clientApiLabel, clientApiGroupKey, avg, bucketSeries, hourFromTimestamp, dashboardCurrentHour, orderedRecentHours, healthColor, healthCellStyle, timestampMs, pluginEndpoint, managementEndpoint, decodeManagementStorage, parseManagementStorage, currentManagementKey, groupedRows, decodeManagementBody, unwrapPluginPayloadWithMeta, unwrapPluginPayload, fetchAllEventPages, cacheRate, costPerMillion, hourBucketValue };
 }

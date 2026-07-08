@@ -58,7 +58,9 @@ function createDashboardHarness(options = {}) {
   let manualPrices = options.manualPrices;
   const dashboardEtags = !!options.dashboardEtags;
   const wrapDashboardResponses = !!options.wrapDashboardResponses;
+  const emptyConditionalEtagOk = !!options.emptyConditionalEtagOk;
   const failDashboardSummary = !!options.failDashboardSummary;
+  let failDashboardEvents = !!options.failDashboardEvents;
   const failModelPrices = !!options.failModelPrices;
   const forceSummaryNotModified = !!options.forceSummaryNotModified;
   const nullDashboardSummary = !!options.nullDashboardSummary;
@@ -105,7 +107,7 @@ function createDashboardHarness(options = {}) {
   if (options.range) localStorage.setItem('cpa-usage-range-v1', options.range);
 
   const summary = {
-    generated_at: new Date().toISOString(),
+    generated_at: options.generatedAt || new Date().toISOString(),
     usage: {
       total_requests: 1200,
       success_count: 1190,
@@ -154,6 +156,7 @@ function createDashboardHarness(options = {}) {
       last_recorded_at: summaryLastRecordedAt,
       summary_version: summaryVersion,
       current_detail_count: 1200,
+      current_hour: Number.isFinite(Number(options.currentHour)) ? Number(options.currentHour) : new Date(options.generatedAt || Date.now()).getHours(),
       storage: { enabled: false, path: 'usage-statistics.jsonl' },
     },
   };
@@ -433,6 +436,14 @@ function createDashboardHarness(options = {}) {
       headers.ETag = [etag];
       if (requestHeaderValue(requestOptions, 'If-None-Match') === etag) status = 304;
     }
+    if (emptyConditionalEtagOk && status === 304) {
+      return {
+        ok: true,
+        status: 200,
+        headers: fetchHeaders(headers),
+        text: async () => '',
+      };
+    }
     if (wrapDashboardResponses && route) {
       const result = {
         status_code: status,
@@ -543,7 +554,17 @@ function createDashboardHarness(options = {}) {
         }
       }
       else if (String(url).includes('dashboard-events-export')) payload = eventsExport(String(url));
-      else if (String(url).includes('dashboard-events')) payload = eventsPage(String(url));
+      else if (String(url).includes('dashboard-events')) {
+        if (failDashboardEvents) {
+          return {
+            ok: false,
+            status: 503,
+            headers: fetchHeaders({}),
+            text: async () => 'events failed',
+          };
+        }
+        payload = eventsPage(String(url));
+      }
       else if (String(url).includes('usage/export')) payload = { version: 1, usage: {} };
       else payload = {};
       if (typeof payload === 'string') {
@@ -605,8 +626,11 @@ function createDashboardHarness(options = {}) {
   const setSummaryVersion = (value) => {
     summaryVersion = value;
   };
+  const setDashboardEventsFailure = (value) => {
+    failDashboardEvents = !!value;
+  };
 
-  return { context, document, fetchCalls, fetchRequests, downloads, timeoutDelays, setVisibility, setLanguage, setSummaryLastRecordedAt, setSummaryVersion };
+  return { context, document, fetchCalls, fetchRequests, downloads, timeoutDelays, setVisibility, setLanguage, setSummaryLastRecordedAt, setSummaryVersion, setDashboardEventsFailure };
 }
 
 async function waitFor(fn) {
@@ -751,6 +775,25 @@ test('dashboard trend chart does not show anomaly spike banner', async () => {
 
   assert.strictEqual(document.getElementById('anomalyBar').className, 'anomalyBar');
   assert.strictEqual(document.getElementById('anomalyBar').innerHTML, '');
+});
+
+test('dashboard hourly trend rotates midnight to the end of the timeline', async () => {
+  const { document } = createDashboardHarness({
+    range: '24h',
+    generatedAt: '2026-01-02T16:30:00Z',
+    currentHour: 0,
+    summaryUsage: {
+      requests_by_hour: { '00': 2, '17': 1, '18': 1, '19': 1, '20': 1, '21': 1, '22': 1, '23': 1 },
+      tokens_by_hour: { '00': 20, '17': 10, '18': 10, '19': 10, '20': 10, '21': 10, '22': 10, '23': 10 },
+      cost_by_hour: {},
+    },
+  });
+
+  await waitFor(() => document.getElementById('trendChart').innerHTML.includes('00:00'));
+  const html = document.getElementById('trendChart').innerHTML;
+
+  assert.ok(html.indexOf('17:00') < html.indexOf('23:00'), html);
+  assert.ok(html.indexOf('23:00') < html.indexOf('00:00'), html);
 });
 
 test('dashboard api detail export buttons create filtered export jobs', async () => {
@@ -1031,6 +1074,36 @@ test('dashboard polling skips detail requests when no new records arrive', async
   assert.ok(countCalls('dashboard-api-detail') > beforeManualApiDetail);
 });
 
+test('dashboard keeps previous event rows when event refresh fails', async () => {
+  const { document, fetchCalls, setVisibility, setSummaryVersion, setDashboardEventsFailure } = createDashboardHarness();
+  const countCalls = (part) => fetchCalls.filter((url) => url.includes(part)).length;
+
+  await waitFor(() => document.getElementById('eventsCount').textContent.includes('1,200'));
+  assert.ok(document.getElementById('events').innerHTML.includes('gpt-4.1'));
+  const beforeEvents = countCalls('dashboard-events?');
+
+  setDashboardEventsFailure(true);
+  setSummaryVersion(2);
+  setVisibility('visible');
+  await waitFor(() => countCalls('dashboard-events?') > beforeEvents);
+
+  assert.ok(document.getElementById('eventsCount').textContent.includes('1,200'));
+  assert.ok(!document.getElementById('eventsCount').textContent.includes('共 0 条'));
+  assert.ok(document.getElementById('events').innerHTML.includes('gpt-4.1'));
+});
+
+test('dashboard does not reuse previous event rows for a failed changed filter', async () => {
+  const { context, document, setDashboardEventsFailure } = createDashboardHarness();
+
+  await waitFor(() => document.getElementById('eventsCount').textContent.includes('1,200'));
+  document.getElementById('filterModel').value = 'gpt-4.1';
+  setDashboardEventsFailure(true);
+  await context.renderEvents();
+
+  assert.ok(document.getElementById('eventsCount').textContent.includes('共 0 条'));
+  assert.ok(!document.getElementById('events').innerHTML.includes('gpt-4.1'));
+});
+
 test('dashboard polling refreshes details when summary version changes within the same second', async () => {
   const { fetchCalls, setVisibility, setSummaryVersion } = createDashboardHarness();
   const countCalls = (part) => fetchCalls.filter((url) => url.includes(part)).length;
@@ -1065,6 +1138,25 @@ test('dashboard summary polling reuses cached data on management 304', async () 
   assert.strictEqual(optionHeaderValue(latestSummary.options, 'If-None-Match'), 'W/"summary-2023-11-15T06:13:20Z"');
   assert.strictEqual(countCalls('dashboard-events?'), beforeEvents);
   assert.strictEqual(countCalls('dashboard-api-detail'), beforeApiDetail);
+});
+
+test('dashboard summary polling treats empty 200 with matching etag as cached 304', async () => {
+  const { document, fetchCalls, fetchRequests, setVisibility } = createDashboardHarness({
+    dashboardEtags: true,
+    emptyConditionalEtagOk: true,
+  });
+  const summaryRequests = () => fetchRequests.filter((req) => req.url.includes('dashboard-summary'));
+
+  await waitFor(() => document.getElementById('eventsCount').textContent.includes('1,200'));
+  const beforeSummary = summaryRequests().length;
+  setVisibility('visible');
+
+  await waitFor(() => summaryRequests().length > beforeSummary);
+  const latestSummary = summaryRequests().at(-1);
+  assert.strictEqual(optionHeaderValue(latestSummary.options, 'If-None-Match'), 'W/"summary-2023-11-15T06:13:20Z"');
+  assert.ok(!fetchCalls.some((url) => url.includes('dashboard-data')), 'empty conditional response must not trigger dashboard-data fallback');
+  assert.ok(document.getElementById('eventsCount').textContent.includes('1,200'));
+  assert.ok(!document.getElementById('eventsCount').textContent.includes('共 0 条'));
 });
 
 test('dashboard api detail refresh keeps cached content while loading', async () => {
