@@ -210,7 +210,7 @@ func TestDashboardSummaryAggregatesClientAPIKeyStats(t *testing.T) {
 	stats.Record(UsageRecord{
 		Provider:    "openai",
 		Model:       "gpt-4.1",
-		APIKey:      "sk-client-alpha-123456",
+		APIKey:      "sk-client-alpha-0000xx",
 		AuthIndex:   "upstream-credential-1",
 		RequestedAt: base,
 		Detail: UsageDetail{
@@ -224,7 +224,7 @@ func TestDashboardSummaryAggregatesClientAPIKeyStats(t *testing.T) {
 	stats.Record(UsageRecord{
 		Provider:    "openai",
 		Model:       "gpt-4.1",
-		APIKey:      "sk-client-alpha-123456",
+		APIKey:      "sk-client-alpha-0000xx",
 		AuthIndex:   "upstream-credential-2",
 		RequestedAt: base.Add(time.Minute),
 		Detail: UsageDetail{
@@ -236,7 +236,7 @@ func TestDashboardSummaryAggregatesClientAPIKeyStats(t *testing.T) {
 	stats.Record(UsageRecord{
 		Provider:    "openai",
 		Model:       "gpt-4.1",
-		APIKey:      "sk-client-beta-654321",
+		APIKey:      "sk-client-beta-0000yy",
 		AuthIndex:   "upstream-credential-1",
 		RequestedAt: base.Add(2 * time.Minute),
 		Detail:      UsageDetail{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
@@ -251,7 +251,7 @@ func TestDashboardSummaryAggregatesClientAPIKeyStats(t *testing.T) {
 	}
 
 	first := summary.ClientAPIStats[0]
-	if first.APIKey != "sk******56" {
+	if first.APIKey != "sk******xx" {
 		t.Fatalf("first client api label = %q, want masked CPA api key", first.APIKey)
 	}
 	if first.TotalRequests != 2 || first.TotalTokens != 1780 {
@@ -278,14 +278,14 @@ func TestDashboardSummaryMergesImportedClientAPIStatsByMaskedKey(t *testing.T) {
 							{
 								Model:      "gpt-4.1",
 								Timestamp:  when,
-								APIKey:     "sk******56",
+								APIKey:     "sk******xx",
 								APIKeyHash: "hash-from-first-export",
 								Tokens:     TokenStats{InputTokens: 100, OutputTokens: 20, TotalTokens: 120},
 							},
 							{
 								Model:      "gpt-4.1",
 								Timestamp:  when.Add(time.Minute),
-								APIKey:     "sk******56",
+								APIKey:     "sk******xx",
 								APIKeyHash: "hash-from-second-export",
 								Tokens:     TokenStats{InputTokens: 30, OutputTokens: 10, TotalTokens: 40},
 							},
@@ -304,7 +304,7 @@ func TestDashboardSummaryMergesImportedClientAPIStatsByMaskedKey(t *testing.T) {
 		t.Fatalf("client api stats len = %d, want 1: %#v", len(summary.ClientAPIStats), summary.ClientAPIStats)
 	}
 	got := summary.ClientAPIStats[0]
-	if got.APIKey != "sk******56" || got.TotalRequests != 2 || got.TotalTokens != 160 {
+	if got.APIKey != "sk******xx" || got.TotalRequests != 2 || got.TotalTokens != 160 {
 		t.Fatalf("client api stat = %#v, want merged masked key totals", got)
 	}
 	if len(got.Models) != 1 || got.Models[0].TotalRequests != 2 {

@@ -879,7 +879,7 @@ test('dashboard api detail renders long error and source cells with safe wrapper
     {
       status_code: 520,
       count: 1,
-      failure: '<!DOCTYPE html> <html class="no-js" lang="en-US"><head><title>opencode.ai | 520</title></head>',
+      failure: '<!DOCTYPE html> <html class="no-js" lang="en-US"><head><title>example.invalid | 520</title></head>',
     },
   ], false, null);
   const recentHtml = context.apiDetailRecentHtml([
@@ -889,14 +889,14 @@ test('dashboard api detail renders long error and source cells with safe wrapper
       failed: false,
       latency_ms: 4520,
       total_tokens: 48035,
-      source: 'openai-compatible-opencode-go',
-      provider: 'openai-compatible-opencode-go',
+      source: 'openai-compatible-example-go',
+      provider: 'openai-compatible-example-go',
     },
   ], false, null);
 
   assert.match(errorHtml, /<td><span class="errorText">&lt;!DOCTYPE html&gt;/);
   assert.doesNotMatch(errorHtml, /<td class="errorText">/);
-  assert.match(recentHtml, /<td class="nameCell">openai-compatible-opencode-go<\/td>/);
+  assert.match(recentHtml, /<td class="nameCell">openai-compatible-example-go<\/td>/);
 });
 
 test('dashboard shows pending storage buffer status', async () => {

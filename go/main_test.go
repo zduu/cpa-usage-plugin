@@ -432,11 +432,11 @@ func TestHealthAlertsIgnoreLowSignalThresholds(t *testing.T) {
 func TestRecordStoresMaskedClientAPIKeyAndCleanSource(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Record(UsageRecord{
-		Provider:  "openai-compatible-opencode",
+		Provider:  "openai-compatible-example",
 		AuthType:  "apikey",
-		AuthIndex: "5312415661d8a481",
-		Source:    "openai-compatible-opencode · apikey · 5312415661d8a481",
-		APIKey:    "sk-test-client-key-zy",
+		AuthIndex: "1111222233334444",
+		Source:    "openai-compatible-example · apikey · 1111222233334444",
+		APIKey:    "sk-test-client-key-xx",
 		Model:     "deepseek-v3.1",
 		Detail: UsageDetail{
 			InputTokens:  10,
@@ -446,7 +446,7 @@ func TestRecordStoresMaskedClientAPIKeyAndCleanSource(t *testing.T) {
 	})
 
 	snapshot := stats.Snapshot()
-	wantAPI := "openai-compatible-opencode"
+	wantAPI := "openai-compatible-example"
 	api, ok := snapshot.APIs[wantAPI]
 	if !ok {
 		t.Fatalf("snapshot APIs = %#v, want upstream key %q", snapshot.APIs, wantAPI)
@@ -456,13 +456,13 @@ func TestRecordStoresMaskedClientAPIKeyAndCleanSource(t *testing.T) {
 		t.Fatalf("details len = %d, want 1", len(details))
 	}
 	detail := details[0]
-	if detail.Source != "openai-compatible-opencode" {
+	if detail.Source != "openai-compatible-example" {
 		t.Fatalf("detail source = %q, want clean source", detail.Source)
 	}
-	if detail.APIKey != "sk******zy" {
+	if detail.APIKey != "sk******xx" {
 		t.Fatalf("detail api key = %q, want masked key", detail.APIKey)
 	}
-	if detail.AuthIndex != "5312415661d8a481" {
+	if detail.AuthIndex != "1111222233334444" {
 		t.Fatalf("credential column value = %q", detail.AuthIndex)
 	}
 	// Verify APIKeyHash is set and consistent
@@ -472,11 +472,11 @@ func TestRecordStoresMaskedClientAPIKeyAndCleanSource(t *testing.T) {
 	hash1 := detail.APIKeyHash
 	// Record again, hash should be identical
 	stats.Record(UsageRecord{
-		Provider:    "openai-compatible-opencode",
+		Provider:    "openai-compatible-example",
 		AuthType:    "apikey",
-		AuthIndex:   "5312415661d8a481",
-		Source:      "openai-compatible-opencode · apikey · 5312415661d8a481",
-		APIKey:      "sk-test-client-key-zy",
+		AuthIndex:   "1111222233334444",
+		Source:      "openai-compatible-example · apikey · 1111222233334444",
+		APIKey:      "sk-test-client-key-xx",
 		Model:       "deepseek-v3.1",
 		RequestedAt: time.Now().Add(time.Minute),
 		Detail: UsageDetail{
@@ -496,11 +496,11 @@ func TestRecordStoresMaskedClientAPIKeyAndCleanSource(t *testing.T) {
 func TestRecordStripsNonStandardAPIKeyFromOpenAICompatibleSource(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Record(UsageRecord{
-		Provider:  "openai-compatible-opencode-free",
+		Provider:  "openai-compatible-example-free",
 		AuthType:  "apikey",
 		AuthIndex: "public",
-		Source:    "openai-compatible-opencode-free · public · opencode-free-client-key",
-		APIKey:    "opencode-free-client-key",
+		Source:    "openai-compatible-example-free · public · example-client-key",
+		APIKey:    "example-client-key",
 		Model:     "deepseek-v3.1",
 		Detail: UsageDetail{
 			InputTokens:  10,
@@ -510,7 +510,7 @@ func TestRecordStripsNonStandardAPIKeyFromOpenAICompatibleSource(t *testing.T) {
 	})
 
 	snapshot := stats.Snapshot()
-	wantAPI := "openai-compatible-opencode-free"
+	wantAPI := "openai-compatible-example-free"
 	api, ok := snapshot.APIs[wantAPI]
 	if !ok {
 		t.Fatalf("snapshot APIs = %#v, want upstream key %q", snapshot.APIs, wantAPI)
@@ -519,7 +519,7 @@ func TestRecordStripsNonStandardAPIKeyFromOpenAICompatibleSource(t *testing.T) {
 	if len(details) != 1 {
 		t.Fatalf("details len = %d, want 1", len(details))
 	}
-	if strings.Contains(details[0].Source, "opencode-free-client-key") {
+	if strings.Contains(details[0].Source, "example-client-key") {
 		t.Fatalf("non-standard api key leaked into upstream name: source=%q", details[0].Source)
 	}
 }
@@ -527,10 +527,10 @@ func TestRecordStripsNonStandardAPIKeyFromOpenAICompatibleSource(t *testing.T) {
 func TestRecordKeepsPublicSourceWhenAPIKeyEqualsAuthIndex(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Record(UsageRecord{
-		Provider:  "openai-compatible-opencode-free",
+		Provider:  "openai-compatible-example-free",
 		AuthType:  "apikey",
 		AuthIndex: "public",
-		Source:    "openai-compatible-opencode-free · public",
+		Source:    "openai-compatible-example-free · public",
 		APIKey:    "public",
 		Model:     "deepseek-v3.1",
 		Detail: UsageDetail{
@@ -541,7 +541,7 @@ func TestRecordKeepsPublicSourceWhenAPIKeyEqualsAuthIndex(t *testing.T) {
 	})
 
 	snapshot := stats.Snapshot()
-	wantAPI := "openai-compatible-opencode-free"
+	wantAPI := "openai-compatible-example-free"
 	if _, ok := snapshot.APIs[wantAPI]; !ok {
 		t.Fatalf("snapshot APIs = %#v, want public source key %q", snapshot.APIs, wantAPI)
 	}
@@ -590,8 +590,8 @@ func TestCleanImportedDetailSourceStripsCredentialSuffixes(t *testing.T) {
 		},
 		{
 			name:   "provider specific openai compatible",
-			detail: RequestDetail{Provider: "openai-compatible-opencode-free", Source: "openai-compatible-opencode-free · public · raw-client-key", APIKey: "raw-client-key"},
-			want:   "openai-compatible-opencode-free",
+			detail: RequestDetail{Provider: "openai-compatible-example-free", Source: "openai-compatible-example-free · public · raw-client-key", APIKey: "raw-client-key"},
+			want:   "openai-compatible-example-free",
 		},
 	}
 
@@ -1565,12 +1565,12 @@ func TestStorageReplaySkipsAndCleansExpiredDateShards(t *testing.T) {
 
 func TestStripCredentialSuffix(t *testing.T) {
 	tests := map[string]string{
-		"openai-compatible-opencode · apikey · 5312415661d8a481": "openai-compatible-opencode",
-		"openai-compatibility:opencode:a4e4860e4fc0":             "openai-compatibility:opencode",
+		"openai-compatible-example · apikey · 1111222233334444": "openai-compatible-example",
+		"openai-compatibility:example:a4e4860e4fc0":             "openai-compatibility:example",
 		"deepseek": "deepseek",
 		// Separator compatibility (P1-15)
-		"opencode - sk-abc123": "opencode",
-		"opencode | sk-abc123": "opencode",
+		"example - sk-abc123": "example",
+		"example | sk-abc123": "example",
 	}
 	for input, want := range tests {
 		if got := stripCredentialSuffix(input); got != want {
@@ -2974,8 +2974,8 @@ func TestMergeSnapshot_DuplicatesSkipped(t *testing.T) {
 
 func TestStripCredentialSuffix_AlternateSeparators(t *testing.T) {
 	tests := map[string]string{
-		"opencode - apikey - somehash": "opencode",
-		"opencode | key | hash123":     "opencode",
+		"example - apikey - somehash": "example",
+		"example | key | hash123":     "example",
 	}
 	for input, want := range tests {
 		if got := stripCredentialSuffix(input); got != want {
@@ -3007,7 +3007,7 @@ func TestUsageGroupKey_DifferentiatesSameProviderChannels(t *testing.T) {
 	}
 	r2 := UsageRecord{
 		Provider:  "codex",
-		Source:    "xpspwc9mfb@privaterelay.appleid.com",
+		Source:    "user-a@example.invalid",
 		AuthIndex: "channel-b",
 	}
 
@@ -3019,7 +3019,7 @@ func TestUsageGroupKey_DifferentiatesSameProviderChannels(t *testing.T) {
 	if k1 != "codex · 上游 channel-a" {
 		t.Fatalf("first key = %q, want codex upstream channel label", k1)
 	}
-	if k2 != "codex · xpspwc9mfb@privaterelay.appleid.com" {
+	if k2 != "codex · user-a@example.invalid" {
 		t.Fatalf("second key = %q, want source without credential label", k2)
 	}
 }
@@ -3052,22 +3052,22 @@ func TestUsageGroupKey_UsesBaseURLForNonOpenAICompatibleProvider(t *testing.T) {
 		Provider:  "gemini",
 		Source:    "gemini",
 		AuthIndex: "3fa2611823b6fefc",
-		BaseURL:   "https://cpa.xkkx.de/v1",
+		BaseURL:   "https://upstream-b.example/v1",
 	})
-	if got != "gemini · https://cpa.xkkx.de/v1" {
+	if got != "gemini · https://upstream-b.example/v1" {
 		t.Fatalf("key = %q, want non-openai-compatible base-url label", got)
 	}
 }
 
 func TestUsageGroupKey_OpenAICompatibleDoesNotShowCredential(t *testing.T) {
 	got := usageGroupKey(UsageRecord{
-		Provider:  "openai-compatible-opencode-free",
+		Provider:  "openai-compatible-example-free",
 		Source:    "public",
-		AuthID:    "openai-compatibility:opencode-free:8623731db2f2",
-		AuthIndex: "02bffe66b8460c3e",
+		AuthID:    "openai-compatibility:example-free:abcdef123456",
+		AuthIndex: "2222333344445555",
 		AuthType:  "apikey",
 	})
-	if got != "openai-compatible-opencode-free" {
+	if got != "openai-compatible-example-free" {
 		t.Fatalf("key = %q, want provider-only without credential source/appended", got)
 	}
 }
