@@ -34,10 +34,10 @@ plugins:
         version: "2.2.7"
         release-tag: "v2.2.7"
         repository: "https://github.com/zduu/cpa-usage-plugin"
-      # 其他配置项见第 3 节 ...
+      # 其他配置项见第 4 节 ...
 ```
 
-然后完成下方第 3 节的剩余配置，重启 CPA。之后登录管理面板 → 插件商店，可看到「用量统计」并直接点击安装。
+然后完成下方第 4 节的剩余配置，重启 CPA。之后登录管理面板 → 插件商店，可看到「用量统计」并直接点击安装。
 
 > **更新版本**：新版本发布后，管理面板 → 插件商店中点击「更新」即可，CPA 自动下载、校验、替换并加载，无需手动操作。
 
@@ -169,9 +169,28 @@ docker restart cli-proxy-api
 
 ## 4. 启用插件
 
-在 CPA 配置文件（通常为 `config.yaml`）中启用插件系统，并启用 `usage-statistics`：
+在 CPA 配置文件（通常为 `config.yaml`）中，至少需要同时完成以下 4 件事：
+
+1. 配置 `remote-management.secret-key`，否则管理 API 和 `management.html` 无法正常使用。
+2. 根据访问方式决定 `remote-management.allow-remote`。
+3. 全局启用插件系统：`plugins.enabled: true`。
+4. 单独启用本插件：`plugins.configs.usage-statistics.enabled: true`。
+
+推荐直接参考下面这份可用示例：
 
 ```yaml
+host: ""
+port: 8317
+
+remote-management:
+  # 仅本机通过浏览器、curl 或 SSH 隧道访问时，可保持 false
+  # 需要从其他机器、域名或反向代理后访问管理页时，通常应设为 true
+  allow-remote: true
+  # 必填。可以先写明文，CPA 启动后会自动转成哈希
+  secret-key: "请替换成你自己的管理密钥"
+  # 如需使用内置管理面板，不要改成 true
+  disable-control-panel: false
+
 plugins:
   enabled: true
   dir: plugins
@@ -224,6 +243,13 @@ plugins:
       update_version: latest
 ```
 
+补充说明：
+
+- `remote-management.secret-key` 留空时，CPA 会直接禁用 `/v0/management/*` 路由，插件看板和管理 API 都无法使用。
+- `remote-management.allow-remote: false` 只适合本机访问管理端。通过公网 IP、内网其他机器、域名或大多数反向代理访问时，通常都要改成 `true`。
+- `plugins.enabled` 和 `plugins.configs.usage-statistics.enabled` 缺一不可；前者是全局开关，后者只控制本插件。
+- 插件商店安装保留 `store` 块；如果你是手动把 `.so` / `.dylib` / `.dll` 放进 `plugins/` 目录，`store` 块可以删除。
+
 重启 CPA 服务：
 
 ```bash
@@ -247,9 +273,24 @@ pluginhost: plugin registered plugin_id=usage-statistics plugin_name=用量统�
 
 ## 5. 查看统计
 
-登录 CPA 管理端（默认 `http://<服务器IP>:8317/management.html`），在菜单中打开"用量统计"。
+先确认 CPA 已经在处理真实请求，再登录管理端查看数据；插件只有在 CPA 收到调用后才会产生统计。
+
+打开 CPA 管理端：
+
+- 本机访问：`http://127.0.0.1:8317/management.html`
+- 局域网或公网访问：`http://<服务器IP或域名>:8317/management.html`
+
+登录后在左侧菜单中打开“用量统计”。
 
 > 管理 API 调用需要在请求头中包含管理密钥（`x-management-key`），密钥为 CPA 配置中 `remote-management.secret-key` 设置的值。
+
+如果页面打不开，优先检查这几项：
+
+- `remote-management.secret-key` 是否已设置且与登录时输入的一致。
+- 远程访问时 `remote-management.allow-remote` 是否为 `true`。
+- `remote-management.disable-control-panel` 是否误设为 `true`。
+- `plugins.enabled` 和 `plugins.configs.usage-statistics.enabled` 是否都已开启。
+- CPA 日志中是否出现 `plugin loaded` / `plugin registered`。
 
 ### 页面功能
 
