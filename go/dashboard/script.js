@@ -1176,20 +1176,35 @@ function coalesceLegacyHashlessClientApiStats(rows) {
   rows.forEach((row, index) => {
     const label = String((row && row.api_key) || '').trim();
     if (!label || !label.includes('******')) return;
-    const group = byLabel.get(label) || { hashed: [], hashless: [] };
-    if (String((row && row.api_key_hash) || '').trim()) group.hashed.push(index);
-    else group.hashless.push(index);
+    const group = byLabel.get(label) || { indices: [], hashes: new Set() };
+    group.indices.push(index);
+    const hash = String((row && row.api_key_hash) || '').trim();
+    if (hash) group.hashes.add(hash);
     byLabel.set(label, group);
   });
   const removed = new Set();
   byLabel.forEach((group) => {
-    if (group.hashed.length !== 1 || !group.hashless.length) return;
-    const target = rows[group.hashed[0]];
-    group.hashless.forEach((sourceIndex) => {
-      if (sourceIndex === group.hashed[0]) return;
+    if (group.indices.length < 2) return;
+    if (group.hashes.size > 1) return;
+    let targetIndex = group.indices[0];
+    group.indices.slice(1).forEach((index) => {
+      if (num(rows[index] && rows[index].total_requests) > num(rows[targetIndex] && rows[targetIndex].total_requests)) {
+        targetIndex = index;
+        return;
+      }
+      if (num(rows[index] && rows[index].total_requests) === num(rows[targetIndex] && rows[targetIndex].total_requests) &&
+        !String(rows[targetIndex] && rows[targetIndex].api_key_hash || '').trim() &&
+        String(rows[index] && rows[index].api_key_hash || '').trim()) targetIndex = index;
+    });
+    const target = rows[targetIndex];
+    group.indices.forEach((sourceIndex) => {
+      if (sourceIndex === targetIndex) return;
       mergeClientApiRow(target, rows[sourceIndex]);
       removed.add(sourceIndex);
     });
+    if (group.hashes.size === 0) target.api_key_hash = '';
+    else if (group.hashes.size === 1) target.api_key_hash = Array.from(group.hashes)[0];
+    else target.api_key_hash = '';
   });
   if (!removed.size) return rows;
   return rows.filter((_, index) => !removed.has(index));

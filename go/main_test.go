@@ -221,6 +221,264 @@ func TestHandleUsageAcceptsOpenAICompatibleLoosePayload(t *testing.T) {
 	}
 }
 
+func TestRegisterAdvertisesResponseInterceptor(t *testing.T) {
+	raw, err := handleRegister(nil)
+	if err != nil {
+		t.Fatalf("handleRegister() error = %v", err)
+	}
+	var env envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if !env.OK {
+		t.Fatalf("register envelope failed: %#v", env.Error)
+	}
+	var resp PluginRegisterResponse
+	if err := json.Unmarshal(env.Result, &resp); err != nil {
+		t.Fatalf("unmarshal register response: %v", err)
+	}
+	if !resp.Capabilities.ResponseInterceptor {
+		t.Fatalf("response_interceptor capability = false, want true")
+	}
+}
+
+func TestResponseInterceptFallbackRecordsOpenAIUsage(t *testing.T) {
+	previousStats := stats
+	previousFallbacks := usageFallbacks
+	previousDelay := usageFallbackRecordDelay
+	stats = NewRequestStatistics()
+	usageFallbacks = newUsageFallbackCoordinator()
+	usageFallbackRecordDelay = 10 * time.Millisecond
+	t.Cleanup(func() {
+		usageFallbacks.Flush()
+		usageFallbacks = previousFallbacks
+		usageFallbackRecordDelay = previousDelay
+		stats = previousStats
+	})
+
+	req := ResponseInterceptRequest{
+		SourceFormat:   "openai",
+		Model:          "deepseek-v4-pro",
+		RequestedModel: "deepseek-v4-pro",
+		RequestHeaders: map[string][]string{
+			"Authorization": {"Bearer sk-client-alpha-0000xx"},
+		},
+		RequestBody: []byte(`{"model":"deepseek-v4-pro","service_tier":"default"}`),
+		Body:        []byte(`{"id":"chatcmpl-test","model":"deepseek-v4-pro","usage":{"prompt_tokens":96,"completion_tokens":8,"total_tokens":104}}`),
+		StatusCode:  http.StatusOK,
+		Metadata: map[string]any{
+			"requested_model":  "deepseek-v4-pro",
+			"selected_auth_id": "auth-deepseek",
+			"service_tier":     "default",
+		},
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal response intercept request: %v", err)
+	}
+	if _, err := handleResponseIntercept(body); err != nil {
+		t.Fatalf("handleResponseIntercept() error = %v", err)
+	}
+
+	waitForTestCondition(t, func() bool {
+		return stats.Snapshot().TotalRequests == 1
+	})
+	summary := stats.SummaryWithoutDetailsForRangeAt("24h", time.Now().Add(time.Second))
+	if summary.Usage.TotalRequests != 1 || summary.Usage.TotalTokens != 104 {
+		t.Fatalf("summary usage = %#v, want one 104-token fallback record", summary.Usage)
+	}
+	if len(summary.ClientAPIStats) != 1 || summary.ClientAPIStats[0].APIKey != "sk******xx" {
+		t.Fatalf("client api stats = %#v, want masked CPA key", summary.ClientAPIStats)
+	}
+	api, ok := summary.Usage.APIs["openai-compatible"]
+	if !ok {
+		t.Fatalf("summary APIs = %#v, want openai-compatible fallback", summary.Usage.APIs)
+	}
+	if model := api.Models["deepseek-v4-pro"]; model.TotalTokens != 104 || model.InputTokens != 96 || model.OutputTokens != 8 {
+		t.Fatalf("model summary = %#v, want 96/8/104 tokens", model)
+	}
+}
+
+func TestResponseInterceptFallbackUsesStatisticsTotalFallback(t *testing.T) {
+	detail, ok := usageDetailFromValue(map[string]any{
+		"promptTokenCount":     json.Number("10"),
+		"candidatesTokenCount": json.Number("11"),
+		"thoughtsTokenCount":   json.Number("7"),
+		"cache_read_tokens":    json.Number("3"),
+	})
+	if !ok {
+		t.Fatal("usageDetailFromValue() ok = false, want true")
+	}
+	if detail.TotalTokens != 21 {
+		t.Fatalf("total_tokens fallback = %d, want input + output only", detail.TotalTokens)
+	}
+	if detail.ReasoningTokens != 7 || detail.CacheReadTokens != 3 {
+		t.Fatalf("detail = %#v, want reasoning/cache preserved separately", detail)
+	}
+}
+
+func TestResponseInterceptFallbackDoesNotDoubleCountNativeUsage(t *testing.T) {
+	previousStats := stats
+	previousFallbacks := usageFallbacks
+	previousDelay := usageFallbackRecordDelay
+	stats = NewRequestStatistics()
+	usageFallbacks = newUsageFallbackCoordinator()
+	usageFallbackRecordDelay = 25 * time.Millisecond
+	t.Cleanup(func() {
+		usageFallbacks.Flush()
+		usageFallbacks = previousFallbacks
+		usageFallbackRecordDelay = previousDelay
+		stats = previousStats
+	})
+
+	interceptReq := ResponseInterceptRequest{
+		SourceFormat:   "openai",
+		Model:          "deepseek-v4-flash",
+		RequestedModel: "deepseek-v4-flash",
+		RequestHeaders: map[string][]string{
+			"Authorization": {"Bearer sk-client-alpha-0000xx"},
+		},
+		RequestBody: []byte(`{"model":"deepseek-v4-flash","service_tier":"default"}`),
+		Body:        []byte(`{"model":"deepseek-v4-flash","usage":{"prompt_tokens":10,"completion_tokens":11,"total_tokens":21}}`),
+		StatusCode:  http.StatusOK,
+		Metadata: map[string]any{
+			"requested_model": "deepseek-v4-flash",
+			"service_tier":    "default",
+		},
+	}
+	interceptBody, err := json.Marshal(interceptReq)
+	if err != nil {
+		t.Fatalf("marshal response intercept request: %v", err)
+	}
+	if _, err := handleResponseIntercept(interceptBody); err != nil {
+		t.Fatalf("handleResponseIntercept() error = %v", err)
+	}
+
+	native := UsageRecord{
+		Provider:     "openai-compatible-kimchi",
+		ExecutorType: "OpenAICompatExecutor",
+		Model:        "deepseek-v4-flash",
+		Alias:        "deepseek-v4-flash",
+		APIKey:       "sk-client-alpha-0000xx",
+		ServiceTier:  "default",
+		RequestedAt:  time.Now(),
+		Detail: UsageDetail{
+			InputTokens:  10,
+			OutputTokens: 11,
+			TotalTokens:  21,
+		},
+	}
+	nativeBody, err := json.Marshal(native)
+	if err != nil {
+		t.Fatalf("marshal native usage record: %v", err)
+	}
+	if _, err := handleUsage(nativeBody); err != nil {
+		t.Fatalf("handleUsage() error = %v", err)
+	}
+
+	time.Sleep(3 * usageFallbackRecordDelay)
+	summary := stats.SummaryWithoutDetailsForRangeAt("24h", time.Now().Add(time.Second))
+	if summary.Usage.TotalRequests != 1 || summary.Usage.TotalTokens != 21 {
+		t.Fatalf("summary usage = %#v, want one native record only", summary.Usage)
+	}
+	if _, ok := summary.Usage.APIs["openai-compatible-kimchi"]; !ok {
+		t.Fatalf("summary APIs = %#v, want native provider key", summary.Usage.APIs)
+	}
+}
+
+func TestResponseInterceptFallbackDoesNotDoubleCountNativeMissingOptionalUsage(t *testing.T) {
+	previousStats := stats
+	previousFallbacks := usageFallbacks
+	previousDelay := usageFallbackRecordDelay
+	stats = NewRequestStatistics()
+	usageFallbacks = newUsageFallbackCoordinator()
+	usageFallbackRecordDelay = 25 * time.Millisecond
+	t.Cleanup(func() {
+		usageFallbacks.Flush()
+		usageFallbacks = previousFallbacks
+		usageFallbackRecordDelay = previousDelay
+		stats = previousStats
+	})
+
+	interceptReq := ResponseInterceptRequest{
+		SourceFormat:   "openai",
+		Model:          "gemini-3.5-pro",
+		RequestedModel: "gemini-3.5-pro",
+		RequestHeaders: map[string][]string{
+			"Authorization": {"Bearer sk-client-alpha-0000xx"},
+		},
+		RequestBody: []byte(`{"model":"gemini-3.5-pro","service_tier":"default"}`),
+		Body:        []byte(`{"model":"gemini-3.5-pro","usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":11,"thoughtsTokenCount":7}}`),
+		StatusCode:  http.StatusOK,
+		Metadata: map[string]any{
+			"requested_model": "gemini-3.5-pro",
+			"service_tier":    "default",
+		},
+	}
+	interceptBody, err := json.Marshal(interceptReq)
+	if err != nil {
+		t.Fatalf("marshal response intercept request: %v", err)
+	}
+	if _, err := handleResponseIntercept(interceptBody); err != nil {
+		t.Fatalf("handleResponseIntercept() error = %v", err)
+	}
+
+	native := UsageRecord{
+		Provider:     "openai-compatible-kimchi",
+		ExecutorType: "OpenAICompatExecutor",
+		Model:        "gemini-3.5-pro",
+		Alias:        "gemini-3.5-pro",
+		APIKey:       "sk-client-alpha-0000xx",
+		ServiceTier:  "default",
+		RequestedAt:  time.Now(),
+		Detail: UsageDetail{
+			InputTokens:  10,
+			OutputTokens: 11,
+			TotalTokens:  21,
+		},
+	}
+	nativeBody, err := json.Marshal(native)
+	if err != nil {
+		t.Fatalf("marshal native usage record: %v", err)
+	}
+	if _, err := handleUsage(nativeBody); err != nil {
+		t.Fatalf("handleUsage() error = %v", err)
+	}
+
+	time.Sleep(3 * usageFallbackRecordDelay)
+	summary := stats.SummaryWithoutDetailsForRangeAt("24h", time.Now().Add(time.Second))
+	if summary.Usage.TotalRequests != 1 || summary.Usage.TotalTokens != 21 {
+		t.Fatalf("summary usage = %#v, want one native record without fallback duplicate", summary.Usage)
+	}
+	if summary.Usage.ReasoningTokens != 0 {
+		t.Fatalf("reasoning tokens = %d, want native record only", summary.Usage.ReasoningTokens)
+	}
+}
+
+func TestResponseInterceptFallbackUsesUpstreamMetadataWhenAvailable(t *testing.T) {
+	record, ok := usageRecordFromResponseIntercept(ResponseInterceptRequest{
+		SourceFormat:   "openai",
+		Model:          "deepseek-v4-pro",
+		RequestedModel: "deepseek-v4-pro",
+		RequestHeaders: map[string][]string{
+			"Authorization": {"Bearer sk-client-alpha-0000xx"},
+		},
+		Body:       []byte(`{"model":"deepseek-v4-pro","usage":{"prompt_tokens":10,"completion_tokens":11,"total_tokens":21}}`),
+		StatusCode: http.StatusOK,
+		Metadata: map[string]any{
+			"upstream_provider": "openai-compatible-opencode-go",
+			"upstream_source":   "opencode-go",
+			"upstream_base_url": "https://api.example.test/v1",
+		},
+	})
+	if !ok {
+		t.Fatal("usageRecordFromResponseIntercept() ok = false, want true")
+	}
+	if record.Provider != "openai-compatible-opencode-go" || record.Source != "opencode-go" || record.BaseURL != "https://api.example.test/v1" {
+		t.Fatalf("record upstream fields = provider:%q source:%q base_url:%q", record.Provider, record.Source, record.BaseURL)
+	}
+}
+
 func TestHandleImportUsageAcceptsV120ExportFixture(t *testing.T) {
 	fixture := filepath.Join("testdata", "usage-export-v1.2.0.json")
 	body, err := os.ReadFile(fixture)
@@ -683,6 +941,35 @@ func TestConfiguredAPIKeyHashSaltIsStable(t *testing.T) {
 
 	if hash1 == "" || hash1 != hash2 {
 		t.Fatalf("configured salt should produce stable hash, got %q and %q", hash1, hash2)
+	}
+}
+
+func TestDefaultAPIKeyHashSaltIsStable(t *testing.T) {
+	previousSalt := currentAPIKeySalt()
+	t.Cleanup(func() { setAPIKeySalt(previousSalt) })
+
+	s1 := NewRequestStatistics()
+	setAPIKeySalt("old-process-salt")
+	s1.ConfigurePatch(runtimeConfigPatch{
+		MaxDetailsPerModel: intPtr(10),
+		DedupWindowMinutes: intPtr(0),
+		APIKeyHashSalt:     stringPtr(""),
+	})
+	s1.Record(UsageRecord{Provider: "openai", Model: "gpt-4", APIKey: "sk-client-key-123456", Detail: UsageDetail{TotalTokens: 1}})
+	hash1 := s1.Snapshot().APIs["openai"].Models["gpt-4"].Details[0].APIKeyHash
+
+	s2 := NewRequestStatistics()
+	setAPIKeySalt("new-process-salt")
+	s2.ConfigurePatch(runtimeConfigPatch{
+		MaxDetailsPerModel: intPtr(10),
+		DedupWindowMinutes: intPtr(0),
+		APIKeyHashSalt:     stringPtr(""),
+	})
+	s2.Record(UsageRecord{Provider: "openai", Model: "gpt-4", APIKey: "sk-client-key-123456", Detail: UsageDetail{TotalTokens: 1}})
+	hash2 := s2.Snapshot().APIs["openai"].Models["gpt-4"].Details[0].APIKeyHash
+
+	if hash1 == "" || hash1 != hash2 {
+		t.Fatalf("default salt should produce stable hash, got %q and %q", hash1, hash2)
 	}
 }
 

@@ -113,6 +113,9 @@ func cliproxyPluginShutdown() {
 	if dashboardExportJobs != nil {
 		dashboardExportJobs.close()
 	}
+	if usageFallbacks != nil {
+		usageFallbacks.Flush()
+	}
 	if stats != nil {
 		stats.Close()
 	}
@@ -128,6 +131,8 @@ func handleMethod(method string, requestBody []byte) ([]byte, error) {
 		return handleManagementRegister()
 	case "usage.handle":
 		return handleUsage(requestBody)
+	case "response.intercept_after":
+		return handleResponseIntercept(requestBody)
 	case "management.handle":
 		return handleManagement(requestBody)
 	default:

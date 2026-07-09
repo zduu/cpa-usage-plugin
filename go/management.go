@@ -14,7 +14,9 @@ func handleUsage(requestBody []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed to parse usage record: %w", err)
 	}
 
-	stats.Record(usageRecord)
+	if usageFallbacks == nil || usageFallbacks.HandleNative(usageRecord) {
+		stats.Record(usageRecord)
+	}
 
 	return okEnvelopeJSON("{}")
 }

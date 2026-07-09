@@ -752,7 +752,7 @@ test('dashboard fallback merges legacy hashless client API stats into a unique h
   assert.strictEqual(rows[0].models[0].total_requests, 2);
 });
 
-test('dashboard fallback keeps legacy hashless client API stats separate when hash match is ambiguous', () => {
+test('dashboard fallback keeps masked client API hash variants separate when ambiguous', () => {
   const { context } = createDashboardHarness();
   const rows = context.coalesceLegacyHashlessClientApiStats([
     { api_key: 'sk******xx', api_key_hash: '', total_requests: 1, total_tokens: 40, models: [] },

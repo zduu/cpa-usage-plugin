@@ -211,7 +211,7 @@ plugins:
       dedup_window_minutes: 1440
       # 可选：允许记录的响应头名称列表（逗号分隔），* 表示全部。留空不记录。
       log_response_headers: ""
-      # 可选：API key 分组 hash salt。留空使用进程内随机 salt；固定后同一实例跨重启 hash 稳定。
+      # 可选：API key 分组 hash salt。留空使用插件默认稳定 salt；固定后可使用实例自定义 hash。
       api_key_hash_salt: ""
       # 推荐生产开启 JSONL 事件持久化，避免重启丢失统计。插件默认 false。
       storage_enabled: true
@@ -552,10 +552,22 @@ bash update-latest-release.sh --force --restart
 | `--restart` | 更新成功后自动重启容器 |
 | `--force` | 跳过版本和 SHA 检查，强制重新下载安装 |
 
+## CPA 版本兼容与统计兜底
+
+CPA 主程序负责在请求完成后把 usage 记录下发给插件。CPA `v7.2.53` 起，部分 OpenAI 兼容模型可能出现“上游有正常响应，但插件看板没有上游和调用记录”的情况；这通常不是插件页面查询失败，而是该请求没有通过原生 `usage.handle` 链路到达插件。旧版插件只依赖这条链路，因此在这类 CPA 版本变动下会漏记。
+
+`v2.2.8` 起，插件会额外声明 `response_interceptor` 能力。对于成功的非流式响应，插件会读取响应体中的 `usage`、`usageMetadata`、`total_usage` 等字段，延迟约 2 秒写入一条兜底统计；如果 CPA 原生 usage 记录随后到达，插件会取消或抑制兜底记录，避免同一请求重复计数。这个兜底过程只读取响应体，不修改返回给客户端的内容。
+
+需要注意的边界：
+
+- 流式响应和失败响应仍主要依赖 CPA 原生 usage 链路；如果 CPA 没有提供可解析的 usage 字段，插件无法凭空计算 token。
+- CPA 响应拦截请求不一定包含已选上游 provider/source。走兜底路径时，上游名称可能显示为通用 `openai-compatible`；走原生 usage 路径时仍会保留 CPA 下发的精确上游名称。
+- CPA API key 的历史脱敏格式和新版 hash 分组可能不同。`v2.2.8` 起，留空 `api_key_hash_salt` 会使用插件默认稳定 salt，避免新记录在重启或升级后继续换 hash；历史无 hash 旧记录只会在同一脱敏显示值下存在唯一 hash 时合并。若同一脱敏显示值下已有多个不同 hash，插件会保留分组，避免把不同真实 key 误合并。
+
 ## 注意
 
 - 默认仅使用插件进程内存；如需 CPA 重启后自动恢复统计，请开启 `storage_enabled` 并将 `storage_path` 放在持久化目录。未开启持久化时，重启前请先导出数据。
 - 多实例部署时，每个实例独立统计。
-- token 是否完整取决于上游返回的 usage 信息；CPA 主程序需向插件传递 snake_case usage 字段。
+- token 是否完整取决于上游返回的 usage 信息；CPA 主程序需向插件传递可解析的 usage 字段。
 - 实时请求不会被去重窗口合并；`max_details_per_model` 只裁剪请求明细，不会扣减总请求、token、成功率等累计统计。`retention_days` 超出窗口的记录会被淘汰并从窗口统计中扣除。
-- `api_key_hash_salt` 只影响新记录的 `api_key_hash`。客户端 API 统计优先按 `api_key_hash` 聚合，缺失 hash 时再按脱敏后的 `api_key` 展示值聚合；hash 仅用于分组/排查，不能反推原始 key。导入已脱敏的旧导出数据时，插件会忽略外部实例生成的 hash，继续按脱敏展示值合并，保持跨实例兼容。
+- `api_key_hash_salt` 只影响新记录的 `api_key_hash`。留空时使用插件默认稳定 salt；填写后使用自定义稳定 salt。客户端 API 统计优先按 `api_key_hash` 聚合，缺失 hash 时再按脱敏后的 `api_key` 展示值聚合；hash 仅用于分组/排查，不能反推原始 key。导入已脱敏的旧导出数据时，插件会忽略外部实例生成的 hash，并按脱敏展示值作为兼容身份。

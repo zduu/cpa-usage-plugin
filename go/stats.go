@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"container/heap"
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -415,8 +414,11 @@ type dashboardEventCacheKey struct {
 	api        string
 }
 
-// apiKeySalt is a per-process random salt used to produce stable grouping IDs.
-var apiKeySalt string
+// apiKeySalt produces stable grouping IDs for raw client API keys. Users can
+// override it with api_key_hash_salt when they need instance-specific hashes.
+const defaultAPIKeyHashSalt = "cpa-usage-plugin-client-api-v2"
+
+var apiKeySalt = defaultAPIKeyHashSalt
 var apiKeySaltMu sync.RWMutex
 
 // hourKeys pre-computes "00" through "23" so Snapshot never allocates strings.
@@ -434,16 +436,6 @@ const (
 	dashboardSummaryRangeCacheStep = time.Minute
 	storageWriteSampleMax          = 256
 )
-
-func init() {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		for i := range b {
-			b[i] = byte(i * 17)
-		}
-	}
-	setAPIKeySalt(hex.EncodeToString(b[:]))
-}
 
 func setAPIKeySalt(value string) {
 	apiKeySaltMu.Lock()
@@ -578,8 +570,12 @@ func (s *RequestStatistics) ConfigurePatch(cfg runtimeConfigPatch) {
 	if cfg.LogResponseHeaders != nil {
 		s.logResponseHeaders = parseHeaderWhitelist(*cfg.LogResponseHeaders)
 	}
-	if cfg.APIKeyHashSalt != nil && strings.TrimSpace(*cfg.APIKeyHashSalt) != "" {
-		setAPIKeySalt(strings.TrimSpace(*cfg.APIKeyHashSalt))
+	if cfg.APIKeyHashSalt != nil {
+		salt := strings.TrimSpace(*cfg.APIKeyHashSalt)
+		if salt == "" {
+			salt = defaultAPIKeyHashSalt
+		}
+		setAPIKeySalt(salt)
 	}
 	if cfg.StoragePath != nil && strings.TrimSpace(*cfg.StoragePath) != "" {
 		s.storagePath = strings.TrimSpace(*cfg.StoragePath)
@@ -5116,7 +5112,7 @@ func clientAPIStatsFromAccumulators(accumulators map[string]*clientAPIStatAccumu
 		sortClientAPIModelStats(stat.Models)
 		stats = append(stats, stat)
 	}
-	stats = coalesceLegacyHashlessClientAPIStats(stats)
+	stats = coalesceMaskedClientAPIStats(stats)
 	sortClientAPIStats(stats)
 	return stats
 }
@@ -5133,13 +5129,13 @@ func sortClientAPIModelStats(stats []ClientAPIModelStat) {
 	})
 }
 
-func coalesceLegacyHashlessClientAPIStats(stats []ClientAPIStat) []ClientAPIStat {
+func coalesceMaskedClientAPIStats(stats []ClientAPIStat) []ClientAPIStat {
 	if len(stats) < 2 {
 		return stats
 	}
 	type labelGroups struct {
-		hashed   []int
-		hashless []int
+		indices []int
+		hashes  map[string]bool
 	}
 	byLabel := make(map[string]*labelGroups)
 	for i := range stats {
@@ -5149,27 +5145,39 @@ func coalesceLegacyHashlessClientAPIStats(stats []ClientAPIStat) []ClientAPIStat
 		}
 		group, ok := byLabel[label]
 		if !ok {
-			group = &labelGroups{}
+			group = &labelGroups{hashes: make(map[string]bool)}
 			byLabel[label] = group
 		}
-		if strings.TrimSpace(stats[i].APIKeyHash) == "" {
-			group.hashless = append(group.hashless, i)
-			continue
+		group.indices = append(group.indices, i)
+		if hash := strings.TrimSpace(stats[i].APIKeyHash); hash != "" {
+			group.hashes[hash] = true
 		}
-		group.hashed = append(group.hashed, i)
 	}
 	removed := make(map[int]bool)
 	for _, group := range byLabel {
-		if len(group.hashed) != 1 || len(group.hashless) == 0 {
+		if len(group.indices) < 2 {
 			continue
 		}
-		target := group.hashed[0]
-		for _, source := range group.hashless {
+		if len(group.hashes) > 1 {
+			continue
+		}
+		target := clientAPIStatsMergeTarget(stats, group.indices)
+		for _, source := range group.indices {
 			if source == target {
 				continue
 			}
 			mergeClientAPIStat(&stats[target], stats[source])
 			removed[source] = true
+		}
+		switch len(group.hashes) {
+		case 0:
+			stats[target].APIKeyHash = ""
+		case 1:
+			for hash := range group.hashes {
+				stats[target].APIKeyHash = hash
+			}
+		default:
+			stats[target].APIKeyHash = ""
 		}
 	}
 	if len(removed) == 0 {
@@ -5183,6 +5191,22 @@ func coalesceLegacyHashlessClientAPIStats(stats []ClientAPIStat) []ClientAPIStat
 		out = append(out, stat)
 	}
 	return out
+}
+
+func clientAPIStatsMergeTarget(stats []ClientAPIStat, indices []int) int {
+	target := indices[0]
+	for _, index := range indices[1:] {
+		if stats[index].TotalRequests > stats[target].TotalRequests {
+			target = index
+			continue
+		}
+		if stats[index].TotalRequests == stats[target].TotalRequests &&
+			strings.TrimSpace(stats[target].APIKeyHash) == "" &&
+			strings.TrimSpace(stats[index].APIKeyHash) != "" {
+			target = index
+		}
+	}
+	return target
 }
 
 func mergeClientAPIStat(dst *ClientAPIStat, src ClientAPIStat) {

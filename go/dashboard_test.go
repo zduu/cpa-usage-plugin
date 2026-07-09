@@ -265,46 +265,34 @@ func TestDashboardSummaryAggregatesClientAPIKeyStats(t *testing.T) {
 	}
 }
 
-func TestDashboardSummarySeparatesMaskedClientAPIKeyCollisionsByHash(t *testing.T) {
-	stats := NewRequestStatistics()
-	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0})
-	base := time.Now().Add(-time.Hour)
-
-	stats.Record(UsageRecord{
-		Provider:    "openai",
-		Model:       "gpt-4.1",
-		APIKey:      "sk-client-alpha-0000xx",
-		RequestedAt: base,
-		Detail:      UsageDetail{InputTokens: 100, OutputTokens: 20, TotalTokens: 120},
-	})
-	stats.Record(UsageRecord{
-		Provider:    "openai",
-		Model:       "gpt-4.1",
-		APIKey:      "sk-client-beta-1111xx",
-		RequestedAt: base.Add(time.Minute),
-		Detail:      UsageDetail{InputTokens: 50, OutputTokens: 10, TotalTokens: 60},
+func TestCoalesceMaskedClientAPIStatsKeepsHashVariantsSeparateWhenAmbiguous(t *testing.T) {
+	rows := coalesceMaskedClientAPIStats([]ClientAPIStat{
+		{APIKey: "sk******xx", APIKeyHash: strings.Repeat("a", 56), TotalRequests: 1, TotalTokens: 120},
+		{APIKey: "sk******xx", APIKeyHash: strings.Repeat("b", 56), TotalRequests: 1, TotalTokens: 60},
+		{APIKey: "sk******xx", TotalRequests: 1, TotalTokens: 40},
 	})
 
-	summary := stats.SummaryWithoutDetails()
-	if len(summary.ClientAPIStats) != 2 {
-		t.Fatalf("client api stats len = %d, want 2 separated masked collisions: %#v", len(summary.ClientAPIStats), summary.ClientAPIStats)
+	if len(rows) != 3 {
+		t.Fatalf("client api stats len = %d, want two hashed groups plus one hashless group: %#v", len(rows), rows)
 	}
-	labels := map[string]int{}
+	var hashless int
 	hashes := map[string]bool{}
-	var totalRequests int64
-	for _, stat := range summary.ClientAPIStats {
-		labels[stat.APIKey]++
-		if stat.APIKeyHash == "" {
-			t.Fatalf("client api stat missing hash: %#v", stat)
+	var totalRequests, totalTokens int64
+	for _, got := range rows {
+		if got.APIKey != "sk******xx" {
+			t.Fatalf("client api label = %q, want shared masked label", got.APIKey)
 		}
-		hashes[stat.APIKeyHash] = true
-		totalRequests += stat.TotalRequests
+		if got.APIKeyHash == "" {
+			hashless++
+		} else {
+			hashes[got.APIKeyHash] = true
+		}
+		totalRequests += got.TotalRequests
+		totalTokens += got.TotalTokens
 	}
-	if labels["sk******xx"] != 2 {
-		t.Fatalf("masked labels = %#v, want two identical display labels", labels)
-	}
-	if len(hashes) != 2 || totalRequests != 2 {
-		t.Fatalf("hashes=%#v total_requests=%d, want two distinct hashes and two requests", hashes, totalRequests)
+	if hashless != 1 || !hashes[strings.Repeat("a", 56)] || !hashes[strings.Repeat("b", 56)] ||
+		totalRequests != 3 || totalTokens != 220 {
+		t.Fatalf("hashless=%d hashes=%#v requests=%d tokens=%d", hashless, hashes, totalRequests, totalTokens)
 	}
 }
 

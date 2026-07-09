@@ -493,8 +493,9 @@ type ConfigField struct {
 }
 
 type PluginCapabilities struct {
-	UsagePlugin   bool `json:"usage_plugin"`
-	ManagementAPI bool `json:"management_api"`
+	UsagePlugin         bool `json:"usage_plugin"`
+	ResponseInterceptor bool `json:"response_interceptor"`
+	ManagementAPI       bool `json:"management_api"`
 }
 
 type ManagementRegisterResponse struct {

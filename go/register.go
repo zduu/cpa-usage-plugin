@@ -51,7 +51,7 @@ func handleRegister(requestBody []byte) ([]byte, error) {
 					Name:        "api_key_hash_salt",
 					Type:        "string",
 					Default:     "",
-					Description: "可选：用于 API key 分组哈希的稳定 salt。留空时使用进程内随机 salt。",
+					Description: "可选：用于 API key 分组哈希的稳定 salt。留空时使用插件默认稳定 salt。",
 				},
 				{
 					Name:        "storage_enabled",
@@ -140,8 +140,9 @@ func handleRegister(requestBody []byte) ([]byte, error) {
 			},
 		},
 		Capabilities: PluginCapabilities{
-			UsagePlugin:   true,
-			ManagementAPI: true,
+			UsagePlugin:         true,
+			ResponseInterceptor: true,
+			ManagementAPI:       true,
 		},
 	}
 
