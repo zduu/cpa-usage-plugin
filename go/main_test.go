@@ -780,6 +780,92 @@ func TestResponseInterceptFallbackDoesNotDoubleCountNativeMissingOptionalUsage(t
 	}
 }
 
+func TestResponseStreamChunkDoesNotDoubleCountNativeCodexUsage(t *testing.T) {
+	previousStats := stats
+	previousFallbacks := usageFallbacks
+	previousDelay := usageFallbackRecordDelay
+	stats = NewRequestStatistics()
+	usageFallbacks = newUsageFallbackCoordinator()
+	usageFallbackRecordDelay = 25 * time.Millisecond
+	t.Cleanup(func() {
+		usageFallbacks.Flush()
+		usageFallbacks = previousFallbacks
+		usageFallbackRecordDelay = previousDelay
+		stats = previousStats
+	})
+
+	authID := "codex-xpspwc9mfb@privaterelay.appleid.com-plus.json"
+	streamReq := ResponseStreamChunkRequest{
+		ResponseInterceptRequest: ResponseInterceptRequest{
+			SourceFormat:   "openai",
+			Model:          "gpt-5.5",
+			RequestedModel: "gpt-5.5",
+			RequestHeaders: map[string][]string{
+				"Authorization": {"Bearer sk-client-alpha-0000xx"},
+			},
+			OriginalRequest: []byte(`{"model":"gpt-5.5","reasoning_effort":"high","stream":true}`),
+			Body: []byte(strings.Join([]string{
+				`data: {"id":"chatcmpl-test","object":"chat.completion.chunk","model":"gpt-5.5","choices":[],"usage":{"prompt_tokens":74474,"completion_tokens":44,"total_tokens":74518}}`,
+				``,
+			}, "\n")),
+			StatusCode: http.StatusOK,
+			Metadata: map[string]any{
+				"requested_model":  "gpt-5.5",
+				"selected_auth_id": authID,
+				"reasoning_effort": "high",
+			},
+		},
+		ChunkIndex: 42,
+	}
+	streamBody, err := json.Marshal(streamReq)
+	if err != nil {
+		t.Fatalf("marshal response stream chunk request: %v", err)
+	}
+	if _, err := handleResponseStreamChunk(streamBody); err != nil {
+		t.Fatalf("handleResponseStreamChunk() error = %v", err)
+	}
+
+	native := UsageRecord{
+		Provider:        "codex",
+		ExecutorType:    "CodexExecutor",
+		Model:           "gpt-5.5",
+		Alias:           "gpt-5.5",
+		APIKey:          "sk-client-alpha-0000xx",
+		AuthID:          authID,
+		AuthIndex:       "a2f9cd186fd7dee9",
+		AuthType:        "oauth",
+		Source:          "xpspwc9mfb@privaterelay.appleid.com",
+		ReasoningEffort: "high",
+		RequestedAt:     time.Now(),
+		Latency:         5062 * time.Millisecond,
+		Detail: UsageDetail{
+			InputTokens:  74474,
+			OutputTokens: 44,
+			CachedTokens: 74112,
+			TotalTokens:  74518,
+		},
+	}
+	nativeBody, err := json.Marshal(native)
+	if err != nil {
+		t.Fatalf("marshal native usage record: %v", err)
+	}
+	if _, err := handleUsage(nativeBody); err != nil {
+		t.Fatalf("handleUsage() error = %v", err)
+	}
+
+	time.Sleep(3 * usageFallbackRecordDelay)
+	summary := stats.SummaryWithoutDetailsForRangeAt("24h", time.Now().Add(time.Second))
+	if summary.Usage.TotalRequests != 1 || summary.Usage.TotalTokens != 74518 {
+		t.Fatalf("summary usage = %#v, want one native Codex record", summary.Usage)
+	}
+	if _, ok := summary.Usage.APIs["openai-compatible"]; ok {
+		t.Fatalf("summary APIs = %#v, did not expect fallback openai-compatible record", summary.Usage.APIs)
+	}
+	if _, ok := summary.Usage.APIs["codex · xpspwc9mfb@privaterelay.appleid.com"]; !ok {
+		t.Fatalf("summary APIs = %#v, want native Codex API key", summary.Usage.APIs)
+	}
+}
+
 func TestResponseInterceptFallbackUsesUpstreamMetadataWhenAvailable(t *testing.T) {
 	record, ok := usageRecordFromResponseIntercept(ResponseInterceptRequest{
 		SourceFormat:   "openai",

@@ -682,17 +682,29 @@ func fallbackUsageProvider(req ResponseInterceptRequest) string {
 
 func providerFromSelectedAuthID(meta map[string]any) string {
 	authID := metadataString(meta, "selected_auth_id", "pinned_auth_id")
-	parts := strings.Split(authID, ":")
-	if len(parts) < 2 {
+	return providerFromAuthID(authID)
+}
+
+func providerFromAuthID(authID string) string {
+	value := strings.TrimSpace(authID)
+	if value == "" {
 		return ""
 	}
+	lower := strings.ToLower(value)
+	parts := strings.Split(value, ":")
 	switch strings.ToLower(strings.TrimSpace(parts[0])) {
 	case "openai-compatibility":
+		if len(parts) < 2 {
+			return "openai-compatible"
+		}
 		name := strings.TrimSpace(parts[1])
 		if name != "" {
 			return "openai-compatible-" + name
 		}
 	case "codex":
+		return "codex"
+	}
+	if strings.HasPrefix(lower, "codex-") || strings.HasPrefix(lower, "codex_") || strings.HasPrefix(lower, "codex.") {
 		return "codex"
 	}
 	return ""
@@ -709,14 +721,24 @@ func fallbackAuthType(meta map[string]any, authID string) string {
 	if authType := metadataString(meta, "auth_type", "selected_auth_type", "pinned_auth_type"); authType != "" {
 		return authType
 	}
-	parts := strings.Split(strings.TrimSpace(authID), ":")
+	value := strings.TrimSpace(authID)
+	parts := strings.Split(value, ":")
 	if len(parts) == 0 {
 		return ""
 	}
 	switch strings.ToLower(strings.TrimSpace(parts[0])) {
-	case "openai-compatibility", "codex":
+	case "openai-compatibility":
 		return "apikey"
+	case "codex":
+		if len(parts) >= 2 && strings.EqualFold(strings.TrimSpace(parts[1]), "apikey") {
+			return "apikey"
+		}
+		return "oauth"
 	default:
+		lower := strings.ToLower(value)
+		if strings.HasPrefix(lower, "codex-") || strings.HasPrefix(lower, "codex_") || strings.HasPrefix(lower, "codex.") {
+			return "oauth"
+		}
 		return ""
 	}
 }

@@ -4,6 +4,12 @@
 
 `v1.0.0` 到 `v1.2.18` 为规范化发布流程建立前的 legacy 历史版本，不在本文件中回填；对应说明见 [v1-history.md](v1-history.md)。
 
+## v2.2.9 - 2026-07-09
+
+### 问题修复
+- 修复 Codex OAuth 上游使用 `codex-*.json` 形式 auth id 时，响应流兜底统计被误归类为通用 `openai-compatible`，导致同一次请求同时产生 Codex 原生 usage 和兜底 usage 两条记录的问题
+- 兜底统计现在会从 `codex-*.json` auth id 正确识别 provider 为 `codex`、auth type 为 `oauth`，从而与 CPA 原生 usage 使用同一去重指纹
+
 ## v2.2.8 - 2026-07-09
 
 ### CPA 兼容性说明
