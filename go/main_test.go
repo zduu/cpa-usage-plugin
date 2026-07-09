@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -609,8 +610,8 @@ func TestCleanImportedDetailSourceStripsCredentialSuffixes(t *testing.T) {
 }
 
 func TestConfiguredAPIKeyHashSaltIsStable(t *testing.T) {
-	previousSalt := apiKeySalt
-	t.Cleanup(func() { apiKeySalt = previousSalt })
+	previousSalt := currentAPIKeySalt()
+	t.Cleanup(func() { setAPIKeySalt(previousSalt) })
 
 	s1 := NewRequestStatistics()
 	s1.ConfigurePatch(runtimeConfigPatch{
@@ -621,7 +622,7 @@ func TestConfiguredAPIKeyHashSaltIsStable(t *testing.T) {
 	s1.Record(UsageRecord{Provider: "openai", Model: "gpt-4", APIKey: "sk-client-key-123456", Detail: UsageDetail{TotalTokens: 1}})
 	hash1 := s1.Snapshot().APIs["openai"].Models["gpt-4"].Details[0].APIKeyHash
 
-	apiKeySalt = previousSalt
+	setAPIKeySalt(previousSalt)
 	s2 := NewRequestStatistics()
 	s2.ConfigurePatch(runtimeConfigPatch{
 		MaxDetailsPerModel: intPtr(10),
@@ -633,6 +634,201 @@ func TestConfiguredAPIKeyHashSaltIsStable(t *testing.T) {
 
 	if hash1 == "" || hash1 != hash2 {
 		t.Fatalf("configured salt should produce stable hash, got %q and %q", hash1, hash2)
+	}
+}
+
+func TestDedupKeyFormatStable(t *testing.T) {
+	detail := RequestDetail{
+		Timestamp:  time.Date(2026, 7, 9, 2, 16, 17, 123456789, time.FixedZone("CST", 8*3600)),
+		LatencyMs:  123,
+		TTFTMs:     45,
+		Source:     "openai-prod",
+		AuthIndex:  "auth-a",
+		APIKey:     "sk******xx",
+		APIKeyHash: "client-hash",
+		Failed:     true,
+		StatusCode: 429,
+		Failure:    "rate limited",
+		Tokens: TokenStats{
+			InputTokens:     10,
+			OutputTokens:    5,
+			ReasoningTokens: 2,
+			CachedTokens:    3,
+			CacheTokens:     4,
+			TotalTokens:     20,
+		},
+	}
+	got := dedupKey("openai · openai-prod", "gpt-4.1", detail)
+	want := requestDedupKey{
+		apiName:       "openai · openai-prod",
+		modelName:     "gpt-4.1",
+		timestamp:     time.Date(2026, 7, 8, 18, 16, 17, 123456789, time.UTC),
+		source:        "openai-prod",
+		authIndex:     "auth-a",
+		clientAPIHash: "client-hash",
+		failure:       "rate limited",
+		failed:        true,
+		latencyMs:     123,
+		ttftMs:        45,
+		statusCode:    429,
+		inputTokens:   10,
+		outputTokens:  5,
+		reasoning:     2,
+		cachedTokens:  3,
+		cacheTokens:   4,
+		totalTokens:   20,
+	}
+	if got != want {
+		t.Fatalf("dedupKey() = %#v, want %#v", got, want)
+	}
+}
+
+func TestMergeSnapshotDedupSeparatesDelimiterBearingFields(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{RetentionDays: 30, DedupWindowMinutes: 0, MaxDetailsPerModel: 10000})
+	when := time.Now().Add(-time.Hour).UTC()
+	base := RequestDetail{
+		Timestamp: when,
+		Tokens:    TokenStats{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+	}
+	result := stats.MergeSnapshot(StatisticsSnapshot{
+		APIs: map[string]APISnapshot{
+			"api|left": {
+				Models: map[string]ModelSnapshot{
+					"model": {Details: []RequestDetail{base}},
+				},
+			},
+			"api": {
+				Models: map[string]ModelSnapshot{
+					"left|model": {Details: []RequestDetail{base}},
+				},
+			},
+		},
+	})
+	if result.Added != 2 || result.Skipped != 0 {
+		t.Fatalf("merge result = %#v, want delimiter-bearing fields kept distinct", result)
+	}
+
+	result = stats.MergeSnapshot(StatisticsSnapshot{
+		APIs: map[string]APISnapshot{
+			"api|left": {
+				Models: map[string]ModelSnapshot{
+					"model": {Details: []RequestDetail{base}},
+				},
+			},
+			"api": {
+				Models: map[string]ModelSnapshot{
+					"left|model": {Details: []RequestDetail{base}},
+				},
+			},
+		},
+	})
+	if result.Added != 0 || result.Skipped != 2 {
+		t.Fatalf("duplicate merge result = %#v, want both delimiter-bearing duplicates skipped", result)
+	}
+}
+
+func TestMergeSnapshotDedupSeparatesDifferentClientAPIKeys(t *testing.T) {
+	previousSalt := currentAPIKeySalt()
+	setAPIKeySalt("dedup-client-api-test-salt")
+	t.Cleanup(func() { setAPIKeySalt(previousSalt) })
+
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{RetentionDays: 30, DedupWindowMinutes: 0, MaxDetailsPerModel: 10000})
+	when := time.Now().Add(-time.Hour).UTC()
+	snapshot := StatisticsSnapshot{
+		APIs: map[string]APISnapshot{
+			"openai": {
+				Models: map[string]ModelSnapshot{
+					"gpt-4.1": {
+						Details: []RequestDetail{
+							{
+								Model:      "gpt-4.1",
+								Timestamp:  when,
+								Source:     "openai",
+								AuthIndex:  "auth-a",
+								APIKey:     "sk-client-alpha-0000xx",
+								APIKeyHash: "external-a",
+								Tokens:     TokenStats{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+							},
+							{
+								Model:      "gpt-4.1",
+								Timestamp:  when,
+								Source:     "openai",
+								AuthIndex:  "auth-a",
+								APIKey:     "sk-client-beta-1111xx",
+								APIKeyHash: "external-b",
+								Tokens:     TokenStats{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	result := stats.MergeSnapshot(snapshot)
+	if result.Added != 2 || result.Skipped != 0 {
+		t.Fatalf("merge result = %#v, want two distinct client API records", result)
+	}
+	if _, ok := stats.Snapshot().APIs["openai · 上游 auth-a"]; !ok {
+		t.Fatalf("snapshot APIs = %#v, want stable imported API group", stats.Snapshot().APIs)
+	}
+	result = stats.MergeSnapshot(snapshot)
+	if result.Added != 0 || result.Skipped != 2 {
+		t.Fatalf("duplicate merge result = %#v, want both duplicates skipped", result)
+	}
+}
+
+func TestMergeSnapshotDedupSeparatesFailureStatusAndLatency(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{RetentionDays: 30, DedupWindowMinutes: 0, MaxDetailsPerModel: 10000})
+	when := time.Now().Add(-time.Hour).UTC()
+	base := RequestDetail{
+		Model:      "gpt-4.1",
+		Timestamp:  when,
+		Source:     "openai",
+		AuthIndex:  "auth-a",
+		APIKey:     "sk******xx",
+		APIKeyHash: "client-hash",
+		Failed:     true,
+		Tokens:     TokenStats{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+	}
+	rateLimited := base
+	rateLimited.LatencyMs = 100
+	rateLimited.TTFTMs = 20
+	rateLimited.StatusCode = 429
+	rateLimited.Failure = "rate limited"
+	badGateway := base
+	badGateway.LatencyMs = 110
+	badGateway.TTFTMs = 25
+	badGateway.StatusCode = 502
+	badGateway.Failure = "bad gateway"
+
+	result := stats.MergeSnapshot(StatisticsSnapshot{
+		APIs: map[string]APISnapshot{
+			"openai": {
+				Models: map[string]ModelSnapshot{
+					"gpt-4.1": {Details: []RequestDetail{rateLimited, badGateway}},
+				},
+			},
+		},
+	})
+	if result.Added != 2 || result.Skipped != 0 {
+		t.Fatalf("merge result = %#v, want two distinct failed records", result)
+	}
+
+	result = stats.MergeSnapshot(StatisticsSnapshot{
+		APIs: map[string]APISnapshot{
+			"openai": {
+				Models: map[string]ModelSnapshot{
+					"gpt-4.1": {Details: []RequestDetail{rateLimited, badGateway}},
+				},
+			},
+		},
+	})
+	if result.Added != 0 || result.Skipped != 2 {
+		t.Fatalf("duplicate merge result = %#v, want failed duplicates skipped", result)
 	}
 }
 
@@ -676,14 +872,14 @@ func TestStorageReplayCleansImportedSourceCredentials(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "usage-statistics.jsonl")
 	rawKey := "raw-client-storage-key"
 	detail := RequestDetail{
-		Model:     "gpt-4",
+		Model:     " gpt-4 ",
 		Timestamp: time.Now().Add(-time.Minute).UTC(),
 		Provider:  "vendor",
 		Source:    "vendor · " + rawKey,
 		APIKey:    rawKey,
 		Tokens:    TokenStats{TotalTokens: 1},
 	}
-	line := mustMarshal(persistedDetail{API: "vendor · " + rawKey, Model: "gpt-4", Detail: detail})
+	line := mustMarshal(persistedDetail{API: "vendor · " + rawKey, Model: "outer-alias", Detail: detail})
 	if err := os.WriteFile(path, append(line, '\n'), 0o600); err != nil {
 		t.Fatalf("write storage fixture: %v", err)
 	}
@@ -707,8 +903,24 @@ func TestStorageReplayCleansImportedSourceCredentials(t *testing.T) {
 	if len(details) != 1 {
 		t.Fatalf("details len = %d, want 1", len(details))
 	}
+	if _, ok := api.Models["outer-alias"]; ok {
+		t.Fatalf("models = %#v, want detail model instead of outer alias", api.Models)
+	}
 	if details[0].Source != "vendor" {
 		t.Fatalf("detail source = %q, want cleaned vendor", details[0].Source)
+	}
+	if details[0].Model != "gpt-4" {
+		t.Fatalf("detail model = %q, want normalized gpt-4", details[0].Model)
+	}
+	if details[0].APIKey != maskAPIKey(rawKey) || details[0].APIKeyHash == "" {
+		t.Fatalf("detail api key identity = key %q hash %q, want masked key with hash", details[0].APIKey, details[0].APIKeyHash)
+	}
+	if events := stats.QueryEvents(EventsQuery{Range: "all", Limit: 10, Model: "gpt-4"}); events.Total != 1 {
+		t.Fatalf("model-filtered events = %#v, want replayed detail under normalized model", events)
+	}
+	rawSnapshot := string(mustMarshal(snapshot))
+	if strings.Contains(rawSnapshot, rawKey) {
+		t.Fatalf("snapshot leaked raw key: %s", rawSnapshot)
 	}
 	for apiName := range snapshot.APIs {
 		if strings.Contains(apiName, rawKey) {
@@ -738,7 +950,7 @@ func TestStorageSnapshotCleansImportedSourceCredentials(t *testing.T) {
 			APIs: map[string]APISnapshot{
 				"vendor · " + rawKey: {
 					Models: map[string]ModelSnapshot{
-						"gpt-4": {Details: []RequestDetail{detail}},
+						"outer-alias": {Details: []RequestDetail{detail}},
 					},
 				},
 			},
@@ -767,13 +979,655 @@ func TestStorageSnapshotCleansImportedSourceCredentials(t *testing.T) {
 	if len(details) != 1 {
 		t.Fatalf("details len = %d, want 1", len(details))
 	}
+	if _, ok := api.Models["outer-alias"]; ok {
+		t.Fatalf("models = %#v, want detail model instead of outer alias", api.Models)
+	}
 	if details[0].Source != "vendor" {
 		t.Fatalf("detail source = %q, want cleaned vendor", details[0].Source)
+	}
+	if details[0].APIKey != maskAPIKey(rawKey) || details[0].APIKeyHash == "" {
+		t.Fatalf("detail api key identity = key %q hash %q, want masked key with hash", details[0].APIKey, details[0].APIKeyHash)
+	}
+	rawSnapshot := string(mustMarshal(snapshot))
+	if strings.Contains(rawSnapshot, rawKey) {
+		t.Fatalf("snapshot leaked raw key: %s", rawSnapshot)
 	}
 	for apiName := range snapshot.APIs {
 		if strings.Contains(apiName, rawKey) {
 			t.Fatalf("api name leaked raw key: %q", apiName)
 		}
+	}
+}
+
+func TestStorageSnapshotMergesAPIsAfterNameCleanup(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "usage-statistics")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir storage dir: %v", err)
+	}
+	when := time.Date(2026, 7, 3, 10, 0, 0, 0, time.UTC)
+	firstKey := "raw-client-alpha"
+	secondKey := "raw-client-beta"
+	payload := persistedStorageSnapshot{
+		Version:     1,
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		Usage: StatisticsSnapshot{
+			TotalRequests: 2,
+			SuccessCount:  2,
+			TotalTokens:   3,
+			APIs: map[string]APISnapshot{
+				"vendor · " + firstKey: {
+					TotalRequests: 1,
+					SuccessCount:  1,
+					TotalTokens:   1,
+					Models: map[string]ModelSnapshot{
+						"gpt-4": {
+							TotalRequests: 1,
+							SuccessCount:  1,
+							TotalTokens:   1,
+							Details: []RequestDetail{{
+								Model:     "gpt-4",
+								Timestamp: when,
+								Provider:  "vendor",
+								Source:    "vendor · " + firstKey,
+								APIKey:    firstKey,
+								Tokens:    TokenStats{TotalTokens: 1},
+							}},
+						},
+					},
+				},
+				"vendor · " + secondKey: {
+					TotalRequests: 1,
+					SuccessCount:  1,
+					TotalTokens:   2,
+					Models: map[string]ModelSnapshot{
+						"gpt-4": {
+							TotalRequests: 1,
+							SuccessCount:  1,
+							TotalTokens:   2,
+							Details: []RequestDetail{{
+								Model:     "gpt-4",
+								Timestamp: when.Add(time.Minute),
+								Provider:  "vendor",
+								Source:    "vendor · " + secondKey,
+								APIKey:    secondKey,
+								Tokens:    TokenStats{TotalTokens: 2},
+							}},
+						},
+					},
+				},
+			},
+			RequestsByDay:  map[string]int64{when.Format("2006-01-02"): 2},
+			RequestsByHour: map[string]int64{hourKeys[when.Hour()]: 2},
+			TokensByDay:    map[string]int64{when.Format("2006-01-02"): 3},
+			TokensByHour:   map[string]int64{hourKeys[when.Hour()]: 3},
+		},
+	}
+	if err := os.WriteFile(storageSnapshotPath(dir), mustMarshal(payload), 0o600); err != nil {
+		t.Fatalf("write storage snapshot: %v", err)
+	}
+
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		MaxDetailsPerModel: 100,
+		RetentionDays:      0,
+		DedupWindowMinutes: 0,
+		StorageEnabled:     true,
+		StoragePath:        dir,
+	})
+	defer stats.Close()
+
+	summary := stats.SummaryWithoutDetails()
+	api, ok := summary.Usage.APIs["vendor"]
+	if !ok {
+		t.Fatalf("summary APIs = %#v, want cleaned vendor API", summary.Usage.APIs)
+	}
+	if api.TotalRequests != 2 || api.TotalTokens != 3 {
+		t.Fatalf("vendor API = %#v, want merged cleaned APIs", api)
+	}
+	model := api.Models["gpt-4"]
+	if model.TotalRequests != 2 || model.TotalTokens != 3 {
+		t.Fatalf("vendor model = %#v, want merged model aggregate", model)
+	}
+	snapshot := stats.Snapshot()
+	details := snapshot.APIs["vendor"].Models["gpt-4"].Details
+	if len(details) != 2 {
+		t.Fatalf("details len = %d, want 2; snapshot APIs=%#v", len(details), snapshot.APIs)
+	}
+	rawSnapshot := string(mustMarshal(snapshot))
+	if strings.Contains(rawSnapshot, firstKey) || strings.Contains(rawSnapshot, secondKey) {
+		t.Fatalf("snapshot leaked raw keys: %s", rawSnapshot)
+	}
+}
+
+func TestStorageSnapshotMergesModelsAfterNameCleanup(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "usage-statistics")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir storage dir: %v", err)
+	}
+	when := time.Date(2026, 7, 3, 10, 0, 0, 0, time.UTC)
+	payload := persistedStorageSnapshot{
+		Version:     1,
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		Usage: StatisticsSnapshot{
+			TotalRequests: 2,
+			SuccessCount:  2,
+			TotalTokens:   3,
+			APIs: map[string]APISnapshot{
+				"openai": {
+					TotalRequests: 2,
+					SuccessCount:  2,
+					TotalTokens:   3,
+					Models: map[string]ModelSnapshot{
+						"gpt-4": {
+							TotalRequests: 1,
+							SuccessCount:  1,
+							TotalTokens:   1,
+							Details: []RequestDetail{{
+								Model:     "gpt-4",
+								Timestamp: when,
+								Provider:  "openai",
+								Source:    "openai",
+								Tokens:    TokenStats{TotalTokens: 1},
+							}},
+						},
+						" gpt-4 ": {
+							TotalRequests: 1,
+							SuccessCount:  1,
+							TotalTokens:   2,
+							Details: []RequestDetail{{
+								Model:     " gpt-4 ",
+								Timestamp: when.Add(time.Minute),
+								Provider:  "openai",
+								Source:    "openai",
+								Tokens:    TokenStats{TotalTokens: 2},
+							}},
+						},
+					},
+				},
+			},
+			RequestsByDay:  map[string]int64{when.Format("2006-01-02"): 2},
+			RequestsByHour: map[string]int64{hourKeys[when.Hour()]: 2},
+			TokensByDay:    map[string]int64{when.Format("2006-01-02"): 3},
+			TokensByHour:   map[string]int64{hourKeys[when.Hour()]: 3},
+		},
+	}
+	if err := os.WriteFile(storageSnapshotPath(dir), mustMarshal(payload), 0o600); err != nil {
+		t.Fatalf("write storage snapshot: %v", err)
+	}
+
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		MaxDetailsPerModel: 100,
+		RetentionDays:      0,
+		DedupWindowMinutes: 0,
+		StorageEnabled:     true,
+		StoragePath:        dir,
+	})
+	defer stats.Close()
+
+	summary := stats.SummaryWithoutDetails()
+	model := summary.Usage.APIs["openai"].Models["gpt-4"]
+	if model.TotalRequests != 2 || model.TotalTokens != 3 {
+		t.Fatalf("openai gpt-4 model = %#v, want merged normalized models", model)
+	}
+	if len(model.Providers) != 1 || model.Providers[0].Provider != "openai" ||
+		model.Providers[0].TotalRequests != 2 || model.Providers[0].TotalTokens != 3 {
+		t.Fatalf("openai gpt-4 providers = %#v, want merged provider stats", model.Providers)
+	}
+	if len(summary.ModelStats) != 1 || summary.ModelStats[0].Model != "gpt-4" ||
+		summary.ModelStats[0].TotalRequests != 2 || summary.ModelStats[0].TotalTokens != 3 {
+		t.Fatalf("model stats = %#v, want one merged model", summary.ModelStats)
+	}
+	sources := make(map[string]SourceStat, len(summary.SourceStats))
+	for _, source := range summary.SourceStats {
+		sources[source.Source] = source
+	}
+	if sources["openai"].TotalRequests != 2 || sources["openai"].TotalTokens != 3 {
+		t.Fatalf("source stats = %#v, want source aggregate preserved after model merge", summary.SourceStats)
+	}
+	details := stats.Snapshot().APIs["openai"].Models["gpt-4"].Details
+	if len(details) != 2 {
+		t.Fatalf("details len = %d, want 2", len(details))
+	}
+	for _, detail := range details {
+		if detail.Model != "gpt-4" {
+			t.Fatalf("detail model = %q, want normalized gpt-4", detail.Model)
+		}
+	}
+	if events := stats.QueryEvents(EventsQuery{Range: "all", Limit: 10, Model: "gpt-4"}); events.Total != 2 {
+		t.Fatalf("model-filtered events = %#v, want both normalized model details", events)
+	}
+}
+
+func TestStorageSnapshotSplitsMixedDetailModelsUnderOuterAlias(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "usage-statistics")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir storage dir: %v", err)
+	}
+	when := time.Date(2026, 7, 3, 10, 0, 0, 0, time.UTC)
+	payload := persistedStorageSnapshot{
+		Version:     1,
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		Usage: StatisticsSnapshot{
+			TotalRequests: 3,
+			SuccessCount:  3,
+			TotalTokens:   6,
+			APIs: map[string]APISnapshot{
+				"openai": {
+					TotalRequests: 3,
+					SuccessCount:  3,
+					TotalTokens:   6,
+					Models: map[string]ModelSnapshot{
+						"outer-alias": {
+							TotalRequests: 3,
+							SuccessCount:  3,
+							TotalTokens:   6,
+							Details: []RequestDetail{
+								{
+									Model:     "gpt-4",
+									Timestamp: when,
+									Provider:  "openai",
+									Source:    "openai",
+									Tokens:    TokenStats{TotalTokens: 1},
+								},
+								{
+									Model:     "claude-3",
+									Timestamp: when.Add(time.Minute),
+									Provider:  "openai",
+									Source:    "openai",
+									Tokens:    TokenStats{TotalTokens: 2},
+								},
+							},
+						},
+					},
+				},
+			},
+			RequestsByDay:  map[string]int64{when.Format("2006-01-02"): 3},
+			RequestsByHour: map[string]int64{hourKeys[when.Hour()]: 3},
+			TokensByDay:    map[string]int64{when.Format("2006-01-02"): 6},
+			TokensByHour:   map[string]int64{hourKeys[when.Hour()]: 6},
+		},
+	}
+	if err := os.WriteFile(storageSnapshotPath(dir), mustMarshal(payload), 0o600); err != nil {
+		t.Fatalf("write storage snapshot: %v", err)
+	}
+
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		MaxDetailsPerModel: 100,
+		RetentionDays:      0,
+		DedupWindowMinutes: 0,
+		StorageEnabled:     true,
+		StoragePath:        dir,
+	})
+	defer stats.Close()
+
+	summary := stats.SummaryWithoutDetails()
+	api := summary.Usage.APIs["openai"]
+	if api.TotalRequests != 3 || api.TotalTokens != 6 {
+		t.Fatalf("openai API = %#v, want original aggregate total preserved", api)
+	}
+	if model := api.Models["gpt-4"]; model.TotalRequests != 1 || model.TotalTokens != 1 {
+		t.Fatalf("gpt-4 model = %#v, want detail aggregate 1/1", model)
+	}
+	if model := api.Models["claude-3"]; model.TotalRequests != 1 || model.TotalTokens != 2 {
+		t.Fatalf("claude-3 model = %#v, want detail aggregate 1/2", model)
+	}
+	if residual := api.Models["outer-alias"]; residual.TotalRequests != 1 || residual.TotalTokens != 3 {
+		t.Fatalf("outer-alias residual = %#v, want trimmed aggregate residual 1/3", residual)
+	}
+	if events := stats.QueryEvents(EventsQuery{Range: "all", Limit: 10, Model: "gpt-4"}); events.Total != 1 {
+		t.Fatalf("gpt-4 events = %#v, want one normalized detail", events)
+	}
+	if events := stats.QueryEvents(EventsQuery{Range: "all", Limit: 10, Model: "claude-3"}); events.Total != 1 {
+		t.Fatalf("claude-3 events = %#v, want one normalized detail", events)
+	}
+}
+
+func TestStorageSnapshotPreservesOuterModelResidualWhenDetailModelDiffers(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "usage-statistics")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir storage dir: %v", err)
+	}
+	when := time.Date(2026, 7, 3, 10, 0, 0, 0, time.UTC)
+	payload := persistedStorageSnapshot{
+		Version:     1,
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		Usage: StatisticsSnapshot{
+			TotalRequests: 5,
+			SuccessCount:  5,
+			TotalTokens:   15,
+			APIs: map[string]APISnapshot{
+				"openai": {
+					TotalRequests: 5,
+					SuccessCount:  5,
+					TotalTokens:   15,
+					Models: map[string]ModelSnapshot{
+						"outer-alias": {
+							TotalRequests: 5,
+							SuccessCount:  5,
+							TotalTokens:   15,
+							Details: []RequestDetail{
+								{
+									Model:     "gpt-4",
+									Timestamp: when,
+									Provider:  "openai",
+									Source:    "openai",
+									Tokens:    TokenStats{TotalTokens: 1},
+								},
+								{
+									Model:     " gpt-4 ",
+									Timestamp: when.Add(time.Minute),
+									Provider:  "openai",
+									Source:    "openai",
+									Tokens:    TokenStats{TotalTokens: 2},
+								},
+							},
+						},
+					},
+				},
+			},
+			RequestsByDay:  map[string]int64{when.Format("2006-01-02"): 5},
+			RequestsByHour: map[string]int64{hourKeys[when.Hour()]: 5},
+			TokensByDay:    map[string]int64{when.Format("2006-01-02"): 15},
+			TokensByHour:   map[string]int64{hourKeys[when.Hour()]: 15},
+		},
+	}
+	if err := os.WriteFile(storageSnapshotPath(dir), mustMarshal(payload), 0o600); err != nil {
+		t.Fatalf("write storage snapshot: %v", err)
+	}
+
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		MaxDetailsPerModel: 100,
+		RetentionDays:      0,
+		DedupWindowMinutes: 0,
+		StorageEnabled:     true,
+		StoragePath:        dir,
+	})
+	defer stats.Close()
+
+	summary := stats.SummaryWithoutDetails()
+	api := summary.Usage.APIs["openai"]
+	if api.TotalRequests != 5 || api.TotalTokens != 15 {
+		t.Fatalf("openai API = %#v, want original aggregate total preserved", api)
+	}
+	if model := api.Models["gpt-4"]; model.TotalRequests != 2 || model.TotalTokens != 3 {
+		t.Fatalf("gpt-4 model = %#v, want detail aggregate 2/3", model)
+	}
+	if residual := api.Models["outer-alias"]; residual.TotalRequests != 3 || residual.TotalTokens != 12 {
+		t.Fatalf("outer-alias residual = %#v, want trimmed aggregate residual 3/12", residual)
+	}
+	if events := stats.QueryEvents(EventsQuery{Range: "all", Limit: 10, Model: "gpt-4"}); events.Total != 2 {
+		t.Fatalf("gpt-4 events = %#v, want two normalized details", events)
+	}
+}
+
+func TestStorageSnapshotRekeysUpstreamChannelsFromDetail(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "usage-statistics")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir storage dir: %v", err)
+	}
+	when := time.Date(2026, 7, 3, 10, 0, 0, 0, time.UTC)
+	payload := persistedStorageSnapshot{
+		Version:     1,
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		Usage: StatisticsSnapshot{
+			TotalRequests: 2,
+			SuccessCount:  2,
+			TotalTokens:   3,
+			APIs: map[string]APISnapshot{
+				"codex": {
+					TotalRequests: 2,
+					SuccessCount:  2,
+					TotalTokens:   3,
+					Models: map[string]ModelSnapshot{
+						"gpt-5": {
+							TotalRequests: 2,
+							SuccessCount:  2,
+							TotalTokens:   3,
+							Details: []RequestDetail{
+								{
+									Model:     "gpt-5",
+									Timestamp: when,
+									Source:    "codex",
+									Provider:  "codex",
+									AuthIndex: "channel-a",
+									Tokens:    TokenStats{TotalTokens: 1},
+								},
+								{
+									Model:     "gpt-5",
+									Timestamp: when.Add(time.Minute),
+									Source:    "codex",
+									Provider:  "codex",
+									AuthIndex: "channel-b",
+									Tokens:    TokenStats{TotalTokens: 2},
+								},
+							},
+						},
+					},
+				},
+			},
+			RequestsByDay:  map[string]int64{when.Format("2006-01-02"): 2},
+			RequestsByHour: map[string]int64{hourKeys[when.Hour()]: 2},
+			TokensByDay:    map[string]int64{when.Format("2006-01-02"): 3},
+			TokensByHour:   map[string]int64{hourKeys[when.Hour()]: 3},
+		},
+	}
+	if err := os.WriteFile(storageSnapshotPath(dir), mustMarshal(payload), 0o600); err != nil {
+		t.Fatalf("write storage snapshot: %v", err)
+	}
+
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		MaxDetailsPerModel: 100,
+		RetentionDays:      0,
+		DedupWindowMinutes: 0,
+		StorageEnabled:     true,
+		StoragePath:        dir,
+	})
+	defer stats.Close()
+
+	snapshot := stats.Snapshot()
+	if _, ok := snapshot.APIs["codex"]; ok {
+		t.Fatalf("snapshot APIs = %#v, want codex records split by upstream channel", snapshot.APIs)
+	}
+	if api := snapshot.APIs["codex · 上游 channel-a"]; api.TotalRequests != 1 || api.TotalTokens != 1 {
+		t.Fatalf("channel-a API = %#v, want one request and one token; all APIs=%#v", api, snapshot.APIs)
+	}
+	if api := snapshot.APIs["codex · 上游 channel-b"]; api.TotalRequests != 1 || api.TotalTokens != 2 {
+		t.Fatalf("channel-b API = %#v, want one request and two tokens; all APIs=%#v", api, snapshot.APIs)
+	}
+
+	summary := stats.SummaryWithoutDetails()
+	if summary.Usage.TotalRequests != 2 || summary.Usage.TotalTokens != 3 {
+		t.Fatalf("summary usage = %#v, want restored top-level totals", summary.Usage)
+	}
+	if len(summary.SourceStats) != 1 || summary.SourceStats[0].Source != "codex" || summary.SourceStats[0].TotalRequests != 2 {
+		t.Fatalf("source stats = %#v, want codex aggregate total 2", summary.SourceStats)
+	}
+	if len(summary.ModelStats) != 1 || summary.ModelStats[0].Model != "gpt-5" || summary.ModelStats[0].TotalRequests != 2 {
+		t.Fatalf("model stats = %#v, want gpt-5 aggregate total 2", summary.ModelStats)
+	}
+	credentialTotals := make(map[string]int64, len(summary.CredentialStats))
+	for _, stat := range summary.CredentialStats {
+		credentialTotals[stat.AuthIndex] = stat.TotalRequests
+	}
+	if credentialTotals["channel-a"] != 1 || credentialTotals["channel-b"] != 1 {
+		t.Fatalf("credential stats = %#v, want split channel totals", summary.CredentialStats)
+	}
+}
+
+func TestStorageSnapshotSplitRestorePreservesTrimmedAggregates(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "usage-statistics")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir storage dir: %v", err)
+	}
+	when := time.Date(2026, 7, 3, 10, 0, 0, 0, time.UTC)
+	payload := persistedStorageSnapshot{
+		Version:     1,
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		Usage: StatisticsSnapshot{
+			TotalRequests: 5,
+			SuccessCount:  5,
+			TotalTokens:   15,
+			APIs: map[string]APISnapshot{
+				"codex": {
+					TotalRequests: 5,
+					SuccessCount:  5,
+					TotalTokens:   15,
+					Models: map[string]ModelSnapshot{
+						"gpt-5": {
+							TotalRequests: 5,
+							SuccessCount:  5,
+							TotalTokens:   15,
+							Details: []RequestDetail{
+								{
+									Model:     "gpt-5",
+									Timestamp: when,
+									Source:    "codex",
+									Provider:  "codex",
+									AuthIndex: "channel-a",
+									Tokens:    TokenStats{TotalTokens: 1},
+								},
+								{
+									Model:     "gpt-5",
+									Timestamp: when.Add(time.Minute),
+									Source:    "codex",
+									Provider:  "codex",
+									AuthIndex: "channel-b",
+									Tokens:    TokenStats{TotalTokens: 2},
+								},
+							},
+						},
+					},
+				},
+			},
+			RequestsByDay:  map[string]int64{when.Format("2006-01-02"): 5},
+			RequestsByHour: map[string]int64{hourKeys[when.Hour()]: 5},
+			TokensByDay:    map[string]int64{when.Format("2006-01-02"): 15},
+			TokensByHour:   map[string]int64{hourKeys[when.Hour()]: 15},
+		},
+	}
+	if err := os.WriteFile(storageSnapshotPath(dir), mustMarshal(payload), 0o600); err != nil {
+		t.Fatalf("write storage snapshot: %v", err)
+	}
+
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		MaxDetailsPerModel: 100,
+		RetentionDays:      0,
+		DedupWindowMinutes: 0,
+		StorageEnabled:     true,
+		StoragePath:        dir,
+	})
+	defer stats.Close()
+
+	summary := stats.SummaryWithoutDetails()
+	if summary.Usage.TotalRequests != 5 || summary.Usage.TotalTokens != 15 {
+		t.Fatalf("summary usage = %#v, want restored top-level totals", summary.Usage)
+	}
+	if api := summary.Usage.APIs["codex · 上游 channel-a"]; api.TotalRequests != 1 || api.TotalTokens != 1 {
+		t.Fatalf("channel-a API = %#v, want one restored detail", api)
+	}
+	if api := summary.Usage.APIs["codex · 上游 channel-b"]; api.TotalRequests != 1 || api.TotalTokens != 2 {
+		t.Fatalf("channel-b API = %#v, want one restored detail", api)
+	}
+	if api := summary.Usage.APIs["codex"]; api.TotalRequests != 3 || api.TotalTokens != 12 {
+		t.Fatalf("residual codex API = %#v, want trimmed aggregate remainder", api)
+	}
+	if len(summary.ModelStats) != 1 || summary.ModelStats[0].Model != "gpt-5" ||
+		summary.ModelStats[0].TotalRequests != 5 || summary.ModelStats[0].TotalTokens != 15 {
+		t.Fatalf("model stats = %#v, want aggregate total preserved", summary.ModelStats)
+	}
+}
+
+func TestNormalizeStoredClientAPIIdentityMasksRawAndPreservesMaskedHash(t *testing.T) {
+	rawKey := "raw-client-key"
+	raw := normalizeStoredClientAPIIdentity(RequestDetail{
+		APIKey:     rawKey,
+		APIKeyHash: "external-hash",
+	})
+	if raw.APIKey != maskAPIKey(rawKey) || raw.APIKeyHash != hashAPIKey(rawKey) {
+		t.Fatalf("raw stored identity = key %q hash %q, want current masked/hash", raw.APIKey, raw.APIKeyHash)
+	}
+
+	masked := normalizeStoredClientAPIIdentity(RequestDetail{
+		APIKey:     "sk******xx",
+		APIKeyHash: strings.Repeat("a", sha256.Size224*2),
+	})
+	if masked.APIKey != "sk******xx" || masked.APIKeyHash != strings.Repeat("a", sha256.Size224*2) {
+		t.Fatalf("masked stored identity = key %q hash %q, want preserved", masked.APIKey, masked.APIKeyHash)
+	}
+
+	importedMasked := normalizeStoredClientAPIIdentity(RequestDetail{
+		APIKey:     "sk******xx",
+		APIKeyHash: "hash-from-old-import",
+	})
+	if importedMasked.APIKey != "sk******xx" || importedMasked.APIKeyHash != "" {
+		t.Fatalf("legacy imported masked identity = key %q hash %q, want masked key without external hash", importedMasked.APIKey, importedMasked.APIKeyHash)
+	}
+}
+
+func TestStorageSnapshotMergesLegacyMaskedExternalAPIKeyHashes(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "usage-statistics")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir storage dir: %v", err)
+	}
+	when := time.Now().Add(-time.Minute).UTC()
+	payload := persistedStorageSnapshot{
+		Version:     1,
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		Usage: StatisticsSnapshot{
+			APIs: map[string]APISnapshot{
+				"openai": {
+					Models: map[string]ModelSnapshot{
+						"gpt-4": {
+							Details: []RequestDetail{
+								{
+									Model:      "gpt-4",
+									Timestamp:  when,
+									Provider:   "openai",
+									APIKey:     "sk******xx",
+									APIKeyHash: "hash-from-first-export",
+									Tokens:     TokenStats{TotalTokens: 1},
+								},
+								{
+									Model:      "gpt-4",
+									Timestamp:  when.Add(time.Second),
+									Provider:   "openai",
+									APIKey:     "sk******xx",
+									APIKeyHash: "hash-from-second-export",
+									Tokens:     TokenStats{TotalTokens: 2},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	if err := os.WriteFile(storageSnapshotPath(dir), mustMarshal(payload), 0o600); err != nil {
+		t.Fatalf("write storage snapshot: %v", err)
+	}
+
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		MaxDetailsPerModel: 100,
+		RetentionDays:      0,
+		DedupWindowMinutes: 0,
+		StorageEnabled:     true,
+		StoragePath:        dir,
+	})
+	defer stats.Close()
+
+	summary := stats.SummaryWithoutDetails()
+	if len(summary.ClientAPIStats) != 1 {
+		t.Fatalf("client api stats = %#v, want one merged masked group", summary.ClientAPIStats)
+	}
+	got := summary.ClientAPIStats[0]
+	if got.APIKey != "sk******xx" || got.APIKeyHash != "" || got.TotalRequests != 2 || got.TotalTokens != 3 {
+		t.Fatalf("client api stat = %#v, want merged masked key without external hash", got)
 	}
 }
 
@@ -3491,6 +4345,17 @@ func BenchmarkQueryEvents100k(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		clearBenchmarkEventCache(stats)
+		_ = stats.QueryEvents(params)
+	}
+}
+
+func BenchmarkQueryEventsColdModelIndex100k(b *testing.B) {
+	stats := buildBenchmarkStats(100000)
+	params := EventsQuery{Limit: 500, Offset: 0, Range: "7d", Model: "gpt-4.1"}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		clearBenchmarkEventCache(stats)
+		clearBenchmarkEventIndex(stats)
 		_ = stats.QueryEvents(params)
 	}
 }

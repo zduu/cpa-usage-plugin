@@ -15,6 +15,8 @@ class FakeElement {
     this.dataset = {};
     this.style = {};
     this.files = [];
+    this.children = [];
+    this.parentNode = null;
     this.classList = {
       add() {},
       remove() {},
@@ -29,6 +31,17 @@ class FakeElement {
   }
   click() {
     if (typeof this.onclick === 'function') this.onclick({ target: this });
+  }
+  appendChild(child) {
+    child.parentNode = this;
+    this.children.push(child);
+    return child;
+  }
+  removeChild(child) {
+    const index = this.children.indexOf(child);
+    if (index >= 0) this.children.splice(index, 1);
+    child.parentNode = null;
+    return child;
   }
   closest() {
     return null;
@@ -170,6 +183,7 @@ function createDashboardHarness(options = {}) {
   summary.model_stats[0].success_count = summary.model_stats[0].total_requests - apiFailureCount;
   if (options.storage) summary._meta.storage = options.storage;
   if (options.clientApiStats) summary.client_api_stats = options.clientApiStats;
+  if (options.credentialStats) summary.credential_stats = options.credentialStats;
   if (options.summaryUsage) Object.assign(summary.usage, options.summaryUsage);
 
   function eventsPage(url) {
@@ -693,6 +707,31 @@ test('dashboard loads summary and export button uses backend event export', asyn
   assert.ok(fetchRequests.some((request) => request.url.includes('dashboard-events-export-jobs') && request.options.method === 'POST' && new URL(request.url, 'http://test.local').searchParams.get('format') === 'csv'));
   const exported = JSON.parse(downloads.find((d) => d.text && d.text.startsWith('[')).text);
   assert.strictEqual(exported.length, 1200);
+});
+
+test('dashboard blob downloads keep object URLs alive for Safari', () => {
+  const { context, document, downloads, timeoutDelays } = createDashboardHarness();
+  context.download('usage.csv', 'a,b\n1,2', 'text/csv;charset=utf-8');
+
+  assert.ok(downloads.some((d) => d.text === 'a,b\n1,2' && d.type === 'text/csv;charset=utf-8'));
+  assert.ok(document.body.children.some((child) => child.download === 'usage.csv' && child.href === 'blob:fake'));
+  assert.strictEqual(timeoutDelays.at(-1), 60000);
+});
+
+test('dashboard credential filter uses summary credential stats beyond current event page', async () => {
+  const { document } = createDashboardHarness({
+    credentialStats: [
+      { auth_index: 'auth-old', total_requests: 1, success_count: 1, failure_count: 0, total_tokens: 15 },
+      { auth_index: 'auth-1', total_requests: 1200, success_count: 1190, failure_count: 10, total_tokens: 24000 },
+      { auth_index: '(空)', total_requests: 2, success_count: 2, failure_count: 0, total_tokens: 20 },
+    ],
+  });
+  await waitFor(() => document.getElementById('filterAuth').innerHTML.includes('auth-old'));
+
+  const html = document.getElementById('filterAuth').innerHTML;
+  assert.match(html, /auth-old/);
+  assert.match(html, /auth-1/);
+  assert.doesNotMatch(html, /\(空\)/);
 });
 
 test('dashboard follows runtime language changes', async () => {

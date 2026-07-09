@@ -35,7 +35,7 @@ type RequestStatistics struct {
 	maxDetailsPerModel int
 	retention          time.Duration
 	dedupWindow        time.Duration
-	seen               map[string]time.Time
+	seen               map[requestDedupKey]time.Time
 
 	totalRequests   int64
 	successCount    int64
@@ -209,6 +209,32 @@ type detailTotals struct {
 	reasoningTokens int64
 	latencySum      int64
 	latencyN        int64
+}
+
+type apiDetailErrorKey struct {
+	statusCode int
+	failure    string
+}
+
+type requestDedupKey struct {
+	apiName       string
+	modelName     string
+	timestamp     time.Time
+	source        string
+	authIndex     string
+	clientAPIHash string
+	clientAPIKey  string
+	failure       string
+	failed        bool
+	latencyMs     int64
+	ttftMs        int64
+	statusCode    int
+	inputTokens   int64
+	outputTokens  int64
+	reasoning     int64
+	cachedTokens  int64
+	cacheTokens   int64
+	totalTokens   int64
 }
 
 func timeSeriesTokenKey(model, provider string) string {
@@ -391,6 +417,7 @@ type dashboardEventCacheKey struct {
 
 // apiKeySalt is a per-process random salt used to produce stable grouping IDs.
 var apiKeySalt string
+var apiKeySaltMu sync.RWMutex
 
 // hourKeys pre-computes "00" through "23" so Snapshot never allocates strings.
 var hourKeys = [24]string{
@@ -415,7 +442,20 @@ func init() {
 			b[i] = byte(i * 17)
 		}
 	}
-	apiKeySalt = hex.EncodeToString(b[:])
+	setAPIKeySalt(hex.EncodeToString(b[:]))
+}
+
+func setAPIKeySalt(value string) {
+	apiKeySaltMu.Lock()
+	apiKeySalt = value
+	apiKeySaltMu.Unlock()
+}
+
+func currentAPIKeySalt() string {
+	apiKeySaltMu.RLock()
+	value := apiKeySalt
+	apiKeySaltMu.RUnlock()
+	return value
 }
 
 func hashAPIKey(raw string) string {
@@ -423,8 +463,21 @@ func hashAPIKey(raw string) string {
 	if s == "" {
 		return ""
 	}
-	h := sha256.Sum224([]byte(apiKeySalt + ":" + s))
+	h := sha256.Sum224([]byte(currentAPIKeySalt() + ":" + s))
 	return hex.EncodeToString(h[:])
+}
+
+func isStoredAPIKeyHashShape(value string) bool {
+	if len(value) != sha256.Size224*2 {
+		return false
+	}
+	for _, r := range value {
+		if (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 var stats = NewRequestStatistics()
@@ -434,7 +487,7 @@ func NewRequestStatistics() *RequestStatistics {
 		maxDetailsPerModel:            defaultMaxDetailsPerModel,
 		retention:                     time.Duration(defaultRetentionDays) * 24 * time.Hour,
 		dedupWindow:                   time.Duration(defaultDedupWindowMinutes) * time.Minute,
-		seen:                          make(map[string]time.Time),
+		seen:                          make(map[requestDedupKey]time.Time),
 		apis:                          make(map[string]*apiStats),
 		requestsByDay:                 make(map[string]int64),
 		requestsByHour:                make(map[int]int64),
@@ -526,7 +579,7 @@ func (s *RequestStatistics) ConfigurePatch(cfg runtimeConfigPatch) {
 		s.logResponseHeaders = parseHeaderWhitelist(*cfg.LogResponseHeaders)
 	}
 	if cfg.APIKeyHashSalt != nil && strings.TrimSpace(*cfg.APIKeyHashSalt) != "" {
-		apiKeySalt = strings.TrimSpace(*cfg.APIKeyHashSalt)
+		setAPIKeySalt(strings.TrimSpace(*cfg.APIKeyHashSalt))
 	}
 	if cfg.StoragePath != nil && strings.TrimSpace(*cfg.StoragePath) != "" {
 		s.storagePath = strings.TrimSpace(*cfg.StoragePath)
@@ -670,7 +723,7 @@ func (s *RequestStatistics) Record(record UsageRecord) {
 	s.mu.Lock()
 
 	now := time.Now()
-	if s.recordDetailLocked(statsKey, modelName, detail, "", now, false) {
+	if s.recordDetailLocked(statsKey, modelName, detail, requestDedupKey{}, now, false) {
 		if s.storageEnabled {
 			persistDetail = &persistedDetail{API: statsKey, Model: modelName, Detail: detail}
 		}
@@ -1189,15 +1242,16 @@ func (s *RequestStatistics) setStorageLastError(err error) {
 	s.mu.Unlock()
 }
 
-func (s *RequestStatistics) recordDetailLocked(apiName, modelName string, detail RequestDetail, dedup string, now time.Time, useDedupWindow bool) bool {
+func (s *RequestStatistics) recordDetailLocked(apiName, modelName string, detail RequestDetail, dedup requestDedupKey, now time.Time, useDedupWindow bool) bool {
 	if s == nil {
 		return false
 	}
-	apiName = usageGroupKeyFromDetail(apiName, detail)
 	if strings.TrimSpace(apiName) == "" {
 		apiName = "未知接口"
 	}
-	dedup = dedupKey(apiName, modelName, detail)
+	if dedup == (requestDedupKey{}) {
+		dedup = dedupKey(apiName, modelName, detail)
+	}
 	s.pruneSeenLocked(now)
 	if useDedupWindow && s.dedupWindow > 0 {
 		if _, exists := s.seen[dedup]; exists {
@@ -1401,6 +1455,10 @@ func (s *RequestStatistics) restoreStorageSnapshotLocked(snapshot StatisticsSnap
 		if apiName == "" {
 			continue
 		}
+		if storageSnapshotHasMultipleAPIGroupNames(apiName, apiSnapshot) {
+			restoredDetails += s.restoreStorageSnapshotSplitAPILocked(apiName, apiSnapshot, now)
+			continue
+		}
 		apiName = storageSnapshotAPIName(apiName, apiSnapshot)
 		apiSt := &apiStats{
 			TotalRequests:   nonNegativeInt64(apiSnapshot.TotalRequests),
@@ -1417,6 +1475,11 @@ func (s *RequestStatistics) restoreStorageSnapshotLocked(snapshot StatisticsSnap
 		apiSt.latencySum, apiSt.latencyN = restoredLatencyAggregate(apiSnapshot.AvgLatencyMs, apiSt.TotalRequests)
 		for modelName, modelSnapshot := range apiSnapshot.Models {
 			modelName = normalizeModelName(modelName)
+			if storageSnapshotNeedsSplitModelRestore(modelName, modelSnapshot) {
+				restoredDetails += s.restoreStorageSnapshotSplitModelLocked(apiSt, modelName, modelSnapshot, now)
+				continue
+			}
+			modelName = storageSnapshotModelName(modelName, modelSnapshot)
 			modelSt := &modelStats{
 				TotalRequests:   nonNegativeInt64(modelSnapshot.TotalRequests),
 				SuccessCount:    nonNegativeInt64(modelSnapshot.SuccessCount),
@@ -1431,20 +1494,7 @@ func (s *RequestStatistics) restoreStorageSnapshotLocked(snapshot StatisticsSnap
 			modelSt.latencySum, modelSt.latencyN = restoredLatencyAggregate(modelSnapshot.AvgLatencyMs, modelSt.TotalRequests)
 			var detailAggregates detailTotals
 			for _, detail := range modelSnapshot.Details {
-				if detail.Model == "" {
-					detail.Model = modelName
-				}
-				if detail.Timestamp.IsZero() {
-					detail.Timestamp = now
-				}
-				if detail.LatencyMs < 0 {
-					detail.LatencyMs = 0
-				}
-				if detail.TTFTMs < 0 {
-					detail.TTFTMs = 0
-				}
-				detail.Tokens.TotalTokens = detailTotalTokens(detail.Tokens)
-				detail.Source = cleanImportedDetailSource(detail)
+				detail = normalizeStorageSnapshotDetail(modelName, detail, now)
 				modelSt.Details = append(modelSt.Details, detail)
 				restoredDetails++
 
@@ -1472,11 +1522,11 @@ func (s *RequestStatistics) restoreStorageSnapshotLocked(snapshot StatisticsSnap
 				modelSt.latencySum = detailAggregates.latencySum
 				modelSt.latencyN = detailAggregates.latencyN
 			}
-			apiSt.Models[modelName] = modelSt
+			mergeRestoredModelStats(apiSt, modelName, modelSt)
 			s.mergeModelSummaryAggregateLocked(modelName, modelSt)
 		}
 		restoreAPIAggregatesFromModels(apiSt)
-		s.apis[apiName] = apiSt
+		s.mergeRestoredAPIStatsLocked(apiName, apiSt)
 	}
 	restoreSnapshotAggregatesFromAPIs(s)
 	if s.totalRequests == 0 && restoredDetails > 0 {
@@ -1484,6 +1534,473 @@ func (s *RequestStatistics) restoreStorageSnapshotLocked(snapshot StatisticsSnap
 	} else {
 		s.restoreMissingCostSeriesLocked(restoredDetails)
 	}
+}
+
+func mergeRestoredModelStats(apiSt *apiStats, modelName string, modelSt *modelStats) {
+	if apiSt == nil || modelSt == nil {
+		return
+	}
+	if apiSt.Models == nil {
+		apiSt.Models = make(map[string]*modelStats)
+	}
+	existing, ok := apiSt.Models[modelName]
+	if !ok || existing == nil {
+		apiSt.Models[modelName] = modelSt
+		return
+	}
+	mergeModelStats(existing, modelSt)
+}
+
+func (s *RequestStatistics) mergeRestoredAPIStatsLocked(apiName string, apiSt *apiStats) {
+	if s == nil || apiSt == nil {
+		return
+	}
+	apiName = strings.TrimSpace(apiName)
+	if apiName == "" {
+		apiName = "未知接口"
+	}
+	existing, ok := s.apis[apiName]
+	if !ok || existing == nil {
+		s.apis[apiName] = apiSt
+		return
+	}
+	mergeAPIStats(existing, apiSt)
+}
+
+func mergeAPIStats(dst, src *apiStats) {
+	if dst == nil || src == nil {
+		return
+	}
+	dst.TotalRequests += src.TotalRequests
+	dst.SuccessCount += src.SuccessCount
+	dst.FailureCount += src.FailureCount
+	dst.TotalTokens += src.TotalTokens
+	dst.InputTokens += src.InputTokens
+	dst.OutputTokens += src.OutputTokens
+	dst.CachedTokens += src.CachedTokens
+	dst.ReasoningTokens += src.ReasoningTokens
+	dst.latencySum += src.latencySum
+	dst.latencyN += src.latencyN
+	if dst.Models == nil {
+		dst.Models = make(map[string]*modelStats, len(src.Models))
+	}
+	for modelName, srcModel := range src.Models {
+		if srcModel == nil {
+			continue
+		}
+		dstModel, ok := dst.Models[modelName]
+		if !ok || dstModel == nil {
+			dst.Models[modelName] = srcModel
+			continue
+		}
+		mergeModelStats(dstModel, srcModel)
+	}
+	mergeSourceStats(dst, src)
+}
+
+func mergeModelStats(dst, src *modelStats) {
+	if dst == nil || src == nil {
+		return
+	}
+	dst.TotalRequests += src.TotalRequests
+	dst.SuccessCount += src.SuccessCount
+	dst.FailureCount += src.FailureCount
+	dst.TotalTokens += src.TotalTokens
+	dst.InputTokens += src.InputTokens
+	dst.OutputTokens += src.OutputTokens
+	dst.CachedTokens += src.CachedTokens
+	dst.ReasoningTokens += src.ReasoningTokens
+	dst.latencySum += src.latencySum
+	dst.latencyN += src.latencyN
+	dst.Details = append(dst.Details, src.Details...)
+	dst.providerStats = mergeModelProviderStats(dst.providerStats, src.providerStats)
+}
+
+func (s *RequestStatistics) restoreStorageSnapshotSplitModelLocked(apiSt *apiStats, modelName string, modelSnapshot ModelSnapshot, now time.Time) int64 {
+	if s == nil || apiSt == nil {
+		return 0
+	}
+	modelName = normalizeModelName(modelName)
+	models := make(map[string]*modelStats)
+	var restoredDetails int64
+	var detailAggregate storageSnapshotDetailAggregate
+	for _, detail := range modelSnapshot.Details {
+		detailModelName := storageSnapshotDetailModelName(modelName, detail)
+		detail = normalizeStorageSnapshotDetail(detailModelName, detail, now)
+		modelSt, ok := models[detailModelName]
+		if !ok {
+			modelSt = &modelStats{}
+			models[detailModelName] = modelSt
+		}
+		totals := incrementModelStats(modelSt, detail)
+		detailAggregate.add(detail, totals)
+		incrementAPISourceStats(apiSt, detail, totals)
+		s.incrementSummaryDimensionStatsLocked(detailModelName, detail, totals)
+		s.incrementHealthBucketLocked(detail)
+		if detail.Timestamp.After(s.lastRecordedAt) {
+			s.lastRecordedAt = detail.Timestamp
+		}
+		restoredDetails++
+	}
+	for detailModelName, modelSt := range models {
+		mergeRestoredModelStats(apiSt, detailModelName, modelSt)
+		s.mergeModelSummaryAggregateLocked(detailModelName, modelSt)
+	}
+	if residualModelSt := storageSnapshotResidualModelStats(modelSnapshot, detailAggregate); residualModelSt != nil {
+		mergeRestoredModelStats(apiSt, modelName, residualModelSt)
+		s.mergeModelSummaryAggregateLocked(modelName, residualModelSt)
+	}
+	return restoredDetails
+}
+
+func incrementModelStats(modelSt *modelStats, detail RequestDetail) detailTotals {
+	totals := detailTotalsFromRequest(detail)
+	modelSt.TotalRequests++
+	if detail.Failed {
+		modelSt.FailureCount++
+	} else {
+		modelSt.SuccessCount++
+	}
+	modelSt.TotalTokens += totals.totalTokens
+	modelSt.InputTokens += totals.inputTokens
+	modelSt.OutputTokens += totals.outputTokens
+	modelSt.CachedTokens += totals.cachedTokens
+	modelSt.ReasoningTokens += totals.reasoningTokens
+	modelSt.latencySum += totals.latencySum
+	modelSt.latencyN += totals.latencyN
+	modelSt.providerStats = incrementModelProviderStats(modelSt.providerStats, detail.Provider, detail.Failed, totals)
+	modelSt.Details = append(modelSt.Details, detail)
+	return totals
+}
+
+func mergeModelProviderStats(dst map[string]*ModelProviderStat, src map[string]*ModelProviderStat) map[string]*ModelProviderStat {
+	if len(src) == 0 {
+		return dst
+	}
+	if dst == nil {
+		dst = make(map[string]*ModelProviderStat, len(src))
+	}
+	for provider, srcStat := range src {
+		if srcStat == nil {
+			continue
+		}
+		dstStat, ok := dst[provider]
+		if !ok || dstStat == nil {
+			copy := *srcStat
+			dst[provider] = &copy
+			continue
+		}
+		dstStat.TotalRequests += srcStat.TotalRequests
+		dstStat.SuccessCount += srcStat.SuccessCount
+		dstStat.FailureCount += srcStat.FailureCount
+		dstStat.TotalTokens += srcStat.TotalTokens
+		dstStat.InputTokens += srcStat.InputTokens
+		dstStat.OutputTokens += srcStat.OutputTokens
+		dstStat.CachedTokens += srcStat.CachedTokens
+		dstStat.ReasoningTokens += srcStat.ReasoningTokens
+	}
+	return dst
+}
+
+func mergeSourceStats(dst, src *apiStats) {
+	if dst == nil || src == nil || len(src.Sources) == 0 {
+		return
+	}
+	if dst.Sources == nil {
+		dst.Sources = make(map[string]*sourceStatAccumulator, len(src.Sources))
+	}
+	for source, srcAgg := range src.Sources {
+		if srcAgg == nil {
+			continue
+		}
+		dstAgg, ok := dst.Sources[source]
+		if !ok || dstAgg == nil {
+			dst.Sources[source] = cloneSourceStatAccumulator(srcAgg)
+			continue
+		}
+		dstAgg.stat.TotalRequests += srcAgg.stat.TotalRequests
+		dstAgg.stat.SuccessCount += srcAgg.stat.SuccessCount
+		dstAgg.stat.FailureCount += srcAgg.stat.FailureCount
+		dstAgg.stat.TotalTokens += srcAgg.stat.TotalTokens
+		if dstAgg.stat.Provider == "" {
+			dstAgg.stat.Provider = srcAgg.stat.Provider
+		}
+		if dstAgg.providers == nil {
+			dstAgg.providers = make(map[string]int64, len(srcAgg.providers))
+		}
+		for provider, count := range srcAgg.providers {
+			dstAgg.providers[provider] += count
+		}
+	}
+}
+
+func cloneSourceStatAccumulator(src *sourceStatAccumulator) *sourceStatAccumulator {
+	if src == nil {
+		return nil
+	}
+	dst := &sourceStatAccumulator{
+		stat:      src.stat,
+		providers: make(map[string]int64, len(src.providers)),
+	}
+	for provider, count := range src.providers {
+		dst.providers[provider] = count
+	}
+	return dst
+}
+
+func (s *RequestStatistics) restoreStorageSnapshotSplitAPILocked(apiName string, apiSnapshot APISnapshot, now time.Time) int64 {
+	if s == nil {
+		return 0
+	}
+	var restoredDetails int64
+	residualAPIName := storageSnapshotResidualAPIName(apiName, apiSnapshot)
+	for modelName, modelSnapshot := range apiSnapshot.Models {
+		modelName = normalizeModelName(modelName)
+		var detailAggregate storageSnapshotDetailAggregate
+		for _, detail := range modelSnapshot.Details {
+			detailModelName := storageSnapshotDetailModelName(modelName, detail)
+			detailAPIName := storageSnapshotDetailAPIName(apiName, detail)
+			detail = normalizeStorageSnapshotDetail(detailModelName, detail, now)
+			apiSt, ok := s.apis[detailAPIName]
+			if !ok {
+				apiSt = &apiStats{Models: make(map[string]*modelStats), Sources: make(map[string]*sourceStatAccumulator)}
+				s.apis[detailAPIName] = apiSt
+			}
+
+			totals := s.updateAPIStats(apiSt, detailModelName, detail)
+			detailAggregate.add(detail, totals)
+			incrementAPISourceStats(apiSt, detail, totals)
+			s.incrementModelSummaryStatsLocked(detailModelName, detail, totals)
+			s.incrementSummaryDimensionStatsLocked(detailModelName, detail, totals)
+			s.incrementHealthBucketLocked(detail)
+			if detail.Timestamp.After(s.lastRecordedAt) {
+				s.lastRecordedAt = detail.Timestamp
+			}
+			restoredDetails++
+		}
+		if residualModelSt := storageSnapshotResidualModelStats(modelSnapshot, detailAggregate); residualModelSt != nil {
+			s.addStorageSnapshotResidualModelLocked(residualAPIName, modelName, residualModelSt)
+		}
+	}
+	return restoredDetails
+}
+
+type storageSnapshotDetailAggregate struct {
+	totalRequests   int64
+	successCount    int64
+	failureCount    int64
+	totalTokens     int64
+	inputTokens     int64
+	outputTokens    int64
+	cachedTokens    int64
+	reasoningTokens int64
+	latencySum      int64
+	latencyN        int64
+}
+
+func (a *storageSnapshotDetailAggregate) add(detail RequestDetail, totals detailTotals) {
+	if a == nil {
+		return
+	}
+	a.totalRequests++
+	if detail.Failed {
+		a.failureCount++
+	} else {
+		a.successCount++
+	}
+	a.totalTokens += totals.totalTokens
+	a.inputTokens += totals.inputTokens
+	a.outputTokens += totals.outputTokens
+	a.cachedTokens += totals.cachedTokens
+	a.reasoningTokens += totals.reasoningTokens
+	a.latencySum += totals.latencySum
+	a.latencyN += totals.latencyN
+}
+
+func storageSnapshotResidualModelStats(modelSnapshot ModelSnapshot, detailAggregate storageSnapshotDetailAggregate) *modelStats {
+	totalRequests := maxInt64(nonNegativeInt64(modelSnapshot.TotalRequests)-detailAggregate.totalRequests, 0)
+	successCount := maxInt64(nonNegativeInt64(modelSnapshot.SuccessCount)-detailAggregate.successCount, 0)
+	failureCount := maxInt64(nonNegativeInt64(modelSnapshot.FailureCount)-detailAggregate.failureCount, 0)
+	totalTokens := maxInt64(nonNegativeInt64(modelSnapshot.TotalTokens)-detailAggregate.totalTokens, 0)
+	inputTokens := maxInt64(nonNegativeInt64(modelSnapshot.InputTokens)-detailAggregate.inputTokens, 0)
+	outputTokens := maxInt64(nonNegativeInt64(modelSnapshot.OutputTokens)-detailAggregate.outputTokens, 0)
+	cachedTokens := maxInt64(nonNegativeInt64(modelSnapshot.CachedTokens)-detailAggregate.cachedTokens, 0)
+	reasoningTokens := maxInt64(nonNegativeInt64(modelSnapshot.ReasoningTokens)-detailAggregate.reasoningTokens, 0)
+	latencySum, latencyN := restoredLatencyAggregate(modelSnapshot.AvgLatencyMs, nonNegativeInt64(modelSnapshot.TotalRequests))
+	latencySum = maxInt64(latencySum-detailAggregate.latencySum, 0)
+	latencyN = maxInt64(latencyN-detailAggregate.latencyN, 0)
+	if totalRequests == 0 && successCount == 0 && failureCount == 0 && totalTokens == 0 &&
+		inputTokens == 0 && outputTokens == 0 && cachedTokens == 0 && reasoningTokens == 0 && latencyN == 0 {
+		return nil
+	}
+	return &modelStats{
+		TotalRequests:   totalRequests,
+		SuccessCount:    successCount,
+		FailureCount:    failureCount,
+		TotalTokens:     totalTokens,
+		InputTokens:     inputTokens,
+		OutputTokens:    outputTokens,
+		CachedTokens:    cachedTokens,
+		ReasoningTokens: reasoningTokens,
+		latencySum:      latencySum,
+		latencyN:        latencyN,
+	}
+}
+
+func (s *RequestStatistics) addStorageSnapshotResidualModelLocked(apiName, modelName string, modelSt *modelStats) {
+	if s == nil || modelSt == nil {
+		return
+	}
+	apiName = strings.TrimSpace(apiName)
+	if apiName == "" {
+		apiName = "未知接口"
+	}
+	apiSt, ok := s.apis[apiName]
+	if !ok {
+		apiSt = &apiStats{Models: make(map[string]*modelStats), Sources: make(map[string]*sourceStatAccumulator)}
+		s.apis[apiName] = apiSt
+	}
+	apiSt.TotalRequests += modelSt.TotalRequests
+	apiSt.SuccessCount += modelSt.SuccessCount
+	apiSt.FailureCount += modelSt.FailureCount
+	apiSt.TotalTokens += modelSt.TotalTokens
+	apiSt.InputTokens += modelSt.InputTokens
+	apiSt.OutputTokens += modelSt.OutputTokens
+	apiSt.CachedTokens += modelSt.CachedTokens
+	apiSt.ReasoningTokens += modelSt.ReasoningTokens
+	apiSt.latencySum += modelSt.latencySum
+	apiSt.latencyN += modelSt.latencyN
+	if existing, ok := apiSt.Models[modelName]; ok && existing != nil {
+		existing.TotalRequests += modelSt.TotalRequests
+		existing.SuccessCount += modelSt.SuccessCount
+		existing.FailureCount += modelSt.FailureCount
+		existing.TotalTokens += modelSt.TotalTokens
+		existing.InputTokens += modelSt.InputTokens
+		existing.OutputTokens += modelSt.OutputTokens
+		existing.CachedTokens += modelSt.CachedTokens
+		existing.ReasoningTokens += modelSt.ReasoningTokens
+		existing.latencySum += modelSt.latencySum
+		existing.latencyN += modelSt.latencyN
+	} else {
+		apiSt.Models[modelName] = modelSt
+	}
+	s.mergeModelSummaryAggregateLocked(modelName, modelSt)
+}
+
+func normalizeStorageSnapshotDetail(modelName string, detail RequestDetail, now time.Time) RequestDetail {
+	detail.Model = normalizeDetailModelName(modelName, detail.Model)
+	if detail.Timestamp.IsZero() {
+		detail.Timestamp = now
+	}
+	if detail.LatencyMs < 0 {
+		detail.LatencyMs = 0
+	}
+	if detail.TTFTMs < 0 {
+		detail.TTFTMs = 0
+	}
+	detail.Tokens.TotalTokens = detailTotalTokens(detail.Tokens)
+	detail.Source = cleanImportedDetailSource(detail)
+	return normalizeStoredClientAPIIdentity(detail)
+}
+
+func normalizeDetailModelName(fallback string, model string) string {
+	modelName := normalizeModelName(model)
+	if modelName == "unknown" {
+		modelName = normalizeModelName(fallback)
+	}
+	return modelName
+}
+
+func storageSnapshotModelName(modelName string, modelSnapshot ModelSnapshot) string {
+	modelName = normalizeModelName(modelName)
+	for _, detail := range modelSnapshot.Details {
+		return storageSnapshotDetailModelName(modelName, detail)
+	}
+	return modelName
+}
+
+func storageSnapshotDetailModelName(modelName string, detail RequestDetail) string {
+	return normalizeDetailModelName(modelName, detail.Model)
+}
+
+func storageSnapshotNeedsSplitModelRestore(modelName string, modelSnapshot ModelSnapshot) bool {
+	var first string
+	modelName = normalizeModelName(modelName)
+	for _, detail := range modelSnapshot.Details {
+		key := storageSnapshotDetailModelName(modelName, detail)
+		if key != modelName {
+			return true
+		}
+		if first == "" {
+			first = key
+			continue
+		}
+		if key != first {
+			return true
+		}
+	}
+	return false
+}
+
+func storageSnapshotHasMultipleAPIGroupNames(apiName string, apiSnapshot APISnapshot) bool {
+	var first string
+	for _, modelSnapshot := range apiSnapshot.Models {
+		for _, detail := range modelSnapshot.Details {
+			key := storageSnapshotDetailAPIName(apiName, detail)
+			if first == "" {
+				first = key
+				continue
+			}
+			if key != first {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func storageSnapshotResidualAPIName(apiName string, apiSnapshot APISnapshot) string {
+	apiName = strings.TrimSpace(apiName)
+	for _, modelSnapshot := range apiSnapshot.Models {
+		for _, detail := range modelSnapshot.Details {
+			if clean := cleanStorageSnapshotFallbackAPIName(apiName, detail); clean != "" {
+				return clean
+			}
+		}
+	}
+	apiName = stripUpstreamChannelSuffix(stripCredentialSuffix(apiName))
+	if apiName == "" || looksLikeSecretKey(apiName) || looksLikeCredentialID(apiName) {
+		return "未知接口"
+	}
+	return apiName
+}
+
+func cleanStorageSnapshotFallbackAPIName(apiName string, detail RequestDetail) string {
+	clean := stripUpstreamChannelSuffix(stripAPIKeySuffix(apiName, detail.APIKey, detail.AuthIndex, detail.AuthID))
+	clean = strings.TrimSpace(clean)
+	if clean != "" && !looksLikeSecretKey(clean) && !looksLikeCredentialID(clean) {
+		return clean
+	}
+	if source := cleanImportedDetailSource(detail); source != "" {
+		return source
+	}
+	provider := strings.TrimSpace(detail.Provider)
+	if provider != "" && !looksLikeSecretKey(provider) && !looksLikeCredentialID(provider) {
+		return provider
+	}
+	return ""
+}
+
+func stripUpstreamChannelSuffix(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	parts := splitBySeparators(value)
+	if len(parts) > 1 && strings.HasPrefix(strings.TrimSpace(parts[len(parts)-1]), "上游 ") {
+		return strings.Join(parts[:len(parts)-1], " · ")
+	}
+	return value
 }
 
 func (s *RequestStatistics) restoreMissingCostSeriesLocked(restoredDetails int64) {
@@ -1577,11 +2094,16 @@ func restoreSnapshotAggregatesFromAPIs(s *RequestStatistics) {
 func storageSnapshotAPIName(apiName string, apiSnapshot APISnapshot) string {
 	for _, modelSnapshot := range apiSnapshot.Models {
 		for _, detail := range modelSnapshot.Details {
-			detail.Source = cleanImportedDetailSource(detail)
-			if key := usageGroupKeyFromDetail(apiName, detail); strings.TrimSpace(key) != "" {
-				return key
-			}
+			return storageSnapshotDetailAPIName(apiName, detail)
 		}
+	}
+	return apiName
+}
+
+func storageSnapshotDetailAPIName(apiName string, detail RequestDetail) string {
+	detail.Source = cleanImportedDetailSource(detail)
+	if key := usageGroupKeyFromDetail(apiName, detail); strings.TrimSpace(key) != "" {
+		return key
 	}
 	return apiName
 }
@@ -1973,17 +2495,16 @@ func (s *RequestStatistics) replayStorageLocked(path string) error {
 			invalidLines++
 			continue
 		}
-		modelName := normalizeModelName(persisted.Model)
 		detail := persisted.Detail
-		if detail.Model == "" {
-			detail.Model = modelName
-		}
+		modelName := normalizeDetailModelName(persisted.Model, detail.Model)
+		detail.Model = modelName
 		if detail.Timestamp.IsZero() {
 			detail.Timestamp = now
 		}
 		detail.Tokens.TotalTokens = detailTotalTokens(detail.Tokens)
 		detail.Source = cleanImportedDetailSource(detail)
 		apiName = usageGroupKeyFromDetail(apiName, detail)
+		detail = normalizeStoredClientAPIIdentity(detail)
 		key := dedupKey(apiName, modelName, detail)
 		if _, ok := existing[key]; ok {
 			continue
@@ -2001,8 +2522,8 @@ func (s *RequestStatistics) replayStorageLocked(path string) error {
 	return nil
 }
 
-func (s *RequestStatistics) detailKeysLocked() map[string]struct{} {
-	keys := make(map[string]struct{})
+func (s *RequestStatistics) detailKeysLocked() map[requestDedupKey]struct{} {
+	keys := make(map[requestDedupKey]struct{}, nonNegativeIntFromInt64(s.countDetailsLocked()))
 	for apiName, apiSt := range s.apis {
 		if apiSt == nil {
 			continue
@@ -3397,7 +3918,7 @@ func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, per
 		cutoff = now.Add(-s.retention)
 	}
 
-	seen := make(map[string]struct{})
+	seen := make(map[requestDedupKey]struct{}, nonNegativeIntFromInt64(s.countDetailsLocked()+snapshotImportDetailCapacity(snapshot, cutoff, now)))
 	for apiName, apiSt := range s.apis {
 		if apiSt == nil {
 			continue
@@ -3421,10 +3942,7 @@ func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, per
 			modelName = normalizeModelName(modelName)
 
 			for _, detail := range modelSnapshot.Details {
-				importModelName := normalizeModelName(detail.Model)
-				if importModelName == "unknown" {
-					importModelName = modelName
-				}
+				importModelName := normalizeDetailModelName(modelName, detail.Model)
 				detail.Model = importModelName
 				detail.Tokens.TotalTokens = detailTotalTokens(detail.Tokens)
 				if detail.Timestamp.IsZero() {
@@ -3436,14 +3954,19 @@ func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, per
 				if detail.TTFTMs < 0 {
 					detail.TTFTMs = 0
 				}
+				detail.Source = cleanImportedDetailSource(detail)
+				importAPIName := usageGroupKeyFromDetail(apiName, detail)
+				if persist {
+					detail = normalizeImportedClientAPIIdentity(detail)
+				} else {
+					detail = normalizeStoredClientAPIIdentity(detail)
+				}
 
 				if !cutoff.IsZero() && !detail.Timestamp.IsZero() && detail.Timestamp.Before(cutoff) {
 					result.IgnoredByRetention++
 					continue
 				}
 
-				detail.Source = cleanImportedDetailSource(detail)
-				importAPIName := usageGroupKeyFromDetail(apiName, detail)
 				key := dedupKey(importAPIName, importModelName, detail)
 				if _, exists := seen[key]; exists {
 					result.Skipped++
@@ -3451,7 +3974,7 @@ func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, per
 				}
 				seen[key] = struct{}{}
 
-				if s.recordImported(importAPIName, importModelName, detail, now) {
+				if s.recordImported(importAPIName, importModelName, detail, key, now) {
 					if persist && s.storageEnabled {
 						persisted = append(persisted, persistedDetail{API: importAPIName, Model: importModelName, Detail: detail})
 					}
@@ -3466,8 +3989,33 @@ func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, per
 	return result, persisted
 }
 
-func (s *RequestStatistics) recordImported(apiName, modelName string, detail RequestDetail, now time.Time) bool {
-	return s.recordDetailLocked(apiName, modelName, detail, dedupKey(apiName, modelName, detail), now, false)
+func (s *RequestStatistics) recordImported(apiName, modelName string, detail RequestDetail, dedup requestDedupKey, now time.Time) bool {
+	return s.recordDetailLocked(apiName, modelName, detail, dedup, now, false)
+}
+
+func snapshotImportDetailCapacity(snapshot StatisticsSnapshot, cutoff time.Time, now time.Time) int64 {
+	var count int64
+	for apiName, apiSnapshot := range snapshot.APIs {
+		if strings.TrimSpace(apiName) == "" {
+			continue
+		}
+		for _, modelSnapshot := range apiSnapshot.Models {
+			if cutoff.IsZero() {
+				count += int64(len(modelSnapshot.Details))
+				continue
+			}
+			for _, detail := range modelSnapshot.Details {
+				timestamp := detail.Timestamp
+				if timestamp.IsZero() {
+					timestamp = now
+				}
+				if !timestamp.Before(cutoff) {
+					count++
+				}
+			}
+		}
+	}
+	return count
 }
 
 func usageDetailTotalTokens(detail UsageDetail) int64 {
@@ -3665,10 +4213,10 @@ func (s *RequestStatistics) rebuildSeenLocked(now time.Time) {
 		return
 	}
 	if s.dedupWindow <= 0 {
-		s.seen = make(map[string]time.Time)
+		s.seen = make(map[requestDedupKey]time.Time)
 		return
 	}
-	s.seen = make(map[string]time.Time)
+	s.seen = make(map[requestDedupKey]time.Time)
 	cutoff := now.Add(-s.dedupWindow)
 	for apiName, apiSt := range s.apis {
 		for modelName, modelSt := range apiSt.Models {
@@ -3686,24 +4234,32 @@ func (s *RequestStatistics) rebuildSeenLocked(now time.Time) {
 	}
 }
 
-func dedupKey(apiName, modelName string, detail RequestDetail) string {
-	timestamp := detail.Timestamp.UTC().Format(time.RFC3339Nano)
+func dedupKey(apiName, modelName string, detail RequestDetail) requestDedupKey {
 	tokens := detail.Tokens
-	return fmt.Sprintf(
-		"%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d|%d",
-		apiName,
-		modelName,
-		timestamp,
-		detail.Source,
-		detail.AuthIndex,
-		detail.Failed,
-		tokens.InputTokens,
-		tokens.OutputTokens,
-		tokens.ReasoningTokens,
-		tokens.CachedTokens,
-		tokens.CacheTokens,
-		tokens.TotalTokens,
-	)
+	key := requestDedupKey{
+		apiName:      apiName,
+		modelName:    modelName,
+		timestamp:    detail.Timestamp.UTC().Round(0),
+		source:       detail.Source,
+		authIndex:    detail.AuthIndex,
+		failure:      detail.Failure,
+		failed:       detail.Failed,
+		latencyMs:    detail.LatencyMs,
+		ttftMs:       detail.TTFTMs,
+		statusCode:   detail.StatusCode,
+		inputTokens:  tokens.InputTokens,
+		outputTokens: tokens.OutputTokens,
+		reasoning:    tokens.ReasoningTokens,
+		cachedTokens: tokens.CachedTokens,
+		cacheTokens:  tokens.CacheTokens,
+		totalTokens:  tokens.TotalTokens,
+	}
+	if hash := strings.TrimSpace(detail.APIKeyHash); hash != "" {
+		key.clientAPIHash = hash
+	} else if apiKey := strings.TrimSpace(detail.APIKey); apiKey != "" {
+		key.clientAPIKey = apiKey
+	}
+	return key
 }
 
 // ============================================================================
@@ -3712,12 +4268,18 @@ func dedupKey(apiName, modelName string, detail RequestDetail) string {
 
 // SummaryWithoutDetails computes a lightweight dashboard summary without detail arrays.
 func (s *RequestStatistics) SummaryWithoutDetails() DashboardSummary {
+	return s.SummaryWithoutDetailsAt(time.Now())
+}
+
+func (s *RequestStatistics) SummaryWithoutDetailsAt(now time.Time) DashboardSummary {
 	if s == nil {
 		return DashboardSummary{}
 	}
 
 	startedAt := time.Now()
-	now := startedAt
+	if now.IsZero() {
+		now = startedAt
+	}
 	healthWindow := summaryHealthWindow(now)
 
 	s.mu.Lock()
@@ -3726,7 +4288,7 @@ func (s *RequestStatistics) SummaryWithoutDetails() DashboardSummary {
 	if s.summaryCacheValid && s.summaryCacheVersion == s.summaryVersion && s.summaryCacheWindow.Equal(healthWindow) {
 		s.summaryCacheHits++
 		s.lastSummaryDuration = time.Since(startedAt)
-		return cloneDashboardSummaryWithGeneratedAt(s.summaryCache, now)
+		return cloneDashboardSummary(s.summaryCache)
 	}
 
 	s.summaryCacheMisses++
@@ -3742,19 +4304,25 @@ func (s *RequestStatistics) SummaryWithoutDetails() DashboardSummary {
 // SummaryWithoutDetailsForRange computes a lightweight dashboard summary scoped to
 // the given time range. "all" or empty rangeKey delegates to the fast pre-aggregated path.
 func (s *RequestStatistics) SummaryWithoutDetailsForRange(rangeKey string) DashboardSummary {
+	return s.SummaryWithoutDetailsForRangeAt(rangeKey, time.Now())
+}
+
+func (s *RequestStatistics) SummaryWithoutDetailsForRangeAt(rangeKey string, now time.Time) DashboardSummary {
 	if s == nil {
 		return DashboardSummary{}
 	}
 	if rangeKey == "" || rangeKey == "all" {
-		return s.SummaryWithoutDetails()
+		return s.SummaryWithoutDetailsAt(now)
 	}
 
 	startedAt := time.Now()
-	now := startedAt
+	if now.IsZero() {
+		now = startedAt
+	}
 	healthWindow := summaryHealthWindow(now)
 	cutoff := dashboardRangeCutoff(rangeKey, now)
 	if cutoff.IsZero() {
-		return s.SummaryWithoutDetails()
+		return s.SummaryWithoutDetailsAt(now)
 	}
 
 	s.mu.Lock()
@@ -3770,7 +4338,7 @@ func (s *RequestStatistics) SummaryWithoutDetailsForRange(rangeKey string) Dashb
 		if window, hasWindow := s.summaryRangeCacheWindow[cacheKey]; hasWindow && window.Equal(healthWindow) {
 			s.summaryCacheHits++
 			s.lastSummaryDuration = time.Since(startedAt)
-			return cloneDashboardSummaryWithGeneratedAt(cached, now)
+			return cloneDashboardSummary(cached)
 		}
 	}
 
@@ -3811,13 +4379,6 @@ func (s *RequestStatistics) pruneSummaryRangeCacheLocked(keepKey string) {
 
 func summaryHealthWindow(now time.Time) time.Time {
 	return now.UTC().Truncate(dashboardHealthStep).Add(dashboardHealthStep)
-}
-
-func cloneDashboardSummaryWithGeneratedAt(summary DashboardSummary, now time.Time) DashboardSummary {
-	cloned := cloneDashboardSummary(summary)
-	cloned.GeneratedAt = now.UTC().Format(time.RFC3339)
-	cloned.Meta.CurrentHour = now.Hour()
-	return cloned
 }
 
 func cloneDashboardSummary(summary DashboardSummary) DashboardSummary {
@@ -4555,15 +5116,55 @@ func clientAPIGroupLabel(detail RequestDetail) string {
 }
 
 func clientAPIGroupKey(detail RequestDetail) string {
-	label := strings.TrimSpace(detail.APIKey)
-	if label != "" {
-		return "api_key:" + label
-	}
 	hash := strings.TrimSpace(detail.APIKeyHash)
 	if hash != "" {
 		return "api_key_hash:" + hash
 	}
+	label := strings.TrimSpace(detail.APIKey)
+	if label != "" {
+		return "api_key:" + label
+	}
 	return "(unknown)"
+}
+
+func normalizeImportedClientAPIIdentity(detail RequestDetail) RequestDetail {
+	label := strings.TrimSpace(detail.APIKey)
+	hash := strings.TrimSpace(detail.APIKeyHash)
+	alreadyMasked := label != "" && strings.Contains(label, redactedMarker)
+	if label != "" && !alreadyMasked {
+		hash = hashAPIKey(label)
+		label = maskAPIKey(label)
+	}
+	// Imported exports may carry hashes generated with a different instance's
+	// salt. For already-masked labels, keep the documented cross-instance merge
+	// behavior by grouping on the masked display value instead.
+	if alreadyMasked {
+		hash = ""
+	}
+	detail.APIKey = label
+	detail.APIKeyHash = hash
+	return detail
+}
+
+func normalizeStoredClientAPIIdentity(detail RequestDetail) RequestDetail {
+	label := strings.TrimSpace(detail.APIKey)
+	if label == "" {
+		detail.APIKey = ""
+		detail.APIKeyHash = strings.TrimSpace(detail.APIKeyHash)
+		return detail
+	}
+	if strings.Contains(label, redactedMarker) {
+		hash := strings.TrimSpace(detail.APIKeyHash)
+		if !isStoredAPIKeyHashShape(hash) {
+			hash = ""
+		}
+		detail.APIKey = label
+		detail.APIKeyHash = hash
+		return detail
+	}
+	detail.APIKey = maskAPIKey(label)
+	detail.APIKeyHash = hashAPIKey(label)
+	return detail
 }
 
 func dashboardRangeCutoff(rangeKey string, now time.Time) time.Time {
@@ -4651,7 +5252,7 @@ func appendBoundedDashboardEventHeap(events *dashboardEventHeap, candidate dashb
 func dashboardEventCacheKeyFor(params EventsQuery, now time.Time) dashboardEventCacheKey {
 	var timeBucket int64
 	if params.Range != "" && params.Range != "all" {
-		timeBucket = now.UTC().Unix()
+		timeBucket = summaryRangeCacheBucket(now).Unix()
 	}
 	return dashboardEventCacheKey{
 		limit:      params.Limit,
@@ -4717,9 +5318,9 @@ func (s *RequestStatistics) cacheDashboardEventsLocked(key dashboardEventCacheKe
 	}
 }
 
-func (s *RequestStatistics) dashboardEventIndexLocked(api string) []dashboardEventDetail {
+func (s *RequestStatistics) refreshDashboardEventIndexesLocked() {
 	if s == nil {
-		return nil
+		return
 	}
 	if s.eventIndexVersion != s.summaryVersion {
 		s.eventIndexVersion = s.summaryVersion
@@ -4729,6 +5330,13 @@ func (s *RequestStatistics) dashboardEventIndexLocked(api string) []dashboardEve
 		s.eventSourceIndex = nil
 		s.eventAuthIndex = nil
 	}
+}
+
+func (s *RequestStatistics) dashboardEventIndexLocked(api string) []dashboardEventDetail {
+	if s == nil {
+		return nil
+	}
+	s.refreshDashboardEventIndexesLocked()
 	if api != "" {
 		if s.eventAPIIndex == nil {
 			s.eventAPIIndex = make(map[string][]dashboardEventDetail)
@@ -4741,7 +5349,7 @@ func (s *RequestStatistics) dashboardEventIndexLocked(api string) []dashboardEve
 		return events
 	}
 	if s.eventIndex == nil {
-		var events []dashboardEventDetail
+		events := make([]dashboardEventDetail, 0, nonNegativeIntFromInt64(s.countDetailsLocked()))
 		for apiName, apiSt := range s.apis {
 			events = appendDashboardEventIndexForAPI(events, apiName, apiSt)
 		}
@@ -4751,6 +5359,34 @@ func (s *RequestStatistics) dashboardEventIndexLocked(api string) []dashboardEve
 		s.eventIndex = events
 	}
 	return s.eventIndex
+}
+
+func (s *RequestStatistics) dashboardEventIndexEntriesLocked() int {
+	if s == nil {
+		return 0
+	}
+	entries := len(s.eventIndex)
+	for _, events := range s.eventAPIIndex {
+		if len(events) > entries {
+			entries = len(events)
+		}
+	}
+	for _, events := range s.eventModelIndex {
+		if len(events) > entries {
+			entries = len(events)
+		}
+	}
+	for _, events := range s.eventSourceIndex {
+		if len(events) > entries {
+			entries = len(events)
+		}
+	}
+	for _, events := range s.eventAuthIndex {
+		if len(events) > entries {
+			entries = len(events)
+		}
+	}
+	return entries
 }
 
 func (s *RequestStatistics) dashboardEventQueryIndexLocked(params EventsQuery) []dashboardEventDetail {
@@ -4776,19 +5412,14 @@ func (s *RequestStatistics) dashboardEventModelIndexLocked(model string) []dashb
 	if s == nil {
 		return nil
 	}
-	index := s.dashboardEventIndexLocked("")
+	s.refreshDashboardEventIndexesLocked()
 	if s.eventModelIndex == nil {
 		s.eventModelIndex = make(map[string][]dashboardEventDetail)
 	}
 	if events, ok := s.eventModelIndex[model]; ok {
 		return events
 	}
-	events := make([]dashboardEventDetail, 0)
-	for _, event := range index {
-		if dashboardEventModelKey(event) == model {
-			events = append(events, event)
-		}
-	}
+	events := buildDashboardEventIndexForFilter(s.apis, dashboardEventIndexFilterModel, model)
 	s.eventModelIndex[model] = events
 	return events
 }
@@ -4797,19 +5428,14 @@ func (s *RequestStatistics) dashboardEventSourceIndexLocked(source string) []das
 	if s == nil {
 		return nil
 	}
-	index := s.dashboardEventIndexLocked("")
+	s.refreshDashboardEventIndexesLocked()
 	if s.eventSourceIndex == nil {
 		s.eventSourceIndex = make(map[string][]dashboardEventDetail)
 	}
 	if events, ok := s.eventSourceIndex[source]; ok {
 		return events
 	}
-	events := make([]dashboardEventDetail, 0)
-	for _, event := range index {
-		if dashboardEventSourceKey(event) == source {
-			events = append(events, event)
-		}
-	}
+	events := buildDashboardEventIndexForFilter(s.apis, dashboardEventIndexFilterSource, source)
 	s.eventSourceIndex[source] = events
 	return events
 }
@@ -4818,49 +5444,143 @@ func (s *RequestStatistics) dashboardEventAuthIndexLocked(authIndex string) []da
 	if s == nil {
 		return nil
 	}
-	index := s.dashboardEventIndexLocked("")
+	s.refreshDashboardEventIndexesLocked()
 	if s.eventAuthIndex == nil {
 		s.eventAuthIndex = make(map[string][]dashboardEventDetail)
 	}
 	if events, ok := s.eventAuthIndex[authIndex]; ok {
 		return events
 	}
-	events := make([]dashboardEventDetail, 0)
-	for _, event := range index {
-		if dashboardEventAuthKey(event) == authIndex {
-			events = append(events, event)
-		}
-	}
+	events := buildDashboardEventIndexForFilter(s.apis, dashboardEventIndexFilterAuth, authIndex)
 	s.eventAuthIndex[authIndex] = events
 	return events
 }
 
 func dashboardEventModelKey(event dashboardEventDetail) string {
-	d := event.requestDetail()
-	if d.Model != "" {
-		return d.Model
+	return dashboardEventDetailModelKey(event.detail, event.modelName)
+}
+
+func dashboardEventDetailModelKey(detail *RequestDetail, modelName string) string {
+	if detail != nil && detail.Model != "" {
+		return detail.Model
 	}
-	return event.modelName
+	return modelName
 }
 
 func dashboardEventSourceKey(event dashboardEventDetail) string {
-	source := event.requestDetail().Source
-	if source == "" {
+	return dashboardEventDetailSourceKey(event.detail)
+}
+
+func dashboardEventDetailSourceKey(detail *RequestDetail) string {
+	if detail == nil || detail.Source == "" {
 		return "未知来源"
 	}
-	return source
+	return detail.Source
 }
 
 func dashboardEventAuthKey(event dashboardEventDetail) string {
-	return event.requestDetail().AuthIndex
+	return dashboardEventDetailAuthKey(event.detail)
 }
 
-func buildDashboardEventIndexForAPI(apiName string, apiSt *apiStats) []dashboardEventDetail {
-	events := appendDashboardEventIndexForAPI(nil, apiName, apiSt)
+func dashboardEventDetailAuthKey(detail *RequestDetail) string {
+	if detail == nil {
+		return ""
+	}
+	return detail.AuthIndex
+}
+
+type dashboardEventIndexFilter int
+
+const (
+	dashboardEventIndexFilterModel dashboardEventIndexFilter = iota + 1
+	dashboardEventIndexFilterSource
+	dashboardEventIndexFilterAuth
+)
+
+func buildDashboardEventIndexForFilter(apis map[string]*apiStats, filter dashboardEventIndexFilter, value string) []dashboardEventDetail {
+	events := make([]dashboardEventDetail, 0, countDashboardEventsForFilter(apis, filter, value))
+	for apiName, apiSt := range apis {
+		events = appendDashboardEventIndexForFilter(events, apiName, apiSt, filter, value)
+	}
 	sort.Slice(events, func(i, j int) bool {
 		return dashboardEventBefore(events[i], events[j])
 	})
 	return events
+}
+
+func countDashboardEventsForFilter(apis map[string]*apiStats, filter dashboardEventIndexFilter, value string) int {
+	var count int
+	for _, apiSt := range apis {
+		if apiSt == nil {
+			continue
+		}
+		for modelName, modelSt := range apiSt.Models {
+			if modelSt == nil {
+				continue
+			}
+			for i := range modelSt.Details {
+				if dashboardEventIndexFilterMatches(&modelSt.Details[i], modelName, filter, value) {
+					count++
+				}
+			}
+		}
+	}
+	return count
+}
+
+func appendDashboardEventIndexForFilter(events []dashboardEventDetail, apiName string, apiSt *apiStats, filter dashboardEventIndexFilter, value string) []dashboardEventDetail {
+	if apiSt == nil {
+		return events
+	}
+	sequence := int64(len(events))
+	for modelName, modelSt := range apiSt.Models {
+		if modelSt == nil {
+			continue
+		}
+		for i := range modelSt.Details {
+			if dashboardEventIndexFilterMatches(&modelSt.Details[i], modelName, filter, value) {
+				events = append(events, dashboardEventDetail{detail: &modelSt.Details[i], sortKey: apiName, modelName: modelName, sequence: sequence})
+			}
+			sequence++
+		}
+	}
+	return events
+}
+
+func dashboardEventIndexFilterMatches(detail *RequestDetail, modelName string, filter dashboardEventIndexFilter, value string) bool {
+	switch filter {
+	case dashboardEventIndexFilterModel:
+		return dashboardEventDetailModelKey(detail, modelName) == value
+	case dashboardEventIndexFilterSource:
+		return dashboardEventDetailSourceKey(detail) == value
+	case dashboardEventIndexFilterAuth:
+		return dashboardEventDetailAuthKey(detail) == value
+	default:
+		return false
+	}
+}
+
+func buildDashboardEventIndexForAPI(apiName string, apiSt *apiStats) []dashboardEventDetail {
+	events := make([]dashboardEventDetail, 0, countDetailsForAPI(apiSt))
+	events = appendDashboardEventIndexForAPI(events, apiName, apiSt)
+	sort.Slice(events, func(i, j int) bool {
+		return dashboardEventBefore(events[i], events[j])
+	})
+	return events
+}
+
+func countDetailsForAPI(apiSt *apiStats) int {
+	if apiSt == nil {
+		return 0
+	}
+	var count int
+	for _, modelSt := range apiSt.Models {
+		if modelSt == nil {
+			continue
+		}
+		count += len(modelSt.Details)
+	}
+	return count
 }
 
 func appendDashboardEventIndexForAPI(events []dashboardEventDetail, apiName string, apiSt *apiStats) []dashboardEventDetail {
@@ -4926,18 +5646,26 @@ func dashboardEventMatches(d RequestDetail, params EventsQuery, cutoff time.Time
 
 // QueryEvents returns paginated, filtered event details.
 func (s *RequestStatistics) QueryEvents(params EventsQuery) EventsResult {
-	return s.queryEvents(params, true, 0)
+	return s.QueryEventsAt(params, time.Now())
+}
+
+func (s *RequestStatistics) QueryEventsAt(params EventsQuery, now time.Time) EventsResult {
+	return s.queryEventsAt(params, true, 0, now)
 }
 
 // QueryAllEvents returns every matching event for backend-generated exports.
 func (s *RequestStatistics) QueryAllEvents(params EventsQuery) EventsResult {
-	return s.queryEvents(params, false, 0)
+	return s.queryEventsAt(params, false, 0, time.Now())
 }
 
 // QueryExportEvents returns matching events up to maxRecords while still
 // counting the full match total for capped backend-generated exports.
 func (s *RequestStatistics) QueryExportEvents(params EventsQuery, maxRecords int) EventsResult {
-	return s.queryEvents(params, false, maxRecords)
+	return s.QueryExportEventsAt(params, maxRecords, time.Now())
+}
+
+func (s *RequestStatistics) QueryExportEventsAt(params EventsQuery, maxRecords int, now time.Time) EventsResult {
+	return s.queryEventsAt(params, false, maxRecords, now)
 }
 
 // QueryExportEventsPage returns one page of exportable events while still
@@ -4964,7 +5692,7 @@ func (s *RequestStatistics) QueryExportEventsPage(params EventsQuery, offset int
 
 	cutoff := dashboardRangeCutoff(params.Range, snapshotAt)
 	index := s.dashboardEventQueryIndexLocked(params)
-	events := make([]RequestDetail, 0, pageLimit)
+	events := make([]RequestDetail, 0, exportPageEventCapacity(pageLimit, offset, maxRecords))
 	total := 0
 	for _, dm := range index {
 		d := dm.requestDetail()
@@ -4994,10 +5722,29 @@ func (s *RequestStatistics) QueryExportEventsPage(params EventsQuery, offset int
 		Offset:      offset,
 		Truncated:   maxRecords > 0 && total > maxRecords,
 		GeneratedAt: snapshotAt.UTC().Format(time.RFC3339),
+
+		dashboardVersion: s.summaryVersion,
 	}
 	s.lastEventsQueryDuration = time.Since(startedAt)
 	s.lastEventsQueryTotal = total
 	return result
+}
+
+func exportPageEventCapacity(pageLimit int, offset int, maxRecords int) int {
+	if pageLimit <= 0 {
+		return 0
+	}
+	if maxRecords <= 0 {
+		return pageLimit
+	}
+	remaining := maxRecords - offset
+	if remaining <= 0 {
+		return 0
+	}
+	if remaining < pageLimit {
+		return remaining
+	}
+	return pageLimit
 }
 
 func normalizeEventsQuery(params EventsQuery, paginate bool) EventsQuery {
@@ -5015,30 +5762,34 @@ func normalizeEventsQuery(params EventsQuery, paginate bool) EventsQuery {
 	return params
 }
 
-func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool, exportLimit int) EventsResult {
+func (s *RequestStatistics) queryEventsAt(params EventsQuery, paginate bool, exportLimit int, now time.Time) EventsResult {
 	if s == nil {
 		return EventsResult{}
 	}
 	startedAt := time.Now()
+	if now.IsZero() {
+		now = startedAt
+	}
 
 	params = normalizeEventsQuery(params, paginate)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	finish := func(result EventsResult) EventsResult {
+		result.dashboardVersion = s.summaryVersion
 		s.lastEventsQueryDuration = time.Since(startedAt)
 		s.lastEventsQueryTotal = result.Total
 		return result
 	}
 
-	now := time.Now()
 	cutoff := dashboardRangeCutoff(params.Range, now)
+	generatedAt := s.dashboardQueryGeneratedAtLocked(params.Range, now).UTC().Format(time.RFC3339)
 	var cacheKey dashboardEventCacheKey
 	if paginate {
 		cacheKey = dashboardEventCacheKeyFor(params, now)
 		if cached, ok := s.eventQueryCache[cacheKey]; ok {
 			s.eventCacheHits++
-			return finish(cloneEventsResult(cached, now))
+			return finish(cloneEventsResult(cached, time.Time{}))
 		}
 		s.eventCacheMisses++
 	}
@@ -5061,7 +5812,7 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool, expor
 				Limit:       limit,
 				Offset:      0,
 				Truncated:   truncated,
-				GeneratedAt: now.UTC().Format(time.RFC3339),
+				GeneratedAt: generatedAt,
 			})
 		}
 		if params.Offset >= total {
@@ -5070,7 +5821,7 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool, expor
 				Total:       total,
 				Limit:       params.Limit,
 				Offset:      params.Offset,
-				GeneratedAt: now.UTC().Format(time.RFC3339),
+				GeneratedAt: generatedAt,
 			}
 			s.cacheDashboardEventsLocked(cacheKey, result)
 			return finish(result)
@@ -5084,13 +5835,17 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool, expor
 			Total:       total,
 			Limit:       params.Limit,
 			Offset:      params.Offset,
-			GeneratedAt: now.UTC().Format(time.RFC3339),
+			GeneratedAt: generatedAt,
 		}
 		s.cacheDashboardEventsLocked(cacheKey, result)
 		return finish(result)
 	}
 
-	var events []RequestDetail
+	eventsCap := 0
+	if paginate {
+		eventsCap = params.Limit
+	}
+	events := make([]RequestDetail, 0, eventsCap)
 	total := 0
 	for _, dm := range index {
 		d := dm.requestDetail()
@@ -5120,7 +5875,7 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool, expor
 			Limit:       exportResultLimit(total, exportLimit),
 			Offset:      0,
 			Truncated:   exportLimit > 0 && total > exportLimit,
-			GeneratedAt: now.UTC().Format(time.RFC3339),
+			GeneratedAt: generatedAt,
 		})
 	}
 
@@ -5130,7 +5885,7 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool, expor
 			Total:       total,
 			Limit:       params.Limit,
 			Offset:      params.Offset,
-			GeneratedAt: now.UTC().Format(time.RFC3339),
+			GeneratedAt: generatedAt,
 		}
 		s.cacheDashboardEventsLocked(cacheKey, result)
 		return finish(result)
@@ -5141,7 +5896,7 @@ func (s *RequestStatistics) queryEvents(params EventsQuery, paginate bool, expor
 		Total:       total,
 		Limit:       params.Limit,
 		Offset:      params.Offset,
-		GeneratedAt: now.UTC().Format(time.RFC3339),
+		GeneratedAt: generatedAt,
 	}
 	s.cacheDashboardEventsLocked(cacheKey, result)
 	return finish(result)
@@ -5154,30 +5909,44 @@ func exportResultLimit(total int, exportLimit int) int {
 	return total
 }
 
+func (s *RequestStatistics) dashboardQueryGeneratedAtLocked(rangeKey string, now time.Time) time.Time {
+	if rangeKey != "" && rangeKey != "all" {
+		return summaryRangeCacheBucket(now)
+	}
+	if s != nil && !s.lastRecordedAt.IsZero() {
+		return s.lastRecordedAt.UTC().Truncate(time.Second)
+	}
+	return time.Unix(0, 0).UTC()
+}
+
 // QueryAPIDetail returns range-scoped aggregates and recent events for one API
 // without making the browser page through every matching event.
 func (s *RequestStatistics) QueryAPIDetail(api string, rangeKey string, recentLimit int, errorLimit int) APIDetailResponse {
+	return s.QueryAPIDetailAt(api, rangeKey, recentLimit, errorLimit, time.Now())
+}
+
+func (s *RequestStatistics) QueryAPIDetailAt(api string, rangeKey string, recentLimit int, errorLimit int, now time.Time) APIDetailResponse {
 	startedAt := time.Now()
+	if now.IsZero() {
+		now = startedAt
+	}
 	result := APIDetailResponse{
 		API:         api,
-		GeneratedAt: startedAt.UTC().Format(time.RFC3339),
+		GeneratedAt: now.UTC().Format(time.RFC3339),
 	}
 	if s == nil {
 		return result
 	}
-	if recentLimit <= 0 || recentLimit > 500 {
-		recentLimit = 120
-	}
-	if errorLimit <= 0 || errorLimit > 100 {
-		errorLimit = 20
-	}
+	recentLimit, errorLimit = normalizeDashboardAPIDetailLimits(recentLimit, errorLimit)
 
-	now := time.Now()
 	cutoff := dashboardRangeCutoff(rangeKey, now)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	generatedAt := s.dashboardQueryGeneratedAtLocked(rangeKey, now).UTC().Format(time.RFC3339)
+	result.GeneratedAt = generatedAt
 	finish := func(result APIDetailResponse) APIDetailResponse {
+		result.dashboardVersion = s.summaryVersion
 		s.apiDetailQueries++
 		s.lastAPIDetailDuration = time.Since(startedAt)
 		s.lastAPIDetailTotal = result.TotalEvents
@@ -5195,14 +5964,13 @@ func (s *RequestStatistics) QueryAPIDetail(api string, rangeKey string, recentLi
 
 	index := s.dashboardEventIndexLocked(api)
 	if len(index) == 0 {
-		result.GeneratedAt = now.UTC().Format(time.RFC3339)
 		return finish(result)
 	}
 
 	modelAgg := make(map[string]*ModelStat)
 	sourceAgg := make(map[string]*SourceStat)
-	errorAgg := make(map[string]*APIDetailErrorStat)
-	recentEvents := dashboardEventHeap{}
+	errorAgg := make(map[apiDetailErrorKey]*APIDetailErrorStat)
+	recentEvents := make(dashboardEventHeap, 0, recentLimit)
 	heap.Init(&recentEvents)
 	var latencySum int64
 	var latencyN int64
@@ -5292,7 +6060,7 @@ func (s *RequestStatistics) QueryAPIDetail(api string, rangeKey string, recentLi
 			if failure == "" {
 				failure = "未返回错误内容"
 			}
-			key := fmt.Sprintf("%d|%s", d.StatusCode, failure)
+			key := apiDetailErrorKey{statusCode: d.StatusCode, failure: failure}
 			es, ok := errorAgg[key]
 			if !ok {
 				es = &APIDetailErrorStat{StatusCode: d.StatusCode, Failure: failure}
@@ -5344,7 +6112,7 @@ func (s *RequestStatistics) QueryAPIDetail(api string, rangeKey string, recentLi
 	for i, dm := range recentEvents {
 		result.RecentEvents[i] = dm.requestDetail()
 	}
-	result.GeneratedAt = now.UTC().Format(time.RFC3339)
+	result.GeneratedAt = generatedAt
 	return finish(result)
 }
 
@@ -5689,7 +6457,7 @@ func (s *RequestStatistics) RuntimeStatus() RuntimeStatus {
 		LastEventsQueryDurationMs:  durationMilliseconds(s.lastEventsQueryDuration),
 		LastEventsQueryTotal:       s.lastEventsQueryTotal,
 		EventIndexVersion:          s.eventIndexVersion,
-		EventIndexEntries:          len(s.eventIndex),
+		EventIndexEntries:          s.dashboardEventIndexEntriesLocked(),
 		APIDetailQueries:           s.apiDetailQueries,
 		LastAPIDetailDurationMs:    durationMilliseconds(s.lastAPIDetailDuration),
 		LastAPIDetailTotalEvents:   s.lastAPIDetailTotal,

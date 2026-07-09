@@ -244,9 +244,10 @@ test('clientApiLabel extracts API key label', () => {
   assert.strictEqual(helpers.clientApiLabel({}), '未知 API');
 });
 
-test('clientApiGroupKey prefers masked API key over imported hash', () => {
-  assert.strictEqual(helpers.clientApiGroupKey({ api_key: 'sk******xx', api_key_hash: 'hash-a' }), 'api_key:sk******xx');
-  assert.strictEqual(helpers.clientApiGroupKey({ api_key: 'sk******xx', api_key_hash: 'hash-b' }), 'api_key:sk******xx');
+test('clientApiGroupKey prefers hash and falls back to masked API key', () => {
+  assert.strictEqual(helpers.clientApiGroupKey({ api_key: 'sk******xx', api_key_hash: 'hash-a' }), 'api_key_hash:hash-a');
+  assert.strictEqual(helpers.clientApiGroupKey({ api_key: 'sk******xx', api_key_hash: 'hash-b' }), 'api_key_hash:hash-b');
+  assert.strictEqual(helpers.clientApiGroupKey({ api_key: 'sk******xx' }), 'api_key:sk******xx');
   assert.strictEqual(helpers.clientApiGroupKey({ api_key_hash: 'hash-only' }), 'api_key_hash:hash-only');
   assert.strictEqual(helpers.clientApiGroupKey({}), '(unknown)');
 });

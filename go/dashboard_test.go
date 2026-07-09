@@ -265,6 +265,49 @@ func TestDashboardSummaryAggregatesClientAPIKeyStats(t *testing.T) {
 	}
 }
 
+func TestDashboardSummarySeparatesMaskedClientAPIKeyCollisionsByHash(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0})
+	base := time.Now().Add(-time.Hour)
+
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-4.1",
+		APIKey:      "sk-client-alpha-0000xx",
+		RequestedAt: base,
+		Detail:      UsageDetail{InputTokens: 100, OutputTokens: 20, TotalTokens: 120},
+	})
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-4.1",
+		APIKey:      "sk-client-beta-1111xx",
+		RequestedAt: base.Add(time.Minute),
+		Detail:      UsageDetail{InputTokens: 50, OutputTokens: 10, TotalTokens: 60},
+	})
+
+	summary := stats.SummaryWithoutDetails()
+	if len(summary.ClientAPIStats) != 2 {
+		t.Fatalf("client api stats len = %d, want 2 separated masked collisions: %#v", len(summary.ClientAPIStats), summary.ClientAPIStats)
+	}
+	labels := map[string]int{}
+	hashes := map[string]bool{}
+	var totalRequests int64
+	for _, stat := range summary.ClientAPIStats {
+		labels[stat.APIKey]++
+		if stat.APIKeyHash == "" {
+			t.Fatalf("client api stat missing hash: %#v", stat)
+		}
+		hashes[stat.APIKeyHash] = true
+		totalRequests += stat.TotalRequests
+	}
+	if labels["sk******xx"] != 2 {
+		t.Fatalf("masked labels = %#v, want two identical display labels", labels)
+	}
+	if len(hashes) != 2 || totalRequests != 2 {
+		t.Fatalf("hashes=%#v total_requests=%d, want two distinct hashes and two requests", hashes, totalRequests)
+	}
+}
+
 func TestDashboardSummaryMergesImportedClientAPIStatsByMaskedKey(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0, RetentionDays: 0})
@@ -309,6 +352,132 @@ func TestDashboardSummaryMergesImportedClientAPIStatsByMaskedKey(t *testing.T) {
 	}
 	if len(got.Models) != 1 || got.Models[0].TotalRequests != 2 {
 		t.Fatalf("client api model stats = %#v, want merged model totals", got.Models)
+	}
+}
+
+func TestDashboardSummarySeparatesImportedRawClientAPIKeyCollisionsByHash(t *testing.T) {
+	previousSalt := currentAPIKeySalt()
+	setAPIKeySalt("import-raw-client-api-test-salt")
+	t.Cleanup(func() { setAPIKeySalt(previousSalt) })
+
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0, RetentionDays: 0})
+	when := time.Now().Add(-time.Hour)
+	firstKey := "sk-client-alpha-0000xx"
+	secondKey := "sk-client-beta-1111xx"
+	result := stats.MergeSnapshot(StatisticsSnapshot{
+		APIs: map[string]APISnapshot{
+			"openai": {
+				Models: map[string]ModelSnapshot{
+					"gpt-4.1": {
+						Details: []RequestDetail{
+							{
+								Model:      "gpt-4.1",
+								Timestamp:  when,
+								APIKey:     firstKey,
+								APIKeyHash: "external-hash-a",
+								Tokens:     TokenStats{InputTokens: 100, OutputTokens: 20, TotalTokens: 120},
+							},
+							{
+								Model:      "gpt-4.1",
+								Timestamp:  when.Add(time.Minute),
+								APIKey:     secondKey,
+								APIKeyHash: "external-hash-b",
+								Tokens:     TokenStats{InputTokens: 30, OutputTokens: 10, TotalTokens: 40},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	if result.Added != 2 {
+		t.Fatalf("merge result = %#v, want two added records", result)
+	}
+
+	summary := stats.SummaryWithoutDetails()
+	if len(summary.ClientAPIStats) != 2 {
+		t.Fatalf("client api stats len = %d, want 2: %#v", len(summary.ClientAPIStats), summary.ClientAPIStats)
+	}
+	wantHashes := map[string]bool{
+		hashAPIKey(firstKey):  true,
+		hashAPIKey(secondKey): true,
+	}
+	for _, got := range summary.ClientAPIStats {
+		if got.APIKey != "sk******xx" {
+			t.Fatalf("client api label = %q, want masked label", got.APIKey)
+		}
+		if !wantHashes[got.APIKeyHash] {
+			t.Fatalf("client api hash = %q, want current-salt hash; stat=%#v", got.APIKeyHash, got)
+		}
+	}
+}
+
+func TestMergeSnapshotMasksImportedNonStandardRawClientAPIKey(t *testing.T) {
+	previousSalt := currentAPIKeySalt()
+	setAPIKeySalt("import-non-standard-client-api-test-salt")
+	t.Cleanup(func() { setAPIKeySalt(previousSalt) })
+
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0, RetentionDays: 0})
+	rawKey := "raw-client-key"
+	result := stats.MergeSnapshot(StatisticsSnapshot{
+		APIs: map[string]APISnapshot{
+			"vendor · raw-client-key": {
+				Models: map[string]ModelSnapshot{
+					"gpt-4.1": {
+						Details: []RequestDetail{
+							{
+								Model:      "gpt-4.1",
+								Timestamp:  time.Now().Add(-time.Hour),
+								Provider:   "vendor",
+								Source:     "vendor · public · raw-client-key",
+								AuthIndex:  "public",
+								APIKey:     rawKey,
+								APIKeyHash: "external-hash",
+								Tokens:     TokenStats{InputTokens: 12, OutputTokens: 8, TotalTokens: 20},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	if result.Added != 1 {
+		t.Fatalf("merge result = %#v, want one added record", result)
+	}
+
+	snapshot := stats.Snapshot()
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatalf("marshal snapshot: %v", err)
+	}
+	if strings.Contains(string(raw), rawKey) {
+		t.Fatalf("snapshot leaked raw imported client API key: %s", raw)
+	}
+
+	var detail RequestDetail
+	for _, api := range snapshot.APIs {
+		for _, model := range api.Models {
+			if len(model.Details) > 0 {
+				detail = model.Details[0]
+			}
+		}
+	}
+	if detail.APIKey != "ra******ey" || detail.APIKeyHash != hashAPIKey(rawKey) {
+		t.Fatalf("imported detail api identity = %q/%q, want masked current-salt hash", detail.APIKey, detail.APIKeyHash)
+	}
+	if strings.Contains(detail.Source, rawKey) {
+		t.Fatalf("detail source leaked raw imported key: %q", detail.Source)
+	}
+
+	summary := stats.SummaryWithoutDetails()
+	if len(summary.ClientAPIStats) != 1 {
+		t.Fatalf("client api stats = %#v, want one stat", summary.ClientAPIStats)
+	}
+	got := summary.ClientAPIStats[0]
+	if got.APIKey != "ra******ey" || got.APIKeyHash != hashAPIKey(rawKey) || got.TotalRequests != 1 {
+		t.Fatalf("client api stat = %#v, want masked current-salt hash", got)
 	}
 }
 
@@ -420,23 +589,31 @@ func TestDashboardSummaryHasMetadata(t *testing.T) {
 	}
 }
 
-func TestCloneDashboardSummaryWithGeneratedAtRefreshesCurrentHour(t *testing.T) {
-	loc := time.FixedZone("test", 8*60*60)
-	now := time.Date(2026, 1, 3, 0, 30, 0, 0, loc)
-	summary := DashboardSummary{
+func TestSummaryCacheHitPreservesGeneratedMetadata(t *testing.T) {
+	stats := NewRequestStatistics()
+	now := time.Now()
+	if time.Until(summaryHealthWindow(now)) < 2*time.Second {
+		time.Sleep(2 * time.Second)
+		now = time.Now()
+	}
+	stats.summaryCache = DashboardSummary{
 		GeneratedAt: "2026-01-02T00:00:00Z",
 		Meta:        DashboardMeta{CurrentHour: 16},
+		Usage:       StatisticsSnapshotWithoutDetails{TotalRequests: 1},
 	}
+	stats.summaryCacheValid = true
+	stats.summaryCacheVersion = stats.summaryVersion
+	stats.summaryCacheWindow = summaryHealthWindow(now)
 
-	cloned := cloneDashboardSummaryWithGeneratedAt(summary, now)
-	if cloned.GeneratedAt != "2026-01-02T16:30:00Z" {
-		t.Fatalf("generated_at = %q, want UTC timestamp", cloned.GeneratedAt)
+	result := stats.SummaryWithoutDetails()
+	if result.GeneratedAt != "2026-01-02T00:00:00Z" {
+		t.Fatalf("generated_at = %q, want cached timestamp", result.GeneratedAt)
 	}
-	if cloned.Meta.CurrentHour != 0 {
-		t.Fatalf("current_hour = %d, want refreshed local hour 0", cloned.Meta.CurrentHour)
+	if result.Meta.CurrentHour != 16 {
+		t.Fatalf("current_hour = %d, want cached hour 16", result.Meta.CurrentHour)
 	}
-	if summary.Meta.CurrentHour != 16 {
-		t.Fatalf("source summary current_hour mutated to %d", summary.Meta.CurrentHour)
+	if result.Usage.TotalRequests != 1 || stats.summaryCacheHits != 1 || stats.summaryCacheMisses != 0 {
+		t.Fatalf("summary cache result requests=%d hits=%d misses=%d, want cached hit", result.Usage.TotalRequests, stats.summaryCacheHits, stats.summaryCacheMisses)
 	}
 }
 
@@ -542,6 +719,31 @@ func TestDashboardEventsCacheReturnsCopyAndInvalidates(t *testing.T) {
 	}
 }
 
+func TestDashboardEventsCacheHitPreservesGeneratedAt(t *testing.T) {
+	stats := NewRequestStatistics()
+	params := normalizeEventsQuery(EventsQuery{Range: "all"}, true)
+	cacheKey := dashboardEventCacheKeyFor(params, time.Now())
+	cachedGeneratedAt := "2026-01-02T03:04:05Z"
+	stats.eventQueryCache = map[dashboardEventCacheKey]EventsResult{
+		cacheKey: {
+			Events:      []RequestDetail{{Model: "gpt-4", Tokens: TokenStats{TotalTokens: 1}}},
+			Total:       1,
+			Limit:       params.Limit,
+			Offset:      params.Offset,
+			GeneratedAt: cachedGeneratedAt,
+		},
+	}
+	stats.eventQueryCacheOrder = []dashboardEventCacheKey{cacheKey}
+
+	result := stats.QueryEvents(EventsQuery{Range: "all"})
+	if result.GeneratedAt != cachedGeneratedAt {
+		t.Fatalf("cache hit generated_at = %q, want cached %q", result.GeneratedAt, cachedGeneratedAt)
+	}
+	if stats.eventCacheHits != 1 || stats.eventCacheMisses != 0 {
+		t.Fatalf("cache metrics hits/misses = %d/%d, want 1/0", stats.eventCacheHits, stats.eventCacheMisses)
+	}
+}
+
 func TestRuntimeStatusReportsDashboardMetrics(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{MaxDetailsPerModel: 200, DedupWindowMinutes: 0})
@@ -643,9 +845,17 @@ func TestDashboardEventsSecondaryIndexesBuildAndInvalidate(t *testing.T) {
 		t.Fatalf("auth-filtered total = %d, want 1", result.Total)
 	}
 
+	status := stats.RuntimeStatus()
+	if status.EventIndexEntries != 1 {
+		t.Fatalf("secondary event index entries = %d, want 1", status.EventIndexEntries)
+	}
+
 	func() {
 		stats.mu.RLock()
 		defer stats.mu.RUnlock()
+		if stats.eventIndex != nil {
+			t.Fatalf("global event index should not be built for secondary-only filters")
+		}
 		if len(stats.eventModelIndex["gpt-4"]) != 1 {
 			t.Fatalf("model index len = %d, want 1", len(stats.eventModelIndex["gpt-4"]))
 		}
@@ -829,6 +1039,11 @@ func TestDashboardEventsExportPageUsesSnapshotAndLimit(t *testing.T) {
 	if second.Events[0].Tokens.TotalTokens != 13 {
 		t.Fatalf("second export page should continue after offset: %#v", second.Events)
 	}
+
+	afterLimit := stats.QueryExportEventsPage(EventsQuery{}, 3, 2, 3, snapshotAt)
+	if afterLimit.Total != 6 || len(afterLimit.Events) != 0 || afterLimit.Limit != 3 || !afterLimit.Truncated {
+		t.Fatalf("after-limit export page = total %d len %d limit %d truncated %v, want 6/0/3/true", afterLimit.Total, len(afterLimit.Events), afterLimit.Limit, afterLimit.Truncated)
+	}
 }
 
 func TestDashboardEventsExportLimitQueryReturnsTruncationHeaders(t *testing.T) {
@@ -948,7 +1163,7 @@ func TestDashboardEventsRangeExcludesZeroTimestampEvents(t *testing.T) {
 		Provider:  "openai",
 		Timestamp: time.Time{},
 		Tokens:    TokenStats{TotalTokens: 100},
-	}, "", time.Now(), false)
+	}, requestDedupKey{}, time.Now(), false)
 	stats.mu.Unlock()
 
 	all := stats.QueryEvents(EventsQuery{Limit: 50, Range: "all"})
@@ -1099,7 +1314,7 @@ func TestDashboardAPIDetailRangeExcludesZeroTimestampEvents(t *testing.T) {
 		Provider:  "openai",
 		Timestamp: time.Time{},
 		Tokens:    TokenStats{TotalTokens: 100},
-	}, "", time.Now(), false)
+	}, requestDedupKey{}, time.Now(), false)
 	stats.mu.Unlock()
 
 	all := stats.QueryAPIDetail("openai", "all", 10, 10)
@@ -1400,10 +1615,23 @@ func TestSummaryWithoutDetailsKeepsAggregatesAfterDetailTrim(t *testing.T) {
 		if len(summary.CredentialStats) != 2 {
 			t.Fatalf("%s credential stats = %#v", label, summary.CredentialStats)
 		}
-		if len(summary.ClientAPIStats) != 1 || summary.ClientAPIStats[0].TotalRequests != 3 ||
-			summary.ClientAPIStats[0].TotalTokens != 66 || len(summary.ClientAPIStats[0].Models) != 1 ||
-			summary.ClientAPIStats[0].Models[0].TotalRequests != 3 {
+		if len(summary.ClientAPIStats) != 2 {
 			t.Fatalf("%s client api stats = %#v", label, summary.ClientAPIStats)
+		}
+		var clientRequests, clientTokens, clientModelRequests int64
+		clientRequestBuckets := map[int64]bool{}
+		for _, stat := range summary.ClientAPIStats {
+			if stat.APIKey != "sk******56" || stat.APIKeyHash == "" || len(stat.Models) != 1 {
+				t.Fatalf("%s client api stat = %#v", label, stat)
+			}
+			clientRequests += stat.TotalRequests
+			clientTokens += stat.TotalTokens
+			clientModelRequests += stat.Models[0].TotalRequests
+			clientRequestBuckets[stat.TotalRequests] = true
+		}
+		if clientRequests != 3 || clientTokens != 66 || clientModelRequests != 3 ||
+			!clientRequestBuckets[1] || !clientRequestBuckets[2] {
+			t.Fatalf("%s client api aggregate = %#v", label, summary.ClientAPIStats)
 		}
 		var healthTotal int64
 		var healthSuccess int64
@@ -1814,7 +2042,7 @@ func TestSummaryRangeExcludesZeroTimestampEvents(t *testing.T) {
 		Provider:  "openai",
 		Timestamp: time.Time{},
 		Tokens:    TokenStats{TotalTokens: 100},
-	}, "", time.Now(), false)
+	}, requestDedupKey{}, time.Now(), false)
 	stats.mu.Unlock()
 
 	fullSummary := stats.SummaryWithoutDetails()
@@ -2045,6 +2273,35 @@ func TestSummaryRangeETagUsesMinuteBucket(t *testing.T) {
 	}
 }
 
+func TestEventsRangeETagUsesMinuteBucket(t *testing.T) {
+	now := time.Date(2026, 7, 3, 10, 15, 0, 0, time.UTC)
+	params := EventsQuery{Limit: 50, Range: "24h", Model: "gpt-4"}
+	etagNow := dashboardEventsETag(params, now)
+	etagSameBucket := dashboardEventsETag(params, now.Add(30*time.Second))
+	etagNextBucket := dashboardEventsETag(params, now.Add(time.Minute))
+	etagAll := dashboardEventsETag(EventsQuery{Limit: 50, Range: "all", Model: "gpt-4"}, now.Add(time.Hour))
+
+	if etagNow != etagSameBucket {
+		t.Fatalf("range events ETag should stay stable within minute bucket: %q vs %q", etagNow, etagSameBucket)
+	}
+	if etagNow == etagNextBucket {
+		t.Fatalf("range events ETag should vary across minute buckets: %q", etagNow)
+	}
+	if etagAll != dashboardEventsETag(EventsQuery{Limit: 50, Range: "all", Model: "gpt-4"}, now) {
+		t.Fatalf("all-range events ETag should not include a time bucket")
+	}
+
+	cacheKeyNow := dashboardEventCacheKeyFor(params, now)
+	cacheKeySameBucket := dashboardEventCacheKeyFor(params, now.Add(30*time.Second))
+	cacheKeyNextBucket := dashboardEventCacheKeyFor(params, now.Add(time.Minute))
+	if cacheKeyNow != cacheKeySameBucket {
+		t.Fatalf("range events cache key should stay stable within minute bucket: %#v vs %#v", cacheKeyNow, cacheKeySameBucket)
+	}
+	if cacheKeyNow == cacheKeyNextBucket {
+		t.Fatalf("range events cache key should vary across minute buckets: %#v", cacheKeyNow)
+	}
+}
+
 func TestAPIDetailRangeETagUsesMinuteBucket(t *testing.T) {
 	now := time.Date(2026, 7, 3, 10, 15, 0, 0, time.UTC)
 	etagNow := dashboardAPIDetailETag("openai", "24h", 120, 20, now)
@@ -2060,6 +2317,130 @@ func TestAPIDetailRangeETagUsesMinuteBucket(t *testing.T) {
 	}
 	if etagAll != dashboardAPIDetailETag("openai", "all", 120, 20, now) {
 		t.Fatalf("all-range API detail ETag should not include a time bucket")
+	}
+}
+
+func TestAPIDetailETagNormalizesLimits(t *testing.T) {
+	now := time.Date(2026, 7, 3, 10, 15, 0, 0, time.UTC)
+	defaultETag := dashboardAPIDetailETag("openai", "24h", dashboardAPIDetailDefaultRecentLimit, dashboardAPIDetailDefaultErrorLimit, now)
+	if got := dashboardAPIDetailETag("openai", "24h", 0, -1, now); got != defaultETag {
+		t.Fatalf("non-positive limits ETag = %q, want default ETag %q", got, defaultETag)
+	}
+	if got := dashboardAPIDetailETag("openai", "24h", dashboardAPIDetailMaxRecentLimit+1, dashboardAPIDetailMaxErrorLimit+1, now); got != defaultETag {
+		t.Fatalf("over-limit ETag = %q, want default ETag %q", got, defaultETag)
+	}
+	customETag := dashboardAPIDetailETag("openai", "24h", dashboardAPIDetailMaxRecentLimit, dashboardAPIDetailMaxErrorLimit, now)
+	if customETag == defaultETag {
+		t.Fatalf("max valid API detail limits should keep a distinct ETag")
+	}
+}
+
+func TestAPIDetailGeneratedAtUsesETagTime(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0})
+	now := time.Date(2026, 7, 3, 10, 15, 10, 0, time.UTC)
+	recordedAt := now.Add(-time.Hour)
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-4",
+		RequestedAt: recordedAt,
+		Detail:      UsageDetail{TotalTokens: 10},
+	})
+
+	first := stats.QueryAPIDetailAt("openai", "24h", 10, 10, now)
+	second := stats.QueryAPIDetailAt("openai", "24h", 10, 10, now.Add(20*time.Second))
+	if first.GeneratedAt != "2026-07-03T10:15:00Z" || second.GeneratedAt != first.GeneratedAt {
+		t.Fatalf("range generated_at = %q/%q, want stable minute bucket", first.GeneratedAt, second.GeneratedAt)
+	}
+	if dashboardAPIDetailETag("openai", "24h", 10, 10, now) != dashboardAPIDetailETag("openai", "24h", 10, 10, now.Add(20*time.Second)) {
+		t.Fatal("test setup expected same API detail ETag within minute bucket")
+	}
+
+	allFirst := stats.QueryAPIDetailAt("openai", "all", 10, 10, now)
+	allSecond := stats.QueryAPIDetailAt("openai", "all", 10, 10, now.Add(time.Hour))
+	wantAllGeneratedAt := recordedAt.UTC().Truncate(time.Second).Format(time.RFC3339)
+	if allFirst.GeneratedAt != wantAllGeneratedAt || allSecond.GeneratedAt != wantAllGeneratedAt {
+		t.Fatalf("all generated_at = %q/%q, want last recorded at %q", allFirst.GeneratedAt, allSecond.GeneratedAt, wantAllGeneratedAt)
+	}
+}
+
+func TestEventsExportGeneratedAtUsesETagTime(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0})
+	now := time.Date(2026, 7, 3, 10, 15, 10, 0, time.UTC)
+	recordedAt := now.Add(-time.Hour)
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-4",
+		RequestedAt: recordedAt,
+		Detail:      UsageDetail{TotalTokens: 10},
+	})
+	params := EventsQuery{Range: "24h", Model: "gpt-4"}
+
+	first := stats.QueryExportEventsAt(params, 0, now)
+	second := stats.QueryExportEventsAt(params, 0, now.Add(20*time.Second))
+	if first.GeneratedAt != "2026-07-03T10:15:00Z" || second.GeneratedAt != first.GeneratedAt {
+		t.Fatalf("range export generated_at = %q/%q, want stable minute bucket", first.GeneratedAt, second.GeneratedAt)
+	}
+	opts := dashboardEventsExportOptions{Format: dashboardExportJSON}
+	if dashboardEventsExportETag(normalizeEventsQuery(params, false), opts, now) != dashboardEventsExportETag(normalizeEventsQuery(params, false), opts, now.Add(20*time.Second)) {
+		t.Fatal("test setup expected same events export ETag within minute bucket")
+	}
+
+	allFirst := stats.QueryExportEventsAt(EventsQuery{Range: "all", Model: "gpt-4"}, 0, now)
+	allSecond := stats.QueryExportEventsAt(EventsQuery{Range: "all", Model: "gpt-4"}, 0, now.Add(time.Hour))
+	wantAllGeneratedAt := recordedAt.UTC().Truncate(time.Second).Format(time.RFC3339)
+	if allFirst.GeneratedAt != wantAllGeneratedAt || allSecond.GeneratedAt != wantAllGeneratedAt {
+		t.Fatalf("all export generated_at = %q/%q, want last recorded at %q", allFirst.GeneratedAt, allSecond.GeneratedAt, wantAllGeneratedAt)
+	}
+}
+
+func TestDashboardETagCanUseQueryResultVersion(t *testing.T) {
+	previousStats := stats
+	stats = NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0})
+	t.Cleanup(func() { stats = previousStats })
+
+	now := time.Date(2026, 7, 3, 10, 15, 10, 0, time.UTC)
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-4",
+		RequestedAt: now.Add(-time.Hour),
+		Detail:      UsageDetail{TotalTokens: 10},
+	})
+
+	params := normalizeEventsQuery(EventsQuery{Range: "24h", Model: "gpt-4"}, true)
+	exportParams := normalizeEventsQuery(EventsQuery{Range: "24h", Model: "gpt-4"}, false)
+	exportOpts := dashboardEventsExportOptions{Format: dashboardExportJSON}
+	events := stats.QueryEventsAt(params, now)
+	export := stats.QueryExportEventsAt(exportParams, 0, now)
+	apiDetail := stats.QueryAPIDetailAt("openai", "24h", 10, 10, now)
+	version := stats.DashboardVersion()
+	if events.dashboardVersion != version || export.dashboardVersion != version || apiDetail.dashboardVersion != version {
+		t.Fatalf("result versions events/export/api-detail = %d/%d/%d, want %d", events.dashboardVersion, export.dashboardVersion, apiDetail.dashboardVersion, version)
+	}
+
+	eventsETag := dashboardEventsETagForVersion(params, now, events.dashboardVersion)
+	exportETag := dashboardEventsExportETagForVersion(exportParams, exportOpts, now, export.dashboardVersion)
+	apiDetailETag := dashboardAPIDetailETagForVersion("openai", "24h", 10, 10, now, apiDetail.dashboardVersion)
+
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-4",
+		RequestedAt: now.Add(-30 * time.Minute),
+		Detail:      UsageDetail{TotalTokens: 20},
+	})
+	if stats.DashboardVersion() == version {
+		t.Fatalf("dashboard version did not change after record")
+	}
+	if got := dashboardEventsETag(params, now); got == eventsETag {
+		t.Fatalf("events ETag still matches stale query version after record: %q", got)
+	}
+	if got := dashboardEventsExportETag(exportParams, exportOpts, now); got == exportETag {
+		t.Fatalf("export ETag still matches stale query version after record: %q", got)
+	}
+	if got := dashboardAPIDetailETag("openai", "24h", 10, 10, now); got == apiDetailETag {
+		t.Fatalf("api detail ETag still matches stale query version after record: %q", got)
 	}
 }
 

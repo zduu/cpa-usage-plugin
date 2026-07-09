@@ -326,7 +326,7 @@ curl http://127.0.0.1:8317/v0/management/plugins/usage-statistics/dashboard-summ
 
 响应包含 `usage`（无 details 聚合数据）、`health_grid`（672 个 15 分钟槽位）、`source_stats`（用于事件来源筛选）、`credential_stats`、`client_api_stats`、`model_stats` 和 `_meta` 元数据。
 
-`/dashboard-summary`、`/dashboard-events`、`/dashboard-api-detail` 和 `/dashboard-events-export` 会返回弱 `ETag`；内置看板轮询会自动带上 `If-None-Match`，数据未变化时复用本地缓存。外部脚本也可在下一次请求带上 `If-None-Match`，接口返回 304 时跳过重复解析和传输。
+`/dashboard-summary`、`/dashboard-events`、`/dashboard-api-detail` 和 `/dashboard-events-export` 会返回弱 `ETag`；内置看板轮询会自动带上 `If-None-Match`，数据未变化时复用本地缓存。外部脚本也可在下一次请求带上 `If-None-Match`，接口返回 304 时跳过重复解析和传输；部分 CPA 管理代理路径会把缓存命中表现为 `200`、空 body、相同 `ETag`，脚本可按等价缓存命中处理。
 
 ```bash
 curl -sD /tmp/cpa-usage.headers \
@@ -415,7 +415,7 @@ curl -X POST http://127.0.0.1:8317/v0/management/plugins/usage-statistics/usage/
   --data-binary @usage-export.json
 ```
 
-导入响应包含 `added`（新增条数）、`skipped`（去重跳过）、`ignored_by_retention`（超出保留窗口忽略）。
+导入响应包含 `added`（新增条数）、`skipped`（去重跳过）、`ignored_by_retention`（超出保留窗口忽略）。导入去重会区分上游分组、模型、时间、来源、上游凭证、客户端 API 身份、延迟、TTFT、失败状态码、错误文本和 token 统计，避免不同客户端 API key 或不同失败结果的同形请求被误合并。
 同时包含 `input_records`（输入记录数）、`accepted_records`（被处理记录数）、`rejected_records`（校验拒绝数）、`total_requests` 和 `failed_requests`，便于核对导入结果。
 
 ## 7. 数据持久化（可选）
@@ -558,4 +558,4 @@ bash update-latest-release.sh --force --restart
 - 多实例部署时，每个实例独立统计。
 - token 是否完整取决于上游返回的 usage 信息；CPA 主程序需向插件传递 snake_case usage 字段。
 - 实时请求不会被去重窗口合并；`max_details_per_model` 只裁剪请求明细，不会扣减总请求、token、成功率等累计统计。`retention_days` 超出窗口的记录会被淘汰并从窗口统计中扣除。
-- `api_key_hash_salt` 只影响新记录的 `api_key_hash`。客户端 API 统计优先按脱敏后的 `api_key` 展示值聚合，缺失时再使用 hash；hash 仅用于分组/排查，不能反推原始 key。
+- `api_key_hash_salt` 只影响新记录的 `api_key_hash`。客户端 API 统计优先按 `api_key_hash` 聚合，缺失 hash 时再按脱敏后的 `api_key` 展示值聚合；hash 仅用于分组/排查，不能反推原始 key。导入已脱敏的旧导出数据时，插件会忽略外部实例生成的 hash，继续按脱敏展示值合并，保持跨实例兼容。

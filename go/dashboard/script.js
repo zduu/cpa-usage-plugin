@@ -927,7 +927,9 @@ function renderFilters() {
   if (!summaryData) return;
   const models = modelNames();
   const sources = (summaryData.source_stats || []).map(s => s.source);
-  const authIndexes = eventsData && eventsData.events ? [...new Set(eventsData.events.map((d) => d.auth_index || '-'))].sort() : [];
+  const summaryAuthIndexes = (summaryData.credential_stats || []).map((s) => s.auth_index).filter((v) => v && v !== '(空)');
+  const pageAuthIndexes = eventsData && eventsData.events ? eventsData.events.map((d) => d.auth_index || '').filter(Boolean) : [];
+  const authIndexes = [...new Set([...summaryAuthIndexes, ...pageAuthIndexes])].sort();
   const fill = (id, emptyLabel, values) => { const old = $(id).value; $(id).innerHTML = '<option value="">' + emptyLabel + '</option>' + values.map((v) => '<option value="' + esc(v) + '">' + esc(v) + '</option>').join(''); $(id).value = [...values, ''].includes(old) ? old : '' };
   fill('filterModel', t('filter_all_models'), models);
   fill('filterSource', t('filter_all_sources'), sources);
@@ -978,7 +980,22 @@ async function renderEvents() {
   renderEventsContent();
 }
 
-function download(name, text, type) { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000) }
+const downloadBlobRevokeDelayMs = 60000;
+function download(name, text, type) {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  a.rel = 'noopener';
+  a.style.display = 'none';
+  const parent = document.body || document.documentElement;
+  if (parent && typeof parent.appendChild === 'function') parent.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    if (a.parentNode && typeof a.parentNode.removeChild === 'function') a.parentNode.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, downloadBlobRevokeDelayMs);
+}
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));

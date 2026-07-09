@@ -68,10 +68,10 @@ function sourceKey(detail) { return sourceLabel(detail) }
 function friendlyApiName(apiName) { const clean = trimCredentialSuffix(apiName); if (!clean) return t('unknown_interface'); const parts = clean.split(' · ').filter(function (p) { return !looksLikeKey(p) && !isCredentialMarker(p) && !isCredentialLabel(p) && !looksLikeCredentialId(p) }); return parts.length ? parts.join(' · ') : clean }
 function clientApiLabel(detail) { const label = String((detail && detail.api_key) || '').trim(); return label || t('unknown_api') }
 function clientApiGroupKey(detail) {
-  const label = String((detail && detail.api_key) || '').trim();
-  if (label) return 'api_key:' + label;
   const hash = String((detail && detail.api_key_hash) || '').trim();
   if (hash) return 'api_key_hash:' + hash;
+  const label = String((detail && detail.api_key) || '').trim();
+  if (label) return 'api_key:' + label;
   return '(unknown)';
 }
 function avg(values) { const xs = values.map(num).filter((v) => v > 0); return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0 }

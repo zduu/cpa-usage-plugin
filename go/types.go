@@ -830,6 +830,8 @@ type EventsResult struct {
 	Offset      int             `json:"offset"`
 	Truncated   bool            `json:"truncated,omitempty"`
 	GeneratedAt string          `json:"generated_at"`
+
+	dashboardVersion uint64
 }
 
 // APIDetailSummary is the range-scoped summary for one upstream API.
@@ -862,4 +864,6 @@ type APIDetailResponse struct {
 	RecentEvents []RequestDetail      `json:"recent_events"`
 	TotalEvents  int                  `json:"total_events"`
 	GeneratedAt  string               `json:"generated_at"`
+
+	dashboardVersion uint64
 }

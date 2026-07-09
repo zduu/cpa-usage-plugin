@@ -44,6 +44,11 @@ const (
 	healthStorageWriterTailMinBatches    = 20
 	healthConditionalLowHitMinRequests   = 20
 	healthConditionalLowHitRateThreshold = 0.20
+
+	dashboardAPIDetailDefaultRecentLimit = 120
+	dashboardAPIDetailMaxRecentLimit     = 500
+	dashboardAPIDetailDefaultErrorLimit  = 20
+	dashboardAPIDetailMaxErrorLimit      = 100
 )
 
 func init() {
@@ -62,11 +67,13 @@ func handleDashboardSummary(query map[string][]string, headers map[string][]stri
 	if v, ok := query["range"]; ok && len(v) > 0 {
 		rangeKey = v[0]
 	}
-	etag := dashboardSummaryETag(time.Now(), rangeKey)
+	now := time.Now()
+	etag := dashboardSummaryETag(now, rangeKey)
 	if dashboardConditionalMatch("dashboard-summary", headers, etag) {
 		return dashboardNotModified(etag)
 	}
-	summary := stats.SummaryWithoutDetailsForRange(rangeKey)
+	summary := stats.SummaryWithoutDetailsForRangeAt(rangeKey, now)
+	etag = dashboardSummaryETagForVersion(now, rangeKey, summary.Meta.SummaryVersion)
 	responseJSON, err := json.Marshal(summary)
 	if err != nil {
 		return nil, err
@@ -80,8 +87,12 @@ func handleDashboardSummary(query map[string][]string, headers map[string][]stri
 }
 
 func dashboardSummaryETag(now time.Time, rangeKey string) string {
+	return dashboardSummaryETagForVersion(now, rangeKey, stats.DashboardVersion())
+}
+
+func dashboardSummaryETagForVersion(now time.Time, rangeKey string, version uint64) string {
 	window := summaryHealthWindow(now).UTC().Format(time.RFC3339)
-	parts := []string{"summary", strconv.FormatUint(stats.DashboardVersion(), 10), window}
+	parts := []string{"summary", strconv.FormatUint(version, 10), window}
 	if rangeKey != "" {
 		parts = append(parts, rangeKey)
 	}
@@ -128,11 +139,13 @@ func dashboardEventsQuery(query map[string][]string) EventsQuery {
 func handleDashboardEvents(query map[string][]string, headers map[string][]string) ([]byte, error) {
 	params := dashboardEventsQuery(query)
 	params = normalizeEventsQuery(params, true)
-	etag := dashboardEventsETag(params, time.Now())
+	now := time.Now()
+	etag := dashboardEventsETag(params, now)
 	if dashboardConditionalMatch("dashboard-events", headers, etag) {
 		return dashboardNotModified(etag)
 	}
-	result := stats.QueryEvents(params)
+	result := stats.QueryEventsAt(params, now)
+	etag = dashboardEventsETagForVersion(params, now, result.dashboardVersion)
 	responseJSON, err := json.Marshal(result)
 	if err != nil {
 		return nil, err
@@ -146,10 +159,14 @@ func handleDashboardEvents(query map[string][]string, headers map[string][]strin
 }
 
 func dashboardEventsETag(params EventsQuery, now time.Time) string {
+	return dashboardEventsETagForVersion(params, now, stats.DashboardVersion())
+}
+
+func dashboardEventsETagForVersion(params EventsQuery, now time.Time, version uint64) string {
 	key := dashboardEventCacheKeyFor(params, now)
 	return dashboardWeakETag(
 		"events",
-		strconv.FormatUint(stats.DashboardVersion(), 10),
+		strconv.FormatUint(version, 10),
 		strconv.Itoa(key.limit),
 		strconv.Itoa(key.offset),
 		strconv.FormatInt(key.timeBucket, 10),
@@ -219,12 +236,14 @@ func handleDashboardEventsExport(query map[string][]string, headers map[string][
 	params := normalizeEventsQuery(dashboardEventsQuery(query), false)
 	opts := dashboardEventsExportOptionsFromQuery(query)
 	opts.Limit = effectiveDashboardExportLimit(opts.Limit, stats.ExportMaxRecords())
-	etag := dashboardEventsExportETag(params, opts, time.Now())
+	now := time.Now()
+	etag := dashboardEventsExportETag(params, opts, now)
 	if dashboardConditionalMatch("dashboard-events-export", headers, etag) {
 		return dashboardNotModifiedWithHeaders(dashboardExportHeaders(etag, dashboardExportContentType(opts.Format), opts.Gzip))
 	}
 	startedAt := time.Now()
-	result := stats.QueryExportEvents(params, opts.Limit)
+	result := stats.QueryExportEventsAt(params, opts.Limit, now)
+	etag = dashboardEventsExportETagForVersion(params, opts, now, result.dashboardVersion)
 	body, contentType, err := encodeDashboardEventsExport(result, opts)
 	if err != nil {
 		return nil, err
@@ -256,10 +275,14 @@ func effectiveDashboardExportLimit(requestLimit int, configuredLimit int) int {
 }
 
 func dashboardEventsExportETag(params EventsQuery, opts dashboardEventsExportOptions, now time.Time) string {
+	return dashboardEventsExportETagForVersion(params, opts, now, stats.DashboardVersion())
+}
+
+func dashboardEventsExportETagForVersion(params EventsQuery, opts dashboardEventsExportOptions, now time.Time, version uint64) string {
 	key := dashboardEventCacheKeyFor(params, now)
 	return dashboardWeakETag(
 		"events-export",
-		strconv.FormatUint(stats.DashboardVersion(), 10),
+		strconv.FormatUint(version, 10),
 		string(opts.Format),
 		strconv.FormatBool(opts.Gzip),
 		strconv.Itoa(opts.Limit),
@@ -418,24 +441,27 @@ func handleDashboardAPIDetail(query map[string][]string, headers map[string][]st
 	if v, ok := query["range"]; ok && len(v) > 0 {
 		rangeKey = v[0]
 	}
-	recentLimit := 120
+	recentLimit := dashboardAPIDetailDefaultRecentLimit
 	if v, ok := query["recent_limit"]; ok && len(v) > 0 {
 		if n, err := strconv.Atoi(v[0]); err == nil && n > 0 {
 			recentLimit = n
 		}
 	}
-	errorLimit := 20
+	errorLimit := dashboardAPIDetailDefaultErrorLimit
 	if v, ok := query["error_limit"]; ok && len(v) > 0 {
 		if n, err := strconv.Atoi(v[0]); err == nil && n > 0 {
 			errorLimit = n
 		}
 	}
+	recentLimit, errorLimit = normalizeDashboardAPIDetailLimits(recentLimit, errorLimit)
 
-	etag := dashboardAPIDetailETag(api, rangeKey, recentLimit, errorLimit, time.Now())
+	now := time.Now()
+	etag := dashboardAPIDetailETag(api, rangeKey, recentLimit, errorLimit, now)
 	if dashboardConditionalMatch("dashboard-api-detail", headers, etag) {
 		return dashboardNotModified(etag)
 	}
-	result := stats.QueryAPIDetail(api, rangeKey, recentLimit, errorLimit)
+	result := stats.QueryAPIDetailAt(api, rangeKey, recentLimit, errorLimit, now)
+	etag = dashboardAPIDetailETagForVersion(api, rangeKey, recentLimit, errorLimit, now, result.dashboardVersion)
 	responseJSON, err := json.Marshal(result)
 	if err != nil {
 		return nil, err
@@ -449,19 +475,34 @@ func handleDashboardAPIDetail(query map[string][]string, headers map[string][]st
 }
 
 func dashboardAPIDetailETag(api string, rangeKey string, recentLimit int, errorLimit int, now time.Time) string {
+	return dashboardAPIDetailETagForVersion(api, rangeKey, recentLimit, errorLimit, now, stats.DashboardVersion())
+}
+
+func dashboardAPIDetailETagForVersion(api string, rangeKey string, recentLimit int, errorLimit int, now time.Time, version uint64) string {
+	recentLimit, errorLimit = normalizeDashboardAPIDetailLimits(recentLimit, errorLimit)
 	timeBucket := int64(0)
 	if rangeKey != "" && rangeKey != "all" {
 		timeBucket = summaryRangeCacheBucket(now).Unix()
 	}
 	return dashboardWeakETag(
 		"api-detail",
-		strconv.FormatUint(stats.DashboardVersion(), 10),
+		strconv.FormatUint(version, 10),
 		strconv.FormatInt(timeBucket, 10),
 		api,
 		rangeKey,
 		strconv.Itoa(recentLimit),
 		strconv.Itoa(errorLimit),
 	)
+}
+
+func normalizeDashboardAPIDetailLimits(recentLimit int, errorLimit int) (int, int) {
+	if recentLimit <= 0 || recentLimit > dashboardAPIDetailMaxRecentLimit {
+		recentLimit = dashboardAPIDetailDefaultRecentLimit
+	}
+	if errorLimit <= 0 || errorLimit > dashboardAPIDetailMaxErrorLimit {
+		errorLimit = dashboardAPIDetailDefaultErrorLimit
+	}
+	return recentLimit, errorLimit
 }
 
 func dashboardWeakETag(parts ...string) string {
