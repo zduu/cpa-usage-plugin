@@ -341,8 +341,10 @@ async function deleteModelPrice(model) {
 function drawSpark(id, values, color) {
   const svg = $(id); const w = svg.clientWidth || 320, h = 54; const max = Math.max(...values, 1); const points = values.map((v, i) => [i * (w / (Math.max(values.length - 1, 1))), h - 8 - (v / max) * (h - 16)]);
   const d = points.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' ');
+  const area = points.length ? d + ' L' + points[points.length - 1][0].toFixed(1) + ' ' + h + ' L' + points[0][0].toFixed(1) + ' ' + h + ' Z' : '';
   svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
-  svg.innerHTML = '<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>';
+  svg.innerHTML = (area ? '<path d="' + area + '" fill="' + color + '" fill-opacity="0.1" stroke="none"/>' : '')
+    + '<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>';
 }
 
 function renderStats() {
@@ -373,7 +375,7 @@ function renderStats() {
     const k = String(i).padStart(2, '0');
     return num(u.tokens_by_hour && u.tokens_by_hour[k]) || 0;
   });
-  drawSpark('requestSpark', reqByHour, '#8b8680');
+  drawSpark('requestSpark', reqByHour, '#3b82f6');
   drawSpark('tokenSpark', tokByHour, '#8b5cf6');
   drawSpark('rpmSpark', reqByHour.length ? reqByHour.map(v => v / 60) : [0], '#22c55e');
   drawSpark('costSpark', reqByHour.length ? reqByHour.map(v => (cost > 0 ? v / Math.max(u.total_requests || 1, 1) * cost : 0)) : [0], '#f59e0b');
