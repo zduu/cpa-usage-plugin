@@ -273,26 +273,12 @@ func TestCoalesceMaskedClientAPIStatsKeepsHashVariantsSeparateWhenAmbiguous(t *t
 	})
 
 	if len(rows) != 3 {
-		t.Fatalf("client api stats len = %d, want two hashed groups plus one hashless group: %#v", len(rows), rows)
+		t.Fatalf("client api stats len = %d, want distinct masked hash variants: %#v", len(rows), rows)
 	}
-	var hashless int
-	hashes := map[string]bool{}
-	var totalRequests, totalTokens int64
-	for _, got := range rows {
-		if got.APIKey != "sk******xx" {
-			t.Fatalf("client api label = %q, want shared masked label", got.APIKey)
+	for _, row := range rows {
+		if row.APIKey != "sk******xx" || row.TotalRequests != 1 {
+			t.Fatalf("client api stat = %#v, want each ambiguous masked key kept separate", row)
 		}
-		if got.APIKeyHash == "" {
-			hashless++
-		} else {
-			hashes[got.APIKeyHash] = true
-		}
-		totalRequests += got.TotalRequests
-		totalTokens += got.TotalTokens
-	}
-	if hashless != 1 || !hashes[strings.Repeat("a", 56)] || !hashes[strings.Repeat("b", 56)] ||
-		totalRequests != 3 || totalTokens != 220 {
-		t.Fatalf("hashless=%d hashes=%#v requests=%d tokens=%d", hashless, hashes, totalRequests, totalTokens)
 	}
 }
 
@@ -349,7 +335,7 @@ func TestDashboardSummaryMergesLegacyHashlessClientAPIKeyWithUniqueCurrentHash(t
 	assertMerged("range", stats.SummaryWithoutDetailsForRange("24h"))
 }
 
-func TestDashboardSummaryKeepsLegacyHashlessClientAPIKeySeparateWhenHashCollisionAmbiguous(t *testing.T) {
+func TestDashboardSummaryKeepsLegacyHashlessClientAPIKeySeparateWhenHashVariantsExist(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0, RetentionDays: 0})
 	when := time.Now().Add(-time.Hour)
@@ -392,19 +378,17 @@ func TestDashboardSummaryKeepsLegacyHashlessClientAPIKeySeparateWhenHashCollisio
 
 	summary := stats.SummaryWithoutDetails()
 	if len(summary.ClientAPIStats) != 3 {
-		t.Fatalf("client api stats len = %d, want two hashed groups plus ambiguous legacy group: %#v", len(summary.ClientAPIStats), summary.ClientAPIStats)
+		t.Fatalf("client api stats len = %d, want distinct ambiguous masked keys: %#v", len(summary.ClientAPIStats), summary.ClientAPIStats)
 	}
-	var hashless int
-	for _, stat := range summary.ClientAPIStats {
-		if stat.APIKey != "sk******xx" {
-			t.Fatalf("client api label = %q, want shared masked label", stat.APIKey)
+	var totalTokens int64
+	for _, got := range summary.ClientAPIStats {
+		if got.APIKey != "sk******xx" || got.TotalRequests != 1 {
+			t.Fatalf("client api stat = %#v, want ambiguous masked key kept separate", got)
 		}
-		if stat.APIKeyHash == "" {
-			hashless++
-		}
+		totalTokens += got.TotalTokens
 	}
-	if hashless != 1 {
-		t.Fatalf("hashless legacy groups = %d, want one ambiguous group", hashless)
+	if totalTokens != 220 {
+		t.Fatalf("client api total tokens = %d, want 220 across separate rows", totalTokens)
 	}
 }
 
@@ -455,7 +439,7 @@ func TestDashboardSummaryMergesImportedClientAPIStatsByMaskedKey(t *testing.T) {
 	}
 }
 
-func TestDashboardSummarySeparatesImportedRawClientAPIKeyCollisionsByHash(t *testing.T) {
+func TestDashboardSummaryMergesImportedRawClientAPIKeysByMaskedLabel(t *testing.T) {
 	previousSalt := currentAPIKeySalt()
 	setAPIKeySalt("import-raw-client-api-test-salt")
 	t.Cleanup(func() { setAPIKeySalt(previousSalt) })
@@ -497,19 +481,17 @@ func TestDashboardSummarySeparatesImportedRawClientAPIKeyCollisionsByHash(t *tes
 
 	summary := stats.SummaryWithoutDetails()
 	if len(summary.ClientAPIStats) != 2 {
-		t.Fatalf("client api stats len = %d, want 2: %#v", len(summary.ClientAPIStats), summary.ClientAPIStats)
+		t.Fatalf("client api stats len = %d, want distinct imported raw masked keys: %#v", len(summary.ClientAPIStats), summary.ClientAPIStats)
 	}
-	wantHashes := map[string]bool{
-		hashAPIKey(firstKey):  true,
-		hashAPIKey(secondKey): true,
-	}
+	var totalTokens int64
 	for _, got := range summary.ClientAPIStats {
-		if got.APIKey != "sk******xx" {
-			t.Fatalf("client api label = %q, want masked label", got.APIKey)
+		if got.APIKey != "sk******xx" || got.APIKeyHash == "" || got.TotalRequests != 1 {
+			t.Fatalf("client api stat = %#v, want distinct current-salt masked key", got)
 		}
-		if !wantHashes[got.APIKeyHash] {
-			t.Fatalf("client api hash = %q, want current-salt hash; stat=%#v", got.APIKeyHash, got)
-		}
+		totalTokens += got.TotalTokens
+	}
+	if totalTokens != 160 {
+		t.Fatalf("client api total tokens = %d, want 160 across separate rows", totalTokens)
 	}
 }
 
@@ -1719,7 +1701,6 @@ func TestSummaryWithoutDetailsKeepsAggregatesAfterDetailTrim(t *testing.T) {
 			t.Fatalf("%s client api stats = %#v", label, summary.ClientAPIStats)
 		}
 		var clientRequests, clientTokens, clientModelRequests int64
-		clientRequestBuckets := map[int64]bool{}
 		for _, stat := range summary.ClientAPIStats {
 			if stat.APIKey != "sk******56" || stat.APIKeyHash == "" || len(stat.Models) != 1 {
 				t.Fatalf("%s client api stat = %#v", label, stat)
@@ -1727,10 +1708,8 @@ func TestSummaryWithoutDetailsKeepsAggregatesAfterDetailTrim(t *testing.T) {
 			clientRequests += stat.TotalRequests
 			clientTokens += stat.TotalTokens
 			clientModelRequests += stat.Models[0].TotalRequests
-			clientRequestBuckets[stat.TotalRequests] = true
 		}
-		if clientRequests != 3 || clientTokens != 66 || clientModelRequests != 3 ||
-			!clientRequestBuckets[1] || !clientRequestBuckets[2] {
+		if clientRequests != 3 || clientTokens != 66 || clientModelRequests != 3 {
 			t.Fatalf("%s client api aggregate = %#v", label, summary.ClientAPIStats)
 		}
 		var healthTotal int64

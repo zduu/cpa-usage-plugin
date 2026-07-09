@@ -451,12 +451,36 @@ func currentAPIKeySalt() string {
 }
 
 func hashAPIKey(raw string) string {
-	s := strings.TrimSpace(raw)
+	s := canonicalClientAPIKey(raw)
 	if s == "" {
 		return ""
 	}
 	h := sha256.Sum224([]byte(currentAPIKeySalt() + ":" + s))
 	return hex.EncodeToString(h[:])
+}
+
+func canonicalClientAPIKey(raw string) string {
+	s := strings.TrimSpace(raw)
+	s = strings.Trim(s, `"'`)
+	if s == "" {
+		return ""
+	}
+	fields := strings.Fields(s)
+	if len(fields) == 2 {
+		scheme := strings.ToLower(strings.TrimSuffix(fields[0], ":"))
+		switch scheme {
+		case "bearer", "token", "key", "apikey", "api-key":
+			return strings.Trim(strings.TrimSpace(fields[1]), `"'`)
+		}
+	}
+	lower := strings.ToLower(s)
+	for _, scheme := range []string{"bearer", "token", "key", "apikey", "api-key"} {
+		prefix := scheme + ":"
+		if strings.HasPrefix(lower, prefix) {
+			return strings.Trim(strings.TrimSpace(s[len(prefix):]), `"'`)
+		}
+	}
+	return s
 }
 
 func isStoredAPIKeyHashShape(value string) bool {
@@ -693,7 +717,7 @@ func (s *RequestStatistics) Record(record UsageRecord) {
 		Timestamp:  timestamp,
 		LatencyMs:  record.Latency.Milliseconds(),
 		TTFTMs:     record.TTFT.Milliseconds(),
-		APIKey:     maskAPIKey(record.APIKey),
+		APIKey:     maskAPIKey(canonicalClientAPIKey(record.APIKey)),
 		APIKeyHash: hashAPIKey(record.APIKey),
 		Source:     usageSource(record),
 		Provider:   strings.TrimSpace(record.Provider),
@@ -5310,7 +5334,7 @@ func mergeFinalizedProviderStats(dst []ModelProviderStat, src []ModelProviderSta
 }
 
 func normalizeImportedClientAPIIdentity(detail RequestDetail) RequestDetail {
-	label := strings.TrimSpace(detail.APIKey)
+	label := canonicalClientAPIKey(detail.APIKey)
 	hash := strings.TrimSpace(detail.APIKeyHash)
 	alreadyMasked := label != "" && strings.Contains(label, redactedMarker)
 	if label != "" && !alreadyMasked {
@@ -5329,7 +5353,7 @@ func normalizeImportedClientAPIIdentity(detail RequestDetail) RequestDetail {
 }
 
 func normalizeStoredClientAPIIdentity(detail RequestDetail) RequestDetail {
-	label := strings.TrimSpace(detail.APIKey)
+	label := canonicalClientAPIKey(detail.APIKey)
 	if label == "" {
 		detail.APIKey = ""
 		detail.APIKeyHash = strings.TrimSpace(detail.APIKeyHash)

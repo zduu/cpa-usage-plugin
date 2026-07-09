@@ -761,7 +761,7 @@ test('dashboard fallback keeps masked client API hash variants separate when amb
   ]);
 
   assert.strictEqual(rows.length, 3);
-  assert.strictEqual(rows.filter((row) => !row.api_key_hash).length, 1);
+  assert.deepStrictEqual(rows.map((row) => row.total_tokens), [40, 120, 60]);
 });
 
 test('dashboard credential filter uses summary credential stats beyond current event page', async () => {

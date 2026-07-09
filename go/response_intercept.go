@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,6 +37,40 @@ type ResponseInterceptRequest struct {
 }
 
 func (r *ResponseInterceptRequest) UnmarshalJSON(data []byte) error {
+	return unmarshalResponseInterceptRequest(data, r)
+}
+
+type ResponseStreamChunkRequest struct {
+	ResponseInterceptRequest
+	HistoryChunks [][]byte
+	ChunkIndex    int
+}
+
+func (r *ResponseStreamChunkRequest) UnmarshalJSON(data []byte) error {
+	if err := unmarshalResponseInterceptRequest(data, &r.ResponseInterceptRequest); err != nil {
+		return err
+	}
+	var wire struct {
+		HistoryChunks      [][]byte `json:"HistoryChunks"`
+		HistoryChunksSnake [][]byte `json:"history_chunks"`
+		ChunkIndex         int      `json:"ChunkIndex"`
+		ChunkIndexSnake    int      `json:"chunk_index"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	r.HistoryChunks = wire.HistoryChunks
+	if len(r.HistoryChunks) == 0 {
+		r.HistoryChunks = wire.HistoryChunksSnake
+	}
+	r.ChunkIndex = wire.ChunkIndex
+	if r.ChunkIndex == 0 {
+		r.ChunkIndex = wire.ChunkIndexSnake
+	}
+	return nil
+}
+
+func unmarshalResponseInterceptRequest(data []byte, r *ResponseInterceptRequest) error {
 	var wire struct {
 		SourceFormat         string              `json:"SourceFormat"`
 		SourceFormatSnake    string              `json:"source_format"`
@@ -94,22 +129,46 @@ func handleResponseIntercept(requestBody []byte) ([]byte, error) {
 	return okEnvelopeJSON("{}")
 }
 
+func handleResponseStreamChunk(requestBody []byte) ([]byte, error) {
+	var req ResponseStreamChunkRequest
+	if err := json.Unmarshal(requestBody, &req); err != nil {
+		return nil, fmt.Errorf("failed to parse response stream chunk request: %w", err)
+	}
+	if record, ok := usageRecordFromResponseStreamChunk(req); ok && usageFallbacks != nil {
+		usageFallbacks.Schedule(record)
+	}
+	return okEnvelopeJSON("{}")
+}
+
 func usageRecordFromResponseIntercept(req ResponseInterceptRequest) (UsageRecord, bool) {
 	if req.Stream || req.StatusCode < 200 || req.StatusCode >= 300 || len(bytes.TrimSpace(req.Body)) == 0 {
 		return UsageRecord{}, false
 	}
-	responseRoot, ok := decodeJSONValue(req.Body)
+	responseValues := responseJSONValues(req.Body)
+	return usageRecordFromResponseValues(req, responseValues)
+}
+
+func usageRecordFromResponseStreamChunk(req ResponseStreamChunkRequest) (UsageRecord, bool) {
+	if req.StatusCode != 0 && (req.StatusCode < 200 || req.StatusCode >= 300) {
+		return UsageRecord{}, false
+	}
+	if len(bytes.TrimSpace(req.Body)) == 0 {
+		return UsageRecord{}, false
+	}
+	return usageRecordFromResponseValues(req.ResponseInterceptRequest, responseJSONValues(req.Body))
+}
+
+func usageRecordFromResponseValues(req ResponseInterceptRequest, responseValues []any) (UsageRecord, bool) {
+	detail, ok := usageDetailFromResponseValues(responseValues)
 	if !ok {
 		return UsageRecord{}, false
 	}
-	detail, ok := usageDetailFromResponseRoot(responseRoot)
-	if !ok {
-		return UsageRecord{}, false
+	if responseUsesAnthropicUsageAccounting(req) {
+		detail = normalizeAnthropicUsageDetail(detail)
 	}
 	requestRoot, _ := decodeJSONValue(firstBytes(req.RequestBody, req.OriginalRequest))
 	model := firstNonEmpty(
-		jsonStringPath(responseRoot, "model"),
-		jsonStringPath(responseRoot, "response.model"),
+		jsonStringPathFromValues(responseValues, "model", "response.model", "message.model"),
 		req.Model,
 		req.RequestedModel,
 		jsonStringPath(requestRoot, "model"),
@@ -121,13 +180,16 @@ func usageRecordFromResponseIntercept(req ResponseInterceptRequest) (UsageRecord
 		jsonStringPath(requestRoot, "model"),
 		model,
 	)
+	authID := firstNonEmpty(metadataString(req.Metadata, "selected_auth_id"), metadataString(req.Metadata, "pinned_auth_id"))
 	return UsageRecord{
-		Provider:        firstNonEmpty(metadataString(req.Metadata, "upstream_provider", "provider", "selected_provider"), fallbackUsageProvider(req)),
+		Provider:        firstNonEmpty(metadataString(req.Metadata, "upstream_provider", "provider", "selected_provider"), providerFromSelectedAuthID(req.Metadata), fallbackUsageProvider(req)),
 		ExecutorType:    "ResponseInterceptorFallback",
 		Model:           model,
 		Alias:           requestedModel,
 		APIKey:          apiKeyFromHeaders(req.RequestHeaders),
-		AuthID:          firstNonEmpty(metadataString(req.Metadata, "selected_auth_id"), metadataString(req.Metadata, "pinned_auth_id")),
+		AuthID:          authID,
+		AuthIndex:       fallbackAuthIndex(req.Metadata, authID),
+		AuthType:        fallbackAuthType(req.Metadata, authID),
 		ReasoningEffort: metadataString(req.Metadata, "reasoning_effort"),
 		ServiceTier:     firstNonEmpty(metadataString(req.Metadata, "service_tier"), jsonStringPath(requestRoot, "service_tier")),
 		RequestedAt:     time.Now(),
@@ -138,10 +200,118 @@ func usageRecordFromResponseIntercept(req ResponseInterceptRequest) (UsageRecord
 	}, true
 }
 
+func responseUsesAnthropicUsageAccounting(req ResponseInterceptRequest) bool {
+	for _, value := range []string{
+		req.SourceFormat,
+		metadataString(req.Metadata, "upstream_provider", "provider", "selected_provider"),
+		providerFromSelectedAuthID(req.Metadata),
+	} {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if strings.Contains(value, "anthropic") || strings.Contains(value, "claude") {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeAnthropicUsageDetail(detail UsageDetail) UsageDetail {
+	cacheInput := detail.CacheReadTokens + detail.CacheCreationTokens
+	if cacheInput > 0 && detail.InputTokens > 0 {
+		detail.InputTokens += cacheInput
+		if detail.TotalTokens != 0 && detail.TotalTokens < detail.InputTokens+detail.OutputTokens {
+			detail.TotalTokens = detail.InputTokens + detail.OutputTokens
+		}
+	}
+	return detail
+}
+
+func responseJSONValues(body []byte) []any {
+	if root, ok := decodeJSONValue(body); ok {
+		return []any{root}
+	}
+	return decodeSSEJSONValues(body)
+}
+
+func decodeSSEJSONValues(body []byte) []any {
+	lines := strings.Split(string(body), "\n")
+	values := make([]any, 0)
+	var data strings.Builder
+	flush := func() {
+		raw := strings.TrimSpace(data.String())
+		data.Reset()
+		if raw == "" || raw == "[DONE]" {
+			return
+		}
+		if value, ok := decodeJSONValue([]byte(raw)); ok {
+			values = append(values, value)
+			return
+		}
+		for _, line := range strings.Split(raw, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || line == "[DONE]" {
+				continue
+			}
+			if value, ok := decodeJSONValue([]byte(line)); ok {
+				values = append(values, value)
+			}
+		}
+	}
+	for _, line := range lines {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			flush()
+			continue
+		}
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		if data.Len() > 0 {
+			data.WriteByte('\n')
+		}
+		data.WriteString(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+	}
+	flush()
+	return values
+}
+
+func usageDetailFromResponseValues(values []any) (UsageDetail, bool) {
+	var best UsageDetail
+	var found bool
+	for _, value := range values {
+		detail, ok := usageDetailFromResponseRoot(value)
+		if !ok {
+			continue
+		}
+		if !found || usageDetailCompleteness(detail) >= usageDetailCompleteness(best) {
+			best = detail
+			found = true
+		}
+	}
+	return best, found
+}
+
+func usageDetailCompleteness(detail UsageDetail) int64 {
+	return absInt64(detail.TotalTokens) +
+		absInt64(detail.InputTokens) +
+		absInt64(detail.OutputTokens) +
+		absInt64(detail.ReasoningTokens) +
+		absInt64(detail.CachedTokens) +
+		absInt64(detail.CacheReadTokens) +
+		absInt64(detail.CacheCreationTokens)
+}
+
+func absInt64(value int64) int64 {
+	if value < 0 {
+		return -value
+	}
+	return value
+}
+
 func usageDetailFromResponseRoot(root any) (UsageDetail, bool) {
 	for _, path := range []string{
 		"usage",
 		"response.usage",
+		"message.usage",
 		"total_usage",
 		"metadata.usage",
 		"metadata.total_usage",
@@ -472,7 +642,7 @@ func usageRecordFingerprint(record UsageRecord) string {
 	parts := []string{
 		usageProviderFamily(record.Provider),
 		strings.ToLower(strings.TrimSpace(firstNonEmpty(record.Model, record.Alias))),
-		strings.TrimSpace(record.APIKey),
+		canonicalClientAPIKey(record.APIKey),
 		strings.ToLower(strings.TrimSpace(record.ReasoningEffort)),
 		strings.ToLower(strings.TrimSpace(record.ServiceTier)),
 		fmt.Sprintf("%d", record.Detail.InputTokens),
@@ -507,6 +677,47 @@ func fallbackUsageProvider(req ResponseInterceptRequest) string {
 		return strings.TrimSpace(req.SourceFormat)
 	default:
 		return "openai-compatible"
+	}
+}
+
+func providerFromSelectedAuthID(meta map[string]any) string {
+	authID := metadataString(meta, "selected_auth_id", "pinned_auth_id")
+	parts := strings.Split(authID, ":")
+	if len(parts) < 2 {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(parts[0])) {
+	case "openai-compatibility":
+		name := strings.TrimSpace(parts[1])
+		if name != "" {
+			return "openai-compatible-" + name
+		}
+	case "codex":
+		return "codex"
+	}
+	return ""
+}
+
+func fallbackAuthIndex(meta map[string]any, authID string) string {
+	if index := metadataString(meta, "auth_index", "selected_auth_index", "pinned_auth_index"); index != "" {
+		return index
+	}
+	return safeCredentialIdentity(authID)
+}
+
+func fallbackAuthType(meta map[string]any, authID string) string {
+	if authType := metadataString(meta, "auth_type", "selected_auth_type", "pinned_auth_type"); authType != "" {
+		return authType
+	}
+	parts := strings.Split(strings.TrimSpace(authID), ":")
+	if len(parts) == 0 {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(parts[0])) {
+	case "openai-compatibility", "codex":
+		return "apikey"
+	default:
+		return ""
 	}
 }
 
@@ -554,6 +765,10 @@ func decodeJSONValue(data []byte) (any, bool) {
 	if err := decoder.Decode(&value); err != nil {
 		return nil, false
 	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return nil, false
+	}
 	return value, true
 }
 
@@ -591,6 +806,17 @@ func jsonStringPath(root any, path string) string {
 	default:
 		return ""
 	}
+}
+
+func jsonStringPathFromValues(values []any, paths ...string) string {
+	for _, value := range values {
+		for _, path := range paths {
+			if got := jsonStringPath(value, path); got != "" {
+				return got
+			}
+		}
+	}
+	return ""
 }
 
 func metadataString(meta map[string]any, keys ...string) string {

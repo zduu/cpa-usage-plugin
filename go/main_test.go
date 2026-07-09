@@ -240,6 +240,9 @@ func TestRegisterAdvertisesResponseInterceptor(t *testing.T) {
 	if !resp.Capabilities.ResponseInterceptor {
 		t.Fatalf("response_interceptor capability = false, want true")
 	}
+	if !resp.Capabilities.ResponseStreamInterceptor {
+		t.Fatalf("response_stream_interceptor capability = false, want true")
+	}
 }
 
 func TestResponseInterceptFallbackRecordsOpenAIUsage(t *testing.T) {
@@ -299,6 +302,310 @@ func TestResponseInterceptFallbackRecordsOpenAIUsage(t *testing.T) {
 	}
 }
 
+func TestResponseInterceptFallbackSkipsStreamingUsage(t *testing.T) {
+	previousStats := stats
+	previousFallbacks := usageFallbacks
+	previousDelay := usageFallbackRecordDelay
+	stats = NewRequestStatistics()
+	usageFallbacks = newUsageFallbackCoordinator()
+	usageFallbackRecordDelay = 10 * time.Millisecond
+	t.Cleanup(func() {
+		usageFallbacks.Flush()
+		usageFallbacks = previousFallbacks
+		usageFallbackRecordDelay = previousDelay
+		stats = previousStats
+	})
+
+	req := ResponseInterceptRequest{
+		SourceFormat:   "openai",
+		Model:          "deepseek-chat",
+		RequestedModel: "deepseek-chat",
+		Stream:         true,
+		RequestHeaders: map[string][]string{
+			"Authorization": {"Bearer sk-test-fallback-key-0000wj"},
+		},
+		RequestBody: []byte(`{"model":"deepseek-chat","stream":true,"stream_options":{"include_usage":true}}`),
+		Body: []byte(strings.Join([]string{
+			`data: {"id":"chatcmpl-test","object":"chat.completion.chunk","model":"deepseek-chat","choices":[{"delta":{"role":"assistant"}}],"usage":null}`,
+			``,
+			`data: {"id":"chatcmpl-test","object":"chat.completion.chunk","model":"deepseek-chat","choices":[],"usage":{"prompt_tokens":32,"completion_tokens":9,"total_tokens":41}}`,
+			``,
+			`data: [DONE]`,
+			``,
+		}, "\n")),
+		StatusCode: http.StatusOK,
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal response intercept request: %v", err)
+	}
+	if _, err := handleResponseIntercept(body); err != nil {
+		t.Fatalf("handleResponseIntercept() error = %v", err)
+	}
+
+	time.Sleep(3 * usageFallbackRecordDelay)
+	if got := stats.Snapshot().TotalRequests; got != 0 {
+		t.Fatalf("total requests = %d, want streaming intercept_after skipped", got)
+	}
+}
+
+func TestResponseStreamChunkRecordsClaudeUsage(t *testing.T) {
+	previousStats := stats
+	previousFallbacks := usageFallbacks
+	previousDelay := usageFallbackRecordDelay
+	stats = NewRequestStatistics()
+	usageFallbacks = newUsageFallbackCoordinator()
+	usageFallbackRecordDelay = 10 * time.Millisecond
+	t.Cleanup(func() {
+		usageFallbacks.Flush()
+		usageFallbacks = previousFallbacks
+		usageFallbackRecordDelay = previousDelay
+		stats = previousStats
+	})
+
+	req := ResponseStreamChunkRequest{
+		ResponseInterceptRequest: ResponseInterceptRequest{
+			SourceFormat:   "claude",
+			Model:          "deepseek-v4-flash",
+			RequestedModel: "deepseek-v4-flash",
+			RequestHeaders: map[string][]string{
+				"Authorization": {"Bearer:sk-test-fallback-key-0000wj"},
+			},
+			ResponseHeaders: map[string][]string{
+				"Content-Type": {"text/event-stream"},
+			},
+			OriginalRequest: []byte(`{"model":"deepseek-v4-flash","service_tier":"standard","stream":true}`),
+			Body: []byte(strings.Join([]string{
+				`event: message_delta`,
+				`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":13717,"output_tokens":31,"cache_read_input_tokens":12}}`,
+				``,
+			}, "\n")),
+			Metadata: map[string]any{
+				"request_path":      "/v1/messages",
+				"requested_model":   "deepseek-v4-flash",
+				"selected_auth_id":  "openai-compatibility:opencode-go:f85c45252fee",
+				"reasoning_effort":  "high",
+				"service_tier":      "standard",
+				"upstream_provider": "claude",
+			},
+		},
+		ChunkIndex: 35,
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal response stream chunk request: %v", err)
+	}
+	if _, err := handleResponseStreamChunk(body); err != nil {
+		t.Fatalf("handleResponseStreamChunk() error = %v", err)
+	}
+
+	waitForTestCondition(t, func() bool {
+		return stats.Snapshot().TotalRequests == 1
+	})
+	summary := stats.SummaryWithoutDetailsForRangeAt("24h", time.Now().Add(time.Second))
+	if summary.Usage.TotalRequests != 1 || summary.Usage.TotalTokens != 13760 || summary.Usage.InputTokens != 13729 || summary.Usage.OutputTokens != 31 {
+		t.Fatalf("summary usage = %#v, want one Claude stream fallback record", summary.Usage)
+	}
+	if summary.Usage.CachedTokens != 12 {
+		t.Fatalf("cached tokens = %d, want cache_read_input_tokens recorded", summary.Usage.CachedTokens)
+	}
+	if len(summary.ClientAPIStats) != 1 || summary.ClientAPIStats[0].APIKey != "sk******wj" {
+		t.Fatalf("client api stats = %#v, want masked Claude Code CPA key", summary.ClientAPIStats)
+	}
+	if len(summary.CredentialStats) != 1 || summary.CredentialStats[0].AuthIndex != "f85c45252fee" {
+		t.Fatalf("credential stats = %#v, want fallback auth index from selected_auth_id", summary.CredentialStats)
+	}
+}
+
+func TestResponseStreamChunkDoesNotDoubleCountNativeOpenAICompatibleUsage(t *testing.T) {
+	previousStats := stats
+	previousFallbacks := usageFallbacks
+	previousDelay := usageFallbackRecordDelay
+	stats = NewRequestStatistics()
+	usageFallbacks = newUsageFallbackCoordinator()
+	usageFallbackRecordDelay = 25 * time.Millisecond
+	t.Cleanup(func() {
+		usageFallbacks.Flush()
+		usageFallbacks = previousFallbacks
+		usageFallbackRecordDelay = previousDelay
+		stats = previousStats
+	})
+
+	streamReq := ResponseStreamChunkRequest{
+		ResponseInterceptRequest: ResponseInterceptRequest{
+			SourceFormat:   "claude",
+			Model:          "deepseek-v4-flash",
+			RequestedModel: "deepseek-v4-flash",
+			RequestHeaders: map[string][]string{
+				"Authorization": {"Bearer:sk-test-fallback-key-0000wj"},
+			},
+			OriginalRequest: []byte(`{"model":"deepseek-v4-flash","service_tier":"standard","stream":true}`),
+			Body: []byte(strings.Join([]string{
+				`event: message_delta`,
+				`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":7831,"output_tokens":32,"cache_read_input_tokens":5888}}`,
+				``,
+			}, "\n")),
+			Metadata: map[string]any{
+				"requested_model":  "deepseek-v4-flash",
+				"selected_auth_id": "openai-compatibility:opencode-go:f85c45252fee",
+				"reasoning_effort": "high",
+				"service_tier":     "standard",
+			},
+		},
+		ChunkIndex: 35,
+	}
+	streamBody, err := json.Marshal(streamReq)
+	if err != nil {
+		t.Fatalf("marshal response stream chunk request: %v", err)
+	}
+	if _, err := handleResponseStreamChunk(streamBody); err != nil {
+		t.Fatalf("handleResponseStreamChunk() error = %v", err)
+	}
+
+	native := UsageRecord{
+		Provider:        "openai-compatible-opencode-go",
+		ExecutorType:    "OpenAICompatExecutor",
+		Model:           "deepseek-v4-flash",
+		Alias:           "deepseek-v4-flash",
+		APIKey:          "sk-test-fallback-key-0000wj",
+		ReasoningEffort: "high",
+		ServiceTier:     "standard",
+		RequestedAt:     time.Now(),
+		Detail: UsageDetail{
+			InputTokens:  13719,
+			OutputTokens: 32,
+			CachedTokens: 5888,
+			TotalTokens:  13751,
+		},
+	}
+	nativeBody, err := json.Marshal(native)
+	if err != nil {
+		t.Fatalf("marshal native usage record: %v", err)
+	}
+	if _, err := handleUsage(nativeBody); err != nil {
+		t.Fatalf("handleUsage() error = %v", err)
+	}
+
+	time.Sleep(3 * usageFallbackRecordDelay)
+	summary := stats.SummaryWithoutDetailsForRangeAt("24h", time.Now().Add(time.Second))
+	if summary.Usage.TotalRequests != 1 || summary.Usage.TotalTokens != 13751 || summary.Usage.InputTokens != 13719 || summary.Usage.CachedTokens != 5888 {
+		t.Fatalf("summary usage = %#v, want native record only", summary.Usage)
+	}
+	if _, ok := summary.Usage.APIs["openai-compatible-opencode-go"]; !ok {
+		t.Fatalf("summary APIs = %#v, want native OpenAI-compatible provider", summary.Usage.APIs)
+	}
+}
+
+func TestResponseStreamChunkIgnoresUsageOnlyInHistory(t *testing.T) {
+	previousStats := stats
+	previousFallbacks := usageFallbacks
+	previousDelay := usageFallbackRecordDelay
+	stats = NewRequestStatistics()
+	usageFallbacks = newUsageFallbackCoordinator()
+	usageFallbackRecordDelay = 10 * time.Millisecond
+	t.Cleanup(func() {
+		usageFallbacks.Flush()
+		usageFallbacks = previousFallbacks
+		usageFallbackRecordDelay = previousDelay
+		stats = previousStats
+	})
+
+	req := ResponseStreamChunkRequest{
+		ResponseInterceptRequest: ResponseInterceptRequest{
+			SourceFormat:   "claude",
+			Model:          "deepseek-v4-flash",
+			RequestedModel: "deepseek-v4-flash",
+			RequestHeaders: map[string][]string{
+				"Authorization": {"Bearer sk-test-fallback-key-0000wj"},
+			},
+			OriginalRequest: []byte(`{"model":"deepseek-v4-flash","stream":true}`),
+			Body: []byte(strings.Join([]string{
+				`event: message_stop`,
+				`data: {"type":"message_stop"}`,
+				``,
+			}, "\n")),
+		},
+		HistoryChunks: [][]byte{[]byte(strings.Join([]string{
+			`event: message_delta`,
+			`data: {"type":"message_delta","usage":{"input_tokens":10,"output_tokens":3}}`,
+			``,
+		}, "\n"))},
+		ChunkIndex: 36,
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal response stream chunk request: %v", err)
+	}
+	if _, err := handleResponseStreamChunk(body); err != nil {
+		t.Fatalf("handleResponseStreamChunk() error = %v", err)
+	}
+	time.Sleep(3 * usageFallbackRecordDelay)
+	if got := stats.Snapshot().TotalRequests; got != 0 {
+		t.Fatalf("total requests = %d, want no duplicate record from history-only usage", got)
+	}
+}
+
+func TestResponseStreamChunkSkipsNonSuccessStatus(t *testing.T) {
+	previousStats := stats
+	previousFallbacks := usageFallbacks
+	previousDelay := usageFallbackRecordDelay
+	stats = NewRequestStatistics()
+	usageFallbacks = newUsageFallbackCoordinator()
+	usageFallbackRecordDelay = 10 * time.Millisecond
+	t.Cleanup(func() {
+		usageFallbacks.Flush()
+		usageFallbacks = previousFallbacks
+		usageFallbackRecordDelay = previousDelay
+		stats = previousStats
+	})
+
+	req := ResponseStreamChunkRequest{
+		ResponseInterceptRequest: ResponseInterceptRequest{
+			SourceFormat:   "openai",
+			Model:          "deepseek-chat",
+			RequestedModel: "deepseek-chat",
+			RequestHeaders: map[string][]string{
+				"Authorization": {"Bearer sk-test-fallback-key-0000wj"},
+			},
+			Body: []byte(strings.Join([]string{
+				`data: {"id":"chatcmpl-test","model":"deepseek-chat","usage":{"prompt_tokens":32,"completion_tokens":9,"total_tokens":41}}`,
+				``,
+			}, "\n")),
+			StatusCode: http.StatusTooManyRequests,
+		},
+		ChunkIndex: 35,
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal response stream chunk request: %v", err)
+	}
+	if _, err := handleResponseStreamChunk(body); err != nil {
+		t.Fatalf("handleResponseStreamChunk() error = %v", err)
+	}
+	time.Sleep(3 * usageFallbackRecordDelay)
+	if got := stats.Snapshot().TotalRequests; got != 0 {
+		t.Fatalf("total requests = %d, want non-success stream chunk skipped", got)
+	}
+}
+
+func TestDecodeSSEJSONValuesKeepsIndependentDataLines(t *testing.T) {
+	values := decodeSSEJSONValues([]byte(strings.Join([]string{
+		`data: {"usage":{"input_tokens":10,"output_tokens":2}}`,
+		`data: {"usage":{"input_tokens":20,"output_tokens":4}}`,
+		``,
+	}, "\n")))
+	if len(values) != 2 {
+		t.Fatalf("decodeSSEJSONValues len = %d, want two independent JSON values: %#v", len(values), values)
+	}
+	detail, ok := usageDetailFromResponseValues(values)
+	if !ok {
+		t.Fatal("usageDetailFromResponseValues() ok = false, want true")
+	}
+	if detail.InputTokens != 20 || detail.OutputTokens != 4 || detail.TotalTokens != 24 {
+		t.Fatalf("detail = %#v, want most complete/latest independent data line", detail)
+	}
+}
+
 func TestResponseInterceptFallbackUsesStatisticsTotalFallback(t *testing.T) {
 	detail, ok := usageDetailFromValue(map[string]any{
 		"promptTokenCount":     json.Number("10"),
@@ -314,6 +621,24 @@ func TestResponseInterceptFallbackUsesStatisticsTotalFallback(t *testing.T) {
 	}
 	if detail.ReasoningTokens != 7 || detail.CacheReadTokens != 3 {
 		t.Fatalf("detail = %#v, want reasoning/cache preserved separately", detail)
+	}
+}
+
+func TestUsageDetailFromValueDoesNotApplyAnthropicCacheGlobally(t *testing.T) {
+	detail, ok := usageDetailFromValue(map[string]any{
+		"input_tokens":                json.Number("10"),
+		"output_tokens":               json.Number("2"),
+		"cache_read_input_tokens":     json.Number("5"),
+		"cache_creation_input_tokens": json.Number("3"),
+	})
+	if !ok {
+		t.Fatal("usageDetailFromValue() ok = false, want true")
+	}
+	if detail.InputTokens != 10 || detail.OutputTokens != 2 || detail.TotalTokens != 12 {
+		t.Fatalf("detail = %#v, want generic usage input/output/total unchanged by cache fields", detail)
+	}
+	if detail.CacheReadTokens != 5 || detail.CacheCreationTokens != 3 {
+		t.Fatalf("detail = %#v, want cache input fields preserved separately", detail)
 	}
 }
 
@@ -1964,6 +2289,45 @@ func TestStorageSnapshotMergesLegacyMaskedExternalAPIKeyHashes(t *testing.T) {
 	got := summary.ClientAPIStats[0]
 	if got.APIKey != "sk******xx" || got.APIKeyHash != "" || got.TotalRequests != 2 || got.TotalTokens != 3 {
 		t.Fatalf("client api stat = %#v, want merged masked key without external hash", got)
+	}
+}
+
+func TestRecordCanonicalizesBearerClientAPIKeyForAggregation(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, RetentionDays: 0, DedupWindowMinutes: 0})
+	when := time.Now().Add(-time.Minute)
+	stats.Record(UsageRecord{
+		Provider:    "openai-compatible",
+		Model:       "deepseek-chat",
+		APIKey:      "sk-test-fallback-key-0000wj",
+		RequestedAt: when,
+		Detail:      UsageDetail{InputTokens: 8, OutputTokens: 3, TotalTokens: 11},
+	})
+	stats.Record(UsageRecord{
+		Provider:    "openai-compatible",
+		Model:       "deepseek-chat",
+		APIKey:      "Bearer sk-test-fallback-key-0000wj",
+		RequestedAt: when.Add(time.Second),
+		Detail:      UsageDetail{InputTokens: 9, OutputTokens: 4, TotalTokens: 13},
+	})
+	stats.Record(UsageRecord{
+		Provider:    "openai-compatible",
+		Model:       "deepseek-chat",
+		APIKey:      "Bearer:sk-test-fallback-key-0000wj",
+		RequestedAt: when.Add(2 * time.Second),
+		Detail:      UsageDetail{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+	})
+
+	summary := stats.SummaryWithoutDetails()
+	if len(summary.ClientAPIStats) != 1 {
+		t.Fatalf("client api stats = %#v, want one canonical API key group", summary.ClientAPIStats)
+	}
+	got := summary.ClientAPIStats[0]
+	if got.APIKey != "sk******wj" || got.APIKeyHash == "" || got.TotalRequests != 3 || got.TotalTokens != 39 {
+		t.Fatalf("client api stat = %#v, want canonicalized bearer/raw API key totals", got)
+	}
+	if len(got.Models) != 1 || got.Models[0].Model != "deepseek-chat" || got.Models[0].TotalRequests != 3 {
+		t.Fatalf("client api model stats = %#v, want merged deepseek model", got.Models)
 	}
 }
 

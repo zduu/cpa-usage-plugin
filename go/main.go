@@ -133,6 +133,8 @@ func handleMethod(method string, requestBody []byte) ([]byte, error) {
 		return handleUsage(requestBody)
 	case "response.intercept_after":
 		return handleResponseIntercept(requestBody)
+	case "response.intercept_stream_chunk":
+		return handleResponseStreamChunk(requestBody)
 	case "management.handle":
 		return handleManagement(requestBody)
 	default:
