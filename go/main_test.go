@@ -349,7 +349,14 @@ func TestResponseInterceptFallbackSkipsStreamingUsage(t *testing.T) {
 	}
 }
 
-func TestResponseStreamChunkRecordsClaudeUsage(t *testing.T) {
+// TestResponseStreamChunkRecordsDeepSeekViaClaudeCode reproduces the reported
+// regression: Claude Code CLI (source_format "claude") calls an
+// OpenAI-compatible deepseek upstream that CPA no longer reports native usage
+// for. The fallback must group under the real openai-compatible provider from
+// selected_auth_id — never under "claude" — and must fold the translated
+// Claude-format cache tokens back into input so the fingerprint matches the
+// native OpenAI-compatible record's prompt_tokens accounting.
+func TestResponseStreamChunkRecordsDeepSeekViaClaudeCode(t *testing.T) {
 	previousStats := stats
 	previousFallbacks := usageFallbacks
 	previousDelay := usageFallbackRecordDelay
@@ -381,12 +388,11 @@ func TestResponseStreamChunkRecordsClaudeUsage(t *testing.T) {
 				``,
 			}, "\n")),
 			Metadata: map[string]any{
-				"request_path":      "/v1/messages",
-				"requested_model":   "deepseek-v4-flash",
-				"selected_auth_id":  "openai-compatibility:opencode-go:f85c45252fee",
-				"reasoning_effort":  "high",
-				"service_tier":      "standard",
-				"upstream_provider": "claude",
+				"request_path":     "/v1/messages",
+				"requested_model":  "deepseek-v4-flash",
+				"selected_auth_id": "openai-compatibility:opencode-go:f85c45252fee",
+				"reasoning_effort": "high",
+				"service_tier":     "standard",
 			},
 		},
 		ChunkIndex: 35,
@@ -404,16 +410,78 @@ func TestResponseStreamChunkRecordsClaudeUsage(t *testing.T) {
 	})
 	summary := stats.SummaryWithoutDetailsForRangeAt("24h", time.Now().Add(time.Second))
 	if summary.Usage.TotalRequests != 1 || summary.Usage.TotalTokens != 13760 || summary.Usage.InputTokens != 13729 || summary.Usage.OutputTokens != 31 {
-		t.Fatalf("summary usage = %#v, want one Claude stream fallback record", summary.Usage)
+		t.Fatalf("summary usage = %#v, want cache folded into input for compat accounting", summary.Usage)
 	}
 	if summary.Usage.CachedTokens != 12 {
 		t.Fatalf("cached tokens = %d, want cache_read_input_tokens recorded", summary.Usage.CachedTokens)
+	}
+	if _, ok := summary.Usage.APIs["openai-compatible-opencode-go"]; !ok {
+		t.Fatalf("summary APIs = %#v, want OpenAI-compatible grouping from selected_auth_id, not claude", summary.Usage.APIs)
 	}
 	if len(summary.ClientAPIStats) != 1 || summary.ClientAPIStats[0].APIKey != "sk******wj" {
 		t.Fatalf("client api stats = %#v, want masked Claude Code CPA key", summary.ClientAPIStats)
 	}
 	if len(summary.CredentialStats) != 1 || summary.CredentialStats[0].AuthIndex != "f85c45252fee" {
 		t.Fatalf("credential stats = %#v, want fallback auth index from selected_auth_id", summary.CredentialStats)
+	}
+}
+
+// TestResponseStreamChunkRecordsGenuineClaudeUsage covers a real Anthropic
+// upstream (selected_auth_id claude-*): Claude-family accounting keeps the
+// exclusive input and counts cache toward the total.
+func TestResponseStreamChunkRecordsGenuineClaudeUsage(t *testing.T) {
+	previousStats := stats
+	previousFallbacks := usageFallbacks
+	previousDelay := usageFallbackRecordDelay
+	stats = NewRequestStatistics()
+	usageFallbacks = newUsageFallbackCoordinator()
+	usageFallbackRecordDelay = 10 * time.Millisecond
+	t.Cleanup(func() {
+		usageFallbacks.Flush()
+		usageFallbacks = previousFallbacks
+		usageFallbackRecordDelay = previousDelay
+		stats = previousStats
+	})
+
+	req := ResponseStreamChunkRequest{
+		ResponseInterceptRequest: ResponseInterceptRequest{
+			SourceFormat:   "claude",
+			Model:          "claude-sonnet-4-5",
+			RequestedModel: "claude-sonnet-4-5",
+			RequestHeaders: map[string][]string{
+				"Authorization": {"Bearer:sk-test-fallback-key-0000wj"},
+			},
+			OriginalRequest: []byte(`{"model":"claude-sonnet-4-5","stream":true}`),
+			Body: []byte(strings.Join([]string{
+				`event: message_delta`,
+				`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":100,"output_tokens":20,"cache_read_input_tokens":40}}`,
+				``,
+			}, "\n")),
+			Metadata: map[string]any{
+				"requested_model":  "claude-sonnet-4-5",
+				"selected_auth_id": "claude-openrouter.json",
+			},
+		},
+		ChunkIndex: 7,
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal response stream chunk request: %v", err)
+	}
+	if _, err := handleResponseStreamChunk(body); err != nil {
+		t.Fatalf("handleResponseStreamChunk() error = %v", err)
+	}
+
+	waitForTestCondition(t, func() bool {
+		return stats.Snapshot().TotalRequests == 1
+	})
+	summary := stats.SummaryWithoutDetailsForRangeAt("24h", time.Now().Add(time.Second))
+	// Claude accounting: input stays exclusive (100), total counts cache (160).
+	if summary.Usage.InputTokens != 100 || summary.Usage.OutputTokens != 20 || summary.Usage.TotalTokens != 160 {
+		t.Fatalf("summary usage = %#v, want Claude-family accounting (exclusive input, cache in total)", summary.Usage)
+	}
+	if summary.Usage.CachedTokens != 40 {
+		t.Fatalf("cached tokens = %d, want cache_read_input_tokens recorded", summary.Usage.CachedTokens)
 	}
 }
 
@@ -588,6 +656,202 @@ func TestResponseStreamChunkSkipsNonSuccessStatus(t *testing.T) {
 	}
 }
 
+// TestResponseStreamChunkIgnoresMessageStartUsage guards against phantom
+// fallbacks: a Claude message_start event carries a pre-generation usage
+// snapshot under message.usage which must not schedule a fallback record.
+func TestResponseStreamChunkIgnoresMessageStartUsage(t *testing.T) {
+	previousStats := stats
+	previousFallbacks := usageFallbacks
+	previousDelay := usageFallbackRecordDelay
+	stats = NewRequestStatistics()
+	usageFallbacks = newUsageFallbackCoordinator()
+	usageFallbackRecordDelay = 10 * time.Millisecond
+	t.Cleanup(func() {
+		usageFallbacks.Flush()
+		usageFallbacks = previousFallbacks
+		usageFallbackRecordDelay = previousDelay
+		stats = previousStats
+	})
+
+	req := ResponseStreamChunkRequest{
+		ResponseInterceptRequest: ResponseInterceptRequest{
+			SourceFormat:   "claude",
+			Model:          "claude-sonnet-4-5",
+			RequestedModel: "claude-sonnet-4-5",
+			RequestHeaders: map[string][]string{
+				"Authorization": {"Bearer sk-test-fallback-key-0000wj"},
+			},
+			Body: []byte(strings.Join([]string{
+				`event: message_start`,
+				`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-4-5","usage":{"input_tokens":1200,"output_tokens":1,"cache_read_input_tokens":800}}}`,
+				``,
+			}, "\n")),
+			Metadata: map[string]any{
+				"selected_auth_id": "claude-openrouter.json",
+			},
+		},
+		ChunkIndex: 0,
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal response stream chunk request: %v", err)
+	}
+	if _, err := handleResponseStreamChunk(body); err != nil {
+		t.Fatalf("handleResponseStreamChunk() error = %v", err)
+	}
+	time.Sleep(3 * usageFallbackRecordDelay)
+	if got := stats.Snapshot().TotalRequests; got != 0 {
+		t.Fatalf("total requests = %d, want message_start usage ignored", got)
+	}
+}
+
+// TestResponseStreamChunkSupersedesRunningUsage covers providers that attach
+// cumulative usage to every stream chunk: a later usage chunk must supersede
+// the pending fallback scheduled from an earlier one, so only the final
+// snapshot is committed.
+func TestResponseStreamChunkSupersedesRunningUsage(t *testing.T) {
+	previousStats := stats
+	previousFallbacks := usageFallbacks
+	previousDelay := usageFallbackRecordDelay
+	stats = NewRequestStatistics()
+	usageFallbacks = newUsageFallbackCoordinator()
+	usageFallbackRecordDelay = 40 * time.Millisecond
+	t.Cleanup(func() {
+		usageFallbacks.Flush()
+		usageFallbacks = previousFallbacks
+		usageFallbackRecordDelay = previousDelay
+		stats = previousStats
+	})
+
+	base := ResponseInterceptRequest{
+		SourceFormat:   "openai",
+		Model:          "kimi-k2.7-code",
+		RequestedModel: "kimi-k2.7-code",
+		RequestHeaders: map[string][]string{
+			"Authorization": {"Bearer sk-test-fallback-key-0000wj"},
+		},
+		OriginalRequest: []byte(`{"model":"kimi-k2.7-code","stream":true}`),
+		Metadata: map[string]any{
+			"requested_model":  "kimi-k2.7-code",
+			"selected_auth_id": "openai-compatibility:kimchi:0011223344ff",
+		},
+	}
+	chunk1 := []byte(`data: {"id":"c1","model":"kimi-k2.7-code","choices":[{"delta":{"content":"a"}}],"usage":{"prompt_tokens":50,"completion_tokens":2,"total_tokens":52}}`)
+	chunk2 := []byte(`data: {"id":"c1","model":"kimi-k2.7-code","choices":[{"delta":{"content":"b"}}],"usage":{"prompt_tokens":50,"completion_tokens":9,"total_tokens":59}}`)
+
+	first := ResponseStreamChunkRequest{ResponseInterceptRequest: base, ChunkIndex: 0}
+	first.Body = chunk1
+	firstBody, err := json.Marshal(first)
+	if err != nil {
+		t.Fatalf("marshal first chunk: %v", err)
+	}
+	if _, err := handleResponseStreamChunk(firstBody); err != nil {
+		t.Fatalf("handleResponseStreamChunk(first) error = %v", err)
+	}
+
+	second := ResponseStreamChunkRequest{ResponseInterceptRequest: base, ChunkIndex: 1, HistoryChunks: [][]byte{chunk1}}
+	second.Body = chunk2
+	secondBody, err := json.Marshal(second)
+	if err != nil {
+		t.Fatalf("marshal second chunk: %v", err)
+	}
+	if _, err := handleResponseStreamChunk(secondBody); err != nil {
+		t.Fatalf("handleResponseStreamChunk(second) error = %v", err)
+	}
+
+	waitForTestCondition(t, func() bool {
+		return stats.Snapshot().TotalRequests == 1
+	})
+	time.Sleep(2 * usageFallbackRecordDelay)
+	snapshot := stats.Snapshot()
+	if snapshot.TotalRequests != 1 {
+		t.Fatalf("total requests = %d, want single record from final usage snapshot", snapshot.TotalRequests)
+	}
+	if snapshot.TotalTokens != 59 || snapshot.OutputTokens != 9 {
+		t.Fatalf("tokens = total %d output %d, want final running usage (59/9)", snapshot.TotalTokens, snapshot.OutputTokens)
+	}
+}
+
+// TestFallbackAuthIndexUsesLearnedNativeIndex verifies fallback records reuse
+// the CPA auth index learned from native records for the same auth ID, so the
+// credential dimension does not split between native and fallback rows.
+func TestFallbackAuthIndexUsesLearnedNativeIndex(t *testing.T) {
+	previousStats := stats
+	previousFallbacks := usageFallbacks
+	previousDelay := usageFallbackRecordDelay
+	previousLearner := authIndexes
+	stats = NewRequestStatistics()
+	usageFallbacks = newUsageFallbackCoordinator()
+	usageFallbackRecordDelay = 10 * time.Millisecond
+	authIndexes = newAuthIndexLearner()
+	t.Cleanup(func() {
+		usageFallbacks.Flush()
+		usageFallbacks = previousFallbacks
+		usageFallbackRecordDelay = previousDelay
+		authIndexes = previousLearner
+		stats = previousStats
+	})
+
+	native := UsageRecord{
+		Provider:     "openai-compatible-opencode-go",
+		ExecutorType: "OpenAICompatExecutor",
+		Model:        "deepseek-v4-pro",
+		Alias:        "deepseek-v4-pro",
+		APIKey:       "sk-test-fallback-key-0000wj",
+		AuthID:       "openai-compatibility:opencode-go:f85c45252fee",
+		AuthIndex:    "5312415661d8a481",
+		AuthType:     "apikey",
+		RequestedAt:  time.Now(),
+		Detail:       UsageDetail{InputTokens: 100, OutputTokens: 10, TotalTokens: 110},
+	}
+	nativeBody, err := json.Marshal(native)
+	if err != nil {
+		t.Fatalf("marshal native record: %v", err)
+	}
+	if _, err := handleUsage(nativeBody); err != nil {
+		t.Fatalf("handleUsage() error = %v", err)
+	}
+
+	req := ResponseStreamChunkRequest{
+		ResponseInterceptRequest: ResponseInterceptRequest{
+			SourceFormat:   "claude",
+			Model:          "deepseek-v4-pro",
+			RequestedModel: "deepseek-v4-pro",
+			RequestHeaders: map[string][]string{
+				"Authorization": {"Bearer sk-test-fallback-key-0000wj"},
+			},
+			Body: []byte(strings.Join([]string{
+				`event: message_delta`,
+				`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":200,"output_tokens":30}}`,
+				``,
+			}, "\n")),
+			Metadata: map[string]any{
+				"requested_model":  "deepseek-v4-pro",
+				"selected_auth_id": "openai-compatibility:opencode-go:f85c45252fee",
+			},
+		},
+		ChunkIndex: 12,
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal response stream chunk request: %v", err)
+	}
+	if _, err := handleResponseStreamChunk(body); err != nil {
+		t.Fatalf("handleResponseStreamChunk() error = %v", err)
+	}
+
+	waitForTestCondition(t, func() bool {
+		return stats.Snapshot().TotalRequests == 2
+	})
+	summary := stats.SummaryWithoutDetailsForRangeAt("24h", time.Now().Add(time.Second))
+	if len(summary.CredentialStats) != 1 {
+		t.Fatalf("credential stats = %#v, want native and fallback merged into one credential", summary.CredentialStats)
+	}
+	if summary.CredentialStats[0].AuthIndex != "5312415661d8a481" {
+		t.Fatalf("credential auth index = %q, want learned native index", summary.CredentialStats[0].AuthIndex)
+	}
+}
+
 func TestDecodeSSEJSONValuesKeepsIndependentDataLines(t *testing.T) {
 	values := decodeSSEJSONValues([]byte(strings.Join([]string{
 		`data: {"usage":{"input_tokens":10,"output_tokens":2}}`,
@@ -597,7 +861,7 @@ func TestDecodeSSEJSONValuesKeepsIndependentDataLines(t *testing.T) {
 	if len(values) != 2 {
 		t.Fatalf("decodeSSEJSONValues len = %d, want two independent JSON values: %#v", len(values), values)
 	}
-	detail, ok := usageDetailFromResponseValues(values)
+	detail, ok := usageDetailFromResponseValues(values, usageDetailPaths)
 	if !ok {
 		t.Fatal("usageDetailFromResponseValues() ok = false, want true")
 	}

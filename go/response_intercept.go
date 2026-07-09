@@ -20,7 +20,55 @@ const (
 var (
 	usageFallbackRecordDelay = defaultUsageFallbackDelay
 	usageFallbacks           = newUsageFallbackCoordinator()
+	authIndexes              = newAuthIndexLearner()
 )
+
+// authIndexLearner remembers the CPA-computed auth index for each auth ID.
+// Native usage records carry both fields, while interceptor metadata only
+// carries the auth ID; reusing the learned index keeps fallback records in
+// the same credential group as native ones on the dashboard.
+type authIndexLearner struct {
+	mu      sync.RWMutex
+	indexes map[string]string
+}
+
+const maxLearnedAuthIndexes = 4096
+
+func newAuthIndexLearner() *authIndexLearner {
+	return &authIndexLearner{indexes: make(map[string]string)}
+}
+
+func (l *authIndexLearner) Learn(authID, authIndex string) {
+	if l == nil {
+		return
+	}
+	key := strings.ToLower(strings.TrimSpace(authID))
+	value := strings.TrimSpace(authIndex)
+	if key == "" || value == "" || value == safeCredentialIdentity(authID) {
+		return
+	}
+	l.mu.Lock()
+	if existing, ok := l.indexes[key]; !ok || existing != value {
+		if len(l.indexes) < maxLearnedAuthIndexes || l.indexes[key] != "" {
+			l.indexes[key] = value
+		}
+	}
+	l.mu.Unlock()
+}
+
+func (l *authIndexLearner) Lookup(authID string) string {
+	if l == nil {
+		return ""
+	}
+	key := strings.ToLower(strings.TrimSpace(authID))
+	if key == "" {
+		return ""
+	}
+	l.mu.RLock()
+	value := l.indexes[key]
+	l.mu.RUnlock()
+	return value
+}
 
 type ResponseInterceptRequest struct {
 	SourceFormat    string
@@ -135,9 +183,42 @@ func handleResponseStreamChunk(requestBody []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed to parse response stream chunk request: %w", err)
 	}
 	if record, ok := usageRecordFromResponseStreamChunk(req); ok && usageFallbacks != nil {
+		usageFallbacks.Supersede(supersededStreamUsageFingerprints(req))
 		usageFallbacks.Schedule(record)
 	}
 	return okEnvelopeJSON("{}")
+}
+
+// supersededStreamUsageFingerprints returns dedup fingerprints for usage
+// payloads carried by earlier chunks of the same stream. A later usage chunk
+// (e.g. providers that attach running totals to every chunk, or Codex emitting
+// usage on multiple response events) supersedes those pending fallbacks so
+// only the most recent usage snapshot of the stream is committed.
+func supersededStreamUsageFingerprints(req ResponseStreamChunkRequest) []string {
+	if len(req.HistoryChunks) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, 2)
+	keys := make([]string, 0, 2)
+	for _, chunk := range req.HistoryChunks {
+		if len(bytes.TrimSpace(chunk)) == 0 {
+			continue
+		}
+		record, ok := usageRecordFromStreamValues(req.ResponseInterceptRequest, responseJSONValues(chunk))
+		if !ok {
+			continue
+		}
+		key := usageRecordFingerprint(record)
+		if key == "" {
+			continue
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	return keys
 }
 
 func usageRecordFromResponseIntercept(req ResponseInterceptRequest) (UsageRecord, bool) {
@@ -155,18 +236,40 @@ func usageRecordFromResponseStreamChunk(req ResponseStreamChunkRequest) (UsageRe
 	if len(bytes.TrimSpace(req.Body)) == 0 {
 		return UsageRecord{}, false
 	}
-	return usageRecordFromResponseValues(req.ResponseInterceptRequest, responseJSONValues(req.Body))
+	return usageRecordFromStreamValues(req.ResponseInterceptRequest, responseJSONValues(req.Body))
 }
 
 func usageRecordFromResponseValues(req ResponseInterceptRequest, responseValues []any) (UsageRecord, bool) {
-	detail, ok := usageDetailFromResponseValues(responseValues)
+	return usageRecordFromValues(req, responseValues, usageDetailPaths)
+}
+
+// usageRecordFromStreamValues mirrors usageRecordFromResponseValues but skips
+// the message_start-style "message.usage" path: in Claude streams that node
+// only carries the pre-generation input snapshot and would schedule a phantom
+// fallback that never matches the final usage of the request.
+func usageRecordFromStreamValues(req ResponseInterceptRequest, responseValues []any) (UsageRecord, bool) {
+	return usageRecordFromValues(req, responseValues, usageDetailStreamPaths)
+}
+
+func usageRecordFromValues(req ResponseInterceptRequest, responseValues []any, detailPaths []string) (UsageRecord, bool) {
+	detail, ok := usageDetailFromResponseValues(responseValues, detailPaths)
 	if !ok {
 		return UsageRecord{}, false
 	}
-	if responseUsesAnthropicUsageAccounting(req) {
-		detail = normalizeAnthropicUsageDetail(detail)
-	}
 	requestRoot, _ := decodeJSONValue(firstBytes(req.RequestBody, req.OriginalRequest))
+	authID := firstNonEmpty(metadataString(req.Metadata, "selected_auth_id"), metadataString(req.Metadata, "pinned_auth_id"))
+	// selected_auth_id is what CPA's conductor actually publishes and encodes
+	// the upstream kind unambiguously; the plain provider metadata keys are
+	// speculative and must not override it (a generic value like "claude"
+	// would flip both grouping and cache accounting for compat upstreams).
+	provider := firstNonEmpty(
+		providerFromSelectedAuthID(req.Metadata),
+		metadataString(req.Metadata, "upstream_provider", "provider", "selected_provider"),
+		fallbackUsageProvider(req),
+	)
+	if responseUsesAnthropicUsageAccounting(req) {
+		detail = normalizeAnthropicUsageDetail(detail, usageProviderFamily(provider))
+	}
 	model := firstNonEmpty(
 		jsonStringPathFromValues(responseValues, "model", "response.model", "message.model"),
 		req.Model,
@@ -180,9 +283,8 @@ func usageRecordFromResponseValues(req ResponseInterceptRequest, responseValues 
 		jsonStringPath(requestRoot, "model"),
 		model,
 	)
-	authID := firstNonEmpty(metadataString(req.Metadata, "selected_auth_id"), metadataString(req.Metadata, "pinned_auth_id"))
 	return UsageRecord{
-		Provider:        firstNonEmpty(metadataString(req.Metadata, "upstream_provider", "provider", "selected_provider"), providerFromSelectedAuthID(req.Metadata), fallbackUsageProvider(req)),
+		Provider:        provider,
 		ExecutorType:    "ResponseInterceptorFallback",
 		Model:           model,
 		Alias:           requestedModel,
@@ -201,26 +303,33 @@ func usageRecordFromResponseValues(req ResponseInterceptRequest, responseValues 
 }
 
 func responseUsesAnthropicUsageAccounting(req ResponseInterceptRequest) bool {
-	for _, value := range []string{
-		req.SourceFormat,
-		metadataString(req.Metadata, "upstream_provider", "provider", "selected_provider"),
-		providerFromSelectedAuthID(req.Metadata),
-	} {
-		value = strings.ToLower(strings.TrimSpace(value))
-		if strings.Contains(value, "anthropic") || strings.Contains(value, "claude") {
-			return true
-		}
-	}
-	return false
+	value := strings.ToLower(strings.TrimSpace(req.SourceFormat))
+	return strings.Contains(value, "anthropic") || strings.Contains(value, "claude")
 }
 
-func normalizeAnthropicUsageDetail(detail UsageDetail) UsageDetail {
+// normalizeAnthropicUsageDetail aligns a Claude-shaped usage payload
+// (input_tokens excludes cache reads/creations) with the accounting of the
+// native usage record CPA produces for the same request, so the dedup
+// fingerprints line up:
+//   - Claude-family upstreams keep the exclusive input and count cache into
+//     the total, mirroring CPA's native Claude usage parser.
+//   - Every other upstream (openai-compatible, codex, ...) reports
+//     prompt_tokens with cache included, so cache is folded into input.
+func normalizeAnthropicUsageDetail(detail UsageDetail, providerFamily string) UsageDetail {
 	cacheInput := detail.CacheReadTokens + detail.CacheCreationTokens
-	if cacheInput > 0 && detail.InputTokens > 0 {
-		detail.InputTokens += cacheInput
-		if detail.TotalTokens != 0 && detail.TotalTokens < detail.InputTokens+detail.OutputTokens {
-			detail.TotalTokens = detail.InputTokens + detail.OutputTokens
+	if cacheInput <= 0 {
+		return detail
+	}
+	if providerFamily == "claude" {
+		expanded := detail.InputTokens + detail.OutputTokens + cacheInput
+		if detail.TotalTokens < expanded {
+			detail.TotalTokens = expanded
 		}
+		return detail
+	}
+	detail.InputTokens += cacheInput
+	if detail.TotalTokens != 0 && detail.TotalTokens < detail.InputTokens+detail.OutputTokens {
+		detail.TotalTokens = detail.InputTokens + detail.OutputTokens
 	}
 	return detail
 }
@@ -274,11 +383,11 @@ func decodeSSEJSONValues(body []byte) []any {
 	return values
 }
 
-func usageDetailFromResponseValues(values []any) (UsageDetail, bool) {
+func usageDetailFromResponseValues(values []any, detailPaths []string) (UsageDetail, bool) {
 	var best UsageDetail
 	var found bool
 	for _, value := range values {
-		detail, ok := usageDetailFromResponseRoot(value)
+		detail, ok := usageDetailFromResponseRoot(value, detailPaths)
 		if !ok {
 			continue
 		}
@@ -307,19 +416,38 @@ func absInt64(value int64) int64 {
 	return value
 }
 
-func usageDetailFromResponseRoot(root any) (UsageDetail, bool) {
-	for _, path := range []string{
-		"usage",
-		"response.usage",
-		"message.usage",
-		"total_usage",
-		"metadata.usage",
-		"metadata.total_usage",
-		"usageMetadata",
-		"usage_metadata",
-		"response.usageMetadata",
-		"response.usage_metadata",
-	} {
+// usageDetailPaths lists the JSON paths probed for usage payloads in complete
+// (non-stream) response bodies.
+var usageDetailPaths = []string{
+	"usage",
+	"response.usage",
+	"message.usage",
+	"total_usage",
+	"metadata.usage",
+	"metadata.total_usage",
+	"usageMetadata",
+	"usage_metadata",
+	"response.usageMetadata",
+	"response.usage_metadata",
+}
+
+// usageDetailStreamPaths is usageDetailPaths without "message.usage": in a
+// Claude SSE stream that path only appears on message_start, whose usage is a
+// pre-generation snapshot rather than the request's final usage.
+var usageDetailStreamPaths = []string{
+	"usage",
+	"response.usage",
+	"total_usage",
+	"metadata.usage",
+	"metadata.total_usage",
+	"usageMetadata",
+	"usage_metadata",
+	"response.usageMetadata",
+	"response.usage_metadata",
+}
+
+func usageDetailFromResponseRoot(root any, detailPaths []string) (UsageDetail, bool) {
+	for _, path := range detailPaths {
 		if node, ok := jsonValuePath(root, path); ok {
 			if detail, ok := usageDetailFromValue(node); ok {
 				return detail, true
@@ -348,8 +476,14 @@ func usageDetailFromValue(value any) (UsageDetail, bool) {
 		if detail.ReasoningTokens == 0 {
 			detail.ReasoningTokens = firstJSONInt(m, "thoughtsTokenCount", "reasoning_tokens", "total_thought_tokens")
 		}
+		if detail.ReasoningTokens == 0 {
+			detail.ReasoningTokens = firstNestedJSONInt(m, "reasoning_tokens", "completion_tokens_details", "output_tokens_details")
+		}
 		if detail.CachedTokens == 0 {
 			detail.CachedTokens = firstJSONInt(m, "cachedContentTokenCount", "cached_tokens", "total_cached_tokens")
+		}
+		if detail.CachedTokens == 0 {
+			detail.CachedTokens = firstNestedJSONInt(m, "cached_tokens", "prompt_tokens_details", "input_tokens_details")
 		}
 		if detail.CacheReadTokens == 0 {
 			detail.CacheReadTokens = firstJSONInt(m, "cache_read_tokens", "cacheReadTokens", "cache_read_input_tokens")
@@ -475,6 +609,32 @@ func (c *usageFallbackCoordinator) HandleNative(record UsageRecord) bool {
 	return true
 }
 
+// Supersede cancels pending fallbacks whose fingerprints were derived from
+// earlier usage-bearing chunks of the same stream; the caller schedules a
+// fresher snapshot right after. Fallbacks already committed cannot be
+// retracted — late native records still reconcile through fallbackRecent.
+func (c *usageFallbackCoordinator) Supersede(keys []string) {
+	if c == nil || len(keys) == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return
+	}
+	for _, key := range keys {
+		if key == "" {
+			continue
+		}
+		if pending := c.popPendingLocked(key); pending != nil {
+			pending.cancelled = true
+			if pending.timer != nil {
+				pending.timer.Stop()
+			}
+		}
+	}
+}
+
 func (c *usageFallbackCoordinator) Flush() {
 	if c == nil {
 		return
@@ -521,6 +681,13 @@ func (c *usageFallbackCoordinator) commit(pending *pendingUsageFallback) {
 	c.cleanupLocked(now)
 	record := pending.record
 	c.mu.Unlock()
+	// A native record for the same credential may have arrived while this
+	// fallback was waiting; prefer the CPA auth index it taught us.
+	if record.AuthID != "" && record.AuthIndex == safeCredentialIdentity(record.AuthID) {
+		if learned := authIndexes.Lookup(record.AuthID); learned != "" {
+			record.AuthIndex = learned
+		}
+	}
 	stats.Record(record)
 }
 
@@ -635,19 +802,35 @@ func (c *usageFallbackCoordinator) cleanupLocked(now time.Time) {
 	}
 }
 
+// usageRecordFingerprint keys native/fallback dedup. Provider is collapsed to
+// its family so a fallback that only knows the generic "openai-compatible"
+// upstream still matches the native record's specific
+// "openai-compatible-<name>" provider. Token counts are canonicalized to
+// cache-inclusive input with a recomputed total: Claude-family records keep
+// input exclusive of cache reads/creations (both CPA's native parser and the
+// fallback's Claude-format normalization do), while every other family
+// already folds cache into input — adding the cache fields for Claude-family
+// records makes the same request produce one fingerprint no matter which
+// side, protocol shape, or total_tokens convention reported it. Reasoning
+// effort and service tier are deliberately excluded: the two sides derive
+// them from different sources and the token triple already discriminates
+// requests.
 func usageRecordFingerprint(record UsageRecord) string {
 	if !usageDetailHasTokens(record.Detail) {
 		return ""
 	}
+	inputTokens := record.Detail.InputTokens
+	if usageProviderFamily(record.Provider) == "claude" {
+		inputTokens += record.Detail.CacheReadTokens + record.Detail.CacheCreationTokens
+	}
+	outputTokens := record.Detail.OutputTokens
 	parts := []string{
 		usageProviderFamily(record.Provider),
 		strings.ToLower(strings.TrimSpace(firstNonEmpty(record.Model, record.Alias))),
 		canonicalClientAPIKey(record.APIKey),
-		strings.ToLower(strings.TrimSpace(record.ReasoningEffort)),
-		strings.ToLower(strings.TrimSpace(record.ServiceTier)),
-		fmt.Sprintf("%d", record.Detail.InputTokens),
-		fmt.Sprintf("%d", record.Detail.OutputTokens),
-		fmt.Sprintf("%d", usageDetailTotalTokens(record.Detail)),
+		fmt.Sprintf("%d", inputTokens),
+		fmt.Sprintf("%d", outputTokens),
+		fmt.Sprintf("%d", inputTokens+outputTokens),
 	}
 	return strings.Join(parts, "\x00")
 }
@@ -659,6 +842,10 @@ func usageProviderFamily(provider string) string {
 		return ""
 	case strings.HasPrefix(value, "openai-compatible") || strings.HasPrefix(value, "openai-compatibility"):
 		return "openai-compatible"
+	case value == "anthropic" || strings.HasPrefix(value, "anthropic-"):
+		return "claude"
+	case value == "claude" || strings.HasPrefix(value, "claude-"):
+		return "claude"
 	default:
 		return value
 	}
@@ -713,6 +900,9 @@ func providerFromAuthID(authID string) string {
 func fallbackAuthIndex(meta map[string]any, authID string) string {
 	if index := metadataString(meta, "auth_index", "selected_auth_index", "pinned_auth_index"); index != "" {
 		return index
+	}
+	if learned := authIndexes.Lookup(authID); learned != "" {
+		return learned
 	}
 	return safeCredentialIdentity(authID)
 }
@@ -896,6 +1086,21 @@ func firstJSONInt(m map[string]any, keys ...string) int64 {
 			if n := jsonInt(value); n != 0 {
 				return n
 			}
+		}
+	}
+	return 0
+}
+
+// firstNestedJSONInt reads key from the first of the given child objects that
+// carries it, e.g. usage.prompt_tokens_details.cached_tokens.
+func firstNestedJSONInt(m map[string]any, key string, parents ...string) int64 {
+	for _, parent := range parents {
+		child, ok := m[parent].(map[string]any)
+		if !ok {
+			continue
+		}
+		if n := firstJSONInt(child, key); n != 0 {
+			return n
 		}
 	}
 	return 0

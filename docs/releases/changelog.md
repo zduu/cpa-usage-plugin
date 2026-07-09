@@ -4,6 +4,27 @@
 
 `v1.0.0` 到 `v1.2.18` 为规范化发布流程建立前的 legacy 历史版本，不在本文件中回填；对应说明见 [v1-history.md](v1-history.md)。
 
+## v2.3.0 - 2026-07-10
+
+本版本对 v2.2.8 引入的响应拦截兜底统计做了一轮系统性加固，是针对「CPA `v7.2.53+` 下 OpenAI 兼容渠道（如 deepseek-v4 系列）在 Claude Code CLI 调用时看板缺记录」问题的完整收尾。审查与验证过程见 [docs/issues/2026-07-09-deepseek-usage-fallback-review.md](../issues/2026-07-09-deepseek-usage-fallback-review.md)。
+
+### 兜底统计与去重加固
+- 兜底 provider 识别改为优先信任 CPA conductor 实际下发的 `selected_auth_id`，推测性的 `upstream_provider` 等 metadata 键降级为次选，客户端协议（SourceFormat）只作最后回退；彻底避免 Claude Code 调用 OpenAI 兼容渠道时兜底记录被误分组为 `claude` 上游
+- 去重指纹的 input/total 改为「缓存全含 + 重算」的规范口径：Claude 家族上游（原生解析 input 不含 cache）在指纹中补入 cache_read/cache_creation，其余上游保持 prompt_tokens 原语义；同一次请求无论走原生记录、Claude 协议翻译还是 OpenAI 协议翻译，指纹一致，修复真实 Anthropic 上游带缓存请求可能双计的问题
+- 去重指纹不再包含 reasoning_effort 和 service_tier：两侧来源不同（原生取自翻译后载荷、兜底取自拦截 metadata），可能取值不一致导致去重失效；token 三元组加模型、key、上游家族已足够区分请求
+- Claude 家族上游的兜底记录保持 input 不含缓存、total 计入缓存的原生口径，与 CPA 原生 Claude usage 解析一致；其余上游继续把 Claude 格式响应的缓存 token 折回 input（并修复了全缓存命中时 input=0 不回补的边界）
+- 流式兜底不再解析 `message_start` 的 `message.usage` 预生成快照，消除 Claude 协议流式响应可能多调度一条永不匹配的幽灵兜底记录的问题
+- 利用 CPA 下发的 `HistoryChunks`：同一流中较新的 usage chunk 会替代（supersede）此前 chunk 调度的待写入兜底，支持每个 chunk 携带累计 usage 的上游（如部分 kimi/glm 渠道），只提交最终快照，不再多计
+- 兜底解析补充 OpenAI 嵌套字段 `prompt_tokens_details.cached_tokens`、`input_tokens_details.cached_tokens`、`completion_tokens_details.reasoning_tokens`、`output_tokens_details.reasoning_tokens`，兜底记录的缓存/推理 token 与原生记录对齐
+
+### 凭证维度一致性
+- 新增 auth index 学习：插件从原生 usage 记录和启动恢复的持久化明细中学习每个 auth id 对应的 CPA auth index，兜底记录复用学习到的 index，凭证维度不再因原生/兜底混合而分裂成两个凭证分组
+- 兜底记录提交前会再次查询学习表，捕捉等待窗口内刚学到的映射
+
+### 说明
+- CPA `v7.2.53/54` 下 OpenAI 兼容渠道原生 `usage.handle` 间歇性缺失的现象仍存在于 CPA 侧（本地实测同一渠道部分请求有原生记录、部分只有兜底记录）；本插件的兜底链路已在实测中验证可完整补位并正确去重
+- 旧版本（≤2.2.8 开发版）已写入的 `claude · 上游 xxx` 错误分组历史数据不会被自动改写，会随保留窗口自然过期；如需立即清理可通过导出-筛选-导入完成
+
 ## v2.2.9 - 2026-07-09
 
 ### 问题修复

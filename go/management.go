@@ -14,6 +14,7 @@ func handleUsage(requestBody []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed to parse usage record: %w", err)
 	}
 
+	authIndexes.Learn(usageRecord.AuthID, usageRecord.AuthIndex)
 	if usageFallbacks == nil || usageFallbacks.HandleNative(usageRecord) {
 		stats.Record(usageRecord)
 	}

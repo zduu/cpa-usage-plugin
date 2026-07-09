@@ -1920,6 +1920,10 @@ func normalizeStorageSnapshotDetail(modelName string, detail RequestDetail, now 
 	}
 	detail.Tokens.TotalTokens = detailTotalTokens(detail.Tokens)
 	detail.Source = cleanImportedDetailSource(detail)
+	// Restored details from native records carry the CPA auth index for their
+	// auth ID; seed the learner so fallback records grouped after a restart
+	// land in the same credential group.
+	authIndexes.Learn(detail.AuthID, detail.AuthIndex)
 	return normalizeStoredClientAPIIdentity(detail)
 }
 
