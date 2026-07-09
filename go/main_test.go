@@ -172,6 +172,55 @@ func TestUsageRecordUnmarshalAcceptsBaseURLAliases(t *testing.T) {
 	}
 }
 
+func TestHandleUsageAcceptsOpenAICompatibleLoosePayload(t *testing.T) {
+	previousStats := stats
+	stats = NewRequestStatistics()
+	t.Cleanup(func() { stats = previousStats })
+
+	raw := []byte(`{
+		"provider":"openai-compatible",
+		"executor_type":"OpenAICompatExecutor",
+		"model":"deepseek-v3.1",
+		"api_key":"sk-client-alpha-0000xx",
+		"auth_index":"public",
+		"baseUrl":"https://compat.example/v1",
+		"source":"compat-example",
+		"requested_at":1783526400123,
+		"latency_ms":1200,
+		"ttft_ms":230,
+		"detail":{
+			"prompt_tokens":11,
+			"completion_tokens":12,
+			"prompt_tokens_details":{"cached_tokens":3},
+			"completion_tokens_details":{"reasoning_tokens":4}
+		}
+	}`)
+
+	if _, err := handleUsage(raw); err != nil {
+		t.Fatalf("handleUsage() error = %v", err)
+	}
+	now := time.Date(2026, 7, 8, 17, 0, 0, 0, time.UTC)
+	summary := stats.SummaryWithoutDetailsForRangeAt("24h", now)
+	if summary.Usage.TotalRequests != 1 || summary.Usage.TotalTokens != 23 {
+		t.Fatalf("summary usage = %#v, want one OpenAI-compatible record", summary.Usage)
+	}
+	apiName := "openai-compatible · https://compat.example/v1"
+	api, ok := summary.Usage.APIs[apiName]
+	if !ok {
+		t.Fatalf("summary APIs = %#v, want %q", summary.Usage.APIs, apiName)
+	}
+	if _, ok := api.Models["deepseek-v3.1"]; !ok {
+		t.Fatalf("api models = %#v, want deepseek-v3.1", api.Models)
+	}
+	events := stats.QueryEventsAt(EventsQuery{Range: "24h", Limit: 10}, now)
+	if events.Total != 1 || len(events.Events) != 1 {
+		t.Fatalf("events = %#v, want one event", events)
+	}
+	if events.Events[0].LatencyMs != 1200 || events.Events[0].TTFTMs != 230 {
+		t.Fatalf("event latency = %d/%d, want 1200/230", events.Events[0].LatencyMs, events.Events[0].TTFTMs)
+	}
+}
+
 func TestHandleImportUsageAcceptsV120ExportFixture(t *testing.T) {
 	fixture := filepath.Join("testdata", "usage-export-v1.2.0.json")
 	body, err := os.ReadFile(fixture)

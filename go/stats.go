@@ -4592,21 +4592,7 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsLocked(now time.Time, heal
 		return summary.CredentialStats[i].TotalRequests > summary.CredentialStats[j].TotalRequests
 	})
 
-	summary.ClientAPIStats = make([]ClientAPIStat, 0, len(s.clientAPIStats))
-	for _, agg := range s.clientAPIStats {
-		stat := agg.stat
-		stat.Models = make([]ClientAPIModelStat, 0, len(agg.models))
-		for _, model := range agg.models {
-			stat.Models = append(stat.Models, finalizeClientAPIModelStat(*model))
-		}
-		sort.SliceStable(stat.Models, func(i, j int) bool {
-			return stat.Models[i].TotalRequests > stat.Models[j].TotalRequests
-		})
-		summary.ClientAPIStats = append(summary.ClientAPIStats, stat)
-	}
-	sort.SliceStable(summary.ClientAPIStats, func(i, j int) bool {
-		return summary.ClientAPIStats[i].TotalRequests > summary.ClientAPIStats[j].TotalRequests
-	})
+	summary.ClientAPIStats = clientAPIStatsFromAccumulators(s.clientAPIStats)
 
 	// Build health grid
 	summary.HealthGrid = make([]HealthGridSlot, dashboardHealthSlotCount)
@@ -4930,21 +4916,7 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Ti
 	})
 
 	// Build client API stats
-	summary.ClientAPIStats = make([]ClientAPIStat, 0, len(clientAPIAgg))
-	for _, agg := range clientAPIAgg {
-		stat := agg.stat
-		stat.Models = make([]ClientAPIModelStat, 0, len(agg.models))
-		for _, model := range agg.models {
-			stat.Models = append(stat.Models, finalizeClientAPIModelStat(*model))
-		}
-		sort.SliceStable(stat.Models, func(i, j int) bool {
-			return stat.Models[i].TotalRequests > stat.Models[j].TotalRequests
-		})
-		summary.ClientAPIStats = append(summary.ClientAPIStats, stat)
-	}
-	sort.SliceStable(summary.ClientAPIStats, func(i, j int) bool {
-		return summary.ClientAPIStats[i].TotalRequests > summary.ClientAPIStats[j].TotalRequests
-	})
+	summary.ClientAPIStats = clientAPIStatsFromAccumulators(clientAPIAgg)
 
 	// Build health grid from pre-aggregated health buckets (always 7-day window, not scoped by range).
 	healthStart := healthWindow.Add(-dashboardHealthSlotCount * dashboardHealthStep)
@@ -5125,6 +5097,192 @@ func clientAPIGroupKey(detail RequestDetail) string {
 		return "api_key:" + label
 	}
 	return "(unknown)"
+}
+
+func clientAPIStatsFromAccumulators(accumulators map[string]*clientAPIStatAccumulator) []ClientAPIStat {
+	stats := make([]ClientAPIStat, 0, len(accumulators))
+	for _, agg := range accumulators {
+		if agg == nil {
+			continue
+		}
+		stat := agg.stat
+		stat.Models = make([]ClientAPIModelStat, 0, len(agg.models))
+		for _, model := range agg.models {
+			if model == nil {
+				continue
+			}
+			stat.Models = append(stat.Models, finalizeClientAPIModelStat(*model))
+		}
+		sortClientAPIModelStats(stat.Models)
+		stats = append(stats, stat)
+	}
+	stats = coalesceLegacyHashlessClientAPIStats(stats)
+	sortClientAPIStats(stats)
+	return stats
+}
+
+func sortClientAPIStats(stats []ClientAPIStat) {
+	sort.SliceStable(stats, func(i, j int) bool {
+		return stats[i].TotalRequests > stats[j].TotalRequests
+	})
+}
+
+func sortClientAPIModelStats(stats []ClientAPIModelStat) {
+	sort.SliceStable(stats, func(i, j int) bool {
+		return stats[i].TotalRequests > stats[j].TotalRequests
+	})
+}
+
+func coalesceLegacyHashlessClientAPIStats(stats []ClientAPIStat) []ClientAPIStat {
+	if len(stats) < 2 {
+		return stats
+	}
+	type labelGroups struct {
+		hashed   []int
+		hashless []int
+	}
+	byLabel := make(map[string]*labelGroups)
+	for i := range stats {
+		label := strings.TrimSpace(stats[i].APIKey)
+		if label == "" || !strings.Contains(label, redactedMarker) {
+			continue
+		}
+		group, ok := byLabel[label]
+		if !ok {
+			group = &labelGroups{}
+			byLabel[label] = group
+		}
+		if strings.TrimSpace(stats[i].APIKeyHash) == "" {
+			group.hashless = append(group.hashless, i)
+			continue
+		}
+		group.hashed = append(group.hashed, i)
+	}
+	removed := make(map[int]bool)
+	for _, group := range byLabel {
+		if len(group.hashed) != 1 || len(group.hashless) == 0 {
+			continue
+		}
+		target := group.hashed[0]
+		for _, source := range group.hashless {
+			if source == target {
+				continue
+			}
+			mergeClientAPIStat(&stats[target], stats[source])
+			removed[source] = true
+		}
+	}
+	if len(removed) == 0 {
+		return stats
+	}
+	out := stats[:0]
+	for i, stat := range stats {
+		if removed[i] {
+			continue
+		}
+		out = append(out, stat)
+	}
+	return out
+}
+
+func mergeClientAPIStat(dst *ClientAPIStat, src ClientAPIStat) {
+	if dst == nil {
+		return
+	}
+	if strings.TrimSpace(dst.APIKey) == "" {
+		dst.APIKey = src.APIKey
+	}
+	if strings.TrimSpace(dst.APIKeyHash) == "" {
+		dst.APIKeyHash = src.APIKeyHash
+	}
+	dst.TotalRequests += src.TotalRequests
+	dst.SuccessCount += src.SuccessCount
+	dst.FailureCount += src.FailureCount
+	dst.TotalTokens += src.TotalTokens
+	dst.InputTokens += src.InputTokens
+	dst.OutputTokens += src.OutputTokens
+	dst.CachedTokens += src.CachedTokens
+	dst.ReasoningTokens += src.ReasoningTokens
+
+	models := make(map[string]*ClientAPIModelStat, len(dst.Models)+len(src.Models))
+	for _, model := range dst.Models {
+		modelCopy := model
+		models[modelCopy.Model] = &modelCopy
+	}
+	for _, model := range src.Models {
+		key := model.Model
+		if existing, ok := models[key]; ok && existing != nil {
+			mergeClientAPIModelStat(existing, model)
+			continue
+		}
+		modelCopy := model
+		models[key] = &modelCopy
+	}
+	dst.Models = dst.Models[:0]
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		dst.Models = append(dst.Models, *model)
+	}
+	sortClientAPIModelStats(dst.Models)
+}
+
+func mergeClientAPIModelStat(dst *ClientAPIModelStat, src ClientAPIModelStat) {
+	if dst == nil {
+		return
+	}
+	dst.TotalRequests += src.TotalRequests
+	dst.SuccessCount += src.SuccessCount
+	dst.FailureCount += src.FailureCount
+	dst.TotalTokens += src.TotalTokens
+	dst.InputTokens += src.InputTokens
+	dst.OutputTokens += src.OutputTokens
+	dst.CachedTokens += src.CachedTokens
+	dst.ReasoningTokens += src.ReasoningTokens
+	dst.Providers = mergeFinalizedProviderStats(dst.Providers, src.Providers)
+}
+
+func mergeFinalizedProviderStats(dst []ModelProviderStat, src []ModelProviderStat) []ModelProviderStat {
+	if len(src) == 0 {
+		return dst
+	}
+	merged := make(map[string]*ModelProviderStat, len(dst)+len(src))
+	for _, provider := range dst {
+		providerCopy := provider
+		merged[modelProviderStatsKey(providerCopy.Provider)] = &providerCopy
+	}
+	for _, provider := range src {
+		key := modelProviderStatsKey(provider.Provider)
+		existing, ok := merged[key]
+		if !ok || existing == nil {
+			providerCopy := provider
+			merged[key] = &providerCopy
+			continue
+		}
+		existing.TotalRequests += provider.TotalRequests
+		existing.SuccessCount += provider.SuccessCount
+		existing.FailureCount += provider.FailureCount
+		existing.TotalTokens += provider.TotalTokens
+		existing.InputTokens += provider.InputTokens
+		existing.OutputTokens += provider.OutputTokens
+		existing.CachedTokens += provider.CachedTokens
+		existing.ReasoningTokens += provider.ReasoningTokens
+	}
+	out := make([]ModelProviderStat, 0, len(merged))
+	for _, provider := range merged {
+		if provider == nil {
+			continue
+		}
+		out = append(out, *provider)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].TotalRequests != out[j].TotalRequests {
+			return out[i].TotalRequests > out[j].TotalRequests
+		}
+		return out[i].Provider < out[j].Provider
+	})
+	return out
 }
 
 func normalizeImportedClientAPIIdentity(detail RequestDetail) RequestDetail {

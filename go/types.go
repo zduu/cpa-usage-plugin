@@ -2,6 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"math"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -129,12 +132,33 @@ type UsageRecord struct {
 }
 
 func (r *UsageRecord) UnmarshalJSON(data []byte) error {
-	type usageRecord UsageRecord
-	var current usageRecord
+	var current struct {
+		Provider        string              `json:"provider"`
+		ExecutorType    string              `json:"executor_type"`
+		Model           string              `json:"model"`
+		Alias           string              `json:"alias"`
+		APIKey          string              `json:"api_key"`
+		AuthID          string              `json:"auth_id"`
+		AuthIndex       string              `json:"auth_index"`
+		AuthType        string              `json:"auth_type"`
+		BaseURL         string              `json:"base_url"`
+		Source          string              `json:"source"`
+		ReasoningEffort string              `json:"reasoning_effort"`
+		ServiceTier     string              `json:"service_tier"`
+		RequestedAt     json.RawMessage     `json:"requested_at"`
+		RequestedAtMs   json.RawMessage     `json:"requested_at_ms"`
+		Latency         json.RawMessage     `json:"latency"`
+		LatencyMs       json.RawMessage     `json:"latency_ms"`
+		TTFT            json.RawMessage     `json:"ttft"`
+		TTFTMs          json.RawMessage     `json:"ttft_ms"`
+		Failed          bool                `json:"failed"`
+		Failure         UsageFailure        `json:"failure"`
+		Detail          UsageDetail         `json:"detail"`
+		ResponseHeaders map[string][]string `json:"response_headers"`
+	}
 	if err := json.Unmarshal(data, &current); err != nil {
 		return err
 	}
-
 	var legacy struct {
 		Provider        string              `json:"Provider"`
 		ExecutorType    string              `json:"ExecutorType"`
@@ -149,9 +173,12 @@ func (r *UsageRecord) UnmarshalJSON(data []byte) error {
 		Source          string              `json:"Source"`
 		ReasoningEffort string              `json:"ReasoningEffort"`
 		ServiceTier     string              `json:"ServiceTier"`
-		RequestedAt     time.Time           `json:"RequestedAt"`
-		Latency         time.Duration       `json:"Latency"`
-		TTFT            time.Duration       `json:"TTFT"`
+		RequestedAt     json.RawMessage     `json:"RequestedAt"`
+		RequestedAtMs   json.RawMessage     `json:"RequestedAtMs"`
+		Latency         json.RawMessage     `json:"Latency"`
+		LatencyMs       json.RawMessage     `json:"LatencyMs"`
+		TTFT            json.RawMessage     `json:"TTFT"`
+		TTFTMs          json.RawMessage     `json:"TTFTMs"`
 		Failed          bool                `json:"Failed"`
 		Failure         UsageFailure        `json:"Failure"`
 		Detail          UsageDetail         `json:"Detail"`
@@ -168,73 +195,163 @@ func (r *UsageRecord) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
-	if current.Provider == "" {
-		current.Provider = legacy.Provider
+	record := UsageRecord{
+		Provider:        firstNonEmpty(current.Provider, legacy.Provider),
+		ExecutorType:    firstNonEmpty(current.ExecutorType, legacy.ExecutorType),
+		Model:           firstNonEmpty(current.Model, legacy.Model),
+		Alias:           firstNonEmpty(current.Alias, legacy.Alias),
+		APIKey:          firstNonEmpty(current.APIKey, legacy.APIKey),
+		AuthID:          firstNonEmpty(current.AuthID, legacy.AuthID),
+		AuthIndex:       firstNonEmpty(current.AuthIndex, legacy.AuthIndex),
+		AuthType:        firstNonEmpty(current.AuthType, legacy.AuthType),
+		BaseURL:         firstNonEmpty(current.BaseURL, aliases.BaseURLCamel, aliases.BaseUrlCamel, legacy.BaseURL, legacy.BaseUrl),
+		Source:          firstNonEmpty(current.Source, legacy.Source),
+		ReasoningEffort: firstNonEmpty(current.ReasoningEffort, legacy.ReasoningEffort),
+		ServiceTier:     firstNonEmpty(current.ServiceTier, legacy.ServiceTier),
+		RequestedAt:     firstNonZeroTime(parseFlexibleTime(current.RequestedAt), parseFlexibleTime(current.RequestedAtMs), parseFlexibleTime(legacy.RequestedAt), parseFlexibleTime(legacy.RequestedAtMs)),
+		Latency:         firstNonZeroDuration(parseFlexibleDuration(current.Latency, time.Nanosecond), parseFlexibleDuration(current.LatencyMs, time.Millisecond), parseFlexibleDuration(legacy.Latency, time.Nanosecond), parseFlexibleDuration(legacy.LatencyMs, time.Millisecond)),
+		TTFT:            firstNonZeroDuration(parseFlexibleDuration(current.TTFT, time.Nanosecond), parseFlexibleDuration(current.TTFTMs, time.Millisecond), parseFlexibleDuration(legacy.TTFT, time.Nanosecond), parseFlexibleDuration(legacy.TTFTMs, time.Millisecond)),
+		Failed:          current.Failed || legacy.Failed,
+		Failure:         current.Failure,
+		Detail:          current.Detail,
+		ResponseHeaders: current.ResponseHeaders,
 	}
-	if current.ExecutorType == "" {
-		current.ExecutorType = legacy.ExecutorType
+	if record.Failure == (UsageFailure{}) {
+		record.Failure = legacy.Failure
 	}
-	if current.Model == "" {
-		current.Model = legacy.Model
+	if record.Detail == (UsageDetail{}) {
+		record.Detail = legacy.Detail
 	}
-	if current.Alias == "" {
-		current.Alias = legacy.Alias
-	}
-	if current.APIKey == "" {
-		current.APIKey = legacy.APIKey
-	}
-	if current.AuthID == "" {
-		current.AuthID = legacy.AuthID
-	}
-	if current.AuthIndex == "" {
-		current.AuthIndex = legacy.AuthIndex
-	}
-	if current.AuthType == "" {
-		current.AuthType = legacy.AuthType
-	}
-	if current.BaseURL == "" {
-		current.BaseURL = aliases.BaseURLCamel
-	}
-	if current.BaseURL == "" {
-		current.BaseURL = aliases.BaseUrlCamel
-	}
-	if current.BaseURL == "" {
-		current.BaseURL = legacy.BaseURL
-	}
-	if current.BaseURL == "" {
-		current.BaseURL = legacy.BaseUrl
-	}
-	if current.Source == "" {
-		current.Source = legacy.Source
-	}
-	if current.ReasoningEffort == "" {
-		current.ReasoningEffort = legacy.ReasoningEffort
-	}
-	if current.ServiceTier == "" {
-		current.ServiceTier = legacy.ServiceTier
-	}
-	if current.RequestedAt.IsZero() {
-		current.RequestedAt = legacy.RequestedAt
-	}
-	if current.Latency == 0 {
-		current.Latency = legacy.Latency
-	}
-	if current.TTFT == 0 {
-		current.TTFT = legacy.TTFT
-	}
-	current.Failed = current.Failed || legacy.Failed
-	if current.Failure == (UsageFailure{}) {
-		current.Failure = legacy.Failure
-	}
-	if current.Detail == (UsageDetail{}) {
-		current.Detail = legacy.Detail
-	}
-	if current.ResponseHeaders == nil {
-		current.ResponseHeaders = legacy.ResponseHeaders
+	if record.ResponseHeaders == nil {
+		record.ResponseHeaders = legacy.ResponseHeaders
 	}
 
-	*r = UsageRecord(current)
+	*r = record
 	return nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func firstNonZeroTime(values ...time.Time) time.Time {
+	for _, value := range values {
+		if !value.IsZero() {
+			return value
+		}
+	}
+	return time.Time{}
+}
+
+func firstNonZeroDuration(values ...time.Duration) time.Duration {
+	for _, value := range values {
+		if value != 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func firstNonZeroInt64(values ...int64) int64 {
+	for _, value := range values {
+		if value != 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func parseFlexibleTime(raw json.RawMessage) time.Time {
+	raw = trimJSONRaw(raw)
+	if len(raw) == 0 {
+		return time.Time{}
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		text = strings.TrimSpace(text)
+		if text == "" {
+			return time.Time{}
+		}
+		if ts, err := time.Parse(time.RFC3339Nano, text); err == nil {
+			return ts
+		}
+		if value, err := strconv.ParseFloat(text, 64); err == nil {
+			return unixTimeFromFlexibleNumber(value)
+		}
+		return time.Time{}
+	}
+	var value float64
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return time.Time{}
+	}
+	return unixTimeFromFlexibleNumber(value)
+}
+
+func unixTimeFromFlexibleNumber(value float64) time.Time {
+	if value == 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+		return time.Time{}
+	}
+	abs := math.Abs(value)
+	switch {
+	case abs >= 1e17:
+		sec := math.Trunc(value / 1e9)
+		nsec := math.Round(value - sec*1e9)
+		return time.Unix(int64(sec), int64(nsec)).UTC()
+	case abs >= 1e12:
+		sec := math.Trunc(value / 1e3)
+		nsec := math.Round((value - sec*1e3) * 1e6)
+		return time.Unix(int64(sec), int64(nsec)).UTC()
+	default:
+		sec := math.Trunc(value)
+		nsec := math.Round((value - sec) * 1e9)
+		return time.Unix(int64(sec), int64(nsec)).UTC()
+	}
+}
+
+func parseFlexibleDuration(raw json.RawMessage, numberUnit time.Duration) time.Duration {
+	raw = trimJSONRaw(raw)
+	if len(raw) == 0 {
+		return 0
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		text = strings.TrimSpace(text)
+		if text == "" {
+			return 0
+		}
+		if duration, err := time.ParseDuration(text); err == nil {
+			return duration
+		}
+		if value, err := strconv.ParseFloat(text, 64); err == nil {
+			return durationFromFlexibleNumber(value, numberUnit)
+		}
+		return 0
+	}
+	var value float64
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return 0
+	}
+	return durationFromFlexibleNumber(value, numberUnit)
+}
+
+func durationFromFlexibleNumber(value float64, numberUnit time.Duration) time.Duration {
+	if value == 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0
+	}
+	return time.Duration(math.Round(value * float64(numberUnit)))
+}
+
+func trimJSONRaw(raw json.RawMessage) json.RawMessage {
+	text := strings.TrimSpace(string(raw))
+	if text == "" || text == "null" {
+		return nil
+	}
+	return json.RawMessage(text)
 }
 
 type UsageFailure struct {
@@ -297,24 +414,39 @@ func (d *UsageDetail) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &legacy); err != nil {
 		return err
 	}
+	var aliases struct {
+		PromptTokens            int64 `json:"prompt_tokens"`
+		CompletionTokens        int64 `json:"completion_tokens"`
+		PromptCacheReadTokens   int64 `json:"cache_read_input_tokens"`
+		PromptCacheCreateTokens int64 `json:"cache_creation_input_tokens"`
+		PromptTokensDetails     struct {
+			CachedTokens int64 `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
+		CompletionTokensDetails struct {
+			ReasoningTokens int64 `json:"reasoning_tokens"`
+		} `json:"completion_tokens_details"`
+	}
+	if err := json.Unmarshal(data, &aliases); err != nil {
+		return err
+	}
 
 	if current.InputTokens == 0 {
-		current.InputTokens = legacy.InputTokens
+		current.InputTokens = firstNonZeroInt64(aliases.PromptTokens, legacy.InputTokens)
 	}
 	if current.OutputTokens == 0 {
-		current.OutputTokens = legacy.OutputTokens
+		current.OutputTokens = firstNonZeroInt64(aliases.CompletionTokens, legacy.OutputTokens)
 	}
 	if current.ReasoningTokens == 0 {
-		current.ReasoningTokens = legacy.ReasoningTokens
+		current.ReasoningTokens = firstNonZeroInt64(aliases.CompletionTokensDetails.ReasoningTokens, legacy.ReasoningTokens)
 	}
 	if current.CachedTokens == 0 {
-		current.CachedTokens = legacy.CachedTokens
+		current.CachedTokens = firstNonZeroInt64(aliases.PromptTokensDetails.CachedTokens, legacy.CachedTokens)
 	}
 	if current.CacheReadTokens == 0 {
-		current.CacheReadTokens = legacy.CacheReadTokens
+		current.CacheReadTokens = firstNonZeroInt64(aliases.PromptCacheReadTokens, aliases.PromptTokensDetails.CachedTokens, legacy.CacheReadTokens)
 	}
 	if current.CacheCreationTokens == 0 {
-		current.CacheCreationTokens = legacy.CacheCreationTokens
+		current.CacheCreationTokens = firstNonZeroInt64(aliases.PromptCacheCreateTokens, legacy.CacheCreationTokens)
 	}
 	if current.TotalTokens == 0 {
 		current.TotalTokens = legacy.TotalTokens

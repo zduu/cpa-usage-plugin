@@ -718,6 +718,52 @@ test('dashboard blob downloads keep object URLs alive for Safari', () => {
   assert.strictEqual(timeoutDelays.at(-1), 60000);
 });
 
+test('dashboard fallback merges legacy hashless client API stats into a unique hashed group', () => {
+  const { context } = createDashboardHarness();
+  const rows = context.coalesceLegacyHashlessClientApiStats([
+    {
+      api_key: 'sk******xx',
+      api_key_hash: '',
+      total_requests: 1,
+      success_count: 1,
+      failure_count: 0,
+      total_tokens: 120,
+      input_tokens: 100,
+      output_tokens: 20,
+      models: [{ model: 'gpt-4.1', total_requests: 1, success_count: 1, failure_count: 0, total_tokens: 120, input_tokens: 100, output_tokens: 20 }],
+    },
+    {
+      api_key: 'sk******xx',
+      api_key_hash: 'hash-a',
+      total_requests: 1,
+      success_count: 1,
+      failure_count: 0,
+      total_tokens: 40,
+      input_tokens: 30,
+      output_tokens: 10,
+      models: [{ model: 'gpt-4.1', total_requests: 1, success_count: 1, failure_count: 0, total_tokens: 40, input_tokens: 30, output_tokens: 10 }],
+    },
+  ]);
+
+  assert.strictEqual(rows.length, 1);
+  assert.strictEqual(rows[0].api_key_hash, 'hash-a');
+  assert.strictEqual(rows[0].total_requests, 2);
+  assert.strictEqual(rows[0].total_tokens, 160);
+  assert.strictEqual(rows[0].models[0].total_requests, 2);
+});
+
+test('dashboard fallback keeps legacy hashless client API stats separate when hash match is ambiguous', () => {
+  const { context } = createDashboardHarness();
+  const rows = context.coalesceLegacyHashlessClientApiStats([
+    { api_key: 'sk******xx', api_key_hash: '', total_requests: 1, total_tokens: 40, models: [] },
+    { api_key: 'sk******xx', api_key_hash: 'hash-a', total_requests: 1, total_tokens: 120, models: [] },
+    { api_key: 'sk******xx', api_key_hash: 'hash-b', total_requests: 1, total_tokens: 60, models: [] },
+  ]);
+
+  assert.strictEqual(rows.length, 3);
+  assert.strictEqual(rows.filter((row) => !row.api_key_hash).length, 1);
+});
+
 test('dashboard credential filter uses summary credential stats beyond current event page', async () => {
   const { document } = createDashboardHarness({
     credentialStats: [

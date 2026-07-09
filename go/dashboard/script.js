@@ -1134,6 +1134,66 @@ function mergeCounterRow(target, row) {
   if (Array.isArray(target.latency) && Array.isArray(row.latency)) row.latency.forEach((value) => { if (num(value) > 0) target.latency.push(num(value)); });
   return target;
 }
+function mergeProviderRows(targetProviders, sourceProviders) {
+  if (!Array.isArray(sourceProviders) || !sourceProviders.length) return Array.isArray(targetProviders) ? targetProviders : [];
+  const providers = new Map();
+  (Array.isArray(targetProviders) ? targetProviders : []).forEach((provider) => {
+    const key = String((provider && provider.provider) || '').trim().toLowerCase();
+    providers.set(key, { ...provider });
+  });
+  sourceProviders.forEach((provider) => {
+    const key = String((provider && provider.provider) || '').trim().toLowerCase();
+    const existing = providers.get(key);
+    if (!existing) {
+      providers.set(key, { ...provider });
+      return;
+    }
+    mergeCounterRow(existing, provider);
+  });
+  return [...providers.values()].sort((a, b) => num(b.total_requests) - num(a.total_requests) || String(a.provider || '').localeCompare(String(b.provider || '')));
+}
+function mergeClientApiModelRow(target, source) {
+  mergeCounterRow(target, source);
+  target.providers = mergeProviderRows(target.providers, source && source.providers);
+}
+function mergeClientApiRow(target, source) {
+  mergeCounterRow(target, source);
+  if (!String(target.api_key || '').trim()) target.api_key = source && source.api_key || '';
+  if (!String(target.api_key_hash || '').trim()) target.api_key_hash = source && source.api_key_hash || '';
+  const models = new Map();
+  (Array.isArray(target.models) ? target.models : []).forEach((model) => models.set(String(model && model.model || ''), { ...model }));
+  (Array.isArray(source && source.models) ? source.models : []).forEach((model) => {
+    const key = String(model && model.model || '');
+    const existing = models.get(key);
+    if (existing) mergeClientApiModelRow(existing, model);
+    else models.set(key, { ...model });
+  });
+  target.models = [...models.values()].sort((a, b) => num(b.total_requests) - num(a.total_requests));
+}
+function coalesceLegacyHashlessClientApiStats(rows) {
+  if (!Array.isArray(rows) || rows.length < 2) return Array.isArray(rows) ? rows : [];
+  const byLabel = new Map();
+  rows.forEach((row, index) => {
+    const label = String((row && row.api_key) || '').trim();
+    if (!label || !label.includes('******')) return;
+    const group = byLabel.get(label) || { hashed: [], hashless: [] };
+    if (String((row && row.api_key_hash) || '').trim()) group.hashed.push(index);
+    else group.hashless.push(index);
+    byLabel.set(label, group);
+  });
+  const removed = new Set();
+  byLabel.forEach((group) => {
+    if (group.hashed.length !== 1 || !group.hashless.length) return;
+    const target = rows[group.hashed[0]];
+    group.hashless.forEach((sourceIndex) => {
+      if (sourceIndex === group.hashed[0]) return;
+      mergeClientApiRow(target, rows[sourceIndex]);
+      removed.add(sourceIndex);
+    });
+  });
+  if (!removed.size) return rows;
+  return rows.filter((_, index) => !removed.has(index));
+}
 function dashboardRangeCutoffMs(rangeKey, referenceMs) {
   const now = num(referenceMs) || Date.now();
   switch (rangeKey) {
@@ -1300,7 +1360,7 @@ function buildSummaryFromFullUsage(data, rangeKey) {
     health_grid: buildHealthGridFromDetails(healthDetails, data.generated_at),
     source_stats: [...sourceAgg.values()].sort((a, b) => b.total_requests - a.total_requests),
     credential_stats: rangeScoped ? credentialStats : [],
-    client_api_stats: [...clientAgg.values()].map((r) => { r.models = [...r.modelMap.values()].map(finalizeCounterRow).sort((a, b) => b.total_requests - a.total_requests); delete r.modelMap; return r }).sort((a, b) => b.total_requests - a.total_requests),
+    client_api_stats: coalesceLegacyHashlessClientApiStats([...clientAgg.values()].map((r) => { r.models = [...r.modelMap.values()].map(finalizeCounterRow).sort((a, b) => b.total_requests - a.total_requests); delete r.modelMap; return r })).sort((a, b) => b.total_requests - a.total_requests),
     model_stats: [...modelAgg.values()].map(finalizeCounterRow).sort((a, b) => b.total_requests - a.total_requests),
     generated_at: data.generated_at || new Date().toISOString(),
     _meta: {}

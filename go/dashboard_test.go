@@ -308,6 +308,118 @@ func TestDashboardSummarySeparatesMaskedClientAPIKeyCollisionsByHash(t *testing.
 	}
 }
 
+func TestDashboardSummaryMergesLegacyHashlessClientAPIKeyWithUniqueCurrentHash(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0, RetentionDays: 0})
+	when := time.Now().Add(-time.Hour)
+
+	result := stats.MergeSnapshot(StatisticsSnapshot{
+		APIs: map[string]APISnapshot{
+			"openai": {
+				Models: map[string]ModelSnapshot{
+					"gpt-4.1": {
+						Details: []RequestDetail{
+							{
+								Model:     "gpt-4.1",
+								Timestamp: when,
+								APIKey:    "sk******xx",
+								Tokens:    TokenStats{InputTokens: 100, OutputTokens: 20, TotalTokens: 120},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	if result.Added != 1 {
+		t.Fatalf("merge result = %#v, want one added legacy record", result)
+	}
+
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-4.1",
+		APIKey:      "sk-client-alpha-0000xx",
+		RequestedAt: when.Add(time.Minute),
+		Detail:      UsageDetail{InputTokens: 30, OutputTokens: 10, TotalTokens: 40},
+	})
+
+	assertMerged := func(label string, summary DashboardSummary) {
+		t.Helper()
+		if len(summary.ClientAPIStats) != 1 {
+			t.Fatalf("%s client api stats len = %d, want 1: %#v", label, len(summary.ClientAPIStats), summary.ClientAPIStats)
+		}
+		got := summary.ClientAPIStats[0]
+		if got.APIKey != "sk******xx" || got.APIKeyHash == "" || got.TotalRequests != 2 || got.TotalTokens != 160 {
+			t.Fatalf("%s client api stat = %#v, want merged legacy/current key totals", label, got)
+		}
+		if len(got.Models) != 1 || got.Models[0].Model != "gpt-4.1" || got.Models[0].TotalRequests != 2 {
+			t.Fatalf("%s client api model stats = %#v, want merged model totals", label, got.Models)
+		}
+	}
+
+	assertMerged("all", stats.SummaryWithoutDetails())
+	assertMerged("range", stats.SummaryWithoutDetailsForRange("24h"))
+}
+
+func TestDashboardSummaryKeepsLegacyHashlessClientAPIKeySeparateWhenHashCollisionAmbiguous(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0, RetentionDays: 0})
+	when := time.Now().Add(-time.Hour)
+
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-4.1",
+		APIKey:      "sk-client-alpha-0000xx",
+		RequestedAt: when,
+		Detail:      UsageDetail{InputTokens: 100, OutputTokens: 20, TotalTokens: 120},
+	})
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-4.1",
+		APIKey:      "sk-client-beta-1111xx",
+		RequestedAt: when.Add(time.Minute),
+		Detail:      UsageDetail{InputTokens: 50, OutputTokens: 10, TotalTokens: 60},
+	})
+	result := stats.MergeSnapshot(StatisticsSnapshot{
+		APIs: map[string]APISnapshot{
+			"openai": {
+				Models: map[string]ModelSnapshot{
+					"gpt-4.1": {
+						Details: []RequestDetail{
+							{
+								Model:     "gpt-4.1",
+								Timestamp: when.Add(2 * time.Minute),
+								APIKey:    "sk******xx",
+								Tokens:    TokenStats{InputTokens: 30, OutputTokens: 10, TotalTokens: 40},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	if result.Added != 1 {
+		t.Fatalf("merge result = %#v, want one added legacy record", result)
+	}
+
+	summary := stats.SummaryWithoutDetails()
+	if len(summary.ClientAPIStats) != 3 {
+		t.Fatalf("client api stats len = %d, want two hashed groups plus ambiguous legacy group: %#v", len(summary.ClientAPIStats), summary.ClientAPIStats)
+	}
+	var hashless int
+	for _, stat := range summary.ClientAPIStats {
+		if stat.APIKey != "sk******xx" {
+			t.Fatalf("client api label = %q, want shared masked label", stat.APIKey)
+		}
+		if stat.APIKeyHash == "" {
+			hashless++
+		}
+	}
+	if hashless != 1 {
+		t.Fatalf("hashless legacy groups = %d, want one ambiguous group", hashless)
+	}
+}
+
 func TestDashboardSummaryMergesImportedClientAPIStatsByMaskedKey(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0, RetentionDays: 0})
