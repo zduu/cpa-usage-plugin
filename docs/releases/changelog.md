@@ -8,16 +8,20 @@
 
 ### CPA 兼容性说明
 - CPA `v7.2.53` 调整后，部分 OpenAI 兼容模型可能不再稳定向 usage 插件下发原生 `usage.handle` 记录，旧版插件会表现为有模型响应但看板没有上游和调用记录
-- 本版本声明 `response_interceptor` 能力，在 CPA 原生 usage 记录缺失时，从成功的非流式响应体中读取 `usage`/`usageMetadata` 等字段并延迟写入兜底统计；如果原生 usage 随后到达，会避免重复计数。去重指纹按 input/output/total 等核心字段匹配，避免 native 与 fallback 对 reasoning/cache 等可选字段解析不一致时重复计数
-- 兜底统计只读取响应中的 token 用量，不修改 CPA 响应内容；当 CPA 没有在响应拦截请求中提供已选上游信息时，兜底记录可能显示为通用 `openai-compatible` 上游，原生 usage 记录仍会保留精确上游名称
+- 本版本声明 `response_interceptor` 和 `response_stream_interceptor` 能力，在 CPA 原生 usage 记录缺失时，从成功响应体或流式 chunk 中读取 `usage`/`usageMetadata` 等字段并延迟写入兜底统计；如果原生 usage 随后到达，会避免重复计数。去重指纹按 input/output/total 等核心字段匹配，避免 native 与 fallback 对 reasoning/cache 等可选字段解析不一致时重复计数
+- 兜底统计只读取响应中的 token 用量，不修改 CPA 响应内容；当 CPA 没有在响应拦截请求中提供已选上游信息时，兜底记录可能显示为通用 `openai-compatible` 上游，原生 usage 记录仍会保留精确上游名称。流式 chunk 兜底没有完整请求耗时上下文，因此延迟字段可能为空或为 0
 - 旧版历史数据和新版稳定 hash 分组可能让同一个 CPA API key 在看板中短暂分裂，本版本会在同一脱敏显示值只有唯一 hash 时合并无 hash 历史分组；遇到多个不同 hash 时保留分组，避免误合并不同真实 key。未配置 `api_key_hash_salt` 时，新记录改用插件默认稳定 salt，避免重启或升级后继续产生新的 hash 分组
 
 ### 问题修复
 - 修复 Dashboard 导出在 Safari 下可能因 `blob:` 下载链接过早释放而失败的问题
 - 修复 OpenAI 兼容模型返回的 usage 载荷字段不完全标准时未写入统计，导致看板没有上游和调用记录的问题
+- 修复 Claude/Anthropic 流式 usage 中缓存输入 token 口径与原生 usage 不一致时可能重复计数的问题
+- 修复失败状态的流式 chunk 仍可能写入兜底 usage 的问题
+- 修复同一客户端 API key 因 `Bearer ...`、`Bearer:...` 和原始 key 格式不同导致展示、hash 或去重不一致的问题
 - 修复同一 CPA API key 在旧版脱敏格式和新版稳定 hash 分组之间被识别为两个客户端 API key 的问题
 - 修复旧持久化/导入数据中 API key 脱敏、分组和去重的多处边界问题
 - 修复 Dashboard ETag、`generated_at` 和查询数据版本不一致导致的缓存响应不稳定问题
+- 修复 SSE 事件中多条独立 `data:` JSON 行可能只解析第一条或被丢弃的问题
 
 ### 改进
 - 优化 Dashboard 事件索引、API 详情聚合和后台导出分页的临时分配
