@@ -4,13 +4,21 @@
 
 `v1.0.0` 到 `v1.2.18` 为规范化发布流程建立前的 legacy 历史版本，不在本文件中回填；对应说明见 [v1-history.md](v1-history.md)。
 
-## Unreleased
+## v2.3.3 - 2026-07-10
+
+本版本新增缓存写入 token 独立计费支持，为 GPT-5.6 等区分 cache read/write 计费的新模型做好准备。
 
 ### 缓存成本统计
-- 新增缓存写入 token 和 `cache_write` 模型价格，缓存读取、缓存写入与普通输入分别计价
-- 兼容 Claude 家族 input 不含缓存、其他上游 input 已包含缓存的两种记账口径
+- 新增 `CacheWriteTokens` 字段，贯通 `TokenStats`、`detailTotals`、`TimeSeriesTokenStat` 全链路
+- 计费公式：`(input-cache_read-cache_write)×Prompt + output×Completion + cache_read×Cache + cache_write×CacheWrite`
+- 兼容 Claude 家族 input 不含缓存（独占缓存输入）、其他上游 input 已包含缓存的两种记账口径
+- 模型价格新增 `cache_write` 字段；models.dev 有 `cache_write` 时使用，缺失或未知时默认使用 0
 - 缓存写入统计贯通摘要、范围查询、持久化快照、provider 聚合、Dashboard 和 CSV 导出
-- 模型价格表单支持缓存写入价格；旧价格配置缺少该字段时默认使用输入价格的 1.25 倍
+- 模型价格表单支持缓存写入价格编辑与展示
+
+### 代码质量
+- `ModelSnapshot.Providers` 支持从快照恢复 provider 维度的 token 统计，避免旧快照重放时丢失
+- 新增 `modelProviderStatsFromSnapshot`、`residualModelProviderStats` 处理快照恢复时的 provider 残差
 
 ## v2.3.2 - 2026-07-10
 

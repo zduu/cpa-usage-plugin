@@ -3907,6 +3907,10 @@ func TestModelPricesUseModelsDevDefaultsWithManualOverride(t *testing.T) {
 		        "cost": {"input": 1.25, "output": 10, "cache_read": 0.125, "cache_write": 1.25,
 		          "tiers": [{"input": 2.5, "output": 15, "cache_read": 0.25, "tier": {"type": "context", "size": 200000}}]
 		        }
+		      },
+		      "free-cache-write": {
+		        "id": "free-cache-write",
+		        "cost": {"input": 2, "output": 8, "cache_read": 0.2, "cache_write": 0}
 		      }
 		    }
 		  },
@@ -3943,10 +3947,13 @@ func TestModelPricesUseModelsDevDefaultsWithManualOverride(t *testing.T) {
 	if got := initial.Prices["openai/gpt-5.5"]; got.Prompt != 1.25 || got.Completion != 10 || got.Cache != 0.125 || got.CacheWrite != 1.25 {
 		t.Fatalf("provider-prefixed models.dev price = %#v", got)
 	}
-	if got := initial.Prices["openrouter/openai/gpt-5.5"]; got.Prompt != 9 || got.Completion != 99 || got.Cache != 0.9 || got.CacheWrite != 11.25 {
+	if got := initial.Prices["free-cache-write"]; got.Prompt != 2 || got.Cache != 0.2 || got.CacheWrite != 0 {
+		t.Fatalf("models.dev explicit free cache-write price = %#v", got)
+	}
+	if got := initial.Prices["openrouter/openai/gpt-5.5"]; got.Prompt != 9 || got.Completion != 99 || got.Cache != 0.9 || got.CacheWrite != 0 {
 		t.Fatalf("openrouter models.dev price = %#v", got)
 	}
-	if initial.ModelsDev.PriceCount != 3 || initial.ModelsDev.LastError != "" {
+	if initial.ModelsDev.PriceCount != 5 || initial.ModelsDev.LastError != "" {
 		t.Fatalf("models.dev status = %#v", initial.ModelsDev)
 	}
 	if got, ok := priceForDetailFromMap(initial.Prices, "openai/gpt-5.5", "openai-compatible"); !ok || got.Prompt != 1.25 || got.Completion != 10 || got.Cache != 0.125 || got.CacheWrite != 1.25 {
@@ -4560,8 +4567,8 @@ func TestModelPriceDefaultsMissingCacheWriteForLegacyJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"prompt":2,"completion":8,"cache":0.5}`), &price); err != nil {
 		t.Fatalf("unmarshal legacy model price: %v", err)
 	}
-	if price.CacheWrite != 2.5 {
-		t.Fatalf("legacy cache write price = %v, want 2.5", price.CacheWrite)
+	if price.CacheWrite != 0 {
+		t.Fatalf("legacy cache write price = %v, want unknown price default 0", price.CacheWrite)
 	}
 
 	if err := json.Unmarshal([]byte(`{"prompt":2,"completion":8,"cache":0.5,"cache_write":0}`), &price); err != nil {

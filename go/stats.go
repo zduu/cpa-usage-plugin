@@ -2974,7 +2974,9 @@ func modelPriceFromModelsDevCost(cost *modelsDevCostPayload) (ModelPrice, bool) 
 	if cost.CacheRead != nil {
 		cache = *cost.CacheRead
 	}
-	cacheWrite := *cost.Input * 1.25
+	// Do not infer a cache-write rate when the price source does not publish
+	// one. Unknown prices default to zero and can be overridden manually.
+	cacheWrite := 0.0
 	if cost.CacheWrite != nil {
 		cacheWrite = *cost.CacheWrite
 	}

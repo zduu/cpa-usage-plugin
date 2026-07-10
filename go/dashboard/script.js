@@ -1602,7 +1602,7 @@ $('range').onchange = () => { localStorage.setItem(rangeKey, $('range').value); 
 $('refreshBtn').onclick = () => load({ forceDetails: true });
 $('savePrice').onclick = async () => {
   const m = $('priceModel').value.trim(); if (!m) return;
-  const prompt = num($('pricePrompt').value), completion = num($('priceCompletion').value), cache = $('priceCache').value === '' ? prompt : num($('priceCache').value), cacheWrite = $('priceCacheWrite').value === '' ? prompt * 1.25 : num($('priceCacheWrite').value);
+  const prompt = num($('pricePrompt').value), completion = num($('priceCompletion').value), cache = $('priceCache').value === '' ? prompt : num($('priceCache').value), cacheWrite = $('priceCacheWrite').value === '' ? 0 : num($('priceCacheWrite').value);
   try {
     await saveModelPrice(m, { prompt, completion, cache, cache_write: cacheWrite });
     fillPriceForm('');

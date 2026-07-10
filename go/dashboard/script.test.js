@@ -679,7 +679,7 @@ test('dashboard loads summary and export button uses backend event export', asyn
   await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-events')));
   assert.strictEqual(document.getElementById('totalRequests').textContent, '1,200');
   assert.strictEqual(document.getElementById('totalCost').textContent, 'US$0.05');
-  assert.strictEqual(document.getElementById('cacheWriteText').textContent, '缓存写入 token：25');
+  assert.strictEqual(document.getElementById('cacheWriteText').textContent, '缓存创建 token：25');
   assert.strictEqual(document.getElementById('storageStatus').textContent, '未开启持久化');
   const apiDetail = document.getElementById('apiDetail').innerHTML;
   assert.match(apiDetail, /总花费/);
@@ -688,8 +688,8 @@ test('dashboard loads summary and export button uses backend event export', asyn
   const loadedApiDetail = document.getElementById('apiDetail').innerHTML;
   assert.match(loadedApiDetail, /US\$0\.000405/);
   assert.match(loadedApiDetail, /总 token 数：105/);
-  assert.match(loadedApiDetail, /缓存 token：10/);
-  assert.match(loadedApiDetail, /缓存写入 token：3/);
+  assert.match(loadedApiDetail, /缓存命中 token：10/);
+  assert.match(loadedApiDetail, /缓存创建 token：3/);
   assert.match(loadedApiDetail, /思考 token：5/);
   assert.match(document.getElementById('apiDetail').innerHTML, /错误统计/);
   assert.match(document.getElementById('apiDetail').innerHTML, /最近请求/);
@@ -1485,7 +1485,7 @@ test('model price settings are loaded and saved through backend API', async () =
   assert.strictEqual(put.options.headers['x-management-key'], 'test-management-key');
   assert.deepStrictEqual(JSON.parse(put.options.body), {
     model: 'gpt-5',
-    price: { prompt: 1.25, completion: 10, cache: 1.25, cache_write: 1.5625 },
+    price: { prompt: 1.25, completion: 10, cache: 1.25, cache_write: 0 },
   });
   assert.match(document.getElementById('priceList').innerHTML, /gpt-5/);
 });

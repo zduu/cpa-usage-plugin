@@ -599,7 +599,9 @@ func (p *ModelPrice) UnmarshalJSON(data []byte) error {
 	p.Prompt = raw.Prompt
 	p.Completion = raw.Completion
 	p.Cache = raw.Cache
-	p.CacheWrite = raw.Prompt * 1.25
+	// Legacy saved prices did not have a separate cache_write field. Unknown
+	// prices default to zero; explicit values, including zero, are preserved.
+	p.CacheWrite = 0
 	if raw.CacheWrite != nil {
 		p.CacheWrite = *raw.CacheWrite
 	}
