@@ -265,20 +265,29 @@ func TestDashboardSummaryAggregatesClientAPIKeyStats(t *testing.T) {
 	}
 }
 
-func TestCoalesceMaskedClientAPIStatsKeepsHashVariantsSeparateWhenAmbiguous(t *testing.T) {
+func TestCoalesceMaskedClientAPIStatsMergesImportedHashlessGroupWithHistoricalHashes(t *testing.T) {
 	rows := coalesceMaskedClientAPIStats([]ClientAPIStat{
 		{APIKey: "sk******xx", APIKeyHash: strings.Repeat("a", 56), TotalRequests: 1, TotalTokens: 120},
 		{APIKey: "sk******xx", APIKeyHash: strings.Repeat("b", 56), TotalRequests: 1, TotalTokens: 60},
 		{APIKey: "sk******xx", TotalRequests: 1, TotalTokens: 40},
 	})
 
-	if len(rows) != 3 {
-		t.Fatalf("client api stats len = %d, want distinct masked hash variants: %#v", len(rows), rows)
+	if len(rows) != 1 {
+		t.Fatalf("client api stats len = %d, want imported masked group merged: %#v", len(rows), rows)
 	}
-	for _, row := range rows {
-		if row.APIKey != "sk******xx" || row.TotalRequests != 1 {
-			t.Fatalf("client api stat = %#v, want each ambiguous masked key kept separate", row)
-		}
+	if rows[0].APIKey != "sk******xx" || rows[0].APIKeyHash != "" || rows[0].TotalRequests != 3 || rows[0].TotalTokens != 220 {
+		t.Fatalf("client api stat = %#v, want merged hashless identity totals 3/220", rows[0])
+	}
+}
+
+func TestCoalesceMaskedClientAPIStatsKeepsDifferentLiveHashesSeparateWithoutImport(t *testing.T) {
+	rows := coalesceMaskedClientAPIStats([]ClientAPIStat{
+		{APIKey: "sk******xx", APIKeyHash: strings.Repeat("a", 56), TotalRequests: 1, TotalTokens: 120},
+		{APIKey: "sk******xx", APIKeyHash: strings.Repeat("b", 56), TotalRequests: 1, TotalTokens: 60},
+	})
+
+	if len(rows) != 2 {
+		t.Fatalf("client api stats len = %d, want different live hashes kept separate: %#v", len(rows), rows)
 	}
 }
 
@@ -335,7 +344,7 @@ func TestDashboardSummaryMergesLegacyHashlessClientAPIKeyWithUniqueCurrentHash(t
 	assertMerged("range", stats.SummaryWithoutDetailsForRange("24h"))
 }
 
-func TestDashboardSummaryKeepsLegacyHashlessClientAPIKeySeparateWhenHashVariantsExist(t *testing.T) {
+func TestDashboardSummaryMergesCrossDeploymentHashlessClientAPIKeyWithHashVariants(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0, RetentionDays: 0})
 	when := time.Now().Add(-time.Hour)
@@ -377,18 +386,50 @@ func TestDashboardSummaryKeepsLegacyHashlessClientAPIKeySeparateWhenHashVariants
 	}
 
 	summary := stats.SummaryWithoutDetails()
-	if len(summary.ClientAPIStats) != 3 {
-		t.Fatalf("client api stats len = %d, want distinct ambiguous masked keys: %#v", len(summary.ClientAPIStats), summary.ClientAPIStats)
+	if len(summary.ClientAPIStats) != 1 {
+		t.Fatalf("client api stats len = %d, want cross-deployment masked key merged: %#v", len(summary.ClientAPIStats), summary.ClientAPIStats)
 	}
-	var totalTokens int64
-	for _, got := range summary.ClientAPIStats {
-		if got.APIKey != "sk******xx" || got.TotalRequests != 1 {
-			t.Fatalf("client api stat = %#v, want ambiguous masked key kept separate", got)
+	got := summary.ClientAPIStats[0]
+	if got.APIKey != "sk******xx" || got.APIKeyHash != "" || got.TotalRequests != 3 || got.TotalTokens != 220 {
+		t.Fatalf("client api stat = %#v, want merged cross-deployment totals 3/220", got)
+	}
+	if len(got.Models) != 1 || got.Models[0].TotalRequests != 3 || got.Models[0].TotalTokens != 220 {
+		t.Fatalf("client api model stats = %#v, want merged cross-deployment model totals", got.Models)
+	}
+}
+
+func TestCoalesceMaskedClientAPIStatsMergesRealCrossDeploymentShape(t *testing.T) {
+	requestCounts := []int64{6563, 61, 11, 5, 3, 1}
+	rows := make([]ClientAPIStat, 0, len(requestCounts))
+	for i, count := range requestCounts {
+		hash := ""
+		if i > 0 {
+			hash = strings.Repeat(string(rune('a'+i-1)), 56)
 		}
-		totalTokens += got.TotalTokens
+		rows = append(rows, ClientAPIStat{
+			APIKey:        "sk******zy",
+			APIKeyHash:    hash,
+			TotalRequests: count,
+			SuccessCount:  count,
+			TotalTokens:   count * 10,
+			Models: []ClientAPIModelStat{{
+				Model:         "gpt-4.1",
+				TotalRequests: count,
+				SuccessCount:  count,
+				TotalTokens:   count * 10,
+			}},
+		})
 	}
-	if totalTokens != 220 {
-		t.Fatalf("client api total tokens = %d, want 220 across separate rows", totalTokens)
+
+	got := coalesceMaskedClientAPIStats(rows)
+	if len(got) != 1 {
+		t.Fatalf("client api stats len = %d, want real cross-deployment rows merged: %#v", len(got), got)
+	}
+	if got[0].APIKey != "sk******zy" || got[0].APIKeyHash != "" || got[0].TotalRequests != 6644 || got[0].TotalTokens != 66440 {
+		t.Fatalf("client api stat = %#v, want merged real totals 6644/66440", got[0])
+	}
+	if len(got[0].Models) != 1 || got[0].Models[0].TotalRequests != 6644 || got[0].Models[0].TotalTokens != 66440 {
+		t.Fatalf("client api model stats = %#v, want merged real model totals", got[0].Models)
 	}
 }
 
@@ -1406,6 +1447,170 @@ func TestDashboardAPIDetailRangeExcludesZeroTimestampEvents(t *testing.T) {
 	rangeResult := stats.QueryAPIDetail("openai", "24h", 10, 10)
 	if rangeResult.Summary.TotalRequests != 0 || rangeResult.TotalEvents != 0 || len(rangeResult.RecentEvents) != 0 {
 		t.Fatalf("24h api detail summary = %#v, total_events = %d, recent = %#v; want zero timestamp event excluded", rangeResult.Summary, rangeResult.TotalEvents, rangeResult.RecentEvents)
+	}
+}
+
+func TestCacheWriteCostSeparatesReadWriteAndProviderAccounting(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.modelPrices = map[string]ModelPrice{
+		"model": {Prompt: 1, Cache: 0.1, CacheWrite: 1.25},
+	}
+
+	for name, stat := range map[string]TimeSeriesTokenStat{
+		"inclusive input": {
+			Model:            "model",
+			Provider:         "openai",
+			TotalTokens:      1_000_000,
+			InputTokens:      1_000_000,
+			CachedTokens:     500_000,
+			CacheWriteTokens: 300_000,
+		},
+		"exclusive input": {
+			Model:            "model",
+			Provider:         "anthropic",
+			TotalTokens:      1_000_000,
+			InputTokens:      500_000,
+			CachedTokens:     500_000,
+			CacheWriteTokens: 300_000,
+		},
+		"inclusive input with inflated total": {
+			Model:            "model",
+			Provider:         "openai",
+			TotalTokens:      1_500_000,
+			InputTokens:      1_000_000,
+			CachedTokens:     500_000,
+			CacheWriteTokens: 300_000,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := stats.timeSeriesTokenCostLocked(stat); math.Abs(got-0.895) > 1e-9 {
+				t.Fatalf("cost = %v, want 0.895", got)
+			}
+		})
+	}
+}
+
+func TestMissingTotalTokensIncludesExclusiveClaudeCache(t *testing.T) {
+	claudeUsage := UsageDetail{
+		InputTokens:         100,
+		OutputTokens:        20,
+		CacheReadTokens:     40,
+		CacheCreationTokens: 30,
+	}
+	if got := usageDetailTotalTokens(claudeUsage, "anthropic"); got != 190 {
+		t.Fatalf("Claude usage total = %d, want 190", got)
+	}
+	if got := usageDetailTotalTokens(claudeUsage, "openai-compatible"); got != 120 {
+		t.Fatalf("inclusive usage total = %d, want 120", got)
+	}
+	aliasUsage := UsageDetail{InputTokens: 100, OutputTokens: 20, CachedTokens: 40, CacheCreationTokens: 30}
+	cacheRead, cacheWrite, cacheTotal := usageDetailCacheTokenParts(aliasUsage)
+	if cacheRead != 40 || cacheWrite != 30 || cacheTotal != 70 || usageDetailTotalTokens(aliasUsage, "claude") != 190 {
+		t.Fatalf("aliased cache parts = read %d write %d total %d, want 40/30/70", cacheRead, cacheWrite, cacheTotal)
+	}
+
+	detail := RequestDetail{
+		Provider: "claude",
+		Tokens: TokenStats{
+			InputTokens:      100,
+			OutputTokens:     20,
+			CacheTokens:      70,
+			CacheWriteTokens: 30,
+		},
+	}
+	if got := detailTotalTokensForRequest(detail); got != 190 {
+		t.Fatalf("Claude request total = %d, want 190", got)
+	}
+}
+
+func TestDashboardAPIDetailRangePreservesCacheWriteTokens(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0, RetentionDays: 30})
+	now := time.Now().UTC()
+	detail := RequestDetail{
+		Model:     "model",
+		Provider:  "anthropic",
+		Timestamp: now.Add(-time.Minute),
+		Tokens: TokenStats{
+			InputTokens:      1_000,
+			CacheTokens:      500,
+			CacheWriteTokens: 300,
+			TotalTokens:      1_000,
+		},
+	}
+	stats.mu.Lock()
+	if !stats.recordDetailLocked("anthropic", "model", detail, requestDedupKey{}, now, false) {
+		stats.mu.Unlock()
+		t.Fatal("record detail failed")
+	}
+	stats.mu.Unlock()
+
+	summary := stats.SummaryWithoutDetailsAt(now)
+	if summary.Usage.CacheWriteTokens != 300 || summary.ModelStats[0].CacheWriteTokens != 300 {
+		t.Fatalf("summary cache writes = usage %d model %#v, want 300", summary.Usage.CacheWriteTokens, summary.ModelStats)
+	}
+	api := summary.Usage.APIs["anthropic"]
+	if api.CacheWriteTokens != 300 || api.Models["model"].CacheWriteTokens != 300 {
+		t.Fatalf("api cache writes = %#v, want 300", api)
+	}
+
+	result := stats.QueryAPIDetailAt("anthropic", "24h", 10, 10, now)
+	if result.Summary.CacheWriteTokens != 300 || len(result.ModelStats) != 1 || result.ModelStats[0].CacheWriteTokens != 300 {
+		t.Fatalf("range cache writes = summary %#v models %#v, want 300", result.Summary, result.ModelStats)
+	}
+	if len(result.ModelStats[0].Providers) != 1 || result.ModelStats[0].Providers[0].CacheWriteTokens != 300 {
+		t.Fatalf("range provider cache writes = %#v, want 300", result.ModelStats[0].Providers)
+	}
+}
+
+func TestStorageSnapshotPreservesProviderAggregatesAfterDetailTrimming(t *testing.T) {
+	now := time.Now().UTC()
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 1, DedupWindowMinutes: 0, RetentionDays: 30})
+
+	stats.mu.Lock()
+	for i := 0; i < 2; i++ {
+		detail := RequestDetail{
+			Model:     "model",
+			Provider:  "anthropic",
+			Timestamp: now.Add(time.Duration(i-2) * time.Minute),
+			Tokens: TokenStats{
+				InputTokens:      1_000,
+				CacheTokens:      500,
+				CacheWriteTokens: 300,
+				TotalTokens:      1_000,
+			},
+		}
+		if !stats.recordDetailLocked("anthropic", "model", detail, requestDedupKey{}, now, false) {
+			stats.mu.Unlock()
+			t.Fatal("record detail failed")
+		}
+	}
+	stats.pruneLocked(now, false)
+	snapshot := stats.snapshotLocked()
+	stats.mu.Unlock()
+
+	modelSnapshot := snapshot.APIs["anthropic"].Models["model"]
+	if modelSnapshot.TotalRequests != 2 || len(modelSnapshot.Details) != 1 || len(modelSnapshot.Providers) != 1 {
+		t.Fatalf("snapshot model = %#v, want 2 requests, 1 detail and 1 provider", modelSnapshot)
+	}
+	if modelSnapshot.Providers[0].TotalRequests != 2 || modelSnapshot.Providers[0].CacheWriteTokens != 600 {
+		t.Fatalf("snapshot providers = %#v, want full untrimmed aggregates", modelSnapshot.Providers)
+	}
+
+	restored := NewRequestStatistics()
+	restored.Configure(runtimeConfig{MaxDetailsPerModel: 1, DedupWindowMinutes: 0, RetentionDays: 30})
+	restored.mu.Lock()
+	restored.restoreStorageSnapshotLocked(snapshot, now)
+	restored.mu.Unlock()
+
+	summary := restored.SummaryWithoutDetailsAt(now)
+	if len(summary.ModelStats) != 1 || len(summary.ModelStats[0].Providers) != 1 {
+		t.Fatalf("restored model stats = %#v", summary.ModelStats)
+	}
+	provider := summary.ModelStats[0].Providers[0]
+	if provider.TotalRequests != 2 || provider.CacheWriteTokens != 600 || provider.CachedTokens != 1_000 {
+		t.Fatalf("restored provider = %#v, want full untrimmed aggregates", provider)
 	}
 }
 

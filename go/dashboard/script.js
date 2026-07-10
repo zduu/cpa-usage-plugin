@@ -356,6 +356,7 @@ function renderStats() {
   setText('avgLatency', withLabel('avg_latency', formatMs(u.avg_latency_ms)));
   setText('totalTokens', compact(u.total_tokens));
   setText('cachedText', withLabel('cached_tokens', compact(u.cached_tokens)));
+  setText('cacheWriteText', withLabel('cache_write_tokens', compact(u.cache_write_tokens)));
   setText('reasoningText', withLabel('reasoning_tokens', compact(u.reasoning_tokens)));
   // RPM: compute from hourly time series
   const hourValues = Object.values(u.requests_by_hour || {}).map(num);
@@ -553,6 +554,7 @@ function fillPriceForm(model) {
   $('pricePrompt').value = p.prompt ?? '';
   $('priceCompletion').value = p.completion ?? '';
   $('priceCache').value = p.cache ?? '';
+  $('priceCacheWrite').value = p.cache_write ?? '';
 }
 
 function syncPriceFormForModel(model) {
@@ -568,7 +570,7 @@ function renderPrices() {
   $('priceModelOptions').innerHTML = priceModelOptions().map((m) => '<option value="' + esc(m) + '"></option>').join('');
   $('priceModel').value = selected;
   const entries = Object.entries(manualModelPrices).sort(([a], [b]) => a.localeCompare(b));
-  $('priceList').innerHTML = entries.length ? entries.map(([m, p]) => '<div class="priceItem"><div><strong>' + esc(m) + '</strong><div class="priceMeta"><span>' + t('input_price') + ' ' + num(p.prompt).toFixed(4) + '</span><span>' + t('output_price') + ' ' + num(p.completion).toFixed(4) + '</span><span>' + t('cache_price') + ' ' + num(p.cache).toFixed(4) + '</span></div></div><div class="priceActions"><button class="btn" data-edit-price="' + esc(m) + '">' + t('edit') + '</button><button class="btn danger" data-del-price="' + esc(m) + '">' + t('delete') + '</button></div></div>').join('') : '<div class="empty">' + t('no_prices') + '</div>';
+  $('priceList').innerHTML = entries.length ? entries.map(([m, p]) => '<div class="priceItem"><div><strong>' + esc(m) + '</strong><div class="priceMeta"><span>' + t('input_price') + ' ' + num(p.prompt).toFixed(4) + '</span><span>' + t('output_price') + ' ' + num(p.completion).toFixed(4) + '</span><span>' + t('cache_price') + ' ' + num(p.cache).toFixed(4) + '</span><span>' + t('cache_write_price') + ' ' + num(p.cache_write).toFixed(4) + '</span></div></div><div class="priceActions"><button class="btn" data-edit-price="' + esc(m) + '">' + t('edit') + '</button><button class="btn danger" data-del-price="' + esc(m) + '">' + t('delete') + '</button></div></div>').join('') : '<div class="empty">' + t('no_prices') + '</div>';
   document.querySelectorAll('[data-edit-price]').forEach((btn) => btn.onclick = () => fillPriceForm(btn.dataset.editPrice));
   document.querySelectorAll('[data-del-price]').forEach((btn) => btn.onclick = async () => {
     try {
@@ -639,7 +641,8 @@ function normalizeApiDetailEvent(d) {
   return Object.assign({}, d, {
     timestamp_ms: timestampMs(d.timestamp),
     total_tokens: totalTokens(d),
-    cached_tokens: Math.max(num(tokens.cached_tokens), num(tokens.cache_tokens)),
+    cached_tokens: cacheTokenTotal(tokens),
+    cache_write_tokens: num(tokens.cache_write_tokens),
     reasoning_tokens: num(tokens.reasoning_tokens),
     cost: detailCost(d, modelPrices, manualModelPrices)
   });
@@ -687,15 +690,15 @@ function renderApiDetailContent(apiData, detailState) {
   const requests = num(summary.total_requests), success = num(summary.success_count), failure = num(summary.failure_count);
   const knownFailureCount = num(apiData && apiData.failure_count);
   const rate = requests ? success / requests * 100 : 100;
-  const models = detail ? (detail.model_stats || []).map((m) => ({ name: m.model || 'unknown', requests: num(m.total_requests), success: num(m.success_count), failure: num(m.failure_count), tokens: num(m.total_tokens), input_tokens: num(m.input_tokens), output_tokens: num(m.output_tokens), cached_tokens: num(m.cached_tokens), reasoning_tokens: num(m.reasoning_tokens), providers: m.providers || [], avgLatency: num(m.avg_latency_ms) })) : Object.entries(apiData.models || {}).map(([name, m]) => ({ name, requests: num(m.total_requests), success: num(m.success_count), failure: num(m.failure_count), tokens: num(m.total_tokens), input_tokens: num(m.input_tokens), output_tokens: num(m.output_tokens), cached_tokens: num(m.cached_tokens), reasoning_tokens: num(m.reasoning_tokens), providers: m.providers || [], avgLatency: num(m.avg_latency_ms) }));
+  const models = detail ? (detail.model_stats || []).map((m) => ({ name: m.model || 'unknown', requests: num(m.total_requests), success: num(m.success_count), failure: num(m.failure_count), tokens: num(m.total_tokens), total_tokens: num(m.total_tokens), input_tokens: num(m.input_tokens), output_tokens: num(m.output_tokens), cached_tokens: num(m.cached_tokens), cache_write_tokens: num(m.cache_write_tokens), reasoning_tokens: num(m.reasoning_tokens), providers: m.providers || [], avgLatency: num(m.avg_latency_ms) })) : Object.entries(apiData.models || {}).map(([name, m]) => ({ name, requests: num(m.total_requests), success: num(m.success_count), failure: num(m.failure_count), tokens: num(m.total_tokens), total_tokens: num(m.total_tokens), input_tokens: num(m.input_tokens), output_tokens: num(m.output_tokens), cached_tokens: num(m.cached_tokens), cache_write_tokens: num(m.cache_write_tokens), reasoning_tokens: num(m.reasoning_tokens), providers: m.providers || [], avgLatency: num(m.avg_latency_ms) }));
   models.sort((a, b) => b.requests - a.requests);
   const sources = detail ? (detail.source_stats || []).map((s) => ({ name: s.source || t('unknown_source'), requests: num(s.total_requests), success: num(s.success_count), failure: num(s.failure_count), tokens: num(s.total_tokens) })) : [];
   const errorRows = (detail && detail.error_stats) || [];
-  const totalCost = models.reduce((s, m) => s + aggregateCost({ model: m.name, input_tokens: m.input_tokens, output_tokens: m.output_tokens, cached_tokens: m.cached_tokens, reasoning_tokens: m.reasoning_tokens, providers: m.providers }, modelPrices, manualModelPrices), 0);
+  const totalCost = models.reduce((s, m) => s + aggregateCost({ model: m.name, total_tokens: m.total_tokens, input_tokens: m.input_tokens, output_tokens: m.output_tokens, cached_tokens: m.cached_tokens, cache_write_tokens: m.cache_write_tokens, reasoning_tokens: m.reasoning_tokens, providers: m.providers }, modelPrices, manualModelPrices), 0);
   $('apiDetail').innerHTML = '<div class="detailGrid">' +
     metricHtml(t('requests_label'), formatInteger(requests), '<span class="ok">' + t('success_label') + ' ' + formatInteger(success) + '</span>&nbsp;<span class="bad">' + t('failure_label') + ' ' + formatInteger(failure) + '</span>') +
     metricHtml(t('success_rate'), '<span class="' + (rate >= 95 ? 'ok' : rate >= 80 ? 'neutral' : 'bad') + '">' + pct(rate) + '</span>') +
-    metricHtml(t('total_tokens_label'), compact(summary.total_tokens), '<span>' + withLabel('cached_tokens', compact(summary.cached_tokens)) + '</span><span>' + withLabel('reasoning_tokens', compact(summary.reasoning_tokens)) + '</span>') +
+    metricHtml(t('total_tokens_label'), compact(summary.total_tokens), '<span>' + withLabel('cached_tokens', compact(summary.cached_tokens)) + '</span><span>' + withLabel('cache_write_tokens', compact(summary.cache_write_tokens)) + '</span><span>' + withLabel('reasoning_tokens', compact(summary.reasoning_tokens)) + '</span>') +
     metricHtml(t('avg_latency'), formatMs(summary.avg_latency_ms)) +
     metricHtml(t('model_count'), formatInteger(models.length), sources.length ? '<span>' + t('source_count') + ' ' + formatInteger(sources.length) + '</span>' : '') +
     metricHtml(t('total_cost'), formatUsd(totalCost), '<span>' + withLabel('total_tokens_label', compact(summary.total_tokens)) + '</span>') +
@@ -955,7 +958,7 @@ function renderEventsContent() {
   const rows = data.events;
   const total = data.total;
   setText('eventsCount', t('events_count', formatInteger(total), formatInteger(Math.min(rows.length, eventsLimit))));
-  $('events').innerHTML = rows.length ? '<table><thead><tr><th>' + t('col_time') + '</th><th>' + t('col_model') + '</th><th>' + t('col_source') + '</th><th>' + t('col_credential') + '</th><th>' + t('col_result') + '</th><th>' + t('col_latency') + '</th><th>' + t('col_input') + '</th><th>' + t('col_output') + '</th><th>' + t('col_thinking') + '</th><th>' + t('col_cache') + '</th><th>' + t('col_total') + '</th></tr></thead><tbody>' + rows.map((d) => '<tr><td>' + formatDateTime(timestampMs(d.timestamp)) + '</td><td class="nameCell">' + esc(d.model) + '</td><td class="nameCell">' + esc(sourceLabel(d)) + '</td><td>' + esc(d.auth_index || '-') + '</td><td class="' + (d.failed ? 'bad' : 'ok') + '">' + statusText(d.failed) + '</td><td>' + formatMs(num(d.latency_ms)) + '</td><td>' + formatInteger(num(d.tokens && d.tokens.input_tokens)) + '</td><td>' + formatInteger(num(d.tokens && d.tokens.output_tokens)) + '</td><td>' + formatInteger(num(d.tokens && d.tokens.reasoning_tokens)) + '</td><td>' + formatInteger(num(d.tokens && Math.max(d.tokens.cached_tokens || 0, d.tokens.cache_tokens || 0))) + '</td><td>' + formatInteger(num(d.tokens && d.tokens.total_tokens)) + '</td></tr>').join('') + '</tbody></table>' : '<div class="empty">' + t('no_events') + '</div>';
+  $('events').innerHTML = rows.length ? '<table><thead><tr><th>' + t('col_time') + '</th><th>' + t('col_model') + '</th><th>' + t('col_source') + '</th><th>' + t('col_credential') + '</th><th>' + t('col_result') + '</th><th>' + t('col_latency') + '</th><th>' + t('col_input') + '</th><th>' + t('col_output') + '</th><th>' + t('col_thinking') + '</th><th>' + t('col_cache') + '</th><th>' + t('col_total') + '</th></tr></thead><tbody>' + rows.map((d) => '<tr><td>' + formatDateTime(timestampMs(d.timestamp)) + '</td><td class="nameCell">' + esc(d.model) + '</td><td class="nameCell">' + esc(sourceLabel(d)) + '</td><td>' + esc(d.auth_index || '-') + '</td><td class="' + (d.failed ? 'bad' : 'ok') + '">' + statusText(d.failed) + '</td><td>' + formatMs(num(d.latency_ms)) + '</td><td>' + formatInteger(num(d.tokens && d.tokens.input_tokens)) + '</td><td>' + formatInteger(num(d.tokens && d.tokens.output_tokens)) + '</td><td>' + formatInteger(num(d.tokens && d.tokens.reasoning_tokens)) + '</td><td>' + formatInteger(cacheTokenTotal(d.tokens)) + '</td><td>' + formatInteger(totalTokens(d)) + '</td></tr>').join('') + '</tbody></table>' : '<div class="empty">' + t('no_events') + '</div>';
   renderFilters();
 }
 
@@ -1041,16 +1044,16 @@ async function fetchExportJobResult(params) {
 }
 
 function rowsCsv(rows) {
-  const head = [t('col_time'), t('col_model'), t('col_source'), t('col_credential'), t('col_result'), 'latency_ms', 'ttft_ms', t('col_input') + ' token', t('col_output') + ' token', t('col_thinking') + ' token', t('col_cache') + ' token', t('col_total') + ' token', t('col_status'), t('error_stats')];
-  return [head, ...rows.map((d) => [d.timestamp, d.model, sourceLabel(d), d.auth_index || '', statusText(d.failed), num(d.latency_ms), num(d.ttft_ms), num(d.tokens && d.tokens.input_tokens), num(d.tokens && d.tokens.output_tokens), num(d.tokens && d.tokens.reasoning_tokens), num(d.tokens && Math.max(d.tokens.cached_tokens || 0, d.tokens.cache_tokens || 0)), num(d.tokens && d.tokens.total_tokens), d.status_code || '', d.failure || ''])].map((row) => row.map((v) => '"' + String(v ?? '').replace(/"/g, '""') + '"').join(',')).join('\n');
+  const head = [t('col_time'), t('col_model'), t('col_source'), t('col_credential'), t('col_result'), 'latency_ms', 'ttft_ms', t('col_input') + ' token', t('col_output') + ' token', t('col_thinking') + ' token', t('col_cache') + ' token', t('col_cache_write') + ' token', t('col_total') + ' token', t('col_status'), t('error_stats')];
+  return [head, ...rows.map((d) => [d.timestamp, d.model, sourceLabel(d), d.auth_index || '', statusText(d.failed), num(d.latency_ms), num(d.ttft_ms), num(d.tokens && d.tokens.input_tokens), num(d.tokens && d.tokens.output_tokens), num(d.tokens && d.tokens.reasoning_tokens), cacheTokenTotal(d.tokens), num(d.tokens && d.tokens.cache_write_tokens), totalTokens(d), d.status_code || '', d.failure || ''])].map((row) => row.map((v) => '"' + String(v ?? '').replace(/"/g, '""') + '"').join(',')).join('\n');
 }
 
-function makeCounterRow(name) { return { model: name, total_requests: 0, success_count: 0, failure_count: 0, total_tokens: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, reasoning_tokens: 0, latency: [], providerMap: new Map() } }
+function makeCounterRow(name) { return { model: name, total_requests: 0, success_count: 0, failure_count: 0, total_tokens: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0, latency: [], providerMap: new Map() } }
 function mergeProviderStat(target, stat) {
   if (!target || !target.providerMap || !stat) return;
   const provider = String(stat.provider || '').trim();
   const key = provider.toLowerCase();
-  const row = target.providerMap.get(key) || { provider, total_requests: 0, success_count: 0, failure_count: 0, total_tokens: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, reasoning_tokens: 0 };
+  const row = target.providerMap.get(key) || { provider, total_requests: 0, success_count: 0, failure_count: 0, total_tokens: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0 };
   row.total_requests += num(stat.total_requests);
   row.success_count += num(stat.success_count);
   row.failure_count += num(stat.failure_count);
@@ -1058,6 +1061,7 @@ function mergeProviderStat(target, stat) {
   row.input_tokens += num(stat.input_tokens);
   row.output_tokens += num(stat.output_tokens);
   row.cached_tokens += num(stat.cached_tokens);
+  row.cache_write_tokens += num(stat.cache_write_tokens);
   row.reasoning_tokens += num(stat.reasoning_tokens);
   target.providerMap.set(key, row);
 }
@@ -1072,7 +1076,8 @@ function addDetailProviderToCounter(row, d) {
     total_tokens: totalTokens(d),
     input_tokens: num(tokens.input_tokens),
     output_tokens: num(tokens.output_tokens),
-    cached_tokens: Math.max(num(tokens.cached_tokens), num(tokens.cache_tokens)),
+    cached_tokens: cacheTokenTotal(tokens),
+    cache_write_tokens: num(tokens.cache_write_tokens),
     reasoning_tokens: num(tokens.reasoning_tokens),
   });
 }
@@ -1083,19 +1088,20 @@ function addDetailToCounter(row, d) {
   row.total_tokens += totalTokens(d);
   row.input_tokens += num(tokens.input_tokens);
   row.output_tokens += num(tokens.output_tokens);
-  row.cached_tokens += Math.max(num(tokens.cached_tokens), num(tokens.cache_tokens));
+  row.cached_tokens += cacheTokenTotal(tokens);
+  row.cache_write_tokens += num(tokens.cache_write_tokens);
   row.reasoning_tokens += num(tokens.reasoning_tokens);
   if (num(d.latency_ms) > 0) row.latency.push(num(d.latency_ms));
   addDetailProviderToCounter(row, d);
 }
 function providerHasValues(provider) {
-  return num(provider.total_requests) > 0 || num(provider.total_tokens) > 0 || num(provider.input_tokens) > 0 || num(provider.output_tokens) > 0 || num(provider.cached_tokens) > 0 || num(provider.reasoning_tokens) > 0;
+  return num(provider.total_requests) > 0 || num(provider.total_tokens) > 0 || num(provider.input_tokens) > 0 || num(provider.output_tokens) > 0 || num(provider.cached_tokens) > 0 || num(provider.cache_write_tokens) > 0 || num(provider.reasoning_tokens) > 0;
 }
 function finalizeCounterRow(row) {
   if (row.latency && row.latency.length) row.avg_latency_ms = row.latency.reduce((a, b) => a + b, 0) / row.latency.length;
   if (row.providerMap) {
     const providers = [...row.providerMap.values()].filter(providerHasValues);
-    const summed = providers.reduce((acc, p) => mergeCounterRow(acc, p), { total_requests: 0, success_count: 0, failure_count: 0, total_tokens: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, reasoning_tokens: 0 });
+    const summed = providers.reduce((acc, p) => mergeCounterRow(acc, p), { total_requests: 0, success_count: 0, failure_count: 0, total_tokens: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0 });
     const remainder = {
       provider: '',
       total_requests: Math.max(num(row.total_requests) - num(summed.total_requests), 0),
@@ -1105,6 +1111,7 @@ function finalizeCounterRow(row) {
       input_tokens: Math.max(num(row.input_tokens) - num(summed.input_tokens), 0),
       output_tokens: Math.max(num(row.output_tokens) - num(summed.output_tokens), 0),
       cached_tokens: Math.max(num(row.cached_tokens) - num(summed.cached_tokens), 0),
+      cache_write_tokens: Math.max(num(row.cache_write_tokens) - num(summed.cache_write_tokens), 0),
       reasoning_tokens: Math.max(num(row.reasoning_tokens) - num(summed.reasoning_tokens), 0),
     };
     if (providerHasValues(remainder)) providers.push(remainder);
@@ -1117,9 +1124,15 @@ function finalizeCounterRow(row) {
 }
 function applySnapshotCounter(row, raw) {
   if (!raw || typeof raw !== 'object') return row;
-  ['total_requests', 'success_count', 'failure_count', 'total_tokens', 'input_tokens', 'output_tokens', 'cached_tokens', 'reasoning_tokens', 'avg_latency_ms'].forEach((field) => {
+  ['total_requests', 'success_count', 'failure_count', 'total_tokens', 'input_tokens', 'output_tokens', 'cached_tokens', 'cache_write_tokens', 'reasoning_tokens', 'avg_latency_ms'].forEach((field) => {
     if (Object.prototype.hasOwnProperty.call(raw, field)) row[field] = num(raw[field]);
   });
+  return row;
+}
+function applySnapshotProviders(row, raw) {
+  if (!row || !raw || !Array.isArray(raw.providers) || !raw.providers.length) return row;
+  row.providerMap = new Map();
+  raw.providers.forEach((provider) => mergeProviderStat(row, provider));
   return row;
 }
 function mergeCounterRow(target, row) {
@@ -1130,6 +1143,7 @@ function mergeCounterRow(target, row) {
   target.input_tokens += num(row.input_tokens);
   target.output_tokens += num(row.output_tokens);
   target.cached_tokens += num(row.cached_tokens);
+  target.cache_write_tokens += num(row.cache_write_tokens);
   target.reasoning_tokens += num(row.reasoning_tokens);
   if (target.providerMap && Array.isArray(row.providers)) row.providers.forEach((provider) => mergeProviderStat(target, provider));
   if (target.providerMap && row.providerMap) row.providerMap.forEach((provider) => mergeProviderStat(target, provider));
@@ -1178,16 +1192,17 @@ function coalesceLegacyHashlessClientApiStats(rows) {
   rows.forEach((row, index) => {
     const label = String((row && row.api_key) || '').trim();
     if (!label || !label.includes('******')) return;
-    const group = byLabel.get(label) || { indices: [], hashes: new Set() };
+    const group = byLabel.get(label) || { indices: [], hashes: new Set(), hasHashless: false };
     group.indices.push(index);
     const hash = String((row && row.api_key_hash) || '').trim();
     if (hash) group.hashes.add(hash);
+    else group.hasHashless = true;
     byLabel.set(label, group);
   });
   const removed = new Set();
   byLabel.forEach((group) => {
     if (group.indices.length < 2) return;
-    if (group.hashes.size > 1) return;
+    if (group.hashes.size > 1 && !group.hasHashless) return;
     let targetIndex = group.indices[0];
     group.indices.slice(1).forEach((index) => {
       if (num(rows[index] && rows[index].total_requests) > num(rows[targetIndex] && rows[targetIndex].total_requests)) {
@@ -1265,7 +1280,8 @@ function addDetailToUsageTotals(usage, d, latency) {
   usage.total_tokens += totalTokens(d);
   usage.input_tokens += num(tokens.input_tokens);
   usage.output_tokens += num(tokens.output_tokens);
-  usage.cached_tokens += Math.max(num(tokens.cached_tokens), num(tokens.cache_tokens));
+  usage.cached_tokens += cacheTokenTotal(tokens);
+  usage.cache_write_tokens += num(tokens.cache_write_tokens);
   usage.reasoning_tokens += num(tokens.reasoning_tokens);
   if (latency && num(d.latency_ms) > 0) latency.push(num(d.latency_ms));
 }
@@ -1294,6 +1310,7 @@ function buildSummaryFromFullUsage(data, rangeKey) {
     input_tokens: 0,
     output_tokens: 0,
     cached_tokens: 0,
+    cache_write_tokens: 0,
     reasoning_tokens: 0,
     avg_latency_ms: 0,
     apis: {},
@@ -1308,7 +1325,7 @@ function buildSummaryFromFullUsage(data, rangeKey) {
   const latency = [];
   const healthDetails = [];
   Object.entries(rawUsage.apis || {}).forEach(([api, a]) => {
-    const apiRow = { total_requests: 0, success_count: 0, failure_count: 0, total_tokens: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, reasoning_tokens: 0, avg_latency_ms: 0, models: {}, latency: [] };
+    const apiRow = { total_requests: 0, success_count: 0, failure_count: 0, total_tokens: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0, avg_latency_ms: 0, models: {}, latency: [] };
     const apiModelRows = new Map();
     Object.entries(a.models || {}).forEach(([model, m]) => {
       const modelRow = makeCounterRow(model);
@@ -1317,7 +1334,7 @@ function buildSummaryFromFullUsage(data, rangeKey) {
         healthDetails.push(d);
         if (!detailMatchesRange(d, cutoffMs)) return;
         const tokens = d.tokens || {};
-        const cached = Math.max(num(tokens.cached_tokens), num(tokens.cache_tokens));
+        const cached = cacheTokenTotal(tokens);
         const detailModelRow = rangeScoped ? (apiModelRows.get(d.model) || makeCounterRow(d.model)) : modelRow;
         addDetailToCounter(detailModelRow, d);
         if (rangeScoped) apiModelRows.set(d.model, detailModelRow);
@@ -1329,6 +1346,7 @@ function buildSummaryFromFullUsage(data, rangeKey) {
           usage.input_tokens += num(tokens.input_tokens);
           usage.output_tokens += num(tokens.output_tokens);
           usage.cached_tokens += cached;
+          usage.cache_write_tokens += num(tokens.cache_write_tokens);
           usage.reasoning_tokens += num(tokens.reasoning_tokens);
           if (num(d.latency_ms) > 0) latency.push(num(d.latency_ms));
         }
@@ -1341,8 +1359,8 @@ function buildSummaryFromFullUsage(data, rangeKey) {
         addDetailToCredentialAgg(credentialAgg, d);
 
         const clientKey = clientApiGroupKey(d);
-        const clientRow = clientAgg.get(clientKey) || { api_key: clientApiLabel(d), api_key_hash: d.api_key_hash || '', total_requests: 0, success_count: 0, failure_count: 0, total_tokens: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, reasoning_tokens: 0, modelMap: new Map() };
-        clientRow.total_requests++; d.failed ? clientRow.failure_count++ : clientRow.success_count++; clientRow.total_tokens += totalTokens(d); clientRow.input_tokens += num(tokens.input_tokens); clientRow.output_tokens += num(tokens.output_tokens); clientRow.cached_tokens += cached; clientRow.reasoning_tokens += num(tokens.reasoning_tokens);
+        const clientRow = clientAgg.get(clientKey) || { api_key: clientApiLabel(d), api_key_hash: d.api_key_hash || '', total_requests: 0, success_count: 0, failure_count: 0, total_tokens: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0, modelMap: new Map() };
+        clientRow.total_requests++; d.failed ? clientRow.failure_count++ : clientRow.success_count++; clientRow.total_tokens += totalTokens(d); clientRow.input_tokens += num(tokens.input_tokens); clientRow.output_tokens += num(tokens.output_tokens); clientRow.cached_tokens += cached; clientRow.cache_write_tokens += num(tokens.cache_write_tokens); clientRow.reasoning_tokens += num(tokens.reasoning_tokens);
         const clientModel = clientRow.modelMap.get(d.model) || makeCounterRow(d.model);
         addDetailToCounter(clientModel, d);
         clientRow.modelMap.set(d.model, clientModel);
@@ -1350,6 +1368,7 @@ function buildSummaryFromFullUsage(data, rangeKey) {
       });
       if (rangeScoped) return;
       applySnapshotCounter(modelRow, m);
+      applySnapshotProviders(modelRow, m);
       const globalModel = modelAgg.get(model) || makeCounterRow(model);
       mergeCounterRow(globalModel, modelRow);
       modelAgg.set(model, globalModel);
@@ -1583,9 +1602,9 @@ $('range').onchange = () => { localStorage.setItem(rangeKey, $('range').value); 
 $('refreshBtn').onclick = () => load({ forceDetails: true });
 $('savePrice').onclick = async () => {
   const m = $('priceModel').value.trim(); if (!m) return;
-  const prompt = num($('pricePrompt').value), completion = num($('priceCompletion').value), cache = $('priceCache').value === '' ? prompt : num($('priceCache').value);
+  const prompt = num($('pricePrompt').value), completion = num($('priceCompletion').value), cache = $('priceCache').value === '' ? prompt : num($('priceCache').value), cacheWrite = $('priceCacheWrite').value === '' ? prompt * 1.25 : num($('priceCacheWrite').value);
   try {
-    await saveModelPrice(m, { prompt, completion, cache });
+    await saveModelPrice(m, { prompt, completion, cache, cache_write: cacheWrite });
     fillPriceForm('');
     await rerender({ refreshEvents: false, refreshApiDetail: true });
   } catch (e) {

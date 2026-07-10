@@ -1861,7 +1861,7 @@ func TestStorageReplayRestoresRecords(t *testing.T) {
 		Model:       "gpt-4",
 		APIKey:      "sk-client-storage-test",
 		RequestedAt: time.Now().Add(-time.Minute),
-		Detail:      UsageDetail{InputTokens: 10, OutputTokens: 5},
+		Detail:      UsageDetail{InputTokens: 10, OutputTokens: 5, CacheReadTokens: 2, CacheCreationTokens: 3, TotalTokens: 15},
 	})
 	first.Close()
 
@@ -1873,6 +1873,13 @@ func TestStorageReplayRestoresRecords(t *testing.T) {
 	snapshot := second.Snapshot()
 	if snapshot.TotalRequests != 1 || snapshot.TotalTokens != 15 {
 		t.Fatalf("replayed snapshot = requests %d tokens %d, want 1/15", snapshot.TotalRequests, snapshot.TotalTokens)
+	}
+	if snapshot.CachedTokens != 5 || snapshot.CacheWriteTokens != 3 {
+		t.Fatalf("replayed cache tokens = total %d write %d, want 5/3", snapshot.CachedTokens, snapshot.CacheWriteTokens)
+	}
+	detail := snapshot.APIs["openai"].Models["gpt-4"].Details[0]
+	if detail.Tokens.CachedTokens != 2 || detail.Tokens.CacheTokens != 5 || detail.Tokens.CacheWriteTokens != 3 {
+		t.Fatalf("replayed detail cache tokens = %#v, want read/total/write 2/5/3", detail.Tokens)
 	}
 	if status := second.StorageStatus(); !status.Enabled || status.LoadedPath == "" || status.LastError != "" {
 		t.Fatalf("storage status after replay = %#v", status)
@@ -2233,6 +2240,9 @@ func TestStorageSnapshotSplitsMixedDetailModelsUnderOuterAlias(t *testing.T) {
 							TotalRequests: 3,
 							SuccessCount:  3,
 							TotalTokens:   6,
+							Providers: []ModelProviderStat{{
+								Provider: "openai", TotalRequests: 3, SuccessCount: 3, TotalTokens: 6,
+							}},
 							Details: []RequestDetail{
 								{
 									Model:     "gpt-4",
@@ -2286,6 +2296,8 @@ func TestStorageSnapshotSplitsMixedDetailModelsUnderOuterAlias(t *testing.T) {
 	}
 	if residual := api.Models["outer-alias"]; residual.TotalRequests != 1 || residual.TotalTokens != 3 {
 		t.Fatalf("outer-alias residual = %#v, want trimmed aggregate residual 1/3", residual)
+	} else if len(residual.Providers) != 1 || residual.Providers[0].TotalRequests != 1 || residual.Providers[0].TotalTokens != 3 {
+		t.Fatalf("outer-alias residual providers = %#v, want trimmed provider residual 1/3", residual.Providers)
 	}
 	if events := stats.QueryEvents(EventsQuery{Range: "all", Limit: 10, Model: "gpt-4"}); events.Total != 1 {
 		t.Fatalf("gpt-4 events = %#v, want one normalized detail", events)
@@ -2492,6 +2504,9 @@ func TestStorageSnapshotSplitRestorePreservesTrimmedAggregates(t *testing.T) {
 							TotalRequests: 5,
 							SuccessCount:  5,
 							TotalTokens:   15,
+							Providers: []ModelProviderStat{{
+								Provider: "codex", TotalRequests: 5, SuccessCount: 5, TotalTokens: 15,
+							}},
 							Details: []RequestDetail{
 								{
 									Model:     "gpt-5",
@@ -2546,6 +2561,8 @@ func TestStorageSnapshotSplitRestorePreservesTrimmedAggregates(t *testing.T) {
 	}
 	if api := summary.Usage.APIs["codex"]; api.TotalRequests != 3 || api.TotalTokens != 12 {
 		t.Fatalf("residual codex API = %#v, want trimmed aggregate remainder", api)
+	} else if providers := api.Models["gpt-5"].Providers; len(providers) != 1 || providers[0].TotalRequests != 3 || providers[0].TotalTokens != 12 {
+		t.Fatalf("residual codex providers = %#v, want trimmed provider remainder 3/12", providers)
 	}
 	if len(summary.ModelStats) != 1 || summary.ModelStats[0].Model != "gpt-5" ||
 		summary.ModelStats[0].TotalRequests != 5 || summary.ModelStats[0].TotalTokens != 15 {
@@ -3920,19 +3937,19 @@ func TestModelPricesUseModelsDevDefaultsWithManualOverride(t *testing.T) {
 	stats.refreshModelsDevPricesOnce()
 
 	initial := stats.ModelPrices()
-	if got := initial.Prices["gpt-5.5"]; got.Prompt != 1.25 || got.Completion != 10 || got.Cache != 0.125 {
+	if got := initial.Prices["gpt-5.5"]; got.Prompt != 1.25 || got.Completion != 10 || got.Cache != 0.125 || got.CacheWrite != 1.25 {
 		t.Fatalf("models.dev price = %#v", got)
 	}
-	if got := initial.Prices["openai/gpt-5.5"]; got.Prompt != 1.25 || got.Completion != 10 || got.Cache != 0.125 {
+	if got := initial.Prices["openai/gpt-5.5"]; got.Prompt != 1.25 || got.Completion != 10 || got.Cache != 0.125 || got.CacheWrite != 1.25 {
 		t.Fatalf("provider-prefixed models.dev price = %#v", got)
 	}
-	if got := initial.Prices["openrouter/openai/gpt-5.5"]; got.Prompt != 9 || got.Completion != 99 || got.Cache != 0.9 {
+	if got := initial.Prices["openrouter/openai/gpt-5.5"]; got.Prompt != 9 || got.Completion != 99 || got.Cache != 0.9 || got.CacheWrite != 11.25 {
 		t.Fatalf("openrouter models.dev price = %#v", got)
 	}
 	if initial.ModelsDev.PriceCount != 3 || initial.ModelsDev.LastError != "" {
 		t.Fatalf("models.dev status = %#v", initial.ModelsDev)
 	}
-	if got, ok := priceForDetailFromMap(initial.Prices, "openai/gpt-5.5", "openai-compatible"); !ok || got.Prompt != 1.25 || got.Completion != 10 || got.Cache != 0.125 {
+	if got, ok := priceForDetailFromMap(initial.Prices, "openai/gpt-5.5", "openai-compatible"); !ok || got.Prompt != 1.25 || got.Completion != 10 || got.Cache != 0.125 || got.CacheWrite != 1.25 {
 		t.Fatalf("models.dev fallback price = %#v ok=%v, want bare gpt-5.5 price", got, ok)
 	}
 
@@ -4142,7 +4159,7 @@ func TestDashboardEventsExportSupportsCSVJSONLAndGzip(t *testing.T) {
 		Source:      "openai-prod",
 		Model:       "gpt-4",
 		RequestedAt: time.Now().Add(-time.Minute),
-		Detail:      UsageDetail{InputTokens: 10, OutputTokens: 5},
+		Detail:      UsageDetail{InputTokens: 10, OutputTokens: 5, CacheReadTokens: 2, CacheCreationTokens: 3, TotalTokens: 15},
 	})
 	stats.Record(UsageRecord{
 		Provider:    "openai",
@@ -4163,7 +4180,8 @@ func TestDashboardEventsExportSupportsCSVJSONLAndGzip(t *testing.T) {
 		t.Fatalf("csv content type = %#v", got)
 	}
 	csvBody := string(csvResp.Body)
-	if !strings.HasPrefix(csvBody, "时间,模型,来源") || !strings.Contains(csvBody, "gpt-4") || !strings.Contains(csvBody, "rate limited") {
+	if !strings.HasPrefix(csvBody, "时间,模型,来源") || !strings.Contains(csvBody, "缓存写入 token") ||
+		!strings.Contains(csvBody, ",5,3,15,") || !strings.Contains(csvBody, "gpt-4") || !strings.Contains(csvBody, "rate limited") {
 		t.Fatalf("csv body missing expected rows: %q", csvBody)
 	}
 
@@ -4510,6 +4528,47 @@ func TestManagementModelPricesRejectInvalidPrice(t *testing.T) {
 	}
 	if env.OK || env.Error == nil || env.Error.Code != "invalid_price" {
 		t.Fatalf("invalid price response = %#v", env)
+	}
+
+	body, err = json.Marshal(map[string]interface{}{
+		"model": "gpt-4.1",
+		"price": ModelPrice{
+			Prompt:     1,
+			Completion: 8,
+			Cache:      0,
+			CacheWrite: -1,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal cache write price payload: %v", err)
+	}
+	raw = invokeManagement(t, ManagementRequest{
+		Method: "PUT",
+		Path:   "/v0/management/plugins/usage-statistics/model-prices",
+		Body:   body,
+	})
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal cache write envelope: %v", err)
+	}
+	if env.OK || env.Error == nil || env.Error.Code != "invalid_price" {
+		t.Fatalf("invalid cache write price response = %#v", env)
+	}
+}
+
+func TestModelPriceDefaultsMissingCacheWriteForLegacyJSON(t *testing.T) {
+	var price ModelPrice
+	if err := json.Unmarshal([]byte(`{"prompt":2,"completion":8,"cache":0.5}`), &price); err != nil {
+		t.Fatalf("unmarshal legacy model price: %v", err)
+	}
+	if price.CacheWrite != 2.5 {
+		t.Fatalf("legacy cache write price = %v, want 2.5", price.CacheWrite)
+	}
+
+	if err := json.Unmarshal([]byte(`{"prompt":2,"completion":8,"cache":0.5,"cache_write":0}`), &price); err != nil {
+		t.Fatalf("unmarshal explicit cache write price: %v", err)
+	}
+	if price.CacheWrite != 0 {
+		t.Fatalf("explicit cache write price = %v, want 0", price.CacheWrite)
 	}
 }
 

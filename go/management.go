@@ -395,7 +395,7 @@ func handleImportUsage(body []byte) ([]byte, error) {
 			for detailIndex, detail := range modelSnapshot.Details {
 				t := detail.Tokens
 				if t.TotalTokens < 0 || t.InputTokens < 0 || t.OutputTokens < 0 ||
-					t.ReasoningTokens < 0 || t.CachedTokens < 0 || t.CacheTokens < 0 {
+					t.ReasoningTokens < 0 || t.CachedTokens < 0 || t.CacheTokens < 0 || t.CacheWriteTokens < 0 {
 					return errorEnvelope("invalid_record",
 						fmt.Sprintf("negative token count found at api=%q model=%q detail_index=%d",
 							apiName, modelName, detailIndex)), nil

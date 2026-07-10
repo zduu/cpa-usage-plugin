@@ -55,6 +55,10 @@ test('totalTokens computes token sum', () => {
   const detail3 = { tokens: { input_tokens: 10, output_tokens: 5, cached_tokens: 8 } };
   // Cached tokens are a discount classification of input tokens, not extra total tokens.
   assert.strictEqual(helpers.totalTokens(detail3), 15);
+  const detail4 = { provider: 'anthropic', tokens: { input_tokens: 10, output_tokens: 5, cached_tokens: 8, cache_write_tokens: 2 } };
+  assert.strictEqual(helpers.totalTokens(detail4), 25);
+  const detail5 = { provider: 'claude', tokens: { input_tokens: 10, output_tokens: 5, cached_tokens: 8, cache_write_tokens: 2, total_tokens: 1 } };
+  assert.strictEqual(helpers.totalTokens(detail5), 25);
 });
 
 test('detailCost computes cost', () => {
@@ -69,6 +73,48 @@ test('detailCost computes cost', () => {
   // total: 57
   const cost = helpers.detailCost(detail, prices);
   assert.ok(Math.abs(cost - 57) < 0.01, 'cost should be ~57, got ' + cost);
+});
+
+test('detailCost separates cache reads and writes from an inclusive input total', () => {
+  const prices = { model: { prompt: 1, completion: 0, cache: 0.1, cache_write: 1.25 } };
+  const detail = {
+    model: 'model',
+    tokens: {
+      input_tokens: 1000000,
+      output_tokens: 0,
+      total_tokens: 1000000,
+      cached_tokens: 200000,
+      cache_write_tokens: 300000,
+    },
+  };
+  const cost = helpers.detailCost(detail, prices);
+  assert.strictEqual(helpers.cacheTokenTotal(detail.tokens), 500000);
+  assert.ok(Math.abs(cost - 0.895) < 1e-9, 'cost should be 0.895, got ' + cost);
+  detail.provider = 'openai';
+  detail.tokens.total_tokens = 1500000;
+  const inflatedTotalCost = helpers.detailCost(detail, prices);
+  assert.ok(Math.abs(inflatedTotalCost - 0.895) < 1e-9, 'non-Claude inflated total cost should be 0.895, got ' + inflatedTotalCost);
+});
+
+test('detailCost keeps Claude-style exclusive input tokens billable', () => {
+  const prices = { model: { prompt: 1, completion: 0, cache: 0.1, cache_write: 1.25 } };
+  const detail = {
+    model: 'model',
+    provider: 'anthropic',
+    tokens: {
+      input_tokens: 500000,
+      output_tokens: 0,
+      total_tokens: 1000000,
+      cached_tokens: 200000,
+      cache_tokens: 500000,
+      cache_write_tokens: 300000,
+    },
+  };
+  const cost = helpers.detailCost(detail, prices);
+  assert.ok(Math.abs(cost - 0.895) < 1e-9, 'cost should be 0.895, got ' + cost);
+  delete detail.tokens.total_tokens;
+  const missingTotalCost = helpers.detailCost(detail, prices);
+  assert.ok(Math.abs(missingTotalCost - 0.895) < 1e-9, 'missing-total cost should be 0.895, got ' + missingTotalCost);
 });
 
 test('detailCost matches model prices case-insensitively', () => {
@@ -147,6 +193,18 @@ test('aggregateCost uses the original model key, not an alias', () => {
   };
   const cost = helpers.aggregateCost(row, prices);
   assert.ok(Math.abs(cost - 29.1) < 0.01, 'cost should use gpt-4 pricing, got ' + cost);
+});
+
+test('cacheRate handles inclusive and Claude-style exclusive input totals', () => {
+  assert.strictEqual(helpers.cacheRate({ input_tokens: 100, output_tokens: 20, total_tokens: 120, cached_tokens: 40 }), 40);
+  assert.ok(Math.abs(helpers.cacheRate({ input_tokens: 100, output_tokens: 20, total_tokens: 160, cached_tokens: 40 }) - 28.57142857142857) < 1e-9);
+  assert.strictEqual(helpers.cacheRate({ input_tokens: 0, output_tokens: 20, total_tokens: 60, cached_tokens: 40 }), 100);
+  assert.strictEqual(helpers.cacheRate({ input_tokens: 100, output_tokens: 0, total_tokens: 100, cached_tokens: 50, cache_write_tokens: 30 }), 20);
+  assert.strictEqual(helpers.cacheRate({ input_tokens: 50, output_tokens: 0, total_tokens: 100, cached_tokens: 50, cache_write_tokens: 30 }), 20);
+  assert.strictEqual(helpers.cacheRate({ providers: [
+    { provider: 'openai', input_tokens: 100, total_tokens: 100, cached_tokens: 20 },
+    { provider: 'anthropic', input_tokens: 80, total_tokens: 100, cached_tokens: 20 },
+  ] }), 20);
 });
 
 test('hourBucketValue reads padded and plain hour keys', () => {

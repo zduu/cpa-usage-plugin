@@ -41,13 +41,15 @@ function formatUsd(value) {
   if (abs < 0.01) return money6.format(value);
   return money2.format(value);
 }
-function totalTokens(detail) { const t = detail.tokens || {}; return num(t.total_tokens) || num(t.input_tokens) + num(t.output_tokens) }
+function providerUsesExclusiveCache(provider) { return /^(anthropic|claude)(?:-|$)/i.test(String(provider || '').trim()) }
+function totalTokens(detail) { const t = detail.tokens || {}; const computed = Math.max(num(t.input_tokens), 0) + Math.max(num(t.output_tokens), 0) + (providerUsesExclusiveCache(detail && detail.provider) ? cacheTokenTotal(t) : 0); return Math.max(num(t.total_tokens), computed, 0) }
 function directPriceForModel(model, prices) { if (!prices) return null; if (prices[model]) return prices[model]; const key = String(model || '').trim().toLowerCase(); if (!key) return null; const found = Object.keys(prices).find((m) => String(m || '').trim().toLowerCase() === key); return found ? prices[found] : null }
 function priceLookupKeys(model, provider) { const providerKey = String(provider || '').trim(); const modelKey = String(model || '').trim(); const keys = []; const seen = new Set(); const add = (key) => { key = String(key || '').trim(); const norm = key.toLowerCase(); if (!norm || seen.has(norm)) return; keys.push(key); seen.add(norm); }; if (providerKey && modelKey) add(providerKey + '/' + modelKey); add(modelKey); const slash = modelKey.indexOf('/'); if (slash > 0 && slash < modelKey.length - 1) add(modelKey.slice(slash + 1)); return keys }
 function priceForModel(model, prices, provider, manualPrices) { const keys = priceLookupKeys(model, provider); for (const key of keys) { const price = directPriceForModel(key, manualPrices); if (price) return price; } for (const key of keys) { const price = directPriceForModel(key, prices); if (price) return price; } return null }
-function tokenCost(model, inputTokens, outputTokens, cachedTokens, reasoningTokens, prices, provider, manualPrices) { const p = priceForModel(model, prices, provider, manualPrices); if (!p) return 0; const cached = Math.max(num(cachedTokens), 0); const input = Math.max(num(inputTokens) - cached, 0); return input / 1e6 * num(p.prompt) + Math.max(num(outputTokens), 0) / 1e6 * num(p.completion) + cached / 1e6 * num(p.cache) }
-function detailCost(detail, prices, manualPrices) { const t = detail.tokens || {}; return tokenCost(detail.model, t.input_tokens, t.output_tokens, Math.max(num(t.cached_tokens), num(t.cache_tokens)), t.reasoning_tokens, prices, detail.provider, manualPrices) }
-function aggregateCost(row, prices, manualPrices) { const providers = Array.isArray(row.providers) ? row.providers : []; if (providers.length) return providers.reduce((sum, p) => sum + tokenCost(row.model, p.input_tokens, p.output_tokens, p.cached_tokens, p.reasoning_tokens, prices, p.provider, manualPrices), 0); return tokenCost(row.model, row.input_tokens, row.output_tokens, row.cached_tokens, row.reasoning_tokens, prices, row.provider, manualPrices) }
+function cacheTokenTotal(tokens) { const t = tokens || {}; const cacheWrite = Math.max(num(t.cache_write_tokens), 0); const explicitCacheTotal = Math.max(num(t.cache_tokens), 0); return explicitCacheTotal > 0 ? Math.max(explicitCacheTotal, num(t.cached_tokens), cacheWrite) : Math.max(num(t.cached_tokens), 0) + cacheWrite }
+function tokenCost(model, inputTokens, outputTokens, totalTokensValue, cachedTokens, cacheWriteTokens, reasoningTokens, prices, provider, manualPrices) { const p = priceForModel(model, prices, provider, manualPrices); if (!p) return 0; const output = Math.max(num(outputTokens), 0); const cacheWrite = Math.max(num(cacheWriteTokens), 0); const cacheTotal = Math.max(num(cachedTokens), cacheWrite, 0); const cacheRead = Math.max(cacheTotal - cacheWrite, 0); const inputValue = Math.max(num(inputTokens), 0); const total = Math.max(num(totalTokensValue), 0); const providerKey = String(provider || '').trim(); const exclusive = providerUsesExclusiveCache(providerKey) || (!providerKey && total >= inputValue + output + cacheTotal); const input = exclusive ? inputValue : Math.max(inputValue - cacheTotal, 0); return input / 1e6 * num(p.prompt) + output / 1e6 * num(p.completion) + cacheRead / 1e6 * num(p.cache) + cacheWrite / 1e6 * num(p.cache_write) }
+function detailCost(detail, prices, manualPrices) { const t = detail.tokens || {}; const cacheWrite = Math.max(num(t.cache_write_tokens), 0); return tokenCost(detail.model, t.input_tokens, t.output_tokens, totalTokens(detail), cacheTokenTotal(t), cacheWrite, t.reasoning_tokens, prices, detail.provider, manualPrices) }
+function aggregateCost(row, prices, manualPrices) { const providers = Array.isArray(row.providers) ? row.providers : []; if (providers.length) return providers.reduce((sum, p) => sum + tokenCost(row.model, p.input_tokens, p.output_tokens, p.total_tokens, p.cached_tokens, p.cache_write_tokens, p.reasoning_tokens, prices, p.provider, manualPrices), 0); return tokenCost(row.model, row.input_tokens, row.output_tokens, row.total_tokens, row.cached_tokens, row.cache_write_tokens, row.reasoning_tokens, prices, row.provider, manualPrices) }
 function looksLikeKey(v) { return typeof v === 'string' && (v.startsWith('sk-') || v.startsWith('AIza') || v.startsWith('hf_') || v.startsWith('pk_') || v.startsWith('rk_') || v.length >= 80) }
 function looksLikeCredentialId(v) { const s = String(v || '').trim(); return /^[a-f0-9]{8,}$/i.test(s) || (s.length >= 32 && !/[ ./_-]/.test(s)) }
 function isCredentialMarker(v) { return /^(api[-_ ]?key|apikey|key|credential|auth)$/i.test(String(v || '').trim()) }
@@ -228,11 +230,22 @@ async function fetchAllEventPages(fetchPage, baseParams, pageLimit) {
 
 // ---- cache rate & cost-per-million helpers ----
 function cacheRate(row) {
-  // input_tokens includes cached tokens (API convention: input = non-cached + cached)
-  var cached = Math.max(0, num(row.cached_tokens));
-  var input = num(row.input_tokens);
-  if (input <= 0) return 0;
-  return Math.min(100, cached / input * 100);
+  var parts = Array.isArray(row.providers) && row.providers.length ? row.providers : [row];
+  var cacheRead = 0;
+  var inputWithCache = 0;
+  parts.forEach(function(part) {
+    var cached = Math.max(0, num(part.cached_tokens));
+    var cacheWrite = Math.max(0, num(part.cache_write_tokens));
+    var input = Math.max(0, num(part.input_tokens));
+    var output = Math.max(0, num(part.output_tokens));
+    var total = Math.max(0, num(part.total_tokens));
+    var provider = String(part.provider || '').trim();
+    var exclusive = providerUsesExclusiveCache(provider) || (!provider && total >= input + output + cached);
+    cacheRead += Math.max(cached - cacheWrite, 0);
+    inputWithCache += exclusive ? input + cached : input;
+  });
+  if (inputWithCache <= 0) return 0;
+  return Math.min(100, cacheRead / inputWithCache * 100);
 }
 function costPerMillion(row, prices, manualPrices) {
   var cost = aggregateCost(row, prices, manualPrices);
@@ -253,5 +266,5 @@ function hourBucketValue(values, hour) {
 
 // Export for Node.js test environment
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { esc, num, compact, pct, formatMs, formatUsd, totalTokens, priceForModel, tokenCost, detailCost, aggregateCost, looksLikeKey, looksLikeCredentialId, isCredentialMarker, isCredentialLabel, trimCredentialSuffix, sourceLabel, sourceKey, friendlyApiName, clientApiLabel, clientApiGroupKey, avg, bucketSeries, hourFromTimestamp, dashboardCurrentHour, orderedRecentHours, healthColor, healthCellStyle, timestampMs, pluginEndpoint, managementEndpoint, decodeManagementStorage, parseManagementStorage, currentManagementKey, groupedRows, decodeManagementBody, unwrapPluginPayloadWithMeta, unwrapPluginPayload, fetchAllEventPages, cacheRate, costPerMillion, hourBucketValue };
+  module.exports = { esc, num, compact, pct, formatMs, formatUsd, providerUsesExclusiveCache, totalTokens, priceForModel, cacheTokenTotal, tokenCost, detailCost, aggregateCost, looksLikeKey, looksLikeCredentialId, isCredentialMarker, isCredentialLabel, trimCredentialSuffix, sourceLabel, sourceKey, friendlyApiName, clientApiLabel, clientApiGroupKey, avg, bucketSeries, hourFromTimestamp, dashboardCurrentHour, orderedRecentHours, healthColor, healthCellStyle, timestampMs, pluginEndpoint, managementEndpoint, decodeManagementStorage, parseManagementStorage, currentManagementKey, groupedRows, decodeManagementBody, unwrapPluginPayloadWithMeta, unwrapPluginPayload, fetchAllEventPages, cacheRate, costPerMillion, hourBucketValue };
 }

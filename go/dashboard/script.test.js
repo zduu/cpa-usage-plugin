@@ -67,7 +67,7 @@ function createDashboardHarness(options = {}) {
   const timeoutDelays = [];
   let summaryLastRecordedAt = options.lastRecordedAt || '2023-11-15T06:13:20Z';
   let summaryVersion = options.summaryVersion || 1;
-  let prices = options.prices || { 'gpt-4.1': { prompt: 2, completion: 8, cache: 0.5 } };
+  let prices = options.prices || { 'gpt-4.1': { prompt: 2, completion: 8, cache: 0.5, cache_write: 0.5 } };
   let manualPrices = options.manualPrices;
   const dashboardEtags = !!options.dashboardEtags;
   const wrapDashboardResponses = !!options.wrapDashboardResponses;
@@ -127,6 +127,7 @@ function createDashboardHarness(options = {}) {
       failure_count: 10,
       total_tokens: 24000,
       cached_tokens: 100,
+      cache_write_tokens: 25,
       reasoning_tokens: 50,
       avg_latency_ms: 120,
       apis: {
@@ -217,9 +218,9 @@ function createDashboardHarness(options = {}) {
     const api = parsed.searchParams.get('api');
     const totalRows = api ? 8 : 1200;
     if (parsed.searchParams.get('format') === 'csv') {
-      return '时间,模型,来源,凭证,结果,延迟毫秒,TTFT毫秒,输入 token,输出 token,思考 token,缓存 token,总 token,状态码,错误\n' +
+      return '时间,模型,来源,凭证,结果,延迟毫秒,TTFT毫秒,输入 token,输出 token,思考 token,缓存 token,缓存写入 token,总 token,状态码,错误\n' +
         eventsPage('http://test.local/dashboard-events?limit=' + totalRows + '&offset=0').events.slice(0, totalRows)
-          .map((event) => [event.timestamp, event.model, event.source, event.auth_index, event.failed ? '失败' : '成功', event.latency_ms, '', event.tokens.input_tokens, event.tokens.output_tokens, '', '', event.tokens.total_tokens, '', ''].join(','))
+          .map((event) => [event.timestamp, event.model, event.source, event.auth_index, event.failed ? '失败' : '成功', event.latency_ms, '', event.tokens.input_tokens, event.tokens.output_tokens, '', '', '', event.tokens.total_tokens, '', ''].join(','))
           .join('\n');
     }
     return {
@@ -288,11 +289,12 @@ function createDashboardHarness(options = {}) {
         input_tokens: 70,
         output_tokens: 35,
         cached_tokens: 10,
+        cache_write_tokens: 3,
         reasoning_tokens: 5,
         avg_latency_ms: 113,
       },
       model_stats: [
-        { model: 'gpt-4.1', total_requests: 7, success_count: 7, failure_count: 0, total_tokens: 105, input_tokens: 70, output_tokens: 35, cached_tokens: 10, reasoning_tokens: 5 },
+        { model: 'gpt-4.1', total_requests: 7, success_count: 7, failure_count: 0, total_tokens: 105, input_tokens: 70, output_tokens: 35, cached_tokens: 10, cache_write_tokens: 3, reasoning_tokens: 5 },
         { model: 'deepseek-v4-flash-free', total_requests: 1, success_count: 0, failure_count: 1, total_tokens: 0, input_tokens: 0, output_tokens: 0, cached_tokens: 0, reasoning_tokens: 0 },
       ],
       source_stats: [{ source: 'openai-prod', total_requests: 8, success_count: 7, failure_count: 1, total_tokens: 105 }],
@@ -327,6 +329,7 @@ function createDashboardHarness(options = {}) {
     const aggregateInput = options.trimmedDashboardData ? 30 : 10;
     const aggregateOutput = options.trimmedDashboardData ? 15 : 5;
     const aggregateCached = options.trimmedDashboardData ? 2 : 0;
+    const aggregateCacheWrite = options.trimmedDashboardData ? 1 : 0;
     const aggregateReasoning = options.trimmedDashboardData ? 4 : 0;
     const aggregateLatency = options.trimmedDashboardData ? 110 : 100;
     const details = [
@@ -366,6 +369,7 @@ function createDashboardHarness(options = {}) {
         input_tokens: aggregateInput,
         output_tokens: aggregateOutput,
         cached_tokens: aggregateCached,
+        cache_write_tokens: aggregateCacheWrite,
         reasoning_tokens: aggregateReasoning,
         avg_latency_ms: aggregateLatency,
         requests_by_day: {},
@@ -381,6 +385,7 @@ function createDashboardHarness(options = {}) {
             input_tokens: aggregateInput,
             output_tokens: aggregateOutput,
             cached_tokens: aggregateCached,
+            cache_write_tokens: aggregateCacheWrite,
             reasoning_tokens: aggregateReasoning,
             avg_latency_ms: aggregateLatency,
             models: {
@@ -392,8 +397,10 @@ function createDashboardHarness(options = {}) {
                 input_tokens: aggregateInput,
                 output_tokens: aggregateOutput,
                 cached_tokens: aggregateCached,
+                cache_write_tokens: aggregateCacheWrite,
                 reasoning_tokens: aggregateReasoning,
                 avg_latency_ms: aggregateLatency,
+                providers: options.dashboardDataProviders,
                 details,
               },
             },
@@ -672,6 +679,7 @@ test('dashboard loads summary and export button uses backend event export', asyn
   await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-events')));
   assert.strictEqual(document.getElementById('totalRequests').textContent, '1,200');
   assert.strictEqual(document.getElementById('totalCost').textContent, 'US$0.05');
+  assert.strictEqual(document.getElementById('cacheWriteText').textContent, '缓存写入 token：25');
   assert.strictEqual(document.getElementById('storageStatus').textContent, '未开启持久化');
   const apiDetail = document.getElementById('apiDetail').innerHTML;
   assert.match(apiDetail, /总花费/);
@@ -681,6 +689,7 @@ test('dashboard loads summary and export button uses backend event export', asyn
   assert.match(loadedApiDetail, /US\$0\.000405/);
   assert.match(loadedApiDetail, /总 token 数：105/);
   assert.match(loadedApiDetail, /缓存 token：10/);
+  assert.match(loadedApiDetail, /缓存写入 token：3/);
   assert.match(loadedApiDetail, /思考 token：5/);
   assert.match(document.getElementById('apiDetail').innerHTML, /错误统计/);
   assert.match(document.getElementById('apiDetail').innerHTML, /最近请求/);
@@ -752,7 +761,7 @@ test('dashboard fallback merges legacy hashless client API stats into a unique h
   assert.strictEqual(rows[0].models[0].total_requests, 2);
 });
 
-test('dashboard fallback keeps masked client API hash variants separate when ambiguous', () => {
+test('dashboard fallback merges imported hashless client API group with historical hashes', () => {
   const { context } = createDashboardHarness();
   const rows = context.coalesceLegacyHashlessClientApiStats([
     { api_key: 'sk******xx', api_key_hash: '', total_requests: 1, total_tokens: 40, models: [] },
@@ -760,8 +769,21 @@ test('dashboard fallback keeps masked client API hash variants separate when amb
     { api_key: 'sk******xx', api_key_hash: 'hash-b', total_requests: 1, total_tokens: 60, models: [] },
   ]);
 
-  assert.strictEqual(rows.length, 3);
-  assert.deepStrictEqual(rows.map((row) => row.total_tokens), [40, 120, 60]);
+  assert.strictEqual(rows.length, 1);
+  assert.strictEqual(rows[0].api_key_hash, '');
+  assert.strictEqual(rows[0].total_requests, 3);
+  assert.strictEqual(rows[0].total_tokens, 220);
+});
+
+test('dashboard fallback keeps different live hashes separate without an imported hashless group', () => {
+  const { context } = createDashboardHarness();
+  const rows = context.coalesceLegacyHashlessClientApiStats([
+    { api_key: 'sk******xx', api_key_hash: 'hash-a', total_requests: 1, total_tokens: 120, models: [] },
+    { api_key: 'sk******xx', api_key_hash: 'hash-b', total_requests: 1, total_tokens: 60, models: [] },
+  ]);
+
+  assert.strictEqual(rows.length, 2);
+  assert.deepStrictEqual(rows.map((row) => row.total_tokens), [120, 60]);
 });
 
 test('dashboard credential filter uses summary credential stats beyond current event page', async () => {
@@ -932,7 +954,7 @@ test('dashboard api detail export uses management endpoints from resource iframe
 
 test('dashboard price form shows models.dev effective prices', async () => {
   const { document } = createDashboardHarness({
-    prices: { 'gpt-4.1': { prompt: 1.25, completion: 10, cache: 0.125 } },
+    prices: { 'gpt-4.1': { prompt: 1.25, completion: 10, cache: 0.125, cache_write: 1.5 } },
     manualPrices: {},
   });
 
@@ -943,6 +965,7 @@ test('dashboard price form shows models.dev effective prices', async () => {
   assert.strictEqual(document.getElementById('pricePrompt').value, 1.25);
   assert.strictEqual(document.getElementById('priceCompletion').value, 10);
   assert.strictEqual(document.getElementById('priceCache').value, 0.125);
+  assert.strictEqual(document.getElementById('priceCacheWrite').value, 1.5);
 });
 
 test('dashboard export truncation headers produce a user notice', () => {
@@ -1400,6 +1423,26 @@ test('dashboard fallback keeps upstream aggregates when details are trimmed', as
   assert.match(document.getElementById('modelStats').innerHTML, /100ms/);
 });
 
+test('dashboard fallback uses persisted provider aggregates when details are trimmed', async () => {
+  const { document, fetchCalls } = createDashboardHarness({
+    failDashboardSummary: true,
+    trimmedDashboardData: true,
+    range: 'all',
+    prices: {
+      'gpt-4.1': { prompt: 2, completion: 8, cache: 0.5, cache_write: 2.5 },
+      'openai/gpt-4.1': { prompt: 20, completion: 0, cache: 0, cache_write: 100 },
+    },
+    dashboardDataProviders: [{
+      provider: 'openai', total_requests: 4, success_count: 3, failure_count: 1,
+      total_tokens: 45, input_tokens: 30, output_tokens: 15,
+      cached_tokens: 2, cache_write_tokens: 1, reasoning_tokens: 4,
+    }],
+  });
+
+  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-data')) && document.getElementById('totalCost').textContent !== '-');
+  assert.strictEqual(document.getElementById('totalCost').textContent, 'US$0.00066');
+});
+
 test('dashboard detail refresh sends conditional requests for events and api detail', async () => {
   const { document, fetchRequests } = createDashboardHarness({
     dashboardEtags: true,
@@ -1432,6 +1475,7 @@ test('model price settings are loaded and saved through backend API', async () =
   document.getElementById('pricePrompt').value = '1.25';
   document.getElementById('priceCompletion').value = '10';
   document.getElementById('priceCache').value = '';
+  document.getElementById('priceCacheWrite').value = '';
   await document.getElementById('savePrice').onclick();
 
   const put = fetchRequests.find((req) => req.url.includes('model-prices') && req.options.method === 'PUT');
@@ -1441,7 +1485,7 @@ test('model price settings are loaded and saved through backend API', async () =
   assert.strictEqual(put.options.headers['x-management-key'], 'test-management-key');
   assert.deepStrictEqual(JSON.parse(put.options.body), {
     model: 'gpt-5',
-    price: { prompt: 1.25, completion: 10, cache: 1.25 },
+    price: { prompt: 1.25, completion: 10, cache: 1.25, cache_write: 1.5625 },
   });
   assert.match(document.getElementById('priceList').innerHTML, /gpt-5/);
 });
