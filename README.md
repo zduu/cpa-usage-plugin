@@ -2,7 +2,7 @@
 
 CPA 用量统计插件，用于在 CLIProxyAPI/CPA v7 插件系统中记录请求用量，并提供管理页面查看统计数据。
 
-当前代码版本：`2.3.1`。
+当前代码版本：`2.3.2`。
 
 `v1.0.0` 到 `v1.2.18` 属于规范化发布流程建立前的 legacy 历史版本；tag、release 和资产下载地址保持不变，说明见 [docs/releases/v1-history.md](docs/releases/v1-history.md)。
 
