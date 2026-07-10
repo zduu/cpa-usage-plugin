@@ -116,11 +116,11 @@ function timestampMs(value) { const ms = Date.parse(value); return Number.isFini
 function pluginEndpoint(path, pathname) {
   const clean = String(path || '').replace(/^\/+/, '');
   const current = String(pathname || (typeof location !== 'undefined' ? location.pathname : ''));
-  if (/\/management\.html\/?$/.test(current)) return '/v0/management/plugins/usage-statistics/' + clean;
-  const resourceMarker = '/resource/plugins/usage-statistics/';
+  if (/\/management\.html\/?$/.test(current)) return '/v0/management/plugins/usage-dashboard-zduu/' + clean;
+  const resourceMarker = '/resource/plugins/usage-dashboard-zduu/';
   const resourceIdx = current.indexOf(resourceMarker);
   if (resourceIdx >= 0) return current.slice(0, resourceIdx + resourceMarker.length) + clean;
-  const managementMarker = '/management/plugins/usage-statistics/';
+  const managementMarker = '/management/plugins/usage-dashboard-zduu/';
   const managementIdx = current.indexOf(managementMarker);
   if (managementIdx >= 0) return current.slice(0, managementIdx + managementMarker.length) + clean;
   return './' + clean;
@@ -128,11 +128,11 @@ function pluginEndpoint(path, pathname) {
 function managementEndpoint(path, pathname) {
   const clean = String(path || '').replace(/^\/+/, '');
   const current = String(pathname || (typeof location !== 'undefined' ? location.pathname : ''));
-  if (/\/management\.html\/?$/.test(current)) return '/v0/management/plugins/usage-statistics/' + clean;
-  const resourceMarker = '/resource/plugins/usage-statistics/';
+  if (/\/management\.html\/?$/.test(current)) return '/v0/management/plugins/usage-dashboard-zduu/' + clean;
+  const resourceMarker = '/resource/plugins/usage-dashboard-zduu/';
   const resourceIdx = current.indexOf(resourceMarker);
-  if (resourceIdx >= 0) return current.slice(0, resourceIdx) + '/management/plugins/usage-statistics/' + clean;
-  const managementMarker = '/management/plugins/usage-statistics/';
+  if (resourceIdx >= 0) return current.slice(0, resourceIdx) + '/management/plugins/usage-dashboard-zduu/' + clean;
+  const managementMarker = '/management/plugins/usage-dashboard-zduu/';
   const managementIdx = current.indexOf(managementMarker);
   if (managementIdx >= 0) return current.slice(0, managementIdx + managementMarker.length) + clean;
   return './' + clean;

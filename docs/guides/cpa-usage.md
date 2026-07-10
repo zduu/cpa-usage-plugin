@@ -4,20 +4,20 @@
 
 从 [GitHub Releases](https://github.com/zduu/cpa-usage-plugin/releases) 下载最新版本的插件：
 
-- Linux x86_64 / amd64：`usage-statistics-linux-amd64.so`
-- Linux arm64 / aarch64：`usage-statistics-linux-arm64.so`
-- macOS Intel：`usage-statistics-darwin-amd64.dylib`
-- macOS Apple Silicon：`usage-statistics-darwin-arm64.dylib`
-- Windows x86_64 / amd64：`usage-statistics-windows-amd64.dll`
-- `usage-statistics.so` 保留为 amd64 兼容别名。
+- Linux x86_64 / amd64：`usage-dashboard-zduu-linux-amd64.so`
+- Linux arm64 / aarch64：`usage-dashboard-zduu-linux-arm64.so`
+- macOS Intel：`usage-dashboard-zduu-darwin-amd64.dylib`
+- macOS Apple Silicon：`usage-dashboard-zduu-darwin-arm64.dylib`
+- Windows x86_64 / amd64：`usage-dashboard-zduu-windows-amd64.dll`
+- `usage-dashboard-zduu.so` 保留为 amd64 兼容别名。
 
-> 也可以从 GitHub Actions 的 `Build Plugin` workflow 下载对应架构的 `usage-statistics-plugin-*` artifact 自行构建。
+> 也可以从 GitHub Actions 的 `Build Plugin` workflow 下载对应架构的 `usage-dashboard-zduu-plugin-*` artifact 自行构建。
 
 ## 2. 安装方式
 
 ### 方式 A：插件商店安装（推荐）
 
-CPA v7 内置插件商店，管理面板中浏览、一键安装/更新。Release 中的 `usage-statistics_{version}_{goos}_{goarch}.zip` 和 `checksums.txt` 已兼容商店格式，仓库根目录已提供 `registry.json`。
+CPA v7 内置插件商店，管理面板中浏览、一键安装/更新。Release 中的 `usage-dashboard-zduu_{version}_{goos}_{goarch}.zip` 和 `checksums.txt` 已兼容商店格式，仓库根目录已提供 `registry.json`。
 
 在 `config.yaml` 中添加商店源和 store 配置：
 
@@ -28,11 +28,11 @@ plugins:
   store-sources:
     - "https://raw.githubusercontent.com/zduu/cpa-usage-plugin/main/registry.json"
   configs:
-    usage-statistics:
+    usage-dashboard-zduu:
       enabled: true
       store:
-        version: "2.3.2"
-        release-tag: "v2.3.2"
+        version: "2.4.0"
+        release-tag: "v2.4.0"
         repository: "https://github.com/zduu/cpa-usage-plugin"
       # 其他配置项见第 4 节 ...
 ```
@@ -40,6 +40,38 @@ plugins:
 然后完成下方第 4 节的剩余配置，重启 CPA。之后登录管理面板 → 插件商店，可看到「用量统计」并直接点击安装。
 
 > **更新版本**：新版本发布后，管理面板 → 插件商店中点击「更新」即可，CPA 自动下载、校验、替换并加载，无需手动操作。
+
+### 从 2.3.4 迁移到 2.4.0
+
+2.4.0 将插件 ID 从 `usage-statistics` 更改为 `usage-dashboard-zduu`，原因是 CPA 官方商店已经存在另一个同 ID 插件。CPA 运行时按 ID 关联安装状态、配置和管理路由，旧 ID 会导致两个来源同时显示为已安装，并且无法安全共存。
+
+由于 ID 变化，CPA 会把 2.4.0 识别为新插件，不能直接点击旧插件的更新按钮。请按以下顺序迁移：
+
+1. 备份 `config.yaml`、`data/usage-statistics/`、旧单文件 `data/usage-statistics.jsonl`（如果存在）和价格文件。
+2. 停止 CPA，确保旧插件不再写入统计文件。
+3. 删除插件目录中的 `usage-statistics`、`usage-statistics-v*` 动态库；不要删除 `data/usage-statistics` 数据目录。
+4. 将 `plugins.configs.usage-statistics` 的业务配置复制到 `plugins.configs.usage-dashboard-zduu`，并删除旧配置节点及其 `store` 元数据。
+5. 从本仓库商店源安装 `usage-dashboard-zduu` 2.4.0，或使用方式 B 部署新文件名资产。
+6. 启动 CPA，确认日志只出现 `plugin_id=usage-dashboard-zduu`，并核对历史请求总数和价格配置。
+
+迁移后的配置示例：
+
+```yaml
+plugins:
+  enabled: true
+  dir: plugins
+  store-sources:
+    - "https://raw.githubusercontent.com/zduu/cpa-usage-plugin/main/registry.json"
+  configs:
+    usage-dashboard-zduu:
+      enabled: true
+      storage_enabled: true
+      storage_path: data/usage-statistics.jsonl
+      price_storage_path: data/usage-statistics-prices.json
+      models_dev_prices_enabled: true
+```
+
+> 不要同时启用新旧插件。两个插件同时读取和写入同一持久化路径会造成重复统计和文件竞争。
 
 ### 方式 B：脚本更新（不依赖插件商店）
 
@@ -84,8 +116,8 @@ services:
 
 ```bash
 mkdir -p ~/docker/CLIProxyAPI/plugins
-cp usage-statistics-linux-amd64.so ~/docker/CLIProxyAPI/plugins/usage-statistics.so
-chmod 755 ~/docker/CLIProxyAPI/plugins/usage-statistics.so
+cp usage-dashboard-zduu-linux-amd64.so ~/docker/CLIProxyAPI/plugins/usage-dashboard-zduu.so
+chmod 755 ~/docker/CLIProxyAPI/plugins/usage-dashboard-zduu.so
 ```
 
 重启容器加载：
@@ -117,10 +149,10 @@ mkdir -p CLIProxyAPI/plugins
 mkdir -p CLIProxyAPI/data
 
 # 2. 下载 macOS 插件并放入
-# Apple Silicon 使用 usage-statistics-darwin-arm64.dylib
-# Intel 使用 usage-statistics-darwin-amd64.dylib
-cp usage-statistics-darwin-arm64.dylib CLIProxyAPI/plugins/usage-statistics.dylib
-chmod 755 CLIProxyAPI/plugins/usage-statistics.dylib
+# Apple Silicon 使用 usage-dashboard-zduu-darwin-arm64.dylib
+# Intel 使用 usage-dashboard-zduu-darwin-amd64.dylib
+cp usage-dashboard-zduu-darwin-arm64.dylib CLIProxyAPI/plugins/usage-dashboard-zduu.dylib
+chmod 755 CLIProxyAPI/plugins/usage-dashboard-zduu.dylib
 
 # 3. 配置 config.yaml（见第 4 节）
 
@@ -137,31 +169,31 @@ cd CLIProxyAPI
 
 ```bash
 # Linux
-cp usage-statistics-linux-amd64.so CLIProxyAPI/plugins/usage-statistics.so
-chmod 755 CLIProxyAPI/plugins/usage-statistics.so
+cp usage-dashboard-zduu-linux-amd64.so CLIProxyAPI/plugins/usage-dashboard-zduu.so
+chmod 755 CLIProxyAPI/plugins/usage-dashboard-zduu.so
 
 # macOS (Apple Silicon)
-cp usage-statistics-darwin-arm64.dylib CLIProxyAPI/plugins/usage-statistics.dylib
-chmod 755 CLIProxyAPI/plugins/usage-statistics.dylib
+cp usage-dashboard-zduu-darwin-arm64.dylib CLIProxyAPI/plugins/usage-dashboard-zduu.dylib
+chmod 755 CLIProxyAPI/plugins/usage-dashboard-zduu.dylib
 
 # macOS (Intel)
-cp usage-statistics-darwin-amd64.dylib CLIProxyAPI/plugins/usage-statistics.dylib
-chmod 755 CLIProxyAPI/plugins/usage-statistics.dylib
+cp usage-dashboard-zduu-darwin-amd64.dylib CLIProxyAPI/plugins/usage-dashboard-zduu.dylib
+chmod 755 CLIProxyAPI/plugins/usage-dashboard-zduu.dylib
 
 # Windows
-copy usage-statistics-windows-amd64.dll CLIProxyAPI\plugins\usage-statistics.dll
+copy usage-dashboard-zduu-windows-amd64.dll CLIProxyAPI\plugins\usage-dashboard-zduu.dll
 ```
 
-> **文件名说明**：方式 A（插件商店）安装后 pluginhost 要求文件名为 `usage-statistics-v{版本号}.{ext}`，安装时 CPA 自动处理。方式 B（脚本）使用 `usage-statistics.{ext}` 即可，pluginhost 通过二进制内置版本号识别。如果从方式 B 迁移到方式 A，将文件重命名为带版本号格式并添加 `store` 块。
+> **文件名说明**：方式 A（插件商店）安装后 pluginhost 要求文件名为 `usage-dashboard-zduu-v{版本号}.{ext}`，安装时 CPA 自动处理。方式 B（脚本）使用 `usage-dashboard-zduu.{ext}` 即可，pluginhost 通过二进制内置版本号识别。如果从方式 B 迁移到方式 A，将文件重命名为带版本号格式并添加 `store` 块。
 
 ### 3.4 docker cp（临时测试）
 
 如果不方便修改 `docker-compose.yml`，直接复制到运行中的容器：
 
 ```bash
-cp usage-statistics-linux-amd64.so usage-statistics.so
-docker cp usage-statistics.so cli-proxy-api:/CLIProxyAPI/plugins/
-docker exec cli-proxy-api chmod 755 /CLIProxyAPI/plugins/usage-statistics.so
+cp usage-dashboard-zduu-linux-amd64.so usage-dashboard-zduu.so
+docker cp usage-dashboard-zduu.so cli-proxy-api:/CLIProxyAPI/plugins/
+docker exec cli-proxy-api chmod 755 /CLIProxyAPI/plugins/usage-dashboard-zduu.so
 docker restart cli-proxy-api
 ```
 
@@ -174,7 +206,7 @@ docker restart cli-proxy-api
 1. 配置 `remote-management.secret-key`，否则管理 API 和 `management.html` 无法正常使用。
 2. 根据访问方式决定 `remote-management.allow-remote`。
 3. 全局启用插件系统：`plugins.enabled: true`。
-4. 单独启用本插件：`plugins.configs.usage-statistics.enabled: true`。
+4. 单独启用本插件：`plugins.configs.usage-dashboard-zduu.enabled: true`。
 
 推荐直接参考下面这份可用示例：
 
@@ -197,11 +229,11 @@ plugins:
   store-sources:
     - "https://raw.githubusercontent.com/zduu/cpa-usage-plugin/main/registry.json"
   configs:
-    usage-statistics:
+    usage-dashboard-zduu:
       enabled: true
       store:
-        version: "2.3.2"
-        release-tag: "v2.3.2"
+        version: "2.4.0"
+        release-tag: "v2.4.0"
         repository: "https://github.com/zduu/cpa-usage-plugin"
       # 每个上游接口/模型最多保留的请求明细条数。默认 5000。
       max_details_per_model: 5000
@@ -239,7 +271,7 @@ plugins:
       models_dev_prices_refresh_interval_seconds: 43200
       # 可选：允许外部脚本更新插件文件。默认 false。
       update_enabled: false
-      # 可选：latest 或指定版本号，例如 v2.3.2。
+      # 可选：latest 或指定版本号，例如 v2.4.0。
       update_version: latest
 ```
 
@@ -247,7 +279,7 @@ plugins:
 
 - `remote-management.secret-key` 留空时，CPA 会直接禁用 `/v0/management/*` 路由，插件看板和管理 API 都无法使用。
 - `remote-management.allow-remote: false` 只适合本机访问管理端。通过公网 IP、内网其他机器、域名或大多数反向代理访问时，通常都要改成 `true`。
-- `plugins.enabled` 和 `plugins.configs.usage-statistics.enabled` 缺一不可；前者是全局开关，后者只控制本插件。
+- `plugins.enabled` 和 `plugins.configs.usage-dashboard-zduu.enabled` 缺一不可；前者是全局开关，后者只控制本插件。
 - 插件商店安装保留 `store` 块；如果你是手动把 `.so` / `.dylib` / `.dll` 放进 `plugins/` 目录，`store` 块可以删除。
 
 重启 CPA 服务：
@@ -265,11 +297,11 @@ cd CLIProxyAPI
 启动后查看日志确认插件加载成功：
 
 ```text
-pluginhost: plugin loaded plugin_id=usage-statistics version=2.3.2 path=plugins/usage-statistics-v2.3.2.so
-pluginhost: plugin registered plugin_id=usage-statistics plugin_name=用量统计 version=2.3.2 path=plugins/usage-statistics-v2.3.2.so
+pluginhost: plugin loaded plugin_id=usage-dashboard-zduu version=2.4.0 path=plugins/usage-dashboard-zduu-v2.4.0.so
+pluginhost: plugin registered plugin_id=usage-dashboard-zduu plugin_name=用量统计 version=2.4.0 path=plugins/usage-dashboard-zduu-v2.4.0.so
 ```
 
-> `store-sources` 引入插件商店注册表，管理面板可浏览安装。`store` 块标记当前期望版本，pluginhost 会匹配 `usage-statistics-v{版本号}.{ext}` 文件名，并自动清理旧版本文件。
+> `store-sources` 引入插件商店注册表，管理面板可浏览安装。`store` 块标记当前期望版本，pluginhost 会匹配 `usage-dashboard-zduu-v{版本号}.{ext}` 文件名，并自动清理旧版本文件。
 
 ## 5. 查看统计
 
@@ -289,7 +321,7 @@ pluginhost: plugin registered plugin_id=usage-statistics plugin_name=用量统�
 - `remote-management.secret-key` 是否已设置且与登录时输入的一致。
 - 远程访问时 `remote-management.allow-remote` 是否为 `true`。
 - `remote-management.disable-control-panel` 是否误设为 `true`。
-- `plugins.enabled` 和 `plugins.configs.usage-statistics.enabled` 是否都已开启。
+- `plugins.enabled` 和 `plugins.configs.usage-dashboard-zduu.enabled` 是否都已开启。
 - CPA 日志中是否出现 `plugin loaded` / `plugin registered`。
 
 ### 页面功能
@@ -320,7 +352,7 @@ pluginhost: plugin registered plugin_id=usage-statistics plugin_name=用量统�
 ### 获取摘要（推荐日常使用）
 
 ```bash
-curl http://127.0.0.1:8317/v0/management/plugins/usage-statistics/dashboard-summary \
+curl http://127.0.0.1:8317/v0/management/plugins/usage-dashboard-zduu/dashboard-summary \
   -H 'x-management-key: <你的管理密钥>'
 ```
 
@@ -330,13 +362,13 @@ curl http://127.0.0.1:8317/v0/management/plugins/usage-statistics/dashboard-summ
 
 ```bash
 curl -sD /tmp/cpa-usage.headers \
-  "http://127.0.0.1:8317/v0/management/plugins/usage-statistics/dashboard-summary" \
+  "http://127.0.0.1:8317/v0/management/plugins/usage-dashboard-zduu/dashboard-summary" \
   -H 'x-management-key: <你的管理密钥>' \
   -o /tmp/cpa-usage-summary.json
 
 etag=$(awk 'tolower($1)=="etag:" {print $2}' /tmp/cpa-usage.headers | tr -d '\r')
 curl -i \
-  "http://127.0.0.1:8317/v0/management/plugins/usage-statistics/dashboard-summary" \
+  "http://127.0.0.1:8317/v0/management/plugins/usage-dashboard-zduu/dashboard-summary" \
   -H 'x-management-key: <你的管理密钥>' \
   -H "If-None-Match: $etag"
 ```
@@ -345,7 +377,7 @@ curl -i \
 
 ```bash
 # 查询最近 24 小时 gpt-4 的请求事件
-curl "http://127.0.0.1:8317/v0/management/plugins/usage-statistics/dashboard-events?limit=20&offset=0&range=24h&model=gpt-4" \
+curl "http://127.0.0.1:8317/v0/management/plugins/usage-dashboard-zduu/dashboard-events?limit=20&offset=0&range=24h&model=gpt-4" \
   -H 'x-management-key: <你的管理密钥>'
 ```
 
@@ -355,12 +387,12 @@ curl "http://127.0.0.1:8317/v0/management/plugins/usage-statistics/dashboard-eve
 
 ```bash
 # 导出最近 24 小时事件为 CSV
-curl "http://127.0.0.1:8317/v0/management/plugins/usage-statistics/dashboard-events-export?range=24h&format=csv" \
+curl "http://127.0.0.1:8317/v0/management/plugins/usage-dashboard-zduu/dashboard-events-export?range=24h&format=csv" \
   -H 'x-management-key: <你的管理密钥>' \
   -o usage-events.csv
 
 # 导出最近 7 天事件为 gzip 压缩 JSONL 文件
-curl "http://127.0.0.1:8317/v0/management/plugins/usage-statistics/dashboard-events-export?range=7d&format=jsonl&gzip=1&limit=50000" \
+curl "http://127.0.0.1:8317/v0/management/plugins/usage-dashboard-zduu/dashboard-events-export?range=7d&format=jsonl&gzip=1&limit=50000" \
   -H 'x-management-key: <你的管理密钥>' \
   -o usage-events.jsonl.gz
 ```
@@ -369,20 +401,20 @@ curl "http://127.0.0.1:8317/v0/management/plugins/usage-statistics/dashboard-eve
 
 ```bash
 # 创建后台导出任务，返回 id/status/download_path 等字段
-curl -X POST "http://127.0.0.1:8317/v0/management/plugins/usage-statistics/dashboard-events-export-jobs?range=7d&format=csv&limit=50000" \
+curl -X POST "http://127.0.0.1:8317/v0/management/plugins/usage-dashboard-zduu/dashboard-events-export-jobs?range=7d&format=csv&limit=50000" \
   -H 'x-management-key: <你的管理密钥>'
 
 # 查询任务状态
-curl "http://127.0.0.1:8317/v0/management/plugins/usage-statistics/dashboard-events-export-jobs?id=<job_id>" \
+curl "http://127.0.0.1:8317/v0/management/plugins/usage-dashboard-zduu/dashboard-events-export-jobs?id=<job_id>" \
   -H 'x-management-key: <你的管理密钥>'
 
 # 下载已完成任务的结果
-curl "http://127.0.0.1:8317/v0/management/plugins/usage-statistics/dashboard-events-export-download?id=<job_id>" \
+curl "http://127.0.0.1:8317/v0/management/plugins/usage-dashboard-zduu/dashboard-events-export-download?id=<job_id>" \
   -H 'x-management-key: <你的管理密钥>' \
   -o usage-events.csv
 
 # 下载后可主动删除任务和临时文件；未删除时完成任务会保留约 15 分钟
-curl -X DELETE "http://127.0.0.1:8317/v0/management/plugins/usage-statistics/dashboard-events-export-jobs?id=<job_id>" \
+curl -X DELETE "http://127.0.0.1:8317/v0/management/plugins/usage-dashboard-zduu/dashboard-events-export-jobs?id=<job_id>" \
   -H 'x-management-key: <你的管理密钥>'
 ```
 
@@ -391,7 +423,7 @@ curl -X DELETE "http://127.0.0.1:8317/v0/management/plugins/usage-statistics/das
 ### 健康检查
 
 ```bash
-curl http://127.0.0.1:8317/v0/management/plugins/usage-statistics/health \
+curl http://127.0.0.1:8317/v0/management/plugins/usage-dashboard-zduu/health \
   -H 'x-management-key: <你的管理密钥>'
 ```
 
@@ -402,14 +434,14 @@ curl http://127.0.0.1:8317/v0/management/plugins/usage-statistics/health \
 ### 数据导出
 
 ```bash
-curl http://127.0.0.1:8317/v0/management/plugins/usage-statistics/usage/export \
+curl http://127.0.0.1:8317/v0/management/plugins/usage-dashboard-zduu/usage/export \
   -H 'x-management-key: <你的管理密钥>'
 ```
 
 ### 数据导入
 
 ```bash
-curl -X POST http://127.0.0.1:8317/v0/management/plugins/usage-statistics/usage/import \
+curl -X POST http://127.0.0.1:8317/v0/management/plugins/usage-dashboard-zduu/usage/import \
   -H 'Content-Type: application/json' \
   -H 'x-management-key: <你的管理密钥>' \
   --data-binary @usage-export.json
@@ -441,7 +473,7 @@ services:
 ```yaml
 plugins:
   configs:
-    usage-statistics:
+    usage-dashboard-zduu:
       enabled: true
       storage_enabled: true
       storage_path: data/usage-statistics.jsonl
@@ -487,10 +519,10 @@ chmod +x CLIProxyAPI/update-latest-release.sh
 ```yaml
 plugins:
   configs:
-    usage-statistics:
+    usage-dashboard-zduu:
       enabled: true
       update_enabled: true
-      update_version: latest   # 或 v2.3.2
+      update_version: latest   # 或 v2.4.0
 ```
 
 执行脚本：
@@ -506,7 +538,7 @@ bash update-latest-release.sh --restart # 安装后自动 docker restart cli-pro
 docker restart cli-proxy-api
 ```
 
-说明：插件文件被 CPA 进程加载后，直接覆盖文件不会让运行中的进程使用新代码；需要重启 CPA 后才会加载新版本。Linux 默认安装文件名为 `usage-statistics.so`，macOS 为 `usage-statistics.dylib`，Windows 为 `usage-statistics.dll`。
+说明：插件文件被 CPA 进程加载后，直接覆盖文件不会让运行中的进程使用新代码；需要重启 CPA 后才会加载新版本。Linux 默认安装文件名为 `usage-dashboard-zduu.so`，macOS 为 `usage-dashboard-zduu.dylib`，Windows 为 `usage-dashboard-zduu.dll`。
 
 #### 自动更新（crontab）
 
@@ -538,12 +570,12 @@ bash update-latest-release.sh --force --restart
 
 更新脚本会根据当前系统自动选择 release 资产：
 
-- `x86_64` / `amd64` 下载 `usage-statistics-linux-amd64.so`
-- `aarch64` / `arm64` 下载 `usage-statistics-linux-arm64.so`
-- macOS 会下载对应的 `usage-statistics-darwin-*.dylib`
-- Windows amd64 会下载 `usage-statistics-windows-amd64.dll`
+- `x86_64` / `amd64` 下载 `usage-dashboard-zduu-linux-amd64.so`
+- `aarch64` / `arm64` 下载 `usage-dashboard-zduu-linux-arm64.so`
+- macOS 会下载对应的 `usage-dashboard-zduu-darwin-*.dylib`
+- Windows amd64 会下载 `usage-dashboard-zduu-windows-amd64.dll`
 
-安装到插件目录时，Linux 默认保存为 `usage-statistics.so`，macOS 默认保存为 `usage-statistics.dylib`，Windows 默认保存为 `usage-statistics.dll`。如果需要手动指定目标平台，可设置 `PLUGIN_PLATFORM=linux-amd64`、`PLUGIN_PLATFORM=linux-arm64`、`PLUGIN_PLATFORM=darwin-amd64`、`PLUGIN_PLATFORM=darwin-arm64` 或 `PLUGIN_PLATFORM=windows-amd64`；如果使用自定义资产名或安装文件名，可设置 `PLUGIN_ASSET` / `PLUGIN_FILE`。
+安装到插件目录时，Linux 默认保存为 `usage-dashboard-zduu.so`，macOS 默认保存为 `usage-dashboard-zduu.dylib`，Windows 默认保存为 `usage-dashboard-zduu.dll`。如果需要手动指定目标平台，可设置 `PLUGIN_PLATFORM=linux-amd64`、`PLUGIN_PLATFORM=linux-arm64`、`PLUGIN_PLATFORM=darwin-amd64`、`PLUGIN_PLATFORM=darwin-arm64` 或 `PLUGIN_PLATFORM=windows-amd64`；如果使用自定义资产名或安装文件名，可设置 `PLUGIN_ASSET` / `PLUGIN_FILE`。
 
 脚本支持的参数：
 

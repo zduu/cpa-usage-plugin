@@ -1187,7 +1187,7 @@ func TestDashboardEventsExportLimitQueryReturnsTruncationHeaders(t *testing.T) {
 
 	resp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
 		Method: "GET",
-		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export",
+		Path:   "/v0/management/plugins/usage-dashboard-zduu/dashboard-events-export",
 		Query:  map[string][]string{"limit": {"2"}},
 	}), nil)
 
@@ -1237,7 +1237,7 @@ func TestDashboardEventsExportQueryLimitCannotExceedConfiguredLimit(t *testing.T
 
 	resp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
 		Method: "GET",
-		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export",
+		Path:   "/v0/management/plugins/usage-dashboard-zduu/dashboard-events-export",
 		Query:  map[string][]string{"limit": {"4"}},
 	}), nil)
 

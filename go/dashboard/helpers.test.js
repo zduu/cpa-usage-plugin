@@ -336,32 +336,32 @@ test('timestampMs parses timestamps', () => {
 
 test('pluginEndpoint builds management URLs from plugin resource paths', () => {
   assert.strictEqual(
-    helpers.pluginEndpoint('usage/import', '/v0/management/plugins/usage-statistics/dashboard'),
-    '/v0/management/plugins/usage-statistics/usage/import'
+    helpers.pluginEndpoint('usage/import', '/v0/management/plugins/usage-dashboard-zduu/dashboard'),
+    '/v0/management/plugins/usage-dashboard-zduu/usage/import'
   );
   assert.strictEqual(
-    helpers.pluginEndpoint('/dashboard-summary', '/v0/management/plugins/usage-statistics/dashboard/'),
-    '/v0/management/plugins/usage-statistics/dashboard-summary'
+    helpers.pluginEndpoint('/dashboard-summary', '/v0/management/plugins/usage-dashboard-zduu/dashboard/'),
+    '/v0/management/plugins/usage-dashboard-zduu/dashboard-summary'
   );
   assert.strictEqual(
-    helpers.pluginEndpoint('usage/import', '/v0/resource/plugins/usage-statistics/dashboard'),
-    '/v0/resource/plugins/usage-statistics/usage/import'
+    helpers.pluginEndpoint('usage/import', '/v0/resource/plugins/usage-dashboard-zduu/dashboard'),
+    '/v0/resource/plugins/usage-dashboard-zduu/usage/import'
   );
   assert.strictEqual(
-    helpers.managementEndpoint('usage/import', '/v0/resource/plugins/usage-statistics/dashboard'),
-    '/v0/management/plugins/usage-statistics/usage/import'
+    helpers.managementEndpoint('usage/import', '/v0/resource/plugins/usage-dashboard-zduu/dashboard'),
+    '/v0/management/plugins/usage-dashboard-zduu/usage/import'
   );
   assert.strictEqual(
-    helpers.managementEndpoint('model-prices?model=gpt-4.1', '/v0/resource/plugins/usage-statistics/dashboard'),
-    '/v0/management/plugins/usage-statistics/model-prices?model=gpt-4.1'
+    helpers.managementEndpoint('model-prices?model=gpt-4.1', '/v0/resource/plugins/usage-dashboard-zduu/dashboard'),
+    '/v0/management/plugins/usage-dashboard-zduu/model-prices?model=gpt-4.1'
   );
   assert.strictEqual(
     helpers.pluginEndpoint('dashboard-events-export-jobs', '/management.html'),
-    '/v0/management/plugins/usage-statistics/dashboard-events-export-jobs'
+    '/v0/management/plugins/usage-dashboard-zduu/dashboard-events-export-jobs'
   );
   assert.strictEqual(
     helpers.managementEndpoint('model-prices', '/management.html'),
-    '/v0/management/plugins/usage-statistics/model-prices'
+    '/v0/management/plugins/usage-dashboard-zduu/model-prices'
   );
   assert.strictEqual(
     helpers.pluginEndpoint('usage/export', '/standalone/dashboard.html'),

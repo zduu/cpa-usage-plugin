@@ -9,7 +9,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const pluginVersion = "2.3.4"
+const pluginID = "usage-dashboard-zduu"
+const legacyPluginID = "usage-statistics"
+const pluginVersion = "2.4.0"
 
 func handleRegister(requestBody []byte) ([]byte, error) {
 	applyRuntimeConfig(requestBody)
@@ -17,7 +19,7 @@ func handleRegister(requestBody []byte) ([]byte, error) {
 	result := PluginRegisterResponse{
 		SchemaVersion: 1,
 		Metadata: PluginMetadata{
-			Name:             "用量统计",
+			Name:             "用量统计 Dashboard",
 			Version:          pluginVersion,
 			Author:           "本地维护",
 			GitHubRepository: "https://github.com/zduu/cpa-usage-plugin",
@@ -321,13 +323,22 @@ func usageStatisticsConfigValues(yamlBytes []byte) map[string]interface{} {
 	if err := yaml.Unmarshal(yamlBytes, &root); err != nil {
 		return nil
 	}
-	if values, ok := nestedMap(root, "plugins", "configs", "usage-statistics"); ok {
+	if values, ok := nestedMap(root, "plugins", "configs", pluginID); ok {
 		return values
 	}
-	if values, ok := nestedMap(root, "configs", "usage-statistics"); ok {
+	if values, ok := nestedMap(root, "plugins", "configs", legacyPluginID); ok {
 		return values
 	}
-	if values, ok := nestedMap(root, "usage-statistics"); ok {
+	if values, ok := nestedMap(root, "configs", pluginID); ok {
+		return values
+	}
+	if values, ok := nestedMap(root, "configs", legacyPluginID); ok {
+		return values
+	}
+	if values, ok := nestedMap(root, pluginID); ok {
+		return values
+	}
+	if values, ok := nestedMap(root, legacyPluginID); ok {
 		return values
 	}
 	return root

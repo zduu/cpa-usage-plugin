@@ -132,15 +132,15 @@ jobs:
       - name: Build plugin
         run: |
           cd go
-          output="../usage-statistics-${{ matrix.platform }}.${{ matrix.ext }}"
+          output="../usage-dashboard-zduu-${{ matrix.platform }}.${{ matrix.ext }}"
           export CC="${{ matrix.cc }}"
           export CGO_ENABLED=1
           export GOOS="${{ matrix.goos }}"
           export GOARCH="${{ matrix.goarch }}"
           go build -buildmode=c-shared -buildvcs=false -o "$output" .
           cd ..
-          rm -f usage-statistics*.h
-          asset="usage-statistics-${{ matrix.platform }}.${{ matrix.ext }}"
+          rm -f usage-dashboard-zduu*.h
+          asset="usage-dashboard-zduu-${{ matrix.platform }}.${{ matrix.ext }}"
           ls -lh "$asset"
           file "$asset" | grep -Eq '${{ matrix.file_pattern }}'
           case "${{ matrix.goos }}" in
@@ -153,27 +153,27 @@ jobs:
         run: |
           VERSION=$(sed -n 's/^const pluginVersion = "\([^"]*\)"/\1/p' go/register.go)
           echo "Plugin version: $VERSION"
-          LIB="usage-statistics-${{ matrix.platform }}.${{ matrix.ext }}"
+          LIB="usage-dashboard-zduu-${{ matrix.platform }}.${{ matrix.ext }}"
           mkdir -p store-artifacts
-          cp "$LIB" "store-artifacts/usage-statistics.${{ matrix.ext }}"
+          cp "$LIB" "store-artifacts/usage-dashboard-zduu.${{ matrix.ext }}"
           cd store-artifacts
-          ZIP_FILE="usage-statistics_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.zip"
-          zip "$ZIP_FILE" "usage-statistics.${{ matrix.ext }}"
+          ZIP_FILE="usage-dashboard-zduu_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.zip"
+          zip "$ZIP_FILE" "usage-dashboard-zduu.${{ matrix.ext }}"
           cd ..
           cp "store-artifacts/${ZIP_FILE}" .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
-          name: usage-statistics-plugin-${{ matrix.platform }}
-          path: usage-statistics-${{ matrix.platform }}.${{ matrix.ext }}
+          name: usage-dashboard-zduu-plugin-${{ matrix.platform }}
+          path: usage-dashboard-zduu-${{ matrix.platform }}.${{ matrix.ext }}
           retention-days: 90
 
       - name: Upload store artifact
         uses: actions/upload-artifact@v6
         with:
-          name: usage-statistics-store-${{ matrix.platform }}
-          path: usage-statistics_*_${{ matrix.goos }}_${{ matrix.goarch }}.zip
+          name: usage-dashboard-zduu-store-${{ matrix.platform }}
+          path: usage-dashboard-zduu_*_${{ matrix.goos }}_${{ matrix.goarch }}.zip
           retention-days: 90
 
   verify:
@@ -185,7 +185,7 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v7
         with:
-          pattern: usage-statistics-plugin-*
+          pattern: usage-dashboard-zduu-plugin-*
           path: dist
           merge-multiple: true
 
@@ -193,7 +193,7 @@ jobs:
         run: |
           set -eu
           found=0
-          for asset in dist/usage-statistics-*.*; do
+          for asset in dist/usage-dashboard-zduu-*.*; do
             [ -e "$asset" ] || continue
             found=1
             echo "Verifying $asset"
@@ -233,17 +233,17 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v7
         with:
-          pattern: usage-statistics-plugin-*
+          pattern: usage-dashboard-zduu-plugin-*
           path: dist
           merge-multiple: true
 
-      - name: Add legacy amd64 asset alias
-        run: cp dist/usage-statistics-linux-amd64.so dist/usage-statistics.so
+      - name: Add amd64 asset alias
+        run: cp dist/usage-dashboard-zduu-linux-amd64.so dist/usage-dashboard-zduu.so
 
       - name: Download store artifacts
         uses: actions/download-artifact@v7
         with:
-          pattern: usage-statistics-store-*
+          pattern: usage-dashboard-zduu-store-*
           path: store-dist
           merge-multiple: true
 
@@ -261,13 +261,13 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: |
-            dist/usage-statistics.so
-            dist/usage-statistics-linux-amd64.so
-            dist/usage-statistics-linux-arm64.so
-            dist/usage-statistics-darwin-amd64.dylib
-            dist/usage-statistics-darwin-arm64.dylib
-            dist/usage-statistics-windows-amd64.dll
-            store-dist/usage-statistics_*.zip
+            dist/usage-dashboard-zduu.so
+            dist/usage-dashboard-zduu-linux-amd64.so
+            dist/usage-dashboard-zduu-linux-arm64.so
+            dist/usage-dashboard-zduu-darwin-amd64.dylib
+            dist/usage-dashboard-zduu-darwin-arm64.dylib
+            dist/usage-dashboard-zduu-windows-amd64.dll
+            store-dist/usage-dashboard-zduu_*.zip
             store-dist/checksums.txt
           draft: false
           prerelease: false

@@ -4,6 +4,27 @@
 
 `v1.0.0` 到 `v1.2.18` 为规范化发布流程建立前的 legacy 历史版本，不在本文件中回填；对应说明见 [v1-history.md](v1-history.md)。
 
+## v2.4.0 - 2026-07-11
+
+本版本将插件 ID 从 `usage-statistics` 更改为 `usage-dashboard-zduu`，解决与 CPA 官方商店同 ID 插件的命名空间冲突。因为 ID、商店资产名、配置节点和管理路由均发生变化，本版本按破坏性迁移版本发布。
+
+### 插件 ID 迁移
+- 插件运行 ID、商店注册表 ID 和版本化动态库文件名统一改为 `usage-dashboard-zduu`
+- 管理 API 和资源路径迁移到 `/plugins/usage-dashboard-zduu/*`
+- CPA 配置节点迁移到 `plugins.configs.usage-dashboard-zduu`
+- 配置解析保留对旧 `usage-statistics` 节点的兼容读取，便于迁移过程中复用原有业务参数
+- 持久化统计目录、旧 JSONL 文件和模型价格文件路径保持不变，历史数据无需转换
+
+### 商店与发布资产
+- GitHub Actions、Release 动态库、商店 zip 和校验文件统一使用 `usage-dashboard-zduu` 前缀
+- 更新插件商店注册表和部署文档，补充 2.3.4 到 2.4.0 的安全迁移顺序
+- 明确禁止新旧插件同时启用，避免重复计数或同时写入相同持久化文件
+
+### 升级原因
+- CPA 官方商店存在另一个 `usage-statistics` 插件；CPA 按插件 ID 而非来源区分安装状态与运行时配置
+- 同 ID 会导致两个商店条目同时显示为已安装，并争用配置节点、管理路由和动态库选择
+- 更换为带作者标识的唯一 ID 后，本插件可以独立安装、更新、降级和卸载
+
 ## v2.3.4 - 2026-07-11
 
 本版本修复缓存价格显示和模型价格表单布局问题，作为旧插件 ID `usage-statistics` 的最后一个兼容维护版本。

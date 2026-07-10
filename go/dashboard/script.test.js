@@ -188,7 +188,7 @@ function createDashboardHarness(options = {}) {
   if (options.summaryUsage) Object.assign(summary.usage, options.summaryUsage);
 
   function eventsPage(url) {
-    const parsed = new URL(url, 'http://test.local/v0/management/plugins/usage-statistics/dashboard');
+    const parsed = new URL(url, 'http://test.local/v0/management/plugins/usage-dashboard-zduu/dashboard');
     const offset = Number(parsed.searchParams.get('offset') || 0);
     const limit = Number(parsed.searchParams.get('limit') || 500);
     const count = Math.min(limit, Math.max(1200 - offset, 0));
@@ -214,7 +214,7 @@ function createDashboardHarness(options = {}) {
   }
 
   function eventsExport(url) {
-    const parsed = new URL(url, 'http://test.local/v0/management/plugins/usage-statistics/dashboard');
+    const parsed = new URL(url, 'http://test.local/v0/management/plugins/usage-dashboard-zduu/dashboard');
     const api = parsed.searchParams.get('api');
     const totalRows = api ? 8 : 1200;
     if (parsed.searchParams.get('format') === 'csv') {
@@ -262,7 +262,7 @@ function createDashboardHarness(options = {}) {
   }
 
   function createExportJob(url) {
-    const parsed = new URL(url, 'http://test.local/v0/management/plugins/usage-statistics/dashboard');
+    const parsed = new URL(url, 'http://test.local/v0/management/plugins/usage-dashboard-zduu/dashboard');
     const payload = eventsExport(url);
     const id = 'job-' + (++exportJobSeq);
     const job = {
@@ -502,7 +502,7 @@ function createDashboardHarness(options = {}) {
     URLSearchParams,
     document,
     localStorage,
-    location: { pathname: options.pathname || '/v0/management/plugins/usage-statistics/dashboard', host: 'test.local' },
+    location: { pathname: options.pathname || '/v0/management/plugins/usage-dashboard-zduu/dashboard', host: 'test.local' },
     navigator: { userAgent: 'node-test', language: options.navigatorLanguage || 'zh-CN' },
     window: { innerWidth: 1200, innerHeight: 800 },
     setTimeout(_fn, delay) { timeoutDelays.push(delay); return timeoutDelays.length; },
@@ -528,7 +528,7 @@ function createDashboardHarness(options = {}) {
           const body = JSON.parse(options.body || '{}');
           prices[body.model] = body.price;
         } else if (options.method === 'DELETE') {
-          const parsed = new URL(String(url), 'http://test.local/v0/management/plugins/usage-statistics/dashboard');
+          const parsed = new URL(String(url), 'http://test.local/v0/management/plugins/usage-dashboard-zduu/dashboard');
           delete prices[parsed.searchParams.get('model')];
         }
         payload = { prices, updated_at: new Date().toISOString(), storage: {} };
@@ -549,7 +549,7 @@ function createDashboardHarness(options = {}) {
       else if (String(url).includes('dashboard-api-detail')) payload = nullDashboardApiDetail ? null : apiDetailPayload(String(url));
       else if (String(url).includes('dashboard-data')) payload = nullDashboardData ? null : dashboardDataPayload();
       else if (String(url).includes('dashboard-events-export-download')) {
-        const parsed = new URL(String(url), 'http://test.local/v0/management/plugins/usage-statistics/dashboard');
+        const parsed = new URL(String(url), 'http://test.local/v0/management/plugins/usage-dashboard-zduu/dashboard');
         const job = exportJobs.get(parsed.searchParams.get('id'));
         payload = job ? job.payload : {};
         if (typeof payload === 'string') {
@@ -563,7 +563,7 @@ function createDashboardHarness(options = {}) {
         return fetchResponse(payload, route, String(url), options);
       }
       else if (String(url).includes('dashboard-events-export-jobs')) {
-        const parsed = new URL(String(url), 'http://test.local/v0/management/plugins/usage-statistics/dashboard');
+        const parsed = new URL(String(url), 'http://test.local/v0/management/plugins/usage-dashboard-zduu/dashboard');
         if (options.method === 'POST') {
           payload = createExportJob(String(url));
         } else if (options.method === 'DELETE') {
@@ -932,13 +932,13 @@ test('dashboard api detail export uses management endpoints from management shel
 
   const create = fetchRequests.find((request) => request.url.includes('dashboard-events-export-jobs') && request.options.method === 'POST');
   assert.ok(create, 'expected an export job create request');
-  assert.match(create.url, /^\/v0\/management\/plugins\/usage-statistics\/dashboard-events-export-jobs\?/);
+  assert.match(create.url, /^\/v0\/management\/plugins\/usage-dashboard-zduu\/dashboard-events-export-jobs\?/);
   assert.strictEqual(create.options.headers.Authorization, 'Bearer test-management-key');
   assert.strictEqual(create.options.headers['x-management-key'], 'test-management-key');
 });
 
 test('dashboard api detail export uses management endpoints from resource iframe', async () => {
-  const { document, fetchRequests, downloads } = createDashboardHarness({ pathname: '/v0/resource/plugins/usage-statistics/dashboard', managementKey: 'test-management-key' });
+  const { document, fetchRequests, downloads } = createDashboardHarness({ pathname: '/v0/resource/plugins/usage-dashboard-zduu/dashboard', managementKey: 'test-management-key' });
 
   await waitFor(() => document.getElementById('apiSelect').value === 'openai');
   await document.getElementById('exportApiJson').onclick();
@@ -948,8 +948,8 @@ test('dashboard api detail export uses management endpoints from resource iframe
   const downloadsReq = fetchRequests.filter((request) => request.url.includes('dashboard-events-export-download'));
   assert.ok(creates.length > 0, 'expected an export job create request');
   assert.ok(downloadsReq.length > 0, 'expected an export job download request');
-  assert.match(creates[0].url, /^\/v0\/management\/plugins\/usage-statistics\/dashboard-events-export-jobs\?/);
-  assert.match(downloadsReq[0].url, /^\/v0\/management\/plugins\/usage-statistics\/dashboard-events-export-download\?/);
+  assert.match(creates[0].url, /^\/v0\/management\/plugins\/usage-dashboard-zduu\/dashboard-events-export-jobs\?/);
+  assert.match(downloadsReq[0].url, /^\/v0\/management\/plugins\/usage-dashboard-zduu\/dashboard-events-export-download\?/);
 });
 
 test('dashboard price form shows models.dev effective prices', async () => {
@@ -1464,7 +1464,7 @@ test('dashboard detail refresh sends conditional requests for events and api det
 
 test('model price settings are loaded and saved through backend API', async () => {
   const { document, fetchRequests } = createDashboardHarness({
-    pathname: '/v0/resource/plugins/usage-statistics/dashboard',
+    pathname: '/v0/resource/plugins/usage-dashboard-zduu/dashboard',
     managementKey: 'test-management-key',
   });
 
@@ -1480,7 +1480,7 @@ test('model price settings are loaded and saved through backend API', async () =
 
   const put = fetchRequests.find((req) => req.url.includes('model-prices') && req.options.method === 'PUT');
   assert.ok(put, 'expected PUT /model-prices');
-  assert.strictEqual(put.url, '/v0/management/plugins/usage-statistics/model-prices');
+  assert.strictEqual(put.url, '/v0/management/plugins/usage-dashboard-zduu/model-prices');
   assert.strictEqual(put.options.headers.Authorization, 'Bearer test-management-key');
   assert.strictEqual(put.options.headers['x-management-key'], 'test-management-key');
   assert.deepStrictEqual(JSON.parse(put.options.body), {

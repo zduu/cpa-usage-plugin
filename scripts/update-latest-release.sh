@@ -12,7 +12,7 @@ PLUGIN_PLATFORM="${PLUGIN_PLATFORM:-}"
 PLUGIN_ASSET="${PLUGIN_ASSET:-}"
 
 LATEST_API="https://api.github.com/repos/$REPO/releases/latest"
-LOG_PREFIX="[usage-statistics-updater]"
+LOG_PREFIX="[usage-dashboard-zduu-updater]"
 
 log() {
   printf '%s %s\n' "$LOG_PREFIX" "$*"
@@ -38,9 +38,9 @@ detect_platform() {
 asset_for_platform() {
   platform="$1"
   case "$platform" in
-    linux-amd64|linux-arm64) printf 'usage-statistics-%s.so' "$platform" ;;
-    darwin-amd64|darwin-arm64) printf 'usage-statistics-%s.dylib' "$platform" ;;
-    windows-amd64) printf 'usage-statistics-%s.dll' "$platform" ;;
+    linux-amd64|linux-arm64) printf 'usage-dashboard-zduu-%s.so' "$platform" ;;
+    darwin-amd64|darwin-arm64) printf 'usage-dashboard-zduu-%s.dylib' "$platform" ;;
+    windows-amd64) printf 'usage-dashboard-zduu-%s.dll' "$platform" ;;
     *) log "unsupported plugin platform '$platform'"; exit 1 ;;
   esac
 }
@@ -48,9 +48,9 @@ asset_for_platform() {
 plugin_file_for_platform() {
   platform="$1"
   case "$platform" in
-    linux-*) printf 'usage-statistics.so' ;;
-    darwin-*) printf 'usage-statistics.dylib' ;;
-    windows-*) printf 'usage-statistics.dll' ;;
+    linux-*) printf 'usage-dashboard-zduu.so' ;;
+    darwin-*) printf 'usage-dashboard-zduu.dylib' ;;
+    windows-*) printf 'usage-dashboard-zduu.dll' ;;
     *) log "unsupported plugin platform '$platform'"; exit 1 ;;
   esac
 }
@@ -157,8 +157,8 @@ if [ -z "$PLUGIN_ASSET" ]; then
 fi
 
 # --- skip if already on this version ---
-state_file="$STATE_DIR/.usage-statistics.release.$PLUGIN_PLATFORM"
-legacy_state_file="$STATE_DIR/.usage-statistics.release"
+state_file="$STATE_DIR/.usage-dashboard-zduu.release.$PLUGIN_PLATFORM"
+legacy_state_file="$STATE_DIR/.usage-dashboard-zduu.release"
 mkdir -p "$STATE_DIR"
 current_tag=""
 if [ -f "$state_file" ]; then
@@ -186,8 +186,8 @@ tmp_file="$tmp_dir/$PLUGIN_ASSET"
 log "downloading $asset_url for $PLUGIN_PLATFORM"
 if ! curl -fL --retry 3 --retry-delay 2 -o "$tmp_file" "$asset_url"; then
   if [ -n "$asset_auto" ] && [ "$PLUGIN_PLATFORM" = "linux-amd64" ]; then
-    legacy_url="https://github.com/$REPO/releases/download/$target_tag/usage-statistics.so"
-    tmp_file="$tmp_dir/usage-statistics.so"
+    legacy_url="https://github.com/$REPO/releases/download/$target_tag/usage-dashboard-zduu.so"
+    tmp_file="$tmp_dir/usage-dashboard-zduu.so"
     log "platform asset not found, falling back to legacy amd64 asset $legacy_url"
     curl -fL --retry 3 --retry-delay 2 -o "$tmp_file" "$legacy_url"
   else

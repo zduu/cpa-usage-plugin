@@ -1215,7 +1215,7 @@ func TestManagementImportRouteAcceptsExportFixture(t *testing.T) {
 
 	req := ManagementRequest{
 		Method: "POST",
-		Path:   "/v0/management/plugins/usage-statistics/usage/import",
+		Path:   "/v0/management/plugins/usage-dashboard-zduu/usage/import",
 		Body:   body,
 	}
 	reqBody, err := json.Marshal(req)
@@ -1314,7 +1314,7 @@ func TestHealthCheckReportsAlertsForRuntimePressure(t *testing.T) {
 	}
 	resp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
 		Method: "GET",
-		Path:   "/v0/management/plugins/usage-statistics/health",
+		Path:   "/v0/management/plugins/usage-dashboard-zduu/health",
 	}), &health)
 
 	if resp.StatusCode != http.StatusOK {
@@ -3584,7 +3584,7 @@ func TestParseRuntimeConfigFromLifecycleConfigYAML(t *testing.T) {
 	yaml := []byte(`
 plugins:
   configs:
-    usage-statistics:
+    usage-dashboard-zduu:
       max_details_per_model: 123
       retention_days: 9
       dedup_window_minutes: 45
@@ -3594,6 +3594,35 @@ plugins:
 	cfg := parseRuntimeConfig(raw)
 	if cfg.MaxDetailsPerModel != 123 || cfg.RetentionDays != 9 || cfg.DedupWindowMinutes != 45 {
 		t.Fatalf("config = %#v", cfg)
+	}
+}
+
+func TestParseRuntimeConfigPrefersNewPluginIDAndFallsBackToLegacyID(t *testing.T) {
+	yaml := []byte(`
+plugins:
+  configs:
+    usage-statistics:
+      retention_days: 9
+    usage-dashboard-zduu:
+      retention_days: 14
+`)
+	raw := []byte(`{"config_yaml":"` + base64.StdEncoding.EncodeToString(yaml) + `"}`)
+
+	cfg := parseRuntimeConfig(raw)
+	if cfg.RetentionDays != 14 {
+		t.Fatalf("retention_days = %d, want new plugin config 14", cfg.RetentionDays)
+	}
+
+	legacyYAML := []byte(`
+plugins:
+  configs:
+    usage-statistics:
+      retention_days: 7
+`)
+	legacyRaw := []byte(`{"config_yaml":"` + base64.StdEncoding.EncodeToString(legacyYAML) + `"}`)
+	legacyCfg := parseRuntimeConfig(legacyRaw)
+	if legacyCfg.RetentionDays != 7 {
+		t.Fatalf("legacy retention_days = %d, want 7", legacyCfg.RetentionDays)
 	}
 }
 
@@ -3806,6 +3835,11 @@ func TestManagementRegisterIncludesImportExportResources(t *testing.T) {
 	if err := json.Unmarshal(env.Result, &result); err != nil {
 		t.Fatalf("failed to unmarshal register result: %v", err)
 	}
+	for _, route := range result.Routes {
+		if !strings.HasPrefix(route.Path, "/plugins/"+pluginID+"/") {
+			t.Fatalf("management route still uses another plugin id: %#v", route)
+		}
+	}
 	resources := make(map[string]bool)
 	for _, resource := range result.Resources {
 		resources[resource.Path] = true
@@ -3814,6 +3848,16 @@ func TestManagementRegisterIncludesImportExportResources(t *testing.T) {
 		if !resources[path] {
 			t.Fatalf("management resources missing %s: %#v", path, result.Resources)
 		}
+	}
+}
+
+func TestRegisterUsesNewPluginIdentity(t *testing.T) {
+	raw, err := handleRegister(nil)
+	if err != nil {
+		t.Fatalf("handleRegister() error = %v", err)
+	}
+	if !strings.Contains(string(raw), `"Name":"用量统计 Dashboard"`) || !strings.Contains(string(raw), `"Version":"2.4.0"`) {
+		t.Fatalf("register response does not expose 2.4.0 identity: %s", raw)
 	}
 }
 
@@ -3827,7 +3871,7 @@ func TestManagementModelPricesCRUDAndPersistence(t *testing.T) {
 	var initial ModelPricesResponse
 	decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
 		Method: "GET",
-		Path:   "/v0/management/plugins/usage-statistics/model-prices",
+		Path:   "/v0/management/plugins/usage-dashboard-zduu/model-prices",
 	}), &initial)
 	if len(initial.Prices) != 0 {
 		t.Fatalf("initial prices = %#v, want empty", initial.Prices)
@@ -3847,7 +3891,7 @@ func TestManagementModelPricesCRUDAndPersistence(t *testing.T) {
 	var saved ModelPricesResponse
 	decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
 		Method: "PUT",
-		Path:   "/v0/management/plugins/usage-statistics/model-prices",
+		Path:   "/v0/management/plugins/usage-dashboard-zduu/model-prices",
 		Body:   body,
 	}), &saved)
 	if got := saved.Prices["gpt-4.1"]; got.Prompt != 2 || got.Completion != 8 || got.Cache != 0.5 {
@@ -3868,7 +3912,7 @@ func TestManagementModelPricesCRUDAndPersistence(t *testing.T) {
 	var updated ModelPricesResponse
 	decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
 		Method: "PUT",
-		Path:   "/v0/management/plugins/usage-statistics/model-prices",
+		Path:   "/v0/management/plugins/usage-dashboard-zduu/model-prices",
 		Body:   body,
 	}), &updated)
 	if got := updated.Prices["gpt-4.1"]; got.Prompt != 3 || got.Completion != 9 || got.Cache != 1 {
@@ -3884,7 +3928,7 @@ func TestManagementModelPricesCRUDAndPersistence(t *testing.T) {
 	var deleted ModelPricesResponse
 	decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
 		Method: "DELETE",
-		Path:   "/v0/management/plugins/usage-statistics/model-prices",
+		Path:   "/v0/management/plugins/usage-dashboard-zduu/model-prices",
 		Query:  map[string][]string{"model": {"gpt-4.1"}},
 	}), &deleted)
 	if _, ok := deleted.Prices["gpt-4.1"]; ok {
@@ -3970,7 +4014,7 @@ func TestModelPricesUseModelsDevDefaultsWithManualOverride(t *testing.T) {
 	var saved ModelPricesResponse
 	decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
 		Method: "PUT",
-		Path:   "/v0/management/plugins/usage-statistics/model-prices",
+		Path:   "/v0/management/plugins/usage-dashboard-zduu/model-prices",
 		Body:   body,
 	}), &saved)
 	if got := priceForModelCaseInsensitive(saved.Prices, "gpt-5.5"); got.Prompt != 3 || got.Completion != 9 || got.Cache != 1 {
@@ -4099,20 +4143,20 @@ func TestDashboardManagementEndpointsReturnNotModifiedForMatchingETag(t *testing
 	})
 
 	tests := []ManagementRequest{
-		{Method: "GET", Path: "/v0/management/plugins/usage-statistics/dashboard-summary"},
+		{Method: "GET", Path: "/v0/management/plugins/usage-dashboard-zduu/dashboard-summary"},
 		{
 			Method: "GET",
-			Path:   "/v0/management/plugins/usage-statistics/dashboard-events",
+			Path:   "/v0/management/plugins/usage-dashboard-zduu/dashboard-events",
 			Query:  map[string][]string{"limit": {"10"}, "offset": {"0"}},
 		},
 		{
 			Method: "GET",
-			Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export",
+			Path:   "/v0/management/plugins/usage-dashboard-zduu/dashboard-events-export",
 			Query:  map[string][]string{"model": {"gpt-4"}},
 		},
 		{
 			Method: "GET",
-			Path:   "/v0/management/plugins/usage-statistics/dashboard-api-detail",
+			Path:   "/v0/management/plugins/usage-dashboard-zduu/dashboard-api-detail",
 			Query:  map[string][]string{"api": {"openai · openai-prod"}},
 		},
 	}
@@ -4180,7 +4224,7 @@ func TestDashboardEventsExportSupportsCSVJSONLAndGzip(t *testing.T) {
 
 	csvResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
 		Method: "GET",
-		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export",
+		Path:   "/v0/management/plugins/usage-dashboard-zduu/dashboard-events-export",
 		Query:  map[string][]string{"format": {"csv"}},
 	}), nil)
 	if got := csvResp.Headers["Content-Type"]; len(got) != 1 || !strings.HasPrefix(got[0], "text/csv") {
@@ -4194,7 +4238,7 @@ func TestDashboardEventsExportSupportsCSVJSONLAndGzip(t *testing.T) {
 
 	jsonlResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
 		Method: "GET",
-		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export",
+		Path:   "/v0/management/plugins/usage-dashboard-zduu/dashboard-events-export",
 		Query:  map[string][]string{"format": {"jsonl"}},
 	}), nil)
 	if got := jsonlResp.Headers["Content-Type"]; len(got) != 1 || !strings.HasPrefix(got[0], "application/x-ndjson") {
@@ -4211,7 +4255,7 @@ func TestDashboardEventsExportSupportsCSVJSONLAndGzip(t *testing.T) {
 
 	gzipResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
 		Method: "GET",
-		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export",
+		Path:   "/v0/management/plugins/usage-dashboard-zduu/dashboard-events-export",
 		Query:  map[string][]string{"format": {"csv"}, "gzip": {"1"}},
 	}), nil)
 	if got := gzipResp.Headers["Content-Type"]; len(got) != 1 || got[0] != "application/gzip" {
@@ -4244,7 +4288,7 @@ func TestDashboardEventsExportSupportsCSVJSONLAndGzip(t *testing.T) {
 	}
 	notModified := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
 		Method:  "GET",
-		Path:    "/v0/management/plugins/usage-statistics/dashboard-events-export",
+		Path:    "/v0/management/plugins/usage-dashboard-zduu/dashboard-events-export",
 		Query:   map[string][]string{"format": {"csv"}, "gzip": {"1"}},
 		Headers: map[string][]string{"If-None-Match": {etag[0]}},
 	}), nil)
@@ -4311,7 +4355,7 @@ func TestDashboardEventsExportAsyncJobFiltersByAPI(t *testing.T) {
 	var created dashboardExportJobResponse
 	createResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
 		Method: "POST",
-		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export-jobs",
+		Path:   "/v0/management/plugins/usage-dashboard-zduu/dashboard-events-export-jobs",
 		Query:  map[string][]string{"api": {"openai"}, "format": {"json"}},
 	}), &created)
 	if createResp.StatusCode != http.StatusAccepted || created.ID == "" {
@@ -4322,7 +4366,7 @@ func TestDashboardEventsExportAsyncJobFiltersByAPI(t *testing.T) {
 	waitForTestCondition(t, func() bool {
 		decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
 			Method: "GET",
-			Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export-jobs",
+			Path:   "/v0/management/plugins/usage-dashboard-zduu/dashboard-events-export-jobs",
 			Query:  map[string][]string{"id": {created.ID}},
 		}), &status)
 		return status.Status == dashboardExportJobSucceeded
@@ -4333,7 +4377,7 @@ func TestDashboardEventsExportAsyncJobFiltersByAPI(t *testing.T) {
 
 	downloadResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
 		Method: "GET",
-		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export-download",
+		Path:   "/v0/management/plugins/usage-dashboard-zduu/dashboard-events-export-download",
 		Query:  map[string][]string{"id": {created.ID}},
 	}), nil)
 	if downloadResp.StatusCode != http.StatusOK {
@@ -4386,7 +4430,7 @@ func TestDashboardEventsExportAsyncJobLifecycle(t *testing.T) {
 	var created dashboardExportJobResponse
 	createResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
 		Method: "POST",
-		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export-jobs",
+		Path:   "/v0/management/plugins/usage-dashboard-zduu/dashboard-events-export-jobs",
 		Query:  map[string][]string{"format": {"csv"}},
 	}), &created)
 	if createResp.StatusCode != http.StatusAccepted || created.ID == "" || created.Status == "" {
@@ -4397,7 +4441,7 @@ func TestDashboardEventsExportAsyncJobLifecycle(t *testing.T) {
 	waitForTestCondition(t, func() bool {
 		decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
 			Method: "GET",
-			Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export-jobs",
+			Path:   "/v0/management/plugins/usage-dashboard-zduu/dashboard-events-export-jobs",
 			Query:  map[string][]string{"id": {created.ID}},
 		}), &status)
 		return status.Status == dashboardExportJobSucceeded
@@ -4408,7 +4452,7 @@ func TestDashboardEventsExportAsyncJobLifecycle(t *testing.T) {
 
 	downloadResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
 		Method: "GET",
-		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export-download",
+		Path:   "/v0/management/plugins/usage-dashboard-zduu/dashboard-events-export-download",
 		Query:  map[string][]string{"id": {created.ID}},
 	}), nil)
 	if downloadResp.StatusCode != http.StatusOK {
@@ -4432,7 +4476,7 @@ func TestDashboardEventsExportAsyncJobLifecycle(t *testing.T) {
 
 	deleteResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
 		Method: "DELETE",
-		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export-jobs",
+		Path:   "/v0/management/plugins/usage-dashboard-zduu/dashboard-events-export-jobs",
 		Query:  map[string][]string{"id": {created.ID}},
 	}), nil)
 	if deleteResp.StatusCode != http.StatusOK {
@@ -4442,7 +4486,7 @@ func TestDashboardEventsExportAsyncJobLifecycle(t *testing.T) {
 	var gzipCreated dashboardExportJobResponse
 	gzipCreateResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
 		Method: "POST",
-		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export-jobs",
+		Path:   "/v0/management/plugins/usage-dashboard-zduu/dashboard-events-export-jobs",
 		Query:  map[string][]string{"format": {"csv"}, "gzip": {"1"}},
 	}), &gzipCreated)
 	if gzipCreateResp.StatusCode != http.StatusAccepted || gzipCreated.ID == "" {
@@ -4453,7 +4497,7 @@ func TestDashboardEventsExportAsyncJobLifecycle(t *testing.T) {
 	waitForTestCondition(t, func() bool {
 		decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
 			Method: "GET",
-			Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export-jobs",
+			Path:   "/v0/management/plugins/usage-dashboard-zduu/dashboard-events-export-jobs",
 			Query:  map[string][]string{"id": {gzipCreated.ID}},
 		}), &gzipStatus)
 		return gzipStatus.Status == dashboardExportJobSucceeded
@@ -4464,7 +4508,7 @@ func TestDashboardEventsExportAsyncJobLifecycle(t *testing.T) {
 
 	gzipDownloadResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
 		Method: "GET",
-		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export-download",
+		Path:   "/v0/management/plugins/usage-dashboard-zduu/dashboard-events-export-download",
 		Query:  map[string][]string{"id": {gzipCreated.ID}},
 	}), nil)
 	if gzipDownloadResp.StatusCode != http.StatusOK {
@@ -4499,7 +4543,7 @@ func TestDashboardEventsExportAsyncJobLifecycle(t *testing.T) {
 
 	gzipDeleteResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
 		Method: "DELETE",
-		Path:   "/v0/management/plugins/usage-statistics/dashboard-events-export-jobs",
+		Path:   "/v0/management/plugins/usage-dashboard-zduu/dashboard-events-export-jobs",
 		Query:  map[string][]string{"id": {gzipCreated.ID}},
 	}), nil)
 	if gzipDeleteResp.StatusCode != http.StatusOK {
@@ -4526,7 +4570,7 @@ func TestManagementModelPricesRejectInvalidPrice(t *testing.T) {
 	}
 	raw := invokeManagement(t, ManagementRequest{
 		Method: "PUT",
-		Path:   "/v0/management/plugins/usage-statistics/model-prices",
+		Path:   "/v0/management/plugins/usage-dashboard-zduu/model-prices",
 		Body:   body,
 	})
 	var env envelope
@@ -4551,7 +4595,7 @@ func TestManagementModelPricesRejectInvalidPrice(t *testing.T) {
 	}
 	raw = invokeManagement(t, ManagementRequest{
 		Method: "PUT",
-		Path:   "/v0/management/plugins/usage-statistics/model-prices",
+		Path:   "/v0/management/plugins/usage-dashboard-zduu/model-prices",
 		Body:   body,
 	})
 	if err := json.Unmarshal(raw, &env); err != nil {

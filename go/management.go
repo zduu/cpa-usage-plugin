@@ -85,88 +85,89 @@ func pathTail(p string) string {
 }
 
 func handleManagementRegister() ([]byte, error) {
+	pluginPath := "/plugins/" + pluginID
 	result := ManagementRegisterResponse{
 		Routes: []ManagementRoute{
 			{
 				Method:      "GET",
-				Path:        "/plugins/usage-statistics/usage",
+				Path:        pluginPath + "/usage",
 				Description: "获取用量统计数据。",
 			},
 			{
 				Method:      "GET",
-				Path:        "/plugins/usage-statistics/usage/export",
+				Path:        pluginPath + "/usage/export",
 				Description: "导出用量统计数据。",
 			},
 			{
 				Method:      "POST",
-				Path:        "/plugins/usage-statistics/usage/import",
+				Path:        pluginPath + "/usage/import",
 				Description: "导入用量统计数据。",
 			},
 			{
 				Method:      "GET",
-				Path:        "/plugins/usage-statistics/dashboard-summary",
+				Path:        pluginPath + "/dashboard-summary",
 				Description: "获取用量统计看板摘要（不含请求明细）。",
 			},
 			{
 				Method:      "GET",
-				Path:        "/plugins/usage-statistics/dashboard-events",
+				Path:        pluginPath + "/dashboard-events",
 				Description: "分页获取请求事件明细。",
 			},
 			{
 				Method:      "GET",
-				Path:        "/plugins/usage-statistics/dashboard-events-export",
+				Path:        pluginPath + "/dashboard-events-export",
 				Description: "导出筛选后的请求事件明细，支持 JSON、CSV、JSONL、gzip 和上限保护。",
 			},
 			{
 				Method:      "POST",
-				Path:        "/plugins/usage-statistics/dashboard-events-export-jobs",
+				Path:        pluginPath + "/dashboard-events-export-jobs",
 				Description: "创建后台事件导出任务。",
 			},
 			{
 				Method:      "GET",
-				Path:        "/plugins/usage-statistics/dashboard-events-export-jobs",
+				Path:        pluginPath + "/dashboard-events-export-jobs",
 				Description: "查询后台事件导出任务状态。",
 			},
 			{
 				Method:      "DELETE",
-				Path:        "/plugins/usage-statistics/dashboard-events-export-jobs",
+				Path:        pluginPath + "/dashboard-events-export-jobs",
 				Description: "删除后台事件导出任务和临时文件。",
 			},
 			{
 				Method:      "GET",
-				Path:        "/plugins/usage-statistics/dashboard-events-export-download",
+				Path:        pluginPath + "/dashboard-events-export-download",
 				Description: "下载已完成的后台事件导出任务结果。",
 			},
 			{
 				Method:      "GET",
-				Path:        "/plugins/usage-statistics/dashboard-api-detail",
+				Path:        pluginPath + "/dashboard-api-detail",
 				Description: "获取单个上游接口的聚合详情。",
 			},
 			{
 				Method:      "GET",
-				Path:        "/plugins/usage-statistics/model-prices",
+				Path:        pluginPath + "/model-prices",
 				Description: "获取全局模型价格表。",
 			},
 			{
 				Method:      "PUT",
-				Path:        "/plugins/usage-statistics/model-prices",
+				Path:        pluginPath + "/model-prices",
 				Description: "新增或更新全局模型价格。",
 			},
 			{
 				Method:      "DELETE",
-				Path:        "/plugins/usage-statistics/model-prices",
+				Path:        pluginPath + "/model-prices",
 				Description: "删除全局模型价格。",
 			},
 			{
 				Method:      "GET",
-				Path:        "/plugins/usage-statistics/health",
+				Path:        pluginPath + "/health",
 				Description: "获取插件运行健康状态。",
 			},
 		},
 		Resources: []ManagementResource{
 			{
 				Path:        "/dashboard",
-				Menu:        "用量统计",
+				Menu:        "用量统计 Dashboard",
 				Description: "请求、token 和模型用量统计。",
 			},
 			{

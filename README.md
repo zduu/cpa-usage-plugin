@@ -2,7 +2,9 @@
 
 CPA 用量统计插件，用于在 CLIProxyAPI/CPA v7 插件系统中记录请求用量，并提供管理页面查看统计数据。
 
-当前代码版本：`2.3.4`。
+当前代码版本：`2.4.0`。
+
+> **2.4.0 迁移提示**：插件 ID 已从 `usage-statistics` 改为 `usage-dashboard-zduu`，用于避开 CPA 官方商店中同 ID 插件造成的安装状态、配置和路由冲突。升级时必须先停用并删除旧插件，再安装新插件；历史统计数据路径保持不变。详细步骤见[部署文档的 2.3.4 → 2.4.0 迁移章节](docs/guides/cpa-usage.md#从-234-迁移到-240)。
 
 `v1.0.0` 到 `v1.2.18` 属于规范化发布流程建立前的 legacy 历史版本；tag、release 和资产下载地址保持不变，说明见 [docs/releases/v1-history.md](docs/releases/v1-history.md)。
 
@@ -58,9 +60,9 @@ CPA 用量统计插件，用于在 CLIProxyAPI/CPA v7 插件系统中记录请�
 
 1. 推送到 `main` / `master` 或手动运行 `Build Plugin` workflow。
 2. CI 自动运行 Go 测试 (`go test -v -race ./...`) 和 JS 测试 (`node --test`)。
-3. 在 Actions 运行结果中下载对应架构 artifact，例如 `usage-statistics-plugin-linux-amd64`。
-4. Release 中会上传按平台命名的资产，例如 `usage-statistics-linux-amd64.so`、`usage-statistics-darwin-arm64.dylib`、`usage-statistics-windows-amd64.dll`，并保留 `usage-statistics.so` 作为 `linux-amd64` 兼容别名。
-5. CI 同时生成插件商店兼容的 zip 资产（`usage-statistics_{version}_{goos}_{goarch}.zip`）和 `checksums.txt`，可直接用于 CPA 插件商店一键安装。
+3. 在 Actions 运行结果中下载对应架构 artifact，例如 `usage-dashboard-zduu-plugin-linux-amd64`。
+4. Release 中会上传按平台命名的资产，例如 `usage-dashboard-zduu-linux-amd64.so`、`usage-dashboard-zduu-darwin-arm64.dylib`、`usage-dashboard-zduu-windows-amd64.dll`，并保留 `usage-dashboard-zduu.so` 作为 `linux-amd64` 兼容别名。
+5. CI 同时生成插件商店兼容的 zip 资产（`usage-dashboard-zduu_{version}_{goos}_{goarch}.zip`）和 `checksums.txt`，可直接用于 CPA 插件商店一键安装。
 
 自 `v2.0.0` 起，发布说明以 [docs/releases/changelog.md](docs/releases/changelog.md) 为准，并由 workflow 在打 `vX.Y.Z` tag 时校验版本号并生成 GitHub Release。
 
@@ -68,14 +70,14 @@ CPA 用量统计插件，用于在 CLIProxyAPI/CPA v7 插件系统中记录请�
 
 ```bash
 cd go
-CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildmode=c-shared -buildvcs=false -o ../usage-statistics.so .
+CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildmode=c-shared -buildvcs=false -o ../usage-dashboard-zduu.so .
 ```
 
 本地交叉构建 arm64 需要安装对应 C 交叉编译器，例如 `aarch64-linux-gnu-gcc`：
 
 ```bash
 cd go
-CC=aarch64-linux-gnu-gcc CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go build -buildmode=c-shared -buildvcs=false -o ../usage-statistics-linux-arm64.so .
+CC=aarch64-linux-gnu-gcc CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go build -buildmode=c-shared -buildvcs=false -o ../usage-dashboard-zduu-linux-arm64.so .
 ```
 
 本地测试：
@@ -136,22 +138,22 @@ cpa-usage-plugin/
 插件注册以下管理接口：
 
 ```text
-GET  /v0/management/plugins/usage-statistics/usage
-GET  /v0/management/plugins/usage-statistics/usage/export
-POST /v0/management/plugins/usage-statistics/usage/import
-GET  /v0/management/plugins/usage-statistics/model-prices
-PUT  /v0/management/plugins/usage-statistics/model-prices
-DELETE /v0/management/plugins/usage-statistics/model-prices
-GET  /v0/management/plugins/usage-statistics/dashboard-summary
-GET  /v0/management/plugins/usage-statistics/dashboard-events
-GET  /v0/management/plugins/usage-statistics/dashboard-events-export
-POST /v0/management/plugins/usage-statistics/dashboard-events-export-jobs
-GET  /v0/management/plugins/usage-statistics/dashboard-events-export-jobs
-DELETE /v0/management/plugins/usage-statistics/dashboard-events-export-jobs
-GET  /v0/management/plugins/usage-statistics/dashboard-events-export-download
-GET  /v0/management/plugins/usage-statistics/dashboard-api-detail
-GET  /v0/management/plugins/usage-statistics/dashboard-data
-GET  /v0/management/plugins/usage-statistics/health
+GET  /v0/management/plugins/usage-dashboard-zduu/usage
+GET  /v0/management/plugins/usage-dashboard-zduu/usage/export
+POST /v0/management/plugins/usage-dashboard-zduu/usage/import
+GET  /v0/management/plugins/usage-dashboard-zduu/model-prices
+PUT  /v0/management/plugins/usage-dashboard-zduu/model-prices
+DELETE /v0/management/plugins/usage-dashboard-zduu/model-prices
+GET  /v0/management/plugins/usage-dashboard-zduu/dashboard-summary
+GET  /v0/management/plugins/usage-dashboard-zduu/dashboard-events
+GET  /v0/management/plugins/usage-dashboard-zduu/dashboard-events-export
+POST /v0/management/plugins/usage-dashboard-zduu/dashboard-events-export-jobs
+GET  /v0/management/plugins/usage-dashboard-zduu/dashboard-events-export-jobs
+DELETE /v0/management/plugins/usage-dashboard-zduu/dashboard-events-export-jobs
+GET  /v0/management/plugins/usage-dashboard-zduu/dashboard-events-export-download
+GET  /v0/management/plugins/usage-dashboard-zduu/dashboard-api-detail
+GET  /v0/management/plugins/usage-dashboard-zduu/dashboard-data
+GET  /v0/management/plugins/usage-dashboard-zduu/health
 ```
 
 ### 接口说明
