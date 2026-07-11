@@ -4294,12 +4294,9 @@ func (s *RequestStatistics) timeSeriesTokenCostLocked(stat TimeSeriesTokenStat) 
 	inputTokens := nonNegativeInt64(stat.InputTokens)
 	outputTokens := nonNegativeInt64(stat.OutputTokens)
 	totalTokens := nonNegativeInt64(stat.TotalTokens)
-	cacheTotal := nonNegativeInt64(stat.CachedTokens)
+	cacheReadTokens := nonNegativeInt64(stat.CachedTokens)
 	cacheWriteTokens := nonNegativeInt64(stat.CacheWriteTokens)
-	if cacheWriteTokens > cacheTotal {
-		cacheTotal = cacheWriteTokens
-	}
-	cacheReadTokens := maxInt64(cacheTotal-cacheWriteTokens, 0)
+	cacheTotal := cacheReadTokens + cacheWriteTokens
 	uncachedInputTokens := maxInt64(inputTokens-cacheTotal, 0)
 	providerFamily := usageProviderFamily(stat.Provider)
 	if providerFamily == "claude" || (providerFamily == "" && totalTokens >= inputTokens+outputTokens+cacheTotal) {

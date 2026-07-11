@@ -1462,7 +1462,7 @@ func TestCacheWriteCostSeparatesReadWriteAndProviderAccounting(t *testing.T) {
 			Provider:         "openai",
 			TotalTokens:      1_000_000,
 			InputTokens:      1_000_000,
-			CachedTokens:     500_000,
+			CachedTokens:     200_000,
 			CacheWriteTokens: 300_000,
 		},
 		"exclusive input": {
@@ -1470,7 +1470,7 @@ func TestCacheWriteCostSeparatesReadWriteAndProviderAccounting(t *testing.T) {
 			Provider:         "anthropic",
 			TotalTokens:      1_000_000,
 			InputTokens:      500_000,
-			CachedTokens:     500_000,
+			CachedTokens:     200_000,
 			CacheWriteTokens: 300_000,
 		},
 		"inclusive input with inflated total": {
@@ -1478,7 +1478,7 @@ func TestCacheWriteCostSeparatesReadWriteAndProviderAccounting(t *testing.T) {
 			Provider:         "openai",
 			TotalTokens:      1_500_000,
 			InputTokens:      1_000_000,
-			CachedTokens:     500_000,
+			CachedTokens:     200_000,
 			CacheWriteTokens: 300_000,
 		},
 	} {
@@ -1488,6 +1488,34 @@ func TestCacheWriteCostSeparatesReadWriteAndProviderAccounting(t *testing.T) {
 			}
 		})
 	}
+
+	when := time.Date(2026, 7, 11, 10, 30, 0, 0, time.UTC)
+	recorded := NewRequestStatistics()
+	recorded.modelPrices = map[string]ModelPrice{
+		"model": {Prompt: 1, Cache: 0.1, CacheWrite: 1.25},
+	}
+	recorded.Record(UsageRecord{
+		Provider:    "openai",
+		Model:       "model",
+		RequestedAt: when,
+		Detail: UsageDetail{
+			InputTokens:         1_000_000,
+			CacheReadTokens:     200_000,
+			CacheCreationTokens: 300_000,
+			TotalTokens:         1_000_000,
+		},
+	})
+
+	snapshot := recorded.Snapshot()
+	assertFloatNear(t, "recorded daily cache cost", snapshot.CostByDay["2026-07-11"], 0.895)
+	assertFloatNear(t, "recorded hourly cache cost", snapshot.CostByHour["10"], 0.895)
+
+	recorded.mu.RLock()
+	rebuiltDay := recorded.costByDayFromTokenSeriesLocked()
+	rebuiltHour := recorded.costByHourFromTokenSeriesLocked()
+	recorded.mu.RUnlock()
+	assertFloatNear(t, "rebuilt daily cache cost", rebuiltDay["2026-07-11"], 0.895)
+	assertFloatNear(t, "rebuilt hourly cache cost", rebuiltHour[10], 0.895)
 }
 
 func TestMissingTotalTokensIncludesExclusiveClaudeCache(t *testing.T) {
