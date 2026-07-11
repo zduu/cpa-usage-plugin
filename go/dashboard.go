@@ -407,7 +407,7 @@ func dashboardEventCSVRecord(event RequestDetail) []string {
 		strconv.FormatInt(tokens.InputTokens, 10),
 		strconv.FormatInt(tokens.OutputTokens, 10),
 		strconv.FormatInt(tokens.ReasoningTokens, 10),
-		strconv.FormatInt(normalizedCacheTokens(tokens), 10),
+		strconv.FormatInt(normalizedCacheReadTokens(tokens), 10),
 		strconv.FormatInt(nonNegativeInt64(tokens.CacheWriteTokens), 10),
 		strconv.FormatInt(detailTotalTokensForRequest(event), 10),
 		dashboardExportStatusCode(event),

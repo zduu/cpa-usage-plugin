@@ -420,8 +420,15 @@ func (d *UsageDetail) UnmarshalJSON(data []byte) error {
 		PromptCacheReadTokens   int64 `json:"cache_read_input_tokens"`
 		PromptCacheCreateTokens int64 `json:"cache_creation_input_tokens"`
 		PromptTokensDetails     struct {
-			CachedTokens int64 `json:"cached_tokens"`
+			CachedTokens        int64 `json:"cached_tokens"`
+			CacheWriteTokens    int64 `json:"cache_write_tokens"`
+			CacheCreationTokens int64 `json:"cache_creation_tokens"`
 		} `json:"prompt_tokens_details"`
+		InputTokensDetails struct {
+			CachedTokens        int64 `json:"cached_tokens"`
+			CacheWriteTokens    int64 `json:"cache_write_tokens"`
+			CacheCreationTokens int64 `json:"cache_creation_tokens"`
+		} `json:"input_tokens_details"`
 		CompletionTokensDetails struct {
 			ReasoningTokens int64 `json:"reasoning_tokens"`
 		} `json:"completion_tokens_details"`
@@ -440,13 +447,20 @@ func (d *UsageDetail) UnmarshalJSON(data []byte) error {
 		current.ReasoningTokens = firstNonZeroInt64(aliases.CompletionTokensDetails.ReasoningTokens, legacy.ReasoningTokens)
 	}
 	if current.CachedTokens == 0 {
-		current.CachedTokens = firstNonZeroInt64(aliases.PromptTokensDetails.CachedTokens, legacy.CachedTokens)
+		current.CachedTokens = firstNonZeroInt64(aliases.PromptTokensDetails.CachedTokens, aliases.InputTokensDetails.CachedTokens, legacy.CachedTokens)
 	}
 	if current.CacheReadTokens == 0 {
-		current.CacheReadTokens = firstNonZeroInt64(aliases.PromptCacheReadTokens, aliases.PromptTokensDetails.CachedTokens, legacy.CacheReadTokens)
+		current.CacheReadTokens = firstNonZeroInt64(aliases.PromptCacheReadTokens, aliases.PromptTokensDetails.CachedTokens, aliases.InputTokensDetails.CachedTokens, legacy.CacheReadTokens)
 	}
 	if current.CacheCreationTokens == 0 {
-		current.CacheCreationTokens = firstNonZeroInt64(aliases.PromptCacheCreateTokens, legacy.CacheCreationTokens)
+		current.CacheCreationTokens = firstNonZeroInt64(
+			aliases.PromptCacheCreateTokens,
+			aliases.PromptTokensDetails.CacheWriteTokens,
+			aliases.PromptTokensDetails.CacheCreationTokens,
+			aliases.InputTokensDetails.CacheWriteTokens,
+			aliases.InputTokensDetails.CacheCreationTokens,
+			legacy.CacheCreationTokens,
+		)
 	}
 	if current.TotalTokens == 0 {
 		current.TotalTokens = legacy.TotalTokens

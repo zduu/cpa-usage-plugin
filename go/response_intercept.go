@@ -491,6 +491,12 @@ func usageDetailFromValue(value any) (UsageDetail, bool) {
 		if detail.CacheCreationTokens == 0 {
 			detail.CacheCreationTokens = firstJSONInt(m, "cache_creation_tokens", "cacheCreationTokens", "cache_creation_input_tokens")
 		}
+		if detail.CacheCreationTokens == 0 {
+			detail.CacheCreationTokens = firstNestedJSONInt(m, "cache_write_tokens", "prompt_tokens_details", "input_tokens_details")
+		}
+		if detail.CacheCreationTokens == 0 {
+			detail.CacheCreationTokens = firstNestedJSONInt(m, "cache_creation_tokens", "prompt_tokens_details", "input_tokens_details")
+		}
 		if detail.TotalTokens == 0 {
 			detail.TotalTokens = firstJSONInt(m, "totalTokenCount", "total_tokens")
 		}
@@ -816,10 +822,14 @@ func (c *usageFallbackCoordinator) cleanupLocked(now time.Time) {
 // fallback's Claude-format normalization do), while every other family
 // already folds cache into input — adding the cache fields for Claude-family
 // records makes the same request produce one fingerprint no matter which
-// side, protocol shape, or total_tokens convention reported it. Reasoning
-// effort and service tier are deliberately excluded: the two sides derive
-// them from different sources and the token triple already discriminates
-// requests.
+// side, protocol shape, or total_tokens convention reported it. The requested
+// model alias is preferred over the upstream response model:
+// native records carry the client-facing alias while fallback responses may
+// expose a routed model name (for example grok-4.5-build-free for a grok-4.5
+// request). Using the routed name would let the same request through twice and
+// create a mirror dashboard group. Reasoning effort and service tier are
+// deliberately excluded: the two sides derive them from different sources and
+// the token triple already discriminates requests.
 func usageRecordFingerprint(record UsageRecord) string {
 	if !usageDetailHasTokens(record.Detail) {
 		return ""
@@ -836,7 +846,7 @@ func usageRecordFingerprint(record UsageRecord) string {
 	outputTokens := record.Detail.OutputTokens
 	parts := []string{
 		upstreamIdentity,
-		strings.ToLower(strings.TrimSpace(firstNonEmpty(record.Model, record.Alias))),
+		strings.ToLower(strings.TrimSpace(firstNonEmpty(record.Alias, record.Model))),
 		canonicalClientAPIKey(record.APIKey),
 		fmt.Sprintf("%d", inputTokens),
 		fmt.Sprintf("%d", outputTokens),

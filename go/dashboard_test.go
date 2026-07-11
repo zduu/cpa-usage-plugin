@@ -1546,20 +1546,20 @@ func TestDashboardAPIDetailRangePreservesCacheWriteTokens(t *testing.T) {
 	stats.mu.Unlock()
 
 	summary := stats.SummaryWithoutDetailsAt(now)
-	if summary.Usage.CacheWriteTokens != 300 || summary.ModelStats[0].CacheWriteTokens != 300 {
-		t.Fatalf("summary cache writes = usage %d model %#v, want 300", summary.Usage.CacheWriteTokens, summary.ModelStats)
+	if summary.Usage.CachedTokens != 200 || summary.Usage.CacheWriteTokens != 300 || summary.ModelStats[0].CachedTokens != 200 || summary.ModelStats[0].CacheWriteTokens != 300 {
+		t.Fatalf("summary cache read/write = usage %#v model %#v, want 200/300", summary.Usage, summary.ModelStats)
 	}
 	api := summary.Usage.APIs["anthropic"]
-	if api.CacheWriteTokens != 300 || api.Models["model"].CacheWriteTokens != 300 {
-		t.Fatalf("api cache writes = %#v, want 300", api)
+	if api.CachedTokens != 200 || api.CacheWriteTokens != 300 || api.Models["model"].CachedTokens != 200 || api.Models["model"].CacheWriteTokens != 300 {
+		t.Fatalf("api cache read/write = %#v, want 200/300", api)
 	}
 
 	result := stats.QueryAPIDetailAt("anthropic", "24h", 10, 10, now)
-	if result.Summary.CacheWriteTokens != 300 || len(result.ModelStats) != 1 || result.ModelStats[0].CacheWriteTokens != 300 {
-		t.Fatalf("range cache writes = summary %#v models %#v, want 300", result.Summary, result.ModelStats)
+	if result.Summary.CachedTokens != 200 || result.Summary.CacheWriteTokens != 300 || len(result.ModelStats) != 1 || result.ModelStats[0].CachedTokens != 200 || result.ModelStats[0].CacheWriteTokens != 300 {
+		t.Fatalf("range cache read/write = summary %#v models %#v, want 200/300", result.Summary, result.ModelStats)
 	}
-	if len(result.ModelStats[0].Providers) != 1 || result.ModelStats[0].Providers[0].CacheWriteTokens != 300 {
-		t.Fatalf("range provider cache writes = %#v, want 300", result.ModelStats[0].Providers)
+	if len(result.ModelStats[0].Providers) != 1 || result.ModelStats[0].Providers[0].CachedTokens != 200 || result.ModelStats[0].Providers[0].CacheWriteTokens != 300 {
+		t.Fatalf("range provider cache read/write = %#v, want 200/300", result.ModelStats[0].Providers)
 	}
 }
 
@@ -1609,8 +1609,47 @@ func TestStorageSnapshotPreservesProviderAggregatesAfterDetailTrimming(t *testin
 		t.Fatalf("restored model stats = %#v", summary.ModelStats)
 	}
 	provider := summary.ModelStats[0].Providers[0]
-	if provider.TotalRequests != 2 || provider.CacheWriteTokens != 600 || provider.CachedTokens != 1_000 {
+	if provider.TotalRequests != 2 || provider.CacheWriteTokens != 600 || provider.CachedTokens != 400 {
 		t.Fatalf("restored provider = %#v, want full untrimmed aggregates", provider)
+	}
+}
+
+func TestLegacyStorageSnapshotMigratesCacheTotalsToReads(t *testing.T) {
+	snapshot := StatisticsSnapshot{
+		CachedTokens:     70,
+		CacheWriteTokens: 40,
+		APIs: map[string]APISnapshot{
+			"openai": {
+				CachedTokens:     70,
+				CacheWriteTokens: 40,
+				Models: map[string]ModelSnapshot{
+					"model": {
+						CachedTokens:     70,
+						CacheWriteTokens: 40,
+						Providers: []ModelProviderStat{{
+							Provider:         "openai",
+							CachedTokens:     70,
+							CacheWriteTokens: 40,
+						}},
+					},
+				},
+			},
+		},
+		CostTokensByDay: map[string][]TimeSeriesTokenStat{
+			"2026-07-11": {{CachedTokens: 70, CacheWriteTokens: 40}},
+		},
+	}
+
+	migrateLegacySnapshotCacheReads(&snapshot)
+	if snapshot.CachedTokens != 30 || snapshot.APIs["openai"].CachedTokens != 30 {
+		t.Fatalf("snapshot cache reads = %#v, want 30", snapshot)
+	}
+	model := snapshot.APIs["openai"].Models["model"]
+	if model.CachedTokens != 30 || len(model.Providers) != 1 || model.Providers[0].CachedTokens != 30 {
+		t.Fatalf("model cache reads = %#v, want 30", model)
+	}
+	if snapshot.CostTokensByDay["2026-07-11"][0].CachedTokens != 30 {
+		t.Fatalf("time-series cache reads = %#v, want 30", snapshot.CostTokensByDay)
 	}
 }
 

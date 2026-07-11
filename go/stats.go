@@ -782,6 +782,8 @@ type persistedStorageSnapshot struct {
 	Usage       StatisticsSnapshot `json:"usage"`
 }
 
+const currentStorageSnapshotVersion = 2
+
 type storageWorkerConfig struct {
 	dir                    string
 	flushInterval          time.Duration
@@ -1438,6 +1440,9 @@ func (s *RequestStatistics) loadStorageSnapshotLocked(dir string, now time.Time)
 	var persisted persistedStorageSnapshot
 	if err := json.Unmarshal(raw, &persisted); err != nil {
 		return time.Time{}, fmt.Errorf("load storage snapshot: %w", err)
+	}
+	if persisted.Version < currentStorageSnapshotVersion {
+		migrateLegacySnapshotCacheReads(&persisted.Usage)
 	}
 	if s.hasRecordsLocked() {
 		_, _ = s.mergeSnapshotLocked(persisted.Usage, false, now)
@@ -2425,7 +2430,7 @@ func writeStorageSnapshotFile(dir string, snapshot StatisticsSnapshot, now time.
 		return err
 	}
 	payload := persistedStorageSnapshot{
-		Version:     1,
+		Version:     currentStorageSnapshotVersion,
 		GeneratedAt: now.UTC().Format(time.RFC3339),
 		Usage:       snapshot,
 	}
@@ -2459,6 +2464,43 @@ func writeStorageSnapshotFile(dir string, snapshot StatisticsSnapshot, now time.
 	}
 	_ = syncDir(dir)
 	return nil
+}
+
+// migrateLegacySnapshotCacheReads converts snapshot v1 aggregates, where
+// CachedTokens stored cache reads plus cache creation, to the v2 meaning of
+// cache reads only. Detail records already keep read/write/total separately.
+func migrateLegacySnapshotCacheReads(snapshot *StatisticsSnapshot) {
+	if snapshot == nil {
+		return
+	}
+	snapshot.CachedTokens = legacyCacheReadTokens(snapshot.CachedTokens, snapshot.CacheWriteTokens)
+	for apiName, api := range snapshot.APIs {
+		api.CachedTokens = legacyCacheReadTokens(api.CachedTokens, api.CacheWriteTokens)
+		for modelName, model := range api.Models {
+			model.CachedTokens = legacyCacheReadTokens(model.CachedTokens, model.CacheWriteTokens)
+			for i := range model.Providers {
+				model.Providers[i].CachedTokens = legacyCacheReadTokens(model.Providers[i].CachedTokens, model.Providers[i].CacheWriteTokens)
+			}
+			api.Models[modelName] = model
+		}
+		snapshot.APIs[apiName] = api
+	}
+	for key, values := range snapshot.CostTokensByDay {
+		for i := range values {
+			values[i].CachedTokens = legacyCacheReadTokens(values[i].CachedTokens, values[i].CacheWriteTokens)
+		}
+		snapshot.CostTokensByDay[key] = values
+	}
+	for key, values := range snapshot.CostTokensByHour {
+		for i := range values {
+			values[i].CachedTokens = legacyCacheReadTokens(values[i].CachedTokens, values[i].CacheWriteTokens)
+		}
+		snapshot.CostTokensByHour[key] = values
+	}
+}
+
+func legacyCacheReadTokens(cachedTokens, cacheWriteTokens int64) int64 {
+	return maxInt64(nonNegativeInt64(cachedTokens)-nonNegativeInt64(cacheWriteTokens), 0)
 }
 
 func compactStorageShardsBeforeSnapshot(dir string, snapshotAt time.Time, loadedPath string) (int, error) {
@@ -4215,7 +4257,7 @@ func detailTotalsFromRequest(detail RequestDetail) detailTotals {
 		totalTokens:      detailTotalTokensForRequest(detail),
 		inputTokens:      nonNegativeInt64(detail.Tokens.InputTokens),
 		outputTokens:     nonNegativeInt64(detail.Tokens.OutputTokens),
-		cachedTokens:     normalizedCacheTokens(detail.Tokens),
+		cachedTokens:     normalizedCacheReadTokens(detail.Tokens),
 		cacheWriteTokens: nonNegativeInt64(detail.Tokens.CacheWriteTokens),
 		reasoningTokens:  nonNegativeInt64(detail.Tokens.ReasoningTokens),
 	}
@@ -4357,6 +4399,20 @@ func normalizedCacheTokens(tokens TokenStats) int64 {
 		return maxInt64(cacheTokens, maxInt64(cachedTokens, cacheWriteTokens))
 	}
 	return cachedTokens + cacheWriteTokens
+}
+
+// normalizedCacheReadTokens returns cache hits only. CacheTokens stores the
+// combined read+write total for compatibility with older snapshots, so using
+// it directly as CachedTokens would count cache creation twice in summaries
+// and costs.
+func normalizedCacheReadTokens(tokens TokenStats) int64 {
+	cachedTokens := nonNegativeInt64(tokens.CachedTokens)
+	if cachedTokens > 0 {
+		return cachedTokens
+	}
+	cacheTokens := nonNegativeInt64(tokens.CacheTokens)
+	cacheWriteTokens := nonNegativeInt64(tokens.CacheWriteTokens)
+	return maxInt64(cacheTokens-cacheWriteTokens, 0)
 }
 
 func nonNegativeInt64(value int64) int64 {
@@ -6388,7 +6444,7 @@ func (s *RequestStatistics) QueryAPIDetailAt(api string, rangeKey string, recent
 		inputTokens := nonNegativeInt64(d.Tokens.InputTokens)
 		outputTokens := nonNegativeInt64(d.Tokens.OutputTokens)
 		reasoningTokens := nonNegativeInt64(d.Tokens.ReasoningTokens)
-		cachedTokens := normalizedCacheTokens(d.Tokens)
+		cachedTokens := normalizedCacheReadTokens(d.Tokens)
 		cacheWriteTokens := nonNegativeInt64(d.Tokens.CacheWriteTokens)
 
 		if !aggregateScope {

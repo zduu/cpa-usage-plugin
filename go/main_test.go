@@ -152,6 +152,34 @@ func TestUsageRecordUnmarshalAcceptsSnakeCaseFields(t *testing.T) {
 	}
 }
 
+func TestUsageDetailUnmarshalAcceptsNestedCacheCreationFields(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "OpenAI Responses cache write",
+			raw:  `{"input_tokens":100,"input_tokens_details":{"cached_tokens":30,"cache_write_tokens":40}}`,
+		},
+		{
+			name: "chat completions cache creation",
+			raw:  `{"prompt_tokens":100,"prompt_tokens_details":{"cached_tokens":30,"cache_creation_tokens":40}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var detail UsageDetail
+			if err := json.Unmarshal([]byte(tt.raw), &detail); err != nil {
+				t.Fatalf("Unmarshal() error = %v", err)
+			}
+			if detail.InputTokens != 100 || detail.CachedTokens != 30 || detail.CacheReadTokens != 30 || detail.CacheCreationTokens != 40 {
+				t.Fatalf("detail = %#v, want nested cache read/write fields", detail)
+			}
+		})
+	}
+}
+
 func TestUsageRecordUnmarshalAcceptsBaseURLAliases(t *testing.T) {
 	tests := map[string]string{
 		"base_url": `"base_url":"https://snake.example/v1"`,
@@ -906,6 +934,36 @@ func TestUsageDetailFromValueDoesNotApplyAnthropicCacheGlobally(t *testing.T) {
 	}
 }
 
+func TestUsageDetailFromValueReadsNestedCacheCreationTokens(t *testing.T) {
+	tests := []struct {
+		name   string
+		parent string
+		field  string
+	}{
+		{name: "OpenAI Responses", parent: "input_tokens_details", field: "cache_write_tokens"},
+		{name: "chat completions", parent: "prompt_tokens_details", field: "cache_creation_tokens"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			detail, ok := usageDetailFromValue(map[string]any{
+				"input_tokens":  json.Number("100"),
+				"output_tokens": json.Number("20"),
+				tt.parent: map[string]any{
+					"cached_tokens": json.Number("30"),
+					tt.field:        json.Number("40"),
+				},
+			})
+			if !ok {
+				t.Fatal("usageDetailFromValue() ok = false, want true")
+			}
+			if detail.CachedTokens != 30 || detail.CacheCreationTokens != 40 {
+				t.Fatalf("detail = %#v, want nested cache read/write fields", detail)
+			}
+		})
+	}
+}
+
 func TestResponseInterceptFallbackDoesNotDoubleCountNativeUsage(t *testing.T) {
 	previousStats := stats
 	previousFallbacks := usageFallbacks
@@ -1264,6 +1322,91 @@ func TestResponseInterceptFallbackDoesNotDoubleCountNativeXAIFileAuth(t *testing
 	}
 	if _, ok := summary.Usage.APIs["claude"]; ok {
 		t.Fatalf("summary APIs = %#v, did not expect a Claude fallback record", summary.Usage.APIs)
+	}
+}
+
+func TestResponseStreamChunkDoesNotMirrorRoutedXAIModelAfterNativeUsage(t *testing.T) {
+	previousStats := stats
+	previousFallbacks := usageFallbacks
+	previousDelay := usageFallbackRecordDelay
+	stats = NewRequestStatistics()
+	usageFallbacks = newUsageFallbackCoordinator()
+	usageFallbackRecordDelay = 25 * time.Millisecond
+	t.Cleanup(func() {
+		usageFallbacks.Flush()
+		usageFallbacks = previousFallbacks
+		usageFallbackRecordDelay = previousDelay
+		stats = previousStats
+	})
+
+	authID := "xai-secondary@example.com.json"
+	native := UsageRecord{
+		Provider:     "xai",
+		ExecutorType: "XAIExecutor",
+		Model:        "grok-4.5",
+		Alias:        "grok-4.5",
+		APIKey:       "sk-client-alpha-0000xx",
+		AuthID:       authID,
+		AuthIndex:    "612973eed8481a2e",
+		AuthType:     "oauth",
+		Source:       "secondary@example.com",
+		RequestedAt:  time.Now(),
+		Latency:      1423 * time.Millisecond,
+		TTFT:         1242 * time.Millisecond,
+		Detail: UsageDetail{
+			InputTokens:  42418,
+			OutputTokens: 58,
+			TotalTokens:  42476,
+		},
+	}
+	nativeBody, err := json.Marshal(native)
+	if err != nil {
+		t.Fatalf("marshal native usage record: %v", err)
+	}
+	if _, err := handleUsage(nativeBody); err != nil {
+		t.Fatalf("handleUsage() error = %v", err)
+	}
+
+	streamReq := ResponseStreamChunkRequest{
+		ResponseInterceptRequest: ResponseInterceptRequest{
+			SourceFormat:   "openai",
+			Model:          "grok-4.5",
+			RequestedModel: "grok-4.5",
+			Stream:         true,
+			RequestHeaders: map[string][]string{
+				"Authorization": {"Bearer sk-client-alpha-0000xx"},
+			},
+			OriginalRequest: []byte(`{"model":"grok-4.5","stream":true}`),
+			Body: []byte(strings.Join([]string{
+				`data: {"id":"chatcmpl-test","model":"grok-4.5-build-free","choices":[],"usage":{"prompt_tokens":42418,"completion_tokens":58,"total_tokens":42476}}`,
+				``,
+			}, "\n")),
+			StatusCode: http.StatusOK,
+			Metadata: map[string]any{
+				"requested_model":  "grok-4.5",
+				"selected_auth_id": authID,
+			},
+		},
+		ChunkIndex: 42,
+	}
+	interceptBody, err := json.Marshal(streamReq)
+	if err != nil {
+		t.Fatalf("marshal response stream chunk request: %v", err)
+	}
+	if _, err := handleResponseStreamChunk(interceptBody); err != nil {
+		t.Fatalf("handleResponseStreamChunk() error = %v", err)
+	}
+
+	time.Sleep(3 * usageFallbackRecordDelay)
+	summary := stats.SummaryWithoutDetailsForRangeAt("24h", time.Now().Add(time.Second))
+	if summary.Usage.TotalRequests != 1 || summary.Usage.TotalTokens != 42476 {
+		t.Fatalf("summary usage = %#v, want one native xAI record", summary.Usage)
+	}
+	if _, ok := summary.Usage.APIs["xai · 上游 612973eed8481a2e"]; ok {
+		t.Fatalf("summary APIs = %#v, did not expect routed-model fallback mirror", summary.Usage.APIs)
+	}
+	if _, ok := summary.Usage.APIs["xai · secondary@example.com"]; !ok {
+		t.Fatalf("summary APIs = %#v, want native xAI credential group", summary.Usage.APIs)
 	}
 }
 
@@ -2011,8 +2154,8 @@ func TestStorageReplayRestoresRecords(t *testing.T) {
 	if snapshot.TotalRequests != 1 || snapshot.TotalTokens != 15 {
 		t.Fatalf("replayed snapshot = requests %d tokens %d, want 1/15", snapshot.TotalRequests, snapshot.TotalTokens)
 	}
-	if snapshot.CachedTokens != 5 || snapshot.CacheWriteTokens != 3 {
-		t.Fatalf("replayed cache tokens = total %d write %d, want 5/3", snapshot.CachedTokens, snapshot.CacheWriteTokens)
+	if snapshot.CachedTokens != 2 || snapshot.CacheWriteTokens != 3 {
+		t.Fatalf("replayed cache tokens = read %d write %d, want 2/3", snapshot.CachedTokens, snapshot.CacheWriteTokens)
 	}
 	detail := snapshot.APIs["openai"].Models["gpt-4"].Details[0]
 	if detail.Tokens.CachedTokens != 2 || detail.Tokens.CacheTokens != 5 || detail.Tokens.CacheWriteTokens != 3 {
@@ -4369,7 +4512,7 @@ func TestDashboardEventsExportSupportsCSVJSONLAndGzip(t *testing.T) {
 	}
 	csvBody := string(csvResp.Body)
 	if !strings.HasPrefix(csvBody, "时间,模型,来源") || !strings.Contains(csvBody, "缓存写入 token") ||
-		!strings.Contains(csvBody, ",5,3,15,") || !strings.Contains(csvBody, "gpt-4") || !strings.Contains(csvBody, "rate limited") {
+		!strings.Contains(csvBody, ",10,5,0,2,3,15,") || !strings.Contains(csvBody, "gpt-4") || !strings.Contains(csvBody, "rate limited") {
 		t.Fatalf("csv body missing expected rows: %q", csvBody)
 	}
 
