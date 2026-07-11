@@ -167,7 +167,7 @@ func handleManagementRegister() ([]byte, error) {
 		Resources: []ManagementResource{
 			{
 				Path:        "/dashboard",
-				Menu:        "用量统计 Dashboard",
+				Menu:        "用量统计",
 				Description: "请求、token 和模型用量统计。",
 			},
 			{

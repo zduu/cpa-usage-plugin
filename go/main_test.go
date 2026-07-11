@@ -3856,7 +3856,7 @@ func TestRegisterUsesNewPluginIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handleRegister() error = %v", err)
 	}
-	if !strings.Contains(string(raw), `"Name":"用量统计 Dashboard"`) || !strings.Contains(string(raw), `"Version":"2.4.0"`) {
+	if !strings.Contains(string(raw), `"Name":"用量统计"`) || !strings.Contains(string(raw), `"Version":"2.4.0"`) {
 		t.Fatalf("register response does not expose 2.4.0 identity: %s", raw)
 	}
 }

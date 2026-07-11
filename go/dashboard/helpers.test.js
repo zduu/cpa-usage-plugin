@@ -89,6 +89,8 @@ test('detailCost separates cache reads and writes from an inclusive input total'
   };
   const cost = helpers.detailCost(detail, prices);
   assert.strictEqual(helpers.cacheTokenTotal(detail.tokens), 500000);
+  assert.strictEqual(helpers.cacheReadTokens(detail.tokens), 200000);
+  assert.strictEqual(helpers.cacheReadTokens({ cache_tokens: 500000, cached_tokens: 999999, cache_write_tokens: 300000 }), 200000);
   assert.ok(Math.abs(cost - 0.895) < 1e-9, 'cost should be 0.895, got ' + cost);
   detail.provider = 'openai';
   detail.tokens.total_tokens = 1500000;

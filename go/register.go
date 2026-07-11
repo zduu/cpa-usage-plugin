@@ -19,7 +19,7 @@ func handleRegister(requestBody []byte) ([]byte, error) {
 	result := PluginRegisterResponse{
 		SchemaVersion: 1,
 		Metadata: PluginMetadata{
-			Name:             "用量统计 Dashboard",
+			Name:             "用量统计",
 			Version:          pluginVersion,
 			Author:           "本地维护",
 			GitHubRepository: "https://github.com/zduu/cpa-usage-plugin",

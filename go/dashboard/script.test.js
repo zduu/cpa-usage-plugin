@@ -207,7 +207,7 @@ function createDashboardHarness(options = {}) {
           auth_index: 'auth-1',
           failed: false,
           latency_ms: 120,
-          tokens: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+          tokens: { input_tokens: 10, output_tokens: 5, cached_tokens: 7, cache_write_tokens: 2, total_tokens: 15 },
         };
       }),
     };
@@ -681,6 +681,10 @@ test('dashboard loads summary and export button uses backend event export', asyn
   assert.strictEqual(document.getElementById('totalCost').textContent, 'US$0.05');
   assert.strictEqual(document.getElementById('cacheWriteText').textContent, '缓存创建 token：25');
   assert.strictEqual(document.getElementById('storageStatus').textContent, '未开启持久化');
+  const eventsTable = document.getElementById('events').innerHTML;
+  assert.match(eventsTable, /缓存命中/);
+  assert.match(eventsTable, /缓存创建/);
+  assert.match(eventsTable, /<td>7<\/td><td>2<\/td><td>15<\/td>/);
   const apiDetail = document.getElementById('apiDetail').innerHTML;
   assert.match(apiDetail, /总花费/);
   assert.doesNotMatch(apiDetail, /Token\/请求/);

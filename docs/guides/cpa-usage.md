@@ -43,18 +43,51 @@ plugins:
 
 ### 从 2.3.4 迁移到 2.4.0
 
-2.4.0 将插件 ID 从 `usage-statistics` 更改为 `usage-dashboard-zduu`，原因是 CPA 官方商店已经存在另一个同 ID 插件。CPA 运行时按 ID 关联安装状态、配置和管理路由，旧 ID 会导致两个来源同时显示为已安装，并且无法安全共存。
+#### 为什么要迁移？
 
-由于 ID 变化，CPA 会把 2.4.0 识别为新插件，不能直接点击旧插件的更新按钮。请按以下顺序迁移：
+2.4.0 把插件名字从 `usage-statistics` 改成了 `usage-dashboard-zduu`。原因是 CPA 官方商店里已经有了一个也叫 `usage-statistics` 的插件，你的插件和它重名了。CPA 靠名字来区分插件，重名会导致配置错乱，没法正常使用。
 
-1. 备份 `config.yaml`、`data/usage-statistics/`、旧单文件 `data/usage-statistics.jsonl`（如果存在）和价格文件。
-2. 停止 CPA，确保旧插件不再写入统计文件。
-3. 删除插件目录中的 `usage-statistics`、`usage-statistics-v*` 动态库；不要删除 `data/usage-statistics` 数据目录。
-4. 将 `plugins.configs.usage-statistics` 的业务配置复制到 `plugins.configs.usage-dashboard-zduu`，并删除旧配置节点及其 `store` 元数据。
-5. 从本仓库商店源安装 `usage-dashboard-zduu` 2.4.0，或使用方式 B 部署新文件名资产。
-6. 启动 CPA，确认日志只出现 `plugin_id=usage-dashboard-zduu`，并核对历史请求总数和价格配置。
+因为名字变了，CPA 会把 2.4.0 当成一个全新的插件。所以**不能在旧插件上直接点「更新」**，需要手动把配置和数据搬过去。
 
-迁移后的配置示例：
+#### 操作步骤
+
+**第 1 步：备份（以防万一）**
+
+把下面这些文件复制一份到别的地方：
+- `config.yaml`（CPA 配置文件）
+- `data/usage-statistics/` 目录（历史统计数据）
+- `data/usage-statistics.jsonl`（如果用的是单文件模式）
+- 价格配置文件（通常叫 `usage-statistics-prices.json`）
+
+**第 2 步：关掉 CPA**
+
+停止 CPA 服务。目的是让旧插件停止写入数据，避免备份之后又产生新数据导致不一致。
+
+**第 3 步：删掉旧插件文件**
+
+去 `plugins/` 目录下，删除所有文件名带 `usage-statistics` 的 `.so` / `.dylib` / `.dll` 文件。
+
+> ⚠️ **注意**：`data/usage-statistics/` 数据目录**不要删**！里面是你的历史统计数据，新插件还能继续用。
+
+**第 4 步：改配置**
+
+打开 `config.yaml`，做两件事：
+1. 把 `plugins.configs.usage-statistics` 下面的配置项（`storage_path`、`max_details_per_model` 等）复制到新的 `plugins.configs.usage-dashboard-zduu` 下面。
+2. 删掉旧的 `plugins.configs.usage-statistics` 整个配置段。
+
+简单说就是把配置项的「钥匙标签」从旧名字换成新名字，里面的配置值不用改。
+
+**第 5 步：安装新插件**
+
+用新名字 `usage-dashboard-zduu` 安装 2.4.0 版本。可以通过插件商店安装，也可以手动下载部署（见方式 B）。
+
+**第 6 步：启动并检查**
+
+启动 CPA 后，检查两件事：
+1. 看日志里插件加载信息是不是 `plugin_id=usage-dashboard-zduu`，不再出现旧名字。
+2. 打开用量看板，确认之前的统计数据还在、价格配置也对。
+
+#### 迁移后的配置参考
 
 ```yaml
 plugins:
@@ -71,7 +104,7 @@ plugins:
       models_dev_prices_enabled: true
 ```
 
-> 不要同时启用新旧插件。两个插件同时读取和写入同一持久化路径会造成重复统计和文件竞争。
+> ⚠️ **不要同时启用新旧两个插件**。它们读写的是同一份数据文件，同时跑会导致数据重复统计。
 
 ### 方式 B：脚本更新（不依赖插件商店）
 
