@@ -803,8 +803,13 @@ func (c *usageFallbackCoordinator) cleanupLocked(now time.Time) {
 }
 
 // usageRecordFingerprint keys native/fallback dedup. Provider is collapsed to
-// its family so a fallback that only knows the generic "openai-compatible"
-// upstream still matches the native record's specific
+// its family for recognized auth IDs so a fallback still matches legacy native
+// records that omitted auth_id. When a file-backed auth uses a custom filename
+// whose provider cannot be inferred by the interceptor, auth ID becomes the
+// upstream identity; both modern native records and interceptor metadata carry
+// that scheduler-selected ID. This keeps custom file auths deduplicated without
+// regressing older records. A fallback that only knows the generic
+// "openai-compatible" upstream still matches the native record's specific
 // "openai-compatible-<name>" provider. Token counts are canonicalized to
 // cache-inclusive input with a recomputed total: Claude-family records keep
 // input exclusive of cache reads/creations (both CPA's native parser and the
@@ -819,13 +824,17 @@ func usageRecordFingerprint(record UsageRecord) string {
 	if !usageDetailHasTokens(record.Detail) {
 		return ""
 	}
+	upstreamIdentity := usageProviderFamily(record.Provider)
+	if authID := strings.ToLower(strings.TrimSpace(record.AuthID)); authID != "" && providerFromAuthID(authID) == "" {
+		upstreamIdentity = "auth:" + authID
+	}
 	inputTokens := record.Detail.InputTokens
 	if usageProviderFamily(record.Provider) == "claude" {
 		inputTokens += record.Detail.CacheReadTokens + record.Detail.CacheCreationTokens
 	}
 	outputTokens := record.Detail.OutputTokens
 	parts := []string{
-		usageProviderFamily(record.Provider),
+		upstreamIdentity,
 		strings.ToLower(strings.TrimSpace(firstNonEmpty(record.Model, record.Alias))),
 		canonicalClientAPIKey(record.APIKey),
 		fmt.Sprintf("%d", inputTokens),
@@ -894,7 +903,51 @@ func providerFromAuthID(authID string) string {
 	if strings.HasPrefix(lower, "codex-") || strings.HasPrefix(lower, "codex_") || strings.HasPrefix(lower, "codex.") {
 		return "codex"
 	}
+	// File-backed auth IDs are normally their JSON filenames. Generated OAuth
+	// and Vertex credentials use a provider prefix, and nested auth directories
+	// may leave a relative path in the ID. Recognize every native file-backed
+	// provider registered by CPA instead of falling back to the client protocol.
+	fileID := lower
+	if index := strings.LastIndexAny(fileID, "/\\"); index >= 0 {
+		fileID = fileID[index+1:]
+	}
+	switch {
+	case authIDHasProviderPrefix(fileID, "claude"), authIDHasProviderPrefix(fileID, "anthropic"):
+		return "claude"
+	case authIDHasProviderPrefix(fileID, "kimi"):
+		return "kimi"
+	case authIDHasProviderPrefix(fileID, "xai"), authIDHasProviderPrefix(fileID, "grok"):
+		return "xai"
+	case authIDHasProviderPrefix(fileID, "vertex"):
+		return "vertex"
+	case authIDHasProviderPrefix(fileID, "aistudio"):
+		return "aistudio"
+	case authIDHasProviderPrefix(fileID, "antigravity"):
+		return "antigravity"
+	case authIDHasProviderPrefix(fileID, "gemini"), authIDHasProviderPrefix(fileID, "geminicli"):
+		return "gemini"
+	}
 	return ""
+}
+
+// authIDHasProviderPrefix checks whether authID starts with provider followed by a
+// recognised separator (-, _, ., :). Note: '@' is deliberately not included as a
+// separator because CPA-generated file auth IDs always use '-' (e.g.
+// claude-user@example.com.json). An auth ID like claude@example.com.json (without a
+// trailing '-' after the provider) will not match — this is safe by construction.
+func authIDHasProviderPrefix(authID, provider string) bool {
+	if authID == provider {
+		return true
+	}
+	if !strings.HasPrefix(authID, provider) || len(authID) <= len(provider) {
+		return false
+	}
+	switch authID[len(provider)] {
+	case '-', '_', '.', ':':
+		return true
+	default:
+		return false
+	}
 }
 
 func fallbackAuthIndex(meta map[string]any, authID string) string {
@@ -925,8 +978,9 @@ func fallbackAuthType(meta map[string]any, authID string) string {
 		}
 		return "oauth"
 	default:
-		lower := strings.ToLower(value)
-		if strings.HasPrefix(lower, "codex-") || strings.HasPrefix(lower, "codex_") || strings.HasPrefix(lower, "codex.") {
+		provider := providerFromAuthID(authID)
+		switch provider {
+		case "claude", "codex", "kimi", "xai", "aistudio", "antigravity", "gemini", "vertex":
 			return "oauth"
 		}
 		return ""

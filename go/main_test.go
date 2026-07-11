@@ -1130,6 +1130,134 @@ func TestResponseStreamChunkDoesNotDoubleCountNativeCodexUsage(t *testing.T) {
 	}
 }
 
+func TestFileAuthFallbackProviderAndFingerprintMatchNativeUsage(t *testing.T) {
+	tests := []struct {
+		name             string
+		authID           string
+		nativeProvider   string
+		fallbackProvider string
+	}{
+		{name: "Anthropic OAuth", authID: "claude-user@example.com.json", nativeProvider: "claude", fallbackProvider: "claude"},
+		{name: "Kimi OAuth", authID: "kimi-1783738800000.json", nativeProvider: "kimi", fallbackProvider: "kimi"},
+		{name: "xAI OAuth", authID: "xai-user@example.com.json", nativeProvider: "xai", fallbackProvider: "xai"},
+		{name: "Grok legacy name", authID: "grok-user@example.com.json", nativeProvider: "xai", fallbackProvider: "xai"},
+		{name: "Vertex JSON", authID: "vertex-project-a.json", nativeProvider: "vertex", fallbackProvider: "vertex"},
+		{name: "AI Studio OAuth", authID: "aistudio-user@example.com.json", nativeProvider: "aistudio", fallbackProvider: "aistudio"},
+		{name: "Antigravity OAuth", authID: "antigravity-user@example.com.json", nativeProvider: "antigravity", fallbackProvider: "antigravity"},
+		{name: "nested auth file", authID: "team/xai-user@example.com.json", nativeProvider: "xai", fallbackProvider: "xai"},
+		{name: "custom filename", authID: "team/account-primary.json", nativeProvider: "xai", fallbackProvider: "claude"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fallback, ok := usageRecordFromResponseIntercept(ResponseInterceptRequest{
+				SourceFormat:   "claude",
+				Model:          "model-test",
+				RequestedModel: "model-test",
+				RequestHeaders: map[string][]string{
+					"Authorization": {"Bearer sk-client-alpha-0000xx"},
+				},
+				Body:       []byte(`{"model":"model-test","usage":{"input_tokens":100,"output_tokens":10}}`),
+				StatusCode: http.StatusOK,
+				Metadata: map[string]any{
+					"selected_auth_id": tt.authID,
+				},
+			})
+			if !ok {
+				t.Fatal("usageRecordFromResponseIntercept() ok = false, want true")
+			}
+			if fallback.Provider != tt.fallbackProvider {
+				t.Fatalf("fallback provider = %q, want %q", fallback.Provider, tt.fallbackProvider)
+			}
+
+			native := UsageRecord{
+				Provider:    tt.nativeProvider,
+				Model:       "model-test",
+				Alias:       "model-test",
+				APIKey:      "sk-client-alpha-0000xx",
+				AuthID:      tt.authID,
+				RequestedAt: time.Now(),
+				Detail:      UsageDetail{InputTokens: 100, OutputTokens: 10, TotalTokens: 110},
+			}
+			if got, want := usageRecordFingerprint(fallback), usageRecordFingerprint(native); got != want {
+				t.Fatalf("fallback fingerprint = %q, native fingerprint = %q", got, want)
+			}
+		})
+	}
+}
+
+func TestResponseInterceptFallbackDoesNotDoubleCountNativeXAIFileAuth(t *testing.T) {
+	previousStats := stats
+	previousFallbacks := usageFallbacks
+	previousDelay := usageFallbackRecordDelay
+	stats = NewRequestStatistics()
+	usageFallbacks = newUsageFallbackCoordinator()
+	usageFallbackRecordDelay = 25 * time.Millisecond
+	t.Cleanup(func() {
+		usageFallbacks.Flush()
+		usageFallbacks = previousFallbacks
+		usageFallbackRecordDelay = previousDelay
+		stats = previousStats
+	})
+
+	authID := "xai-5mx37vnwpr@b.ed.ccwu.cc.json"
+	interceptReq := ResponseInterceptRequest{
+		SourceFormat:   "claude",
+		Model:          "grok-4.5",
+		RequestedModel: "grok-4.5",
+		RequestHeaders: map[string][]string{
+			"Authorization": {"Bearer sk-client-alpha-0000xx"},
+		},
+		Body:       []byte(`{"model":"grok-4.5","usage":{"input_tokens":14884,"output_tokens":510}}`),
+		StatusCode: http.StatusOK,
+		Metadata: map[string]any{
+			"selected_auth_id": authID,
+		},
+	}
+	interceptBody, err := json.Marshal(interceptReq)
+	if err != nil {
+		t.Fatalf("marshal response intercept request: %v", err)
+	}
+	if _, err := handleResponseIntercept(interceptBody); err != nil {
+		t.Fatalf("handleResponseIntercept() error = %v", err)
+	}
+
+	native := UsageRecord{
+		Provider:     "xai",
+		ExecutorType: "XAIExecutor",
+		Model:        "grok-4.5",
+		Alias:        "grok-4.5",
+		APIKey:       "sk-client-alpha-0000xx",
+		AuthID:       authID,
+		AuthIndex:    "e1ebd6bb6df69b32",
+		AuthType:     "oauth",
+		Source:       "5mx37vnwpr@b.ed.ccwu.cc",
+		RequestedAt:  time.Now(),
+		Detail: UsageDetail{
+			InputTokens:  14884,
+			OutputTokens: 510,
+			CachedTokens: 471,
+			TotalTokens:  15394,
+		},
+	}
+	nativeBody, err := json.Marshal(native)
+	if err != nil {
+		t.Fatalf("marshal native usage record: %v", err)
+	}
+	if _, err := handleUsage(nativeBody); err != nil {
+		t.Fatalf("handleUsage() error = %v", err)
+	}
+
+	time.Sleep(3 * usageFallbackRecordDelay)
+	summary := stats.SummaryWithoutDetailsForRangeAt("24h", time.Now().Add(time.Second))
+	if summary.Usage.TotalRequests != 1 || summary.Usage.TotalTokens != 15394 {
+		t.Fatalf("summary usage = %#v, want one native xAI record", summary.Usage)
+	}
+	if _, ok := summary.Usage.APIs["claude"]; ok {
+		t.Fatalf("summary APIs = %#v, did not expect a Claude fallback record", summary.Usage.APIs)
+	}
+}
+
 func TestResponseInterceptFallbackUsesUpstreamMetadataWhenAvailable(t *testing.T) {
 	record, ok := usageRecordFromResponseIntercept(ResponseInterceptRequest{
 		SourceFormat:   "openai",
