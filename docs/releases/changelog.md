@@ -4,6 +4,20 @@
 
 `v1.0.0` 到 `v1.2.18` 为规范化发布流程建立前的 legacy 历史版本，不在本文件中回填；对应说明见 [v1-history.md](v1-history.md)。
 
+## v2.4.2 - 2026-07-11
+
+本版本修复文件认证（file-backed auth）的 fallback 用量记录去重问题，确保 Claude、Kimi、xAI、Vertex、AI Studio、Antigravity、Gemini 等文件认证的兜底记录能正确与原生用量记录匹配去重，避免重复计数。
+
+### 文件认证回退去重
+- `providerFromAuthID` 扩展支持从文件名识别 provider（claude/kimi/xai/vertex/aistudio/antigravity/gemini），包括嵌套目录路径和旧版 Grok 命名
+- `usageRecordFingerprint` 在 auth ID 无法推断 provider 时使用 `auth:<id>` 作为去重标识，确保自定义文件名认证也能正确去重
+- `fallbackAuthType` 对已识别的文件认证统一返回 `"oauth"`，不再依赖 auth ID 的格式推断
+- 新增 `authIDHasProviderPrefix` 辅助函数，统一 provider 前缀匹配逻辑
+
+### 测试
+- 增加 `TestFileAuthFallbackProviderAndFingerprintMatchNativeUsage` 参数化测试（9 个用例）
+- 增加 `TestResponseInterceptFallbackDoesNotDoubleCountNativeXAIFileAuth` 端到端去重验证测试
+
 ## v2.4.1 - 2026-07-11
 
 本版本完善请求事件明细中的缓存 token 展示，将缓存命中和缓存创建拆分为两个独立列。

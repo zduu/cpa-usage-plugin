@@ -824,12 +824,13 @@ func usageRecordFingerprint(record UsageRecord) string {
 	if !usageDetailHasTokens(record.Detail) {
 		return ""
 	}
-	upstreamIdentity := usageProviderFamily(record.Provider)
+	providerFamily := usageProviderFamily(record.Provider)
+	upstreamIdentity := providerFamily
 	if authID := strings.ToLower(strings.TrimSpace(record.AuthID)); authID != "" && providerFromAuthID(authID) == "" {
 		upstreamIdentity = "auth:" + authID
 	}
 	inputTokens := record.Detail.InputTokens
-	if usageProviderFamily(record.Provider) == "claude" {
+	if providerFamily == "claude" {
 		inputTokens += record.Detail.CacheReadTokens + record.Detail.CacheCreationTokens
 	}
 	outputTokens := record.Detail.OutputTokens

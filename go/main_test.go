@@ -1136,6 +1136,7 @@ func TestFileAuthFallbackProviderAndFingerprintMatchNativeUsage(t *testing.T) {
 		authID           string
 		nativeProvider   string
 		fallbackProvider string
+		cacheReadTokens  int64
 	}{
 		{name: "Anthropic OAuth", authID: "claude-user@example.com.json", nativeProvider: "claude", fallbackProvider: "claude"},
 		{name: "Kimi OAuth", authID: "kimi-1783738800000.json", nativeProvider: "kimi", fallbackProvider: "kimi"},
@@ -1146,10 +1147,12 @@ func TestFileAuthFallbackProviderAndFingerprintMatchNativeUsage(t *testing.T) {
 		{name: "Antigravity OAuth", authID: "antigravity-user@example.com.json", nativeProvider: "antigravity", fallbackProvider: "antigravity"},
 		{name: "nested auth file", authID: "team/xai-user@example.com.json", nativeProvider: "xai", fallbackProvider: "xai"},
 		{name: "custom filename", authID: "team/account-primary.json", nativeProvider: "xai", fallbackProvider: "claude"},
+		{name: "custom filename with cache", authID: "team/account-primary.json", nativeProvider: "xai", fallbackProvider: "claude", cacheReadTokens: 20},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			responseBody := fmt.Sprintf(`{"model":"model-test","usage":{"input_tokens":100,"output_tokens":10,"cache_read_input_tokens":%d}}`, tt.cacheReadTokens)
 			fallback, ok := usageRecordFromResponseIntercept(ResponseInterceptRequest{
 				SourceFormat:   "claude",
 				Model:          "model-test",
@@ -1157,7 +1160,7 @@ func TestFileAuthFallbackProviderAndFingerprintMatchNativeUsage(t *testing.T) {
 				RequestHeaders: map[string][]string{
 					"Authorization": {"Bearer sk-client-alpha-0000xx"},
 				},
-				Body:       []byte(`{"model":"model-test","usage":{"input_tokens":100,"output_tokens":10}}`),
+				Body:       []byte(responseBody),
 				StatusCode: http.StatusOK,
 				Metadata: map[string]any{
 					"selected_auth_id": tt.authID,
@@ -1170,6 +1173,7 @@ func TestFileAuthFallbackProviderAndFingerprintMatchNativeUsage(t *testing.T) {
 				t.Fatalf("fallback provider = %q, want %q", fallback.Provider, tt.fallbackProvider)
 			}
 
+			nativeInputTokens := int64(100) + tt.cacheReadTokens
 			native := UsageRecord{
 				Provider:    tt.nativeProvider,
 				Model:       "model-test",
@@ -1177,7 +1181,12 @@ func TestFileAuthFallbackProviderAndFingerprintMatchNativeUsage(t *testing.T) {
 				APIKey:      "sk-client-alpha-0000xx",
 				AuthID:      tt.authID,
 				RequestedAt: time.Now(),
-				Detail:      UsageDetail{InputTokens: 100, OutputTokens: 10, TotalTokens: 110},
+				Detail: UsageDetail{
+					InputTokens:  nativeInputTokens,
+					OutputTokens: 10,
+					CachedTokens: tt.cacheReadTokens,
+					TotalTokens:  nativeInputTokens + 10,
+				},
 			}
 			if got, want := usageRecordFingerprint(fallback), usageRecordFingerprint(native); got != want {
 				t.Fatalf("fallback fingerprint = %q, native fingerprint = %q", got, want)
