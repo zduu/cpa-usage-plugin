@@ -40,6 +40,26 @@ test('formatMs formats milliseconds', () => {
   assert.strictEqual(helpers.formatMs(-1), '-');
 });
 
+test('formatDurationAndTTFT shows duration and first-token time in one value', () => {
+  assert.strictEqual(helpers.formatDurationAndTTFT(181470, 12350), '181.47s / 12.35s');
+  assert.strictEqual(helpers.formatDurationAndTTFT(181470, 0), '181.47s / -');
+  assert.strictEqual(helpers.formatDurationAndTTFT(120, undefined), '120ms / -');
+});
+
+test('duration and first-token labels are localized in every supported language', () => {
+  const expected = {
+    'zh-CN': ['平均用时', '平均用时', '用时 / 首字'],
+    'zh-TW': ['平均用時', '平均用時', '用時 / 首字'],
+    en: ['Avg Duration', 'Avg Duration', 'Duration / First Token'],
+    ru: ['Среднее время', 'Ср. время', 'Время / первый токен'],
+  };
+  Object.entries(expected).forEach(([language, labels]) => {
+    assert.strictEqual(i18n.I18N_MAP[language].avg_latency, labels[0]);
+    assert.strictEqual(i18n.I18N_MAP[language].col_avg_latency, labels[1]);
+    assert.strictEqual(i18n.I18N_MAP[language].col_latency, labels[2]);
+  });
+});
+
 test('formatUsd preserves small non-zero costs', () => {
   assert.strictEqual(helpers.formatUsd(1.2345), 'US$1.23');
   assert.strictEqual(helpers.formatUsd(0.000445), 'US$0.000445');

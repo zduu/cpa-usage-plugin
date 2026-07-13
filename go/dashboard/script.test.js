@@ -207,6 +207,7 @@ function createDashboardHarness(options = {}) {
           auth_index: 'auth-1',
           failed: false,
           latency_ms: 120,
+          ttft_ms: 35,
           tokens: { input_tokens: 10, output_tokens: 5, cached_tokens: 7, cache_write_tokens: 2, total_tokens: 15 },
         };
       }),
@@ -311,6 +312,7 @@ function createDashboardHarness(options = {}) {
           status_code: failed ? 401 : 200,
           failure: failed ? '{"type":"error","error":{"type":"ModelError","message":"Model deepseek-v4-flash-free is not supported"}}' : '',
           latency_ms: failed ? 64 : 120,
+          ttft_ms: failed ? 0 : 40,
           tokens: failed ? { total_tokens: 0 } : { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
         };
       }),
@@ -684,6 +686,8 @@ test('dashboard loads summary and export button uses backend event export', asyn
   const eventsTable = document.getElementById('events').innerHTML;
   assert.match(eventsTable, /缓存命中/);
   assert.match(eventsTable, /缓存创建/);
+  assert.match(eventsTable, /用时 \/ 首字/);
+  assert.match(eventsTable, /120ms \/ 35ms/);
   assert.match(eventsTable, /<td>7<\/td><td>2<\/td><td>15<\/td>/);
   const apiDetail = document.getElementById('apiDetail').innerHTML;
   assert.match(apiDetail, /总花费/);
@@ -697,6 +701,9 @@ test('dashboard loads summary and export button uses backend event export', asyn
   assert.match(loadedApiDetail, /思考 token：5/);
   assert.match(document.getElementById('apiDetail').innerHTML, /错误统计/);
   assert.match(document.getElementById('apiDetail').innerHTML, /最近请求/);
+  assert.match(document.getElementById('apiDetail').innerHTML, /用时 \/ 首字/);
+  assert.match(document.getElementById('apiDetail').innerHTML, /120ms \/ 40ms/);
+  assert.match(document.getElementById('apiDetail').innerHTML, /64ms \/ -/);
   assert.match(document.getElementById('apiDetail').innerHTML, /401/);
   assert.match(document.getElementById('apiDetail').innerHTML, /deepseek-v4-flash-free/);
 
@@ -1000,6 +1007,7 @@ test('dashboard api detail renders long error and source cells with safe wrapper
       model: 'deepseek-v4-pro',
       failed: false,
       latency_ms: 4520,
+      ttft_ms: 810,
       total_tokens: 48035,
       source: 'openai-compatible-example-go',
       provider: 'openai-compatible-example-go',
@@ -1009,6 +1017,7 @@ test('dashboard api detail renders long error and source cells with safe wrapper
   assert.match(errorHtml, /<td><span class="errorText">&lt;!DOCTYPE html&gt;/);
   assert.doesNotMatch(errorHtml, /<td class="errorText">/);
   assert.match(recentHtml, /<td class="nameCell">openai-compatible-example-go<\/td>/);
+  assert.match(recentHtml, /4\.52s \/ 810ms/);
 });
 
 test('dashboard shows pending storage buffer status', async () => {

@@ -27,7 +27,7 @@
     </div>
   </div>
   <section class="cards">
-    <div class="stat"><div class="label" data-i18n="total_requests">总请求数</div><div class="value" id="totalRequests">-</div><div class="meta"><span class="ok" id="successText">成功请求：-</span><span class="bad" id="failureText">失败请求：-</span><span id="avgLatency">平均延迟：-</span></div><svg id="requestSpark" class="spark"></svg></div>
+    <div class="stat"><div class="label" data-i18n="total_requests">总请求数</div><div class="value" id="totalRequests">-</div><div class="meta"><span class="ok" id="successText">成功请求：-</span><span class="bad" id="failureText">失败请求：-</span><span id="avgLatency">平均用时：-</span></div><svg id="requestSpark" class="spark"></svg></div>
     <div class="stat purple"><div class="label" data-i18n="total_tokens">总 token 数</div><div class="value" id="totalTokens">-</div><div class="meta"><span id="cachedText">缓存命中 token：-</span><span id="cacheWriteText">缓存创建 token：-</span><span id="reasoningText">思考 token：-</span></div><svg id="tokenSpark" class="spark"></svg></div>
     <div class="stat green"><div class="label" data-i18n="rpm">每分钟请求</div><div class="value" id="rpm">-</div><div class="meta"><span id="rpmMeta">-</span></div><svg id="rpmSpark" class="spark"></svg></div>
     <div class="stat amber"><div class="label" data-i18n="total_cost">总花费</div><div class="value" id="totalCost">-</div><div class="meta"><span id="costMeta">-</span></div><svg id="costSpark" class="spark"></svg></div>
@@ -84,7 +84,7 @@
       <div id="apiDetail"></div>
     </div>
     <div class="panel">
-      <div class="panelHead"><h2 data-i18n="model_stats_title">模型统计</h2><span class="subtle" data-i18n="model_stats_subtle">请求数、token、延迟、成功率、缓存命中、花费和实际单价</span></div>
+      <div class="panelHead"><h2 data-i18n="model_stats_title">模型统计</h2><span class="subtle" data-i18n="model_stats_subtle">请求数、token、用时、成功率、缓存命中、花费和实际单价</span></div>
       <div class="tableWrap" id="modelStats"></div>
     </div>
     <div class="panel full">
@@ -97,7 +97,7 @@
         <select id="filterSource" class="select"></select>
         <select id="filterAuth" class="select"></select>
       </div>
-      <div class="eventsMeta"><span id="eventsCount">-</span><span data-i18n="events_latency_unit">延迟单位：毫秒</span></div>
+      <div class="eventsMeta"><span id="eventsCount">-</span><span data-i18n="events_latency_unit">用时 / 首字按时长显示 ms/s</span></div>
       <div class="tableWrap" id="events"></div>
     </div>
   </section>
