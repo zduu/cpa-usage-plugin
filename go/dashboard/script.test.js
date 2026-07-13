@@ -706,6 +706,7 @@ test('dashboard loads summary and export button uses backend event export', asyn
   assert.match(document.getElementById('apiDetail').innerHTML, /64ms \/ -/);
   assert.match(document.getElementById('apiDetail').innerHTML, /401/);
   assert.match(document.getElementById('apiDetail').innerHTML, /deepseek-v4-flash-free/);
+  assert.match(document.getElementById('apiDetail').innerHTML, /class="splitGrid detailActivityGrid"/);
 
   const pagedEventsCount = () => fetchCalls.filter((url) => url.includes('dashboard-events?')).length;
   const exportJobCreateCount = () => fetchRequests.filter((request) => request.url.includes('dashboard-events-export-jobs') && request.options.method === 'POST').length;
@@ -1013,11 +1014,27 @@ test('dashboard api detail renders long error and source cells with safe wrapper
       provider: 'openai-compatible-example-go',
     },
   ], false, null);
+  const barsHtml = context.barsHtml('来源分布', [{
+    name: 'xpspwc9mfb@privaterelay.appleid.com-extra-long-credential-name',
+    requests: 8,
+  }], 8, '暂无来源数据');
 
   assert.match(errorHtml, /<td><span class="errorText">&lt;!DOCTYPE html&gt;/);
   assert.doesNotMatch(errorHtml, /<td class="errorText">/);
   assert.match(recentHtml, /<td class="nameCell">openai-compatible-example-go<\/td>/);
   assert.match(recentHtml, /4\.52s \/ 810ms/);
+  assert.match(barsHtml, /class="barLabel" title="xpspwc9mfb@privaterelay\.appleid\.com-extra-long-credential-name"/);
+  assert.match(barsHtml, /class="barValue">8 请求/);
+});
+
+test('dashboard wide statistic panels span the full layout width', () => {
+  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
+  const css = fs.readFileSync(path.join(__dirname, 'style.css'), 'utf8');
+
+  assert.match(html, /<div class="panel full">\s*<div class="panelHead"><h2 data-i18n="upstream_title">/);
+  assert.match(html, /<div class="panel full">\s*<div class="panelHead"><h2 data-i18n="model_stats_title">/);
+  assert.match(css, /\.detailActivityGrid\{grid-template-columns:minmax\(0,1fr\)\}/);
+  assert.match(css, /\.barLabel\{[^}]*overflow-wrap:anywhere;[^}]*word-break:break-word/);
 });
 
 test('dashboard shows pending storage buffer status', async () => {
@@ -1309,13 +1326,15 @@ test('dashboard api detail follows current time range selector', async () => {
 test('dashboard api detail uses summary failure count when backend returns null payload', async () => {
   const { document, fetchCalls } = createDashboardHarness({ nullDashboardApiDetail: true, apiFailureCount: 0 });
 
-  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-api-detail')) && document.getElementById('apiDetail').innerHTML.includes('暂无失败请求'));
+  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-api-detail')) && document.getElementById('apiDetail').innerHTML.includes('请求明细加载失败'));
 
   const html = document.getElementById('apiDetail').innerHTML;
-  assert.match(html, /暂无失败请求/);
   assert.match(html, /失败 0/);
   assert.match(html, /metricValue">1,200</);
   assert.match(html, /请求明细加载失败/);
+  assert.match(html, /class="splitGrid detailActivityGrid"/);
+  assert.doesNotMatch(html, /错误统计/);
+  assert.doesNotMatch(html, /暂无失败请求/);
   assert.doesNotMatch(html, /请求明细加载失败：dashboard-api-detail 返回空数据/);
 });
 

@@ -287,10 +287,13 @@ tbody td{transition:background-color .12s}
 .metricMeta{margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;font-size:11px;line-height:1.4}
 .splitGrid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
 .splitGrid>*{min-width:0}
+.detailActivityGrid{grid-template-columns:minmax(0,1fr)}
 
 /* ---- 柱状图 ---- */
 .barList{display:grid;gap:8px}
-.barItem{display:grid;grid-template-columns:minmax(120px,1fr) minmax(160px,2fr) auto;gap:10px;align-items:center;font-size:12px}
+.barItem{display:grid;grid-template-columns:minmax(0,1fr) minmax(120px,2fr) max-content;gap:10px;align-items:center;font-size:12px}
+.barLabel{min-width:0;font-weight:600;color:var(--cpa-text-secondary);line-height:1.4;overflow-wrap:anywhere;word-break:break-word}
+.barValue{justify-self:end;white-space:nowrap}
 .barTrack{height:8px;background:var(--cpa-bg-bar);border-radius:999px;overflow:hidden}
 .barFill{height:100%;background:linear-gradient(90deg,#60a5fa,#3b82f6);border-radius:999px}
 .errorText{display:inline-block;max-width:none;min-width:max-content;overflow:visible;text-overflow:clip;white-space:nowrap;word-break:normal}
@@ -370,7 +373,7 @@ html[data-cpa-theme="light"] .anomalyBar.muted{background:#f8f9fb;border-color:#
 @media(max-width:1120px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.layout{grid-template-columns:1fr}.detailGrid{grid-template-columns:repeat(3,minmax(0,1fr))}.splitGrid{grid-template-columns:1fr}}
 @media(max-width:1000px){.priceGrid{grid-template-columns:repeat(3,minmax(0,1fr))}.priceGrid .btn{width:100%}}
 @media(max-width:760px){.priceGrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:640px){.shell{padding:14px}h1{font-size:20px}.cards{grid-template-columns:1fr}.value{font-size:24px}.priceGrid{grid-template-columns:1fr}.priceItem{align-items:stretch;flex-direction:column}.priceActions{justify-content:stretch}.priceActions .btn{flex:1 1 120px}.detailGrid{grid-template-columns:1fr}.barItem{grid-template-columns:1fr}.apiCard{grid-template-columns:1fr}.btn,.select,.input{width:100%}.toolbar{width:100%}.toolbar>*{flex:1 1 150px}table{font-size:11px}th,td{padding:6px 6px;white-space:normal;word-break:break-word}.nameCell{min-width:80px;font-size:11px}.errorText{max-width:none;min-width:max-content;white-space:nowrap;word-break:normal;overflow:visible}.header{padding-right:0}}
+@media(max-width:640px){.shell{padding:14px}h1{font-size:20px}.cards{grid-template-columns:1fr}.value{font-size:24px}.priceGrid{grid-template-columns:1fr}.priceItem{align-items:stretch;flex-direction:column}.priceActions{justify-content:stretch}.priceActions .btn{flex:1 1 120px}.detailGrid{grid-template-columns:1fr}.barItem{grid-template-columns:1fr}.barValue{justify-self:start}.apiCard{grid-template-columns:1fr}.btn,.select,.input{width:100%}.toolbar{width:100%}.toolbar>*{flex:1 1 150px}table{font-size:11px}th,td{padding:6px 6px;white-space:normal;word-break:break-word}.nameCell{min-width:80px;font-size:11px}.errorText{max-width:none;min-width:max-content;white-space:nowrap;word-break:normal;overflow:visible}.header{padding-right:0}}
 
 /* ---- 动画偏好 ---- */
 @media(prefers-reduced-motion:reduce){*{transition-duration:0s!important;animation-duration:0s!important}}
