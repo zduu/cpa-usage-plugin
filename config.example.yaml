@@ -72,15 +72,15 @@ plugins:
   #     type: bearer
   #     token-env: "CLIPROXY_PLUGIN_STORE_TOKEN"
   configs:
-    usage-statistics:
+    usage-dashboard-zduu:
       # CPA 插件宿主通用字段：是否启用当前插件
       enabled: true
       # CPA 插件宿主通用字段：插件优先级。仅在多个插件能力冲突时需要。
       # priority: 1
       # CPA 插件宿主通用字段：插件商店安装元数据。手动放置插件文件时可省略。
       # store:
-      #   version: "2.2.8"
-      #   release-tag: "v2.2.8"
+      #   version: "2.4.6"
+      #   release-tag: "v2.4.6"
       #   repository: "https://github.com/zduu/cpa-usage-plugin"
 
       # 以下为用量统计插件自己的配置字段

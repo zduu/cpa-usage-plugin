@@ -2,7 +2,7 @@
 
 CPA 用量统计插件，用于在 CLIProxyAPI/CPA v7 插件系统中记录请求用量，并提供管理页面查看统计数据。
 
-当前代码版本：`2.4.5`。
+当前代码版本：`2.4.6`。
 
 > **2.4.0 迁移提示**：插件 ID 已从 `usage-statistics` 改为 `usage-dashboard-zduu`，用于避开 CPA 官方商店中同 ID 插件造成的安装状态、配置和路由冲突。升级时必须先停用并删除旧插件，再安装新插件；历史统计数据路径保持不变。详细步骤见[部署文档的 2.3.4 → 2.4.0 迁移章节](docs/guides/cpa-usage.md#从-234-迁移到-240)。
 
@@ -15,7 +15,7 @@ CPA 用量统计插件，用于在 CLIProxyAPI/CPA v7 插件系统中记录请�
 - 按上游接口、模型、来源、CPA 凭证和调用 CPA 的客户端 API key 聚合统计。
 - 在 CPA 原生 usage 记录缺失时，可从成功响应体或流式 chunk 中的 usage 字段写入兜底统计，并通过延迟写入和指纹匹配避免与原生记录重复计数。
 - 轻量级首屏摘要：看板数据不含请求明细，首包体积不随记录数增长。
-- 请求事件明细支持按模型、来源、凭证、时间范围筛选，页面以滚动表格展示。
+- 请求事件明细支持按模型、来源、凭证、时间范围筛选，页面以滚动表格展示；来源列显示完整上游接口标识，便于区分同一 Codex、Claude 等提供商下的不同上游凭证。
 - 服务健康网格按 15 分钟展示最近 7 天状态，鼠标悬停显示窗口信息。
 - 用量趋势图支持切换每日成本、请求数、token 和平均 RPM，并提示近期用量突增或下降。
 - 支持导入/导出统计数据，导出包含版本、插件版本、明细数和配置摘要；导入返回输入/接收/拒绝/新增/跳过/过期忽略明细。
@@ -165,11 +165,11 @@ GET  /v0/management/plugins/usage-dashboard-zduu/health
 | `/usage/import` | POST | 导入统计数据，返回 `input_records`/`accepted_records`/`rejected_records`/`added`/`skipped`/`ignored_by_retention`。 |
 | `/model-prices` | GET/PUT/DELETE | 获取、新增/更新、删除全局模型价格表。 |
 | `/dashboard-summary` | GET | **推荐** — 轻量看板摘要，不含请求明细，含预计算健康网格/来源/客户端 API/模型聚合和 `_meta` 元数据。 |
-| `/dashboard-events` | GET | 事件查询，支持 `?limit=50&offset=0&range=24h&model=gpt-4&source=xxx&auth=xxx&api=xxx`。 |
+| `/dashboard-events` | GET | 事件查询，支持 `?limit=50&offset=0&range=24h&model=gpt-4&source=xxx&auth=xxx&api=xxx`；每条事件的可选 `api` 字段为完整上游接口分组键。 |
 | `/dashboard-events-export` | GET | 按筛选条件导出事件，默认 JSON；支持 `format=csv|jsonl`、`gzip=1` 和 `limit`，默认受 `export_max_records` 保护。`gzip=1` 返回 gzip 文件内容，不使用 `Content-Encoding`。 |
 | `/dashboard-events-export-jobs` | POST/GET/DELETE | 创建、查询或删除后台事件导出任务，参数与 `/dashboard-events-export` 一致。 |
 | `/dashboard-events-export-download` | GET | 下载已完成的后台事件导出任务结果，使用 `?id=<job_id>`。 |
-| `/dashboard-api-detail` | GET | 单个上游接口详情，支持 `?api=xxx&range=24h&model=gpt-4&source=xxx&auth=xxx`，返回模型分布、错误统计和最近请求。 |
+| `/dashboard-api-detail` | GET | 单个上游接口详情，支持 `?api=xxx&range=24h&model=gpt-4&source=xxx&auth=xxx`，返回模型分布、来源、错误统计和最近请求；最近请求同样携带完整上游接口 `api`。 |
 | `/dashboard-data` | GET | 兼容旧版，返回含全部 `details` 数组的完整数据。 |
 | `/health` | GET | 运行健康状态：`status`、`alerts`、`detail_count`、`evicted_total`、`total_requests`。 |
 
