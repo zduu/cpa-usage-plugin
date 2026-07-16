@@ -3,6 +3,7 @@
 *.dylib
 *.dll
 *.h
+/go/cpa-usage-plugin
 
 # 临时文件
 *.backup.*

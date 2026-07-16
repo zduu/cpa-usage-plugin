@@ -416,6 +416,9 @@ func dashboardEventCSVRecord(event RequestDetail) []string {
 }
 
 func dashboardExportSource(event RequestDetail) string {
+	if strings.TrimSpace(event.UpstreamAPI) != "" {
+		return event.UpstreamAPI
+	}
 	if strings.TrimSpace(event.Source) != "" {
 		return event.Source
 	}

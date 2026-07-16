@@ -769,6 +769,9 @@ func TestDashboardEventsPagination(t *testing.T) {
 	}
 	for i, event := range result.Events {
 		want := int64(29 - i)
+		if event.UpstreamAPI != "openai" {
+			t.Fatalf("page 1 event %d api = %q, want openai", i, event.UpstreamAPI)
+		}
 		if event.Tokens.TotalTokens != want {
 			t.Fatalf("page 1 event %d total tokens = %d, want %d", i, event.Tokens.TotalTokens, want)
 		}
@@ -790,6 +793,47 @@ func TestDashboardEventsPagination(t *testing.T) {
 		if event.Tokens.TotalTokens != want {
 			t.Fatalf("page 2 event %d total tokens = %d, want %d", i, event.Tokens.TotalTokens, want)
 		}
+	}
+}
+
+func TestDashboardEventsExposeExactCodexAndClaudeUpstreamInterfaces(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 20, DedupWindowMinutes: 0})
+	now := time.Now()
+	stats.Record(UsageRecord{
+		Provider:    "codex",
+		Source:      "codex",
+		AuthIndex:   "b374b8e7c98ca23c",
+		Model:       "gpt-5.5",
+		RequestedAt: now.Add(-time.Minute),
+		Detail:      UsageDetail{TotalTokens: 10},
+	})
+	stats.Record(UsageRecord{
+		Provider:    "claude",
+		Source:      "claude",
+		AuthID:      "openai-compatibility:opencode-go:f85c45252fee",
+		Model:       "deepseek-v4-pro",
+		RequestedAt: now,
+		Detail:      UsageDetail{TotalTokens: 20},
+	})
+
+	events := stats.QueryEvents(EventsQuery{Range: "all", Limit: 20})
+	if len(events.Events) != 2 {
+		t.Fatalf("events len = %d, want 2", len(events.Events))
+	}
+	wantAPIByModel := map[string]string{
+		"gpt-5.5":         "codex · 上游 b374b8e7c98ca23c",
+		"deepseek-v4-pro": "claude · 上游 f85c45252fee",
+	}
+	for _, event := range events.Events {
+		if event.UpstreamAPI != wantAPIByModel[event.Model] {
+			t.Fatalf("event model %q api = %q, want %q", event.Model, event.UpstreamAPI, wantAPIByModel[event.Model])
+		}
+	}
+
+	detail := stats.QueryAPIDetail("claude · 上游 f85c45252fee", "all", 10, 10)
+	if len(detail.RecentEvents) != 1 || detail.RecentEvents[0].UpstreamAPI != detail.API {
+		t.Fatalf("claude recent events = %#v, want api %q", detail.RecentEvents, detail.API)
 	}
 }
 
@@ -1127,6 +1171,20 @@ func TestDashboardEventsExportLimitKeepsTotalAndMarksTruncated(t *testing.T) {
 	}
 }
 
+func TestDashboardEventsCSVUsesFullUpstreamInterfaceAsSource(t *testing.T) {
+	event := RequestDetail{
+		UpstreamAPI: "codex · 上游 b374b8e7c98ca23c",
+		Source:      "codex",
+		Provider:    "codex",
+		Timestamp:   time.Date(2026, 7, 16, 5, 0, 0, 0, time.UTC),
+		Model:       "gpt-5.5",
+	}
+	record := dashboardEventCSVRecord(event)
+	if record[2] != event.UpstreamAPI {
+		t.Fatalf("csv source = %q, want full upstream interface %q", record[2], event.UpstreamAPI)
+	}
+}
+
 func TestDashboardEventsExportPageUsesSnapshotAndLimit(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0})
@@ -1356,6 +1414,11 @@ func TestDashboardAPIDetailAggregatesErrorsAndRecentEvents(t *testing.T) {
 	}
 	if len(result.RecentEvents) != 3 {
 		t.Fatalf("recent events = %d, want 3", len(result.RecentEvents))
+	}
+	for i, event := range result.RecentEvents {
+		if event.UpstreamAPI != "openai" {
+			t.Fatalf("recent event %d api = %q, want openai", i, event.UpstreamAPI)
+		}
 	}
 	if !result.RecentEvents[0].Timestamp.After(result.RecentEvents[1].Timestamp) ||
 		!result.RecentEvents[1].Timestamp.After(result.RecentEvents[2].Timestamp) {

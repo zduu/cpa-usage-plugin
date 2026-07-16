@@ -1027,6 +1027,51 @@ test('dashboard api detail renders long error and source cells with safe wrapper
   assert.match(barsHtml, /class="barValue">8 请求/);
 });
 
+test('dashboard api detail shows the full upstream interface for source rows', () => {
+  const { context, document } = createDashboardHarness();
+  const api = 'codex · 上游 b374b8e7c98ca23c';
+  context.renderApiDetailContent({ failure_count: 0, models: {} }, {
+    loading: false,
+    detail: {
+      api,
+      summary: { total_requests: 1, success_count: 1, failure_count: 0, total_tokens: 10 },
+      model_stats: [],
+      source_stats: [{ source: 'codex', provider: 'codex', total_requests: 1, success_count: 1, failure_count: 0, total_tokens: 10 }],
+      error_stats: [],
+      recent_events: [{ api, timestamp_ms: Date.UTC(2026, 6, 16, 5, 0, 0), model: 'gpt-5.5', source: 'codex', provider: 'codex', failed: false, latency_ms: 100, total_tokens: 10 }],
+    },
+  });
+
+  const html = document.getElementById('apiDetail').innerHTML;
+  assert.match(html, /class="barLabel" title="codex · 上游 b374b8e7c98ca23c"/);
+  assert.match(html, /<td class="nameCell">codex · 上游 b374b8e7c98ca23c<\/td>/);
+});
+
+test('dashboard event rows show the full upstream interface as source', () => {
+  const { context, document } = createDashboardHarness();
+  vm.runInContext(`
+    eventsData = {
+      total: 1,
+      limit: 500,
+      offset: 0,
+      events: [{
+        api: 'claude · 上游 f85c45252fee',
+        timestamp: '2026-07-16T05:00:00Z',
+        model: 'deepseek-v4-pro',
+        source: 'claude',
+        provider: 'claude',
+        auth_index: '',
+        failed: false,
+        latency_ms: 100,
+        tokens: { total_tokens: 10 }
+      }]
+    };
+    renderEventsContent();
+  `, context);
+
+  assert.match(document.getElementById('events').innerHTML, /<td class="nameCell">claude · 上游 f85c45252fee<\/td>/);
+});
+
 test('dashboard wide statistic panels span the full layout width', () => {
   const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
   const css = fs.readFileSync(path.join(__dirname, 'style.css'), 'utf8');

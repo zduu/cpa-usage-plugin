@@ -5637,17 +5637,20 @@ func dashboardRangeCutoff(rangeKey string, now time.Time) time.Time {
 }
 
 type dashboardEventDetail struct {
-	detail    *RequestDetail
-	sortKey   string
-	modelName string
-	sequence  int64
+	detail      *RequestDetail
+	upstreamAPI string
+	sortKey     string
+	modelName   string
+	sequence    int64
 }
 
 func (d dashboardEventDetail) requestDetail() RequestDetail {
 	if d.detail == nil {
 		return RequestDetail{}
 	}
-	return *d.detail
+	detail := *d.detail
+	detail.UpstreamAPI = d.upstreamAPI
+	return detail
 }
 
 func (d dashboardEventDetail) timestamp() time.Time {
@@ -5995,7 +5998,7 @@ func appendDashboardEventIndexForFilter(events []dashboardEventDetail, apiName s
 		}
 		for i := range modelSt.Details {
 			if dashboardEventIndexFilterMatches(&modelSt.Details[i], modelName, filter, value) {
-				events = append(events, dashboardEventDetail{detail: &modelSt.Details[i], sortKey: apiName, modelName: modelName, sequence: sequence})
+				events = append(events, dashboardEventDetail{detail: &modelSt.Details[i], upstreamAPI: apiName, sortKey: apiName, modelName: modelName, sequence: sequence})
 			}
 			sequence++
 		}
@@ -6049,7 +6052,7 @@ func appendDashboardEventIndexForAPI(events []dashboardEventDetail, apiName stri
 			continue
 		}
 		for i := range modelSt.Details {
-			events = append(events, dashboardEventDetail{detail: &modelSt.Details[i], sortKey: apiName, modelName: modelName, sequence: sequence})
+			events = append(events, dashboardEventDetail{detail: &modelSt.Details[i], upstreamAPI: apiName, sortKey: apiName, modelName: modelName, sequence: sequence})
 			sequence++
 		}
 	}
@@ -6529,7 +6532,7 @@ func (s *RequestStatistics) QueryAPIDetailAt(api string, rangeKey string, recent
 			es.Count++
 		}
 
-		appendBoundedDashboardEventHeap(&recentEvents, dashboardEventDetail{detail: dm.detail, sortKey: d.Model, sequence: sequence}, recentLimit)
+		appendBoundedDashboardEventHeap(&recentEvents, dashboardEventDetail{detail: dm.detail, upstreamAPI: dm.upstreamAPI, sortKey: d.Model, sequence: sequence}, recentLimit)
 		sequence++
 	}
 

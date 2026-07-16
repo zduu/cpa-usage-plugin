@@ -67,7 +67,7 @@ function trimCredentialSuffix(value) {
   if (colon.length >= 3 && looksLikeCredentialId(colon[colon.length - 1])) return colon.slice(0, -1).join(':');
   return s;
 }
-function sourceLabel(detail) { const s = trimCredentialSuffix(detail.source); if (s && !looksLikeKey(s)) return s; const p = trimCredentialSuffix(detail.provider); if (p && !looksLikeKey(p)) return p; return t('unknown_source') }
+function sourceLabel(detail) { const a = String(detail.api || '').trim(); if (a) return friendlyApiName(a); const s = trimCredentialSuffix(detail.source); if (s && !looksLikeKey(s)) return s; const p = trimCredentialSuffix(detail.provider); if (p && !looksLikeKey(p)) return p; return t('unknown_source') }
 function sourceKey(detail) { return sourceLabel(detail) }
 function friendlyApiName(apiName) { const clean = trimCredentialSuffix(apiName); if (!clean) return t('unknown_interface'); const parts = clean.split(' · ').filter(function (p) { return !looksLikeKey(p) && !isCredentialMarker(p) && !isCredentialLabel(p) && !looksLikeCredentialId(p) }); return parts.length ? parts.join(' · ') : clean }
 function clientApiLabel(detail) { const label = String((detail && detail.api_key) || '').trim(); return label || t('unknown_api') }

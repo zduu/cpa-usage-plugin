@@ -296,6 +296,8 @@ test('trimCredentialSuffix removes credential suffixes', () => {
 });
 
 test('sourceLabel returns clean source name', () => {
+  assert.strictEqual(helpers.sourceLabel({ api: 'codex · 上游 b374b8e7c98ca23c', source: 'codex', provider: 'codex' }), 'codex · 上游 b374b8e7c98ca23c');
+  assert.strictEqual(helpers.sourceLabel({ api: 'claude · 上游 f85c45252fee', source: 'claude', provider: 'claude' }), 'claude · 上游 f85c45252fee');
   assert.strictEqual(helpers.sourceLabel({ source: 'openai · key · hash', provider: 'openai' }), 'openai');
   assert.strictEqual(helpers.sourceLabel({ source: 'sk-secret-key', provider: 'my-provider' }), 'my-provider');
   assert.strictEqual(helpers.sourceLabel({}), '未知来源');

@@ -705,24 +705,28 @@ type ImportResponse struct {
 // ============================================================================
 
 type RequestDetail struct {
-	Model      string              `json:"model,omitempty"`
-	Timestamp  time.Time           `json:"timestamp"`
-	LatencyMs  int64               `json:"latency_ms"`
-	TTFTMs     int64               `json:"ttft_ms,omitempty"`
-	APIKey     string              `json:"api_key,omitempty"`
-	APIKeyHash string              `json:"api_key_hash,omitempty"`
-	Source     string              `json:"source"`
-	Provider   string              `json:"provider,omitempty"`
-	AuthID     string              `json:"auth_id,omitempty"`
-	AuthIndex  string              `json:"auth_index"`
-	AuthType   string              `json:"auth_type,omitempty"`
-	BaseURL    string              `json:"base_url,omitempty"`
-	Thinking   UsageThinking       `json:"thinking,omitempty"`
-	Tokens     TokenStats          `json:"tokens"`
-	Failed     bool                `json:"failed"`
-	StatusCode int                 `json:"status_code,omitempty"`
-	Failure    string              `json:"failure,omitempty"`
-	Headers    map[string][]string `json:"headers,omitempty"`
+	// UpstreamAPI is the exact dashboard grouping key for the upstream
+	// interface, for example "codex · 上游 b374b8e7c98ca23c". It is populated
+	// only on query result copies and is not stored with recorded details.
+	UpstreamAPI string              `json:"api,omitempty"`
+	Model       string              `json:"model,omitempty"`
+	Timestamp   time.Time           `json:"timestamp"`
+	LatencyMs   int64               `json:"latency_ms"`
+	TTFTMs      int64               `json:"ttft_ms,omitempty"`
+	APIKey      string              `json:"api_key,omitempty"`
+	APIKeyHash  string              `json:"api_key_hash,omitempty"`
+	Source      string              `json:"source"`
+	Provider    string              `json:"provider,omitempty"`
+	AuthID      string              `json:"auth_id,omitempty"`
+	AuthIndex   string              `json:"auth_index"`
+	AuthType    string              `json:"auth_type,omitempty"`
+	BaseURL     string              `json:"base_url,omitempty"`
+	Thinking    UsageThinking       `json:"thinking,omitempty"`
+	Tokens      TokenStats          `json:"tokens"`
+	Failed      bool                `json:"failed"`
+	StatusCode  int                 `json:"status_code,omitempty"`
+	Failure     string              `json:"failure,omitempty"`
+	Headers     map[string][]string `json:"headers,omitempty"`
 }
 
 type TokenStats struct {
