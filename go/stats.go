@@ -4225,8 +4225,10 @@ func snapshotImportDetailCapacity(snapshot StatisticsSnapshot, cutoff time.Time,
 
 func usageDetailTotalTokens(detail UsageDetail, provider string) int64 {
 	_, _, cacheTokens := usageDetailCacheTokenParts(detail)
-	computedTokens := nonNegativeInt64(detail.InputTokens) + nonNegativeInt64(detail.OutputTokens)
-	if usageProviderFamily(provider) == "claude" {
+	inputTokens := nonNegativeInt64(detail.InputTokens)
+	outputTokens := nonNegativeInt64(detail.OutputTokens)
+	computedTokens := inputTokens + outputTokens
+	if usesExclusiveCacheInput(provider, inputTokens, outputTokens, cacheTokens, detail.TotalTokens) {
 		computedTokens += cacheTokens
 	}
 	return maxInt64(nonNegativeInt64(detail.TotalTokens), computedTokens)
@@ -4245,11 +4247,37 @@ func detailTotalTokens(tokens TokenStats) int64 {
 
 func detailTotalTokensForRequest(detail RequestDetail) int64 {
 	totalTokens := detailTotalTokens(detail.Tokens)
-	if usageProviderFamily(detail.Provider) == "claude" {
-		expandedTokens := nonNegativeInt64(detail.Tokens.InputTokens) + nonNegativeInt64(detail.Tokens.OutputTokens) + normalizedCacheTokens(detail.Tokens)
+	inputTokens := nonNegativeInt64(detail.Tokens.InputTokens)
+	outputTokens := nonNegativeInt64(detail.Tokens.OutputTokens)
+	cacheTokens := normalizedCacheTokens(detail.Tokens)
+	if usesExclusiveCacheInput(detail.Provider, inputTokens, outputTokens, cacheTokens, detail.Tokens.TotalTokens) {
+		expandedTokens := inputTokens + outputTokens + cacheTokens
 		totalTokens = maxInt64(totalTokens, expandedTokens)
 	}
 	return totalTokens
+}
+
+func detailUncachedInputTokensForRequest(detail RequestDetail) int64 {
+	inputTokens := nonNegativeInt64(detail.Tokens.InputTokens)
+	if providerUsesExclusiveCacheInput(detail.Provider) {
+		return inputTokens
+	}
+	cacheTokens := normalizedCacheTokens(detail.Tokens)
+	if usesExclusiveCacheInput(detail.Provider, inputTokens, nonNegativeInt64(detail.Tokens.OutputTokens), cacheTokens, detail.Tokens.TotalTokens) {
+		return inputTokens
+	}
+	return maxInt64(inputTokens-cacheTokens, 0)
+}
+
+func usesExclusiveCacheInput(provider string, inputTokens, outputTokens, cacheTokens, totalTokens int64) bool {
+	if providerUsesExclusiveCacheInput(provider) {
+		return true
+	}
+	return strings.TrimSpace(provider) == "" && totalTokens > 0 && totalTokens >= inputTokens+outputTokens+cacheTokens
+}
+
+func providerUsesExclusiveCacheInput(provider string) bool {
+	return usageProviderFamily(provider) == "claude"
 }
 
 func detailTotalsFromRequest(detail RequestDetail) detailTotals {
@@ -4298,8 +4326,7 @@ func (s *RequestStatistics) timeSeriesTokenCostLocked(stat TimeSeriesTokenStat) 
 	cacheWriteTokens := nonNegativeInt64(stat.CacheWriteTokens)
 	cacheTotal := cacheReadTokens + cacheWriteTokens
 	uncachedInputTokens := maxInt64(inputTokens-cacheTotal, 0)
-	providerFamily := usageProviderFamily(stat.Provider)
-	if providerFamily == "claude" || (providerFamily == "" && totalTokens >= inputTokens+outputTokens+cacheTotal) {
+	if usesExclusiveCacheInput(stat.Provider, inputTokens, outputTokens, cacheTotal, totalTokens) {
 		uncachedInputTokens = inputTokens
 	}
 	return float64(uncachedInputTokens)/1e6*price.Prompt +

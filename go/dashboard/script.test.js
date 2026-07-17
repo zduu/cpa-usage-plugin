@@ -219,9 +219,9 @@ function createDashboardHarness(options = {}) {
     const api = parsed.searchParams.get('api');
     const totalRows = api ? 8 : 1200;
     if (parsed.searchParams.get('format') === 'csv') {
-      return '时间,模型,来源,凭证,结果,延迟毫秒,TTFT毫秒,输入 token,输出 token,思考 token,缓存 token,缓存写入 token,总 token,状态码,错误\n' +
+      return '时间,模型,来源,凭证,结果,延迟毫秒,TTFT毫秒,非缓存输入 token,输出 token,思考 token,缓存 token,缓存写入 token,总 token,状态码,错误\n' +
         eventsPage('http://test.local/dashboard-events?limit=' + totalRows + '&offset=0').events.slice(0, totalRows)
-          .map((event) => [event.timestamp, event.model, event.source, event.auth_index, event.failed ? '失败' : '成功', event.latency_ms, '', event.tokens.input_tokens, event.tokens.output_tokens, '', '', '', event.tokens.total_tokens, '', ''].join(','))
+          .map((event) => [event.timestamp, event.model, event.source, event.auth_index, event.failed ? '失败' : '成功', event.latency_ms, '', 1, event.tokens.output_tokens, '', 7, 2, event.tokens.total_tokens, '', ''].join(','))
           .join('\n');
     }
     return {
@@ -688,6 +688,7 @@ test('dashboard loads summary and export button uses backend event export', asyn
   assert.match(eventsTable, /缓存创建/);
   assert.match(eventsTable, /用时 \/ 首字/);
   assert.match(eventsTable, /120ms \/ 35ms/);
+  assert.match(eventsTable, /<td>1<\/td><td>5<\/td><td>0<\/td><td>7<\/td><td>2<\/td><td>15<\/td>/);
   assert.match(eventsTable, /<td>7<\/td><td>2<\/td><td>15<\/td>/);
   const apiDetail = document.getElementById('apiDetail').innerHTML;
   assert.match(apiDetail, /总花费/);
@@ -726,6 +727,9 @@ test('dashboard loads summary and export button uses backend event export', asyn
   assert.strictEqual(syncExportEventsCount(), beforeSyncExports);
   assert.strictEqual(exportDownloadCount(), beforeExportDownloads + 2);
   assert.ok(fetchRequests.some((request) => request.url.includes('dashboard-events-export-jobs') && request.options.method === 'POST' && new URL(request.url, 'http://test.local').searchParams.get('format') === 'csv'));
+  const csvExport = downloads.find((d) => d.text && d.text.startsWith('时间,模型'));
+  assert.match(csvExport.text, /非缓存输入 token/);
+  assert.match(csvExport.text, /,1,5,,7,2,15,/);
   const exported = JSON.parse(downloads.find((d) => d.text && d.text.startsWith('[')).text);
   assert.strictEqual(exported.length, 1200);
 });

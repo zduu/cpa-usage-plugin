@@ -81,6 +81,19 @@ test('totalTokens computes token sum', () => {
   assert.strictEqual(helpers.totalTokens(detail5), 25);
 });
 
+test('uncachedInputTokens excludes cache only for cache-inclusive providers', () => {
+  assert.strictEqual(helpers.uncachedInputTokens({ provider: 'openai', tokens: { input_tokens: 100, output_tokens: 20, cached_tokens: 30, cache_write_tokens: 10, total_tokens: 120 } }), 60);
+  assert.strictEqual(helpers.uncachedInputTokens({ provider: 'anthropic', tokens: { input_tokens: 100, output_tokens: 20, cached_tokens: 30, cache_write_tokens: 10, total_tokens: 160 } }), 100);
+  assert.strictEqual(helpers.uncachedInputTokens({ tokens: { input_tokens: 60, output_tokens: 20, cached_tokens: 30, cache_write_tokens: 10, total_tokens: 120 } }), 60);
+  assert.strictEqual(helpers.uncachedInputTokens({ provider: 'openai', tokens: { input_tokens: 10, cached_tokens: 20 } }), 0);
+});
+
+test('usesExclusiveCacheInput only infers exclusive accounting from a positive total', () => {
+  assert.strictEqual(helpers.usesExclusiveCacheInput('anthropic', 100, 20, 40, 160), true);
+  assert.strictEqual(helpers.usesExclusiveCacheInput('', 60, 20, 40, 120), true);
+  assert.strictEqual(helpers.usesExclusiveCacheInput('', 0, 0, 0, 0), false);
+});
+
 test('detailCost computes cost', () => {
   const prices = { 'gpt-4': { prompt: 30, completion: 60, cache: 15 } };
   const detail = {

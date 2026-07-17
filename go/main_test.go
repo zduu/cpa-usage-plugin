@@ -4512,7 +4512,7 @@ func TestDashboardEventsExportSupportsCSVJSONLAndGzip(t *testing.T) {
 	}
 	csvBody := string(csvResp.Body)
 	if !strings.HasPrefix(csvBody, "时间,模型,来源") || !strings.Contains(csvBody, "缓存写入 token") ||
-		!strings.Contains(csvBody, ",10,5,0,2,3,15,") || !strings.Contains(csvBody, "gpt-4") || !strings.Contains(csvBody, "rate limited") {
+		!strings.Contains(csvBody, ",5,5,0,2,3,15,") || !strings.Contains(csvBody, "gpt-4") || !strings.Contains(csvBody, "rate limited") {
 		t.Fatalf("csv body missing expected rows: %q", csvBody)
 	}
 

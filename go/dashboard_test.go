@@ -1185,6 +1185,36 @@ func TestDashboardEventsCSVUsesFullUpstreamInterfaceAsSource(t *testing.T) {
 	}
 }
 
+func TestDashboardEventCSVUsesUncachedInputTokens(t *testing.T) {
+	openAI := RequestDetail{
+		Provider: "openai",
+		Tokens:   TokenStats{InputTokens: 100, OutputTokens: 20, CachedTokens: 30, CacheWriteTokens: 10, CacheTokens: 40, TotalTokens: 120},
+	}
+	if got := dashboardEventCSVRecord(openAI)[7]; got != "60" {
+		t.Fatalf("OpenAI CSV input = %q, want uncached input 60", got)
+	}
+
+	claude := RequestDetail{
+		Provider: "anthropic",
+		Tokens:   TokenStats{InputTokens: 100, OutputTokens: 20, CachedTokens: 30, CacheWriteTokens: 10, CacheTokens: 40, TotalTokens: 160},
+	}
+	if got := dashboardEventCSVRecord(claude)[7]; got != "100" {
+		t.Fatalf("Claude CSV input = %q, want already-exclusive input 100", got)
+	}
+}
+
+func TestUsesExclusiveCacheInputRequiresPositiveUnknownTotal(t *testing.T) {
+	if !usesExclusiveCacheInput("anthropic", 100, 20, 40, 160) {
+		t.Fatal("Anthropic provider should use exclusive cache input")
+	}
+	if !usesExclusiveCacheInput("", 60, 20, 40, 120) {
+		t.Fatal("empty provider with a matching positive total should use exclusive cache input")
+	}
+	if usesExclusiveCacheInput("", 0, 0, 0, 0) {
+		t.Fatal("empty provider with a zero total must not infer exclusive cache input")
+	}
+}
+
 func TestDashboardEventsExportPageUsesSnapshotAndLimit(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0})

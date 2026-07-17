@@ -387,7 +387,7 @@ func dashboardEventsCSV(events []RequestDetail) ([]byte, error) {
 }
 
 func dashboardEventsCSVHeader() []string {
-	return []string{"时间", "模型", "来源", "凭证", "结果", "延迟毫秒", "TTFT毫秒", "输入 token", "输出 token", "思考 token", "缓存 token", "缓存写入 token", "总 token", "状态码", "错误"}
+	return []string{"时间", "模型", "来源", "凭证", "结果", "延迟毫秒", "TTFT毫秒", "非缓存输入 token", "输出 token", "思考 token", "缓存 token", "缓存写入 token", "总 token", "状态码", "错误"}
 }
 
 func dashboardEventCSVRecord(event RequestDetail) []string {
@@ -404,7 +404,7 @@ func dashboardEventCSVRecord(event RequestDetail) []string {
 		status,
 		strconv.FormatInt(event.LatencyMs, 10),
 		strconv.FormatInt(event.TTFTMs, 10),
-		strconv.FormatInt(tokens.InputTokens, 10),
+		strconv.FormatInt(detailUncachedInputTokensForRequest(event), 10),
 		strconv.FormatInt(tokens.OutputTokens, 10),
 		strconv.FormatInt(tokens.ReasoningTokens, 10),
 		strconv.FormatInt(normalizedCacheReadTokens(tokens), 10),
