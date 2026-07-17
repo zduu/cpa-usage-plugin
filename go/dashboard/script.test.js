@@ -1051,6 +1051,37 @@ test('dashboard api detail shows the full upstream interface for source rows', (
   assert.match(html, /<td class="nameCell">codex · 上游 b374b8e7c98ca23c<\/td>/);
 });
 
+test('dashboard api detail labels every model with its cost', () => {
+  const { context, document } = createDashboardHarness();
+  vm.runInContext(`
+    modelPrices = { 'gpt-4.1': { prompt: 2, completion: 8 } };
+    manualModelPrices = {};
+  `, context);
+  context.renderApiDetailContent({ failure_count: 0, models: {} }, {
+    loading: false,
+    detail: {
+      api: 'openai',
+      summary: { total_requests: 2, success_count: 2, failure_count: 0, total_tokens: 1500000 },
+      model_stats: [{
+        model: 'gpt-4.1',
+        total_requests: 2,
+        success_count: 2,
+        failure_count: 0,
+        total_tokens: 1500000,
+        input_tokens: 1000000,
+        output_tokens: 500000,
+      }],
+      source_stats: [{ source: 'openai', provider: 'openai', total_requests: 2 }],
+      error_stats: [],
+      recent_events: [],
+    },
+  });
+
+  const html = document.getElementById('apiDetail').innerHTML;
+  assert.match(html, /gpt-4\.1<span class="barCost">US\$6\.00<\/span>/);
+  assert.doesNotMatch(html, /openai<span class="barCost">/);
+});
+
 test('dashboard event rows show the full upstream interface as source', () => {
   const { context, document } = createDashboardHarness();
   vm.runInContext(`

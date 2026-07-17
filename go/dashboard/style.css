@@ -293,6 +293,7 @@ tbody td{transition:background-color .12s}
 .barList{display:grid;gap:8px}
 .barItem{display:grid;grid-template-columns:minmax(0,1fr) minmax(120px,2fr) max-content;gap:10px;align-items:center;font-size:12px}
 .barLabel{min-width:0;font-weight:600;color:var(--cpa-text-secondary);line-height:1.4;overflow-wrap:anywhere;word-break:break-word}
+.barCost{display:inline-block;margin-left:6px;color:var(--cpa-text-tertiary);font-weight:500;white-space:nowrap}
 .barValue{justify-self:end;white-space:nowrap}
 .barTrack{height:8px;background:var(--cpa-bg-bar);border-radius:999px;overflow:hidden}
 .barFill{height:100%;background:linear-gradient(90deg,#60a5fa,#3b82f6);border-radius:999px}

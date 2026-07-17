@@ -632,7 +632,8 @@ function barsHtml(title, rows, total, emptyText) {
   if (!rows.length) return '<div><div class="subtle" style="margin-bottom:8px">' + esc(title) + '</div><div class="empty">' + esc(emptyText) + '</div></div>';
   return '<div><div class="subtle" style="margin-bottom:8px">' + esc(title) + '</div><div class="barList">' + rows.slice(0, 8).map((r) => {
     const width = total ? Math.max(4, Math.round(r.requests / total * 100)) : 0;
-    return '<div class="barItem"><div class="barLabel" title="' + esc(r.name) + '">' + esc(r.name) + '</div><div class="barTrack"><div class="barFill" style="width:' + width + '%"></div></div><div class="barValue">' + formatInteger(r.requests) + ' ' + t('col_requests') + '</div></div>';
+    const cost = Number.isFinite(r.cost) ? '<span class="barCost">' + formatUsd(r.cost) + '</span>' : '';
+    return '<div class="barItem"><div class="barLabel" title="' + esc(r.name) + '">' + esc(r.name) + cost + '</div><div class="barTrack"><div class="barFill" style="width:' + width + '%"></div></div><div class="barValue">' + formatInteger(r.requests) + ' ' + t('col_requests') + '</div></div>';
   }).join('') + '</div></div>';
 }
 
@@ -691,11 +692,12 @@ function renderApiDetailContent(apiData, detailState) {
   const knownFailureCount = num(apiData && apiData.failure_count);
   const rate = requests ? success / requests * 100 : 100;
   const models = detail ? (detail.model_stats || []).map((m) => ({ name: m.model || 'unknown', requests: num(m.total_requests), success: num(m.success_count), failure: num(m.failure_count), tokens: num(m.total_tokens), total_tokens: num(m.total_tokens), input_tokens: num(m.input_tokens), output_tokens: num(m.output_tokens), cached_tokens: num(m.cached_tokens), cache_write_tokens: num(m.cache_write_tokens), reasoning_tokens: num(m.reasoning_tokens), providers: m.providers || [], avgLatency: num(m.avg_latency_ms) })) : Object.entries(apiData.models || {}).map(([name, m]) => ({ name, requests: num(m.total_requests), success: num(m.success_count), failure: num(m.failure_count), tokens: num(m.total_tokens), total_tokens: num(m.total_tokens), input_tokens: num(m.input_tokens), output_tokens: num(m.output_tokens), cached_tokens: num(m.cached_tokens), cache_write_tokens: num(m.cache_write_tokens), reasoning_tokens: num(m.reasoning_tokens), providers: m.providers || [], avgLatency: num(m.avg_latency_ms) }));
+  models.forEach((m) => { m.cost = aggregateCost({ model: m.name, total_tokens: m.total_tokens, input_tokens: m.input_tokens, output_tokens: m.output_tokens, cached_tokens: m.cached_tokens, cache_write_tokens: m.cache_write_tokens, reasoning_tokens: m.reasoning_tokens, providers: m.providers }, modelPrices, manualModelPrices) });
   models.sort((a, b) => b.requests - a.requests);
   const sources = detail ? (detail.source_stats || []).map((s) => ({ name: sourceLabel({ api: detail.api, source: s.source, provider: s.provider }), requests: num(s.total_requests), success: num(s.success_count), failure: num(s.failure_count), tokens: num(s.total_tokens) })) : [];
   const errorRows = (detail && detail.error_stats) || [];
   const showErrorStats = errorRows.length > 0 || knownFailureCount > 0;
-  const totalCost = models.reduce((s, m) => s + aggregateCost({ model: m.name, total_tokens: m.total_tokens, input_tokens: m.input_tokens, output_tokens: m.output_tokens, cached_tokens: m.cached_tokens, cache_write_tokens: m.cache_write_tokens, reasoning_tokens: m.reasoning_tokens, providers: m.providers }, modelPrices, manualModelPrices), 0);
+  const totalCost = models.reduce((s, m) => s + m.cost, 0);
   $('apiDetail').innerHTML = '<div class="detailGrid">' +
     metricHtml(t('requests_label'), formatInteger(requests), '<span class="ok">' + t('success_label') + ' ' + formatInteger(success) + '</span>&nbsp;<span class="bad">' + t('failure_label') + ' ' + formatInteger(failure) + '</span>') +
     metricHtml(t('success_rate'), '<span class="' + (rate >= 95 ? 'ok' : rate >= 80 ? 'neutral' : 'bad') + '">' + pct(rate) + '</span>') +
