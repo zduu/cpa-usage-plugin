@@ -628,12 +628,13 @@ function metricHtml(label, value, extra) {
   return '<div class="metric"><div class="metricLabel">' + esc(label) + '</div><div class="metricValue">' + value + '</div>' + (extra ? '<div class="subtle metricMeta">' + extra + '</div>' : '') + '</div>';
 }
 
-function barsHtml(title, rows, total, emptyText) {
+function barsHtml(title, rows, total, emptyText, showTokenUsage) {
   if (!rows.length) return '<div><div class="subtle" style="margin-bottom:8px">' + esc(title) + '</div><div class="empty">' + esc(emptyText) + '</div></div>';
   return '<div><div class="subtle" style="margin-bottom:8px">' + esc(title) + '</div><div class="barList">' + rows.slice(0, 8).map((r) => {
     const width = total ? Math.max(4, Math.round(r.requests / total * 100)) : 0;
+    const tokens = showTokenUsage ? '<span class="barTokens">' + compact(r.tokens) + '</span>' : '';
     const cost = Number.isFinite(r.cost) ? '<span class="barCost">' + formatUsd(r.cost) + '</span>' : '';
-    return '<div class="barItem"><div class="barLabel" title="' + esc(r.name) + '">' + esc(r.name) + cost + '</div><div class="barTrack"><div class="barFill" style="width:' + width + '%"></div></div><div class="barValue">' + formatInteger(r.requests) + ' ' + t('col_requests') + '</div></div>';
+    return '<div class="barItem"><div class="barLabel" title="' + esc(r.name) + '">' + esc(r.name) + tokens + cost + '</div><div class="barTrack"><div class="barFill" style="width:' + width + '%"></div></div><div class="barValue">' + formatInteger(r.requests) + ' ' + t('col_requests') + '</div></div>';
   }).join('') + '</div></div>';
 }
 
@@ -707,7 +708,7 @@ function renderApiDetailContent(apiData, detailState) {
     metricHtml(t('total_cost'), formatUsd(totalCost), '<span>' + withLabel('total_tokens_label', compact(summary.total_tokens)) + '</span>') +
     '</div>' +
     '<div class="splitGrid">' +
-    barsHtml(t('model_distribution'), models, requests, t('no_model_data')) +
+    barsHtml(t('model_distribution'), models, requests, t('no_model_data'), true) +
     barsHtml(t('source_distribution'), sources, requests, loading ? t('loading_source_data') : t('no_source_data')) +
     '</div>' +
     '<div class="splitGrid detailActivityGrid">' + (showErrorStats ? apiDetailErrorHtml(errorRows, loading, error, knownFailureCount) : '') + apiDetailRecentHtml(rows, loading, error) + '</div>';

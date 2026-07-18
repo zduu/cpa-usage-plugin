@@ -1051,7 +1051,7 @@ test('dashboard api detail shows the full upstream interface for source rows', (
   assert.match(html, /<td class="nameCell">codex · 上游 b374b8e7c98ca23c<\/td>/);
 });
 
-test('dashboard api detail labels every model with its cost', () => {
+test('dashboard api detail labels every model with its token usage and cost', () => {
   const { context, document } = createDashboardHarness();
   vm.runInContext(`
     modelPrices = { 'gpt-4.1': { prompt: 2, completion: 8 } };
@@ -1078,7 +1078,8 @@ test('dashboard api detail labels every model with its cost', () => {
   });
 
   const html = document.getElementById('apiDetail').innerHTML;
-  assert.match(html, /gpt-4\.1<span class="barCost">US\$6\.00<\/span>/);
+  assert.match(html, /gpt-4\.1<span class="barTokens">1\.5M<\/span><span class="barCost">US\$6\.00<\/span>/);
+  assert.doesNotMatch(html, /openai<span class="barTokens">/);
   assert.doesNotMatch(html, /openai<span class="barCost">/);
 });
 
