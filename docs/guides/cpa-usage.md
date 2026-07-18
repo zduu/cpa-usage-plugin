@@ -31,8 +31,8 @@ plugins:
     usage-dashboard-zduu:
       enabled: true
       store:
-        version: "2.4.8"
-        release-tag: "v2.4.8"
+        version: "2.4.9"
+        release-tag: "v2.4.9"
         repository: "https://github.com/zduu/cpa-usage-plugin"
       # 其他配置项见第 4 节 ...
 ```
@@ -265,8 +265,8 @@ plugins:
     usage-dashboard-zduu:
       enabled: true
       store:
-        version: "2.4.8"
-        release-tag: "v2.4.8"
+        version: "2.4.9"
+        release-tag: "v2.4.9"
         repository: "https://github.com/zduu/cpa-usage-plugin"
       # 每个上游接口/模型最多保留的请求明细条数。默认 5000。
       max_details_per_model: 5000
@@ -304,7 +304,7 @@ plugins:
       models_dev_prices_refresh_interval_seconds: 43200
       # 可选：允许外部脚本更新插件文件。默认 false。
       update_enabled: false
-      # 可选：latest 或指定版本号，例如 v2.4.8。
+      # 可选：latest 或指定版本号，例如 v2.4.9。
       update_version: latest
 ```
 
@@ -330,8 +330,8 @@ cd CLIProxyAPI
 启动后查看日志确认插件加载成功：
 
 ```text
-pluginhost: plugin loaded plugin_id=usage-dashboard-zduu version=2.4.8 path=plugins/usage-dashboard-zduu-v2.4.8.so
-pluginhost: plugin registered plugin_id=usage-dashboard-zduu plugin_name=用量统计 version=2.4.8 path=plugins/usage-dashboard-zduu-v2.4.8.so
+pluginhost: plugin loaded plugin_id=usage-dashboard-zduu version=2.4.9 path=plugins/usage-dashboard-zduu-v2.4.9.so
+pluginhost: plugin registered plugin_id=usage-dashboard-zduu plugin_name=用量统计 version=2.4.9 path=plugins/usage-dashboard-zduu-v2.4.9.so
 ```
 
 > `store-sources` 引入插件商店注册表，管理面板可浏览安装。`store` 块标记当前期望版本，pluginhost 会匹配 `usage-dashboard-zduu-v{版本号}.{ext}` 文件名，并自动清理旧版本文件。
@@ -555,7 +555,7 @@ plugins:
     usage-dashboard-zduu:
       enabled: true
       update_enabled: true
-      update_version: latest   # 或 v2.4.8
+      update_version: latest   # 或 v2.4.9
 ```
 
 执行脚本：
