@@ -904,6 +904,7 @@ type CredentialStat struct {
 type ClientAPIStat struct {
 	APIKey           string               `json:"api_key"`
 	APIKeyHash       string               `json:"api_key_hash,omitempty"`
+	Selector         string               `json:"selector,omitempty"`
 	TotalRequests    int64                `json:"total_requests"`
 	SuccessCount     int64                `json:"success_count"`
 	FailureCount     int64                `json:"failure_count"`
@@ -1008,6 +1009,7 @@ type EventsQuery struct {
 	Source    string
 	AuthIndex string
 	API       string
+	ClientAPI string
 }
 
 // EventsResult is the response from the events endpoint.

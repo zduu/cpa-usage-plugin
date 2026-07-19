@@ -263,6 +263,115 @@ func TestDashboardSummaryAggregatesClientAPIKeyStats(t *testing.T) {
 	if len(first.Models) != 1 || first.Models[0].Model != "gpt-4.1" {
 		t.Fatalf("client api model breakdown = %#v", first.Models)
 	}
+	if first.Selector == "" || !strings.HasPrefix(first.Selector, "h.") {
+		t.Fatalf("client api selector = %q, want irreversible hash selector", first.Selector)
+	}
+}
+
+func TestClientAPISelectorFiltersSummaryEventsAndAPIDetail(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0})
+	now := time.Now()
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-4.1",
+		APIKey:      "sk-client-alpha-0000xx",
+		RequestedAt: now.Add(-2 * time.Minute),
+		Detail:      UsageDetail{InputTokens: 80, OutputTokens: 20, TotalTokens: 100},
+	})
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-4.1-mini",
+		APIKey:      "sk-client-alpha-0000xx",
+		RequestedAt: now.Add(-time.Minute),
+		Detail:      UsageDetail{InputTokens: 30, OutputTokens: 10, TotalTokens: 40},
+	})
+	stats.Record(UsageRecord{
+		Provider:    "claude",
+		Model:       "claude-sonnet",
+		APIKey:      "sk-client-beta-0000yy",
+		RequestedAt: now,
+		Detail:      UsageDetail{InputTokens: 200, OutputTokens: 50, TotalTokens: 250},
+	})
+
+	base := stats.SummaryWithoutDetailsForRangeAndClientAPIAt("24h", "", now)
+	if len(base.ClientAPIStats) != 2 {
+		t.Fatalf("base client api stats = %#v, want two groups", base.ClientAPIStats)
+	}
+	var alpha ClientAPIStat
+	for _, stat := range base.ClientAPIStats {
+		if stat.APIKey == "sk******xx" {
+			alpha = stat
+		}
+	}
+	if alpha.Selector == "" {
+		t.Fatalf("alpha selector missing: %#v", base.ClientAPIStats)
+	}
+
+	filtered := stats.SummaryWithoutDetailsForRangeAndClientAPIAt("24h", alpha.Selector, now)
+	if filtered.Usage.TotalRequests != 2 || filtered.Usage.TotalTokens != 140 {
+		t.Fatalf("filtered usage = %#v, want 2 requests and 140 tokens", filtered.Usage)
+	}
+	if len(filtered.ModelStats) != 2 || len(filtered.Usage.APIs) != 1 {
+		t.Fatalf("filtered dimensions = models %#v apis %#v", filtered.ModelStats, filtered.Usage.APIs)
+	}
+
+	events := stats.QueryEventsAt(EventsQuery{Range: "24h", ClientAPI: alpha.Selector, Limit: 50}, now)
+	if events.Total != 2 || len(events.Events) != 2 {
+		t.Fatalf("filtered events = %#v, want two alpha events", events)
+	}
+	for _, event := range events.Events {
+		if event.APIKeyHash != alpha.APIKeyHash {
+			t.Fatalf("event api key hash = %q, want %q", event.APIKeyHash, alpha.APIKeyHash)
+		}
+	}
+
+	detail := stats.QueryAPIDetailForClientAPIAt("openai", "24h", alpha.Selector, 20, 20, now)
+	if detail.TotalEvents != 2 || detail.Summary.TotalTokens != 140 || len(detail.RecentEvents) != 2 {
+		t.Fatalf("filtered api detail = %#v, want two alpha events and 140 tokens", detail)
+	}
+
+	invalid := stats.QueryEventsAt(EventsQuery{Range: "24h", ClientAPI: "invalid", Limit: 50}, now)
+	if invalid.Total != 0 || len(invalid.Events) != 0 {
+		t.Fatalf("invalid selector must not fall back to all events: %#v", invalid)
+	}
+}
+
+func TestClientAPISelectorMatchesCoalescedLegacyIdentity(t *testing.T) {
+	hash := strings.Repeat("a", 56)
+	stat := ClientAPIStat{APIKey: "sk******xx", APIKeyHash: hash}
+	selector := clientAPISelectorForStat(stat)
+	if !clientAPISelectorMatchesDetail(selector, RequestDetail{APIKey: "sk******xx", APIKeyHash: hash}) {
+		t.Fatal("hash selector should match the current hashed record")
+	}
+	if !clientAPISelectorMatchesDetail(selector, RequestDetail{APIKey: "sk******xx"}) {
+		t.Fatal("hash selector should include the coalesced legacy hashless record")
+	}
+	if clientAPISelectorMatchesDetail(selector, RequestDetail{APIKey: "sk******xx", APIKeyHash: strings.Repeat("b", 56)}) {
+		t.Fatal("hash selector must not match a distinct live hash")
+	}
+
+	mergedSelector := clientAPISelectorForStat(ClientAPIStat{APIKey: "sk******xx"})
+	if !clientAPISelectorMatchesDetail(mergedSelector, RequestDetail{APIKey: "sk******xx", APIKeyHash: hash}) {
+		t.Fatal("masked selector should match all identities represented by a merged masked group")
+	}
+}
+
+func TestClientAPIFilterChangesDashboardETags(t *testing.T) {
+	now := time.Now()
+	selector := clientAPISelectorForStat(ClientAPIStat{APIKey: "sk******xx", APIKeyHash: strings.Repeat("a", 56)})
+	if dashboardSummaryETagForVersion(now, "24h", 7) == dashboardSummaryETagForClientAPIVersion(now, "24h", selector, 7) {
+		t.Fatal("summary etag must include client api selector")
+	}
+	baseParams := EventsQuery{Range: "24h", Limit: 50}
+	filteredParams := baseParams
+	filteredParams.ClientAPI = selector
+	if dashboardEventsETagForVersion(baseParams, now, 7) == dashboardEventsETagForVersion(filteredParams, now, 7) {
+		t.Fatal("events etag must include client api selector")
+	}
+	if dashboardAPIDetailETagForVersion("openai", "24h", 20, 20, now, 7) == dashboardAPIDetailETagForClientAPIVersion("openai", "24h", selector, 20, 20, now, 7) {
+		t.Fatal("api detail etag must include client api selector")
+	}
 }
 
 func TestCoalesceMaskedClientAPIStatsMergesImportedHashlessGroupWithHistoricalHashes(t *testing.T) {
@@ -2926,5 +3035,25 @@ func TestSummaryRangeCachedResultsUseCache(t *testing.T) {
 	}
 	if first.Usage.TotalTokens != second.Usage.TotalTokens {
 		t.Fatalf("cached result should match: %d vs %d", first.Usage.TotalTokens, second.Usage.TotalTokens)
+	}
+}
+
+func TestDashboardEventsQueryParsesClientAPISelector(t *testing.T) {
+	selector := clientAPISelectorForStat(ClientAPIStat{APIKey: "sk******xx", APIKeyHash: strings.Repeat("a", 56)})
+	query := dashboardEventsQuery(map[string][]string{
+		"range":      {"24h"},
+		"api":        {"openai"},
+		"client_api": {"  " + selector + "  "},
+	})
+	if query.Range != "24h" || query.API != "openai" || query.ClientAPI != selector {
+		t.Fatalf("parsed events query = %#v", query)
+	}
+}
+
+func TestQueryRawValuePreservesClientAPISelectorCase(t *testing.T) {
+	selector := "m.c2sQKioqKip6eQ"
+	query := map[string][]string{"client_api": {"  " + selector + "  "}}
+	if got := queryRawValue(query, "client_api"); got != selector {
+		t.Fatalf("queryRawValue() = %q, want %q", got, selector)
 	}
 }

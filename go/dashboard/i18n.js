@@ -61,6 +61,11 @@ var I18N_MAP = {
     sort_requests: '请求次数',
     sort_tokens: 'Token数量',
     sort_cost: '总花费',
+    client_api_filter: 'API Key 筛选',
+    client_api_selected: '已选中',
+    client_api_current_filter: '当前筛选：{0}',
+    client_api_filter_failed: 'API Key 筛选数据加载失败，请稍后重试。',
+    client_api_filter_compat_unavailable: '兼容数据模式无法可靠应用 API Key 筛选。',
     no_api_data: '暂无 API key 请求数据',
 
     // ---- upstream API ----
@@ -277,6 +282,11 @@ var I18N_MAP = {
     sort_requests: '請求次數',
     sort_tokens: 'Token數量',
     sort_cost: '總花費',
+    client_api_filter: 'API Key 篩選',
+    client_api_selected: '已選取',
+    client_api_current_filter: '目前篩選：{0}',
+    client_api_filter_failed: 'API Key 篩選資料載入失敗，請稍後重試。',
+    client_api_filter_compat_unavailable: '相容資料模式無法可靠套用 API Key 篩選。',
     no_api_data: '暫無 API key 請求資料',
 
     upstream_title: '上游介面統計',
@@ -476,6 +486,11 @@ var I18N_MAP = {
     sort_requests: 'Requests',
     sort_tokens: 'Tokens',
     sort_cost: 'Cost',
+    client_api_filter: 'Filter by API Key',
+    client_api_selected: 'Selected',
+    client_api_current_filter: 'Current filter: {0}',
+    client_api_filter_failed: 'Failed to load API key filtered data. Please retry.',
+    client_api_filter_compat_unavailable: 'API key filtering is unavailable in compatibility data mode.',
     no_api_data: 'No API key request data',
 
     upstream_title: 'Upstream APIs',
@@ -675,6 +690,11 @@ var I18N_MAP = {
     sort_requests: 'Запросы',
     sort_tokens: 'Токены',
     sort_cost: 'Стоимость',
+    client_api_filter: 'Фильтр по API-ключу',
+    client_api_selected: 'Выбрано',
+    client_api_current_filter: 'Текущий фильтр: {0}',
+    client_api_filter_failed: 'Не удалось загрузить данные по выбранному API-ключу. Повторите попытку.',
+    client_api_filter_compat_unavailable: 'Фильтр по API-ключу недоступен в режиме совместимости.',
     no_api_data: 'Нет данных по API-ключам',
 
     upstream_title: 'Входящие API',

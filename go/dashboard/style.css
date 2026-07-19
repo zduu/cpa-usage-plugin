@@ -304,7 +304,14 @@ tbody td{transition:background-color .12s}
 .apiCardGrid{display:grid;gap:12px}
 .apiCard{border:1px solid var(--cpa-border);border-radius:12px;padding:16px;background:var(--cpa-bg-surface);display:grid;grid-template-columns:1fr;gap:12px;align-items:center;box-shadow:var(--cpa-shadow-card);transition:box-shadow .2s}
 .apiCard:hover{box-shadow:var(--cpa-shadow-hover)}
+.apiCard.selectable{cursor:pointer}
+.apiCard.selectable:focus-visible{outline:3px solid var(--cpa-accent-soft);outline-offset:2px;border-color:var(--cpa-accent)}
+.apiCard.selected{border-color:var(--cpa-accent);background:var(--cpa-bg-selected);box-shadow:0 0 0 2px var(--cpa-accent-soft)}
 .apiName{font-size:15px;font-weight:700;color:var(--cpa-text-secondary);margin-bottom:10px;letter-spacing:-.01em}
+.selectedBadge,.clientApiFilterBadge{display:inline-flex;align-items:center;border:1px solid var(--cpa-accent);background:var(--cpa-accent-soft);color:var(--cpa-accent-strong);border-radius:999px;padding:2px 8px;font-size:11px;font-weight:700}
+.selectedBadge{margin-left:8px;vertical-align:middle}
+.clientApiFilterStatus{min-height:22px;margin-top:6px}
+.clientApiFilterError{display:inline-block;margin-left:8px;color:#e0564a;font-size:12px;font-weight:600}
 .apiChips{display:flex;gap:8px;flex-wrap:wrap}
 .chip{display:inline-flex;align-items:center;border:1px solid var(--cpa-border-light);background:var(--cpa-bg-raised);border-radius:999px;padding:5px 12px;color:var(--cpa-text-dim);font-size:12px;line-height:1.4}
 

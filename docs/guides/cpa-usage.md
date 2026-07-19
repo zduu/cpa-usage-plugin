@@ -361,7 +361,7 @@ pluginhost: plugin registered plugin_id=usage-dashboard-zduu plugin_name=用量�
 
 - **统计卡片**：总请求数、成功/失败、总 token、每分钟请求、估算花费，附带小时级折线图。
 - **服务健康监测**：7 天 × 15 分钟粒度的彩色网格，鼠标悬停显示窗口详情，灰色格表示无请求。
-- **API 详细统计**：按调用 CPA 服务的客户端 API key 聚合。页面显示脱敏 key；导入不同实例导出的同一脱敏 key 时会合并展示。
+- **API 详细统计**：按调用 CPA 服务的客户端 API key 聚合。页面显示脱敏 key；点击右侧“API Key 筛选”后再点击具体 key，可联动筛选上游接口统计、上游接口详情、模型统计、请求事件明细和用量趋势。被选中的 key 会明确显示“已选中”；再次点击可取消，点击“请求次数 / Token数量 / 总花费”任一排序项也会恢复全量。API key 不是必选项，默认只应用全局时间范围。
 - **上游接口统计**：按上游接口聚合，点击查看模型分布详情。
 - **模型统计**：跨接口的模型汇总，包含请求数、token、平均延迟、成功率和费用。
 - **模型价格设置**：在后端全局保存输入、输出、缓存读取和缓存写入价格（US$/M token），跨设备访问看板可见同一份最新价格。可启用 models.dev 默认价格源，后端定时拉取 `input`/`output`/`cache_read`/`cache_write` 基础价格；缺少 `cache_write` 时视为价格未知并默认使用 0，不自动推算写入费率。手动价格覆盖默认价格，模型名匹配大小写不敏感；收费模型需显式填写实际写入价格，免费模型填写 0。models.dev 的分层价格需要当前请求上下文长度等字段，CPA v7 当前 usage 插件接口未提供这些字段，因此本插件暂不使用 `tiers`/`context_over_200k`。
@@ -389,7 +389,13 @@ curl http://127.0.0.1:8317/v0/management/plugins/usage-dashboard-zduu/dashboard-
   -H 'x-management-key: <你的管理密钥>'
 ```
 
-响应包含 `usage`（无 details 聚合数据）、`health_grid`（672 个 15 分钟槽位）、`source_stats`（用于事件来源筛选）、`credential_stats`、`client_api_stats`、`model_stats` 和 `_meta` 元数据。
+响应包含 `usage`（无 details 聚合数据）、`health_grid`（672 个 15 分钟槽位）、`source_stats`（用于事件来源筛选）、`credential_stats`、`client_api_stats`、`model_stats` 和 `_meta` 元数据。每个 `client_api_stats` 项包含不可逆 `selector`；把它作为 `client_api` 查询参数传给摘要、事件、事件导出或上游接口详情接口，可得到同一客户端 API 身份的数据。不要使用脱敏显示文本代替 selector。
+
+```bash
+# 例：使用摘要中某个 client_api_stats[].selector 筛选最近 24 小时摘要
+curl "http://127.0.0.1:8317/v0/management/plugins/usage-dashboard-zduu/dashboard-summary?range=24h&client_api=<selector>" \
+  -H 'x-management-key: <你的管理密钥>'
+```
 
 `/dashboard-summary`、`/dashboard-events`、`/dashboard-api-detail` 和 `/dashboard-events-export` 会返回弱 `ETag`；内置看板轮询会自动带上 `If-None-Match`，数据未变化时复用本地缓存。外部脚本也可在下一次请求带上 `If-None-Match`，接口返回 304 时跳过重复解析和传输；部分 CPA 管理代理路径会把缓存命中表现为 `200`、空 body、相同 `ETag`，脚本可按等价缓存命中处理。
 
@@ -413,6 +419,8 @@ curl -i \
 curl "http://127.0.0.1:8317/v0/management/plugins/usage-dashboard-zduu/dashboard-events?limit=20&offset=0&range=24h&model=gpt-4" \
   -H 'x-management-key: <你的管理密钥>'
 ```
+
+`dashboard-events`、`dashboard-events-export`、后台导出任务和 `dashboard-api-detail` 同样接受可选的 `client_api=<selector>`。该条件会与时间范围、模型、来源、凭证及上游接口条件按 AND 关系组合；未知或无效 selector 不会回退为全量数据。
 
 ### 按筛选导出事件
 

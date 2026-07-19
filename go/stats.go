@@ -5,6 +5,7 @@ import (
 	"container/heap"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -423,6 +424,7 @@ type dashboardEventCacheKey struct {
 	source     string
 	authIndex  string
 	api        string
+	clientAPI  string
 }
 
 // apiKeySalt produces stable grouping IDs for raw client API keys. Users can
@@ -4585,10 +4587,15 @@ func (s *RequestStatistics) SummaryWithoutDetailsForRange(rangeKey string) Dashb
 }
 
 func (s *RequestStatistics) SummaryWithoutDetailsForRangeAt(rangeKey string, now time.Time) DashboardSummary {
+	return s.SummaryWithoutDetailsForRangeAndClientAPIAt(rangeKey, "", now)
+}
+
+func (s *RequestStatistics) SummaryWithoutDetailsForRangeAndClientAPIAt(rangeKey string, clientAPI string, now time.Time) DashboardSummary {
 	if s == nil {
 		return DashboardSummary{}
 	}
-	if rangeKey == "" || rangeKey == "all" {
+	clientAPI = strings.TrimSpace(clientAPI)
+	if clientAPI == "" && (rangeKey == "" || rangeKey == "all") {
 		return s.SummaryWithoutDetailsAt(now)
 	}
 
@@ -4598,7 +4605,7 @@ func (s *RequestStatistics) SummaryWithoutDetailsForRangeAt(rangeKey string, now
 	}
 	healthWindow := summaryHealthWindow(now)
 	cutoff := dashboardRangeCutoff(rangeKey, now)
-	if cutoff.IsZero() {
+	if cutoff.IsZero() && clientAPI == "" {
 		return s.SummaryWithoutDetailsAt(now)
 	}
 
@@ -4609,7 +4616,7 @@ func (s *RequestStatistics) SummaryWithoutDetailsForRangeAt(rangeKey string, now
 		s.summaryRangeCache = make(map[string]DashboardSummary)
 		s.summaryRangeCacheWindow = make(map[string]time.Time)
 	}
-	cacheKey := summaryRangeCacheKey(rangeKey, now)
+	cacheKey := summaryRangeClientAPICacheKey(rangeKey, clientAPI, now)
 	cached, ok := s.summaryRangeCache[cacheKey]
 	if ok && s.summaryRangeCacheWindow != nil {
 		if window, hasWindow := s.summaryRangeCacheWindow[cacheKey]; hasWindow && window.Equal(healthWindow) {
@@ -4620,7 +4627,7 @@ func (s *RequestStatistics) SummaryWithoutDetailsForRangeAt(rangeKey string, now
 	}
 
 	s.summaryCacheMisses++
-	summary := s.buildSummaryWithoutDetailsForRangeLocked(now, healthWindow, cutoff)
+	summary := s.buildSummaryWithoutDetailsForRangeLocked(now, healthWindow, cutoff, clientAPI)
 	s.summaryRangeCache[cacheKey] = cloneDashboardSummary(summary)
 	s.summaryRangeCacheWindow[cacheKey] = healthWindow
 	s.pruneSummaryRangeCacheLocked(cacheKey)
@@ -4629,7 +4636,11 @@ func (s *RequestStatistics) SummaryWithoutDetailsForRangeAt(rangeKey string, now
 }
 
 func summaryRangeCacheKey(rangeKey string, now time.Time) string {
-	return rangeKey + "|" + strconv.FormatInt(summaryRangeCacheBucket(now).Unix(), 10)
+	return summaryRangeClientAPICacheKey(rangeKey, "", now)
+}
+
+func summaryRangeClientAPICacheKey(rangeKey string, clientAPI string, now time.Time) string {
+	return rangeKey + "|" + clientAPI + "|" + strconv.FormatInt(summaryRangeCacheBucket(now).Unix(), 10)
 }
 
 func summaryRangeCacheBucket(now time.Time) time.Time {
@@ -4946,7 +4957,7 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsLocked(now time.Time, heal
 
 // buildSummaryWithoutDetailsForRangeLocked scans all events within the cutoff window
 // and builds a fresh DashboardSummary. Caller must hold s.mu.
-func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Time, healthWindow time.Time, cutoff time.Time) DashboardSummary {
+func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Time, healthWindow time.Time, cutoff time.Time, clientAPI string) DashboardSummary {
 	summary := DashboardSummary{}
 
 	// Usage accumulators
@@ -4978,6 +4989,9 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Ti
 			}
 			for _, detail := range modelSt.Details {
 				if !cutoff.IsZero() && (detail.Timestamp.IsZero() || detail.Timestamp.Before(cutoff)) {
+					continue
+				}
+				if !clientAPISelectorMatchesDetail(clientAPI, detail) {
 					continue
 				}
 				totals := detailTotalsFromRequest(detail)
@@ -5408,8 +5422,76 @@ func clientAPIStatsFromAccumulators(accumulators map[string]*clientAPIStatAccumu
 		stats = append(stats, stat)
 	}
 	stats = coalesceMaskedClientAPIStats(stats)
+	for i := range stats {
+		stats[i].Selector = clientAPISelectorForStat(stats[i])
+	}
 	sortClientAPIStats(stats)
 	return stats
+}
+
+func clientAPISelectorForStat(stat ClientAPIStat) string {
+	label := strings.TrimSpace(stat.APIKey)
+	hash := strings.TrimSpace(stat.APIKeyHash)
+	encodedLabel := base64.RawURLEncoding.EncodeToString([]byte(label))
+	if hash != "" {
+		return "h." + hash + "." + encodedLabel
+	}
+	if label == "" || label == "未知 API" {
+		return "u"
+	}
+	return "m." + encodedLabel
+}
+
+type clientAPISelector struct {
+	kind  byte
+	hash  string
+	label string
+}
+
+func parseClientAPISelector(value string) (clientAPISelector, bool) {
+	value = strings.TrimSpace(value)
+	if value == "u" {
+		return clientAPISelector{kind: 'u'}, true
+	}
+	parts := strings.Split(value, ".")
+	if len(parts) == 2 && parts[0] == "m" {
+		label, err := base64.RawURLEncoding.DecodeString(parts[1])
+		if err != nil || strings.TrimSpace(string(label)) == "" {
+			return clientAPISelector{}, false
+		}
+		return clientAPISelector{kind: 'm', label: strings.TrimSpace(string(label))}, true
+	}
+	if len(parts) == 3 && parts[0] == "h" {
+		hash := strings.TrimSpace(parts[1])
+		label, err := base64.RawURLEncoding.DecodeString(parts[2])
+		if err != nil || hash == "" || strings.TrimSpace(string(label)) == "" {
+			return clientAPISelector{}, false
+		}
+		return clientAPISelector{kind: 'h', hash: hash, label: strings.TrimSpace(string(label))}, true
+	}
+	return clientAPISelector{}, false
+}
+
+func clientAPISelectorMatchesDetail(value string, detail RequestDetail) bool {
+	if strings.TrimSpace(value) == "" {
+		return true
+	}
+	selector, ok := parseClientAPISelector(value)
+	if !ok {
+		return false
+	}
+	label := strings.TrimSpace(detail.APIKey)
+	hash := strings.TrimSpace(detail.APIKeyHash)
+	switch selector.kind {
+	case 'u':
+		return label == "" && hash == ""
+	case 'm':
+		return label == selector.label
+	case 'h':
+		return hash == selector.hash || hash == "" && label == selector.label
+	default:
+		return false
+	}
 }
 
 func sortClientAPIStats(stats []ClientAPIStat) {
@@ -5749,6 +5831,7 @@ func dashboardEventCacheKeyFor(params EventsQuery, now time.Time) dashboardEvent
 		source:     params.Source,
 		authIndex:  params.AuthIndex,
 		api:        params.API,
+		clientAPI:  params.ClientAPI,
 	}
 }
 
@@ -6098,7 +6181,8 @@ func dashboardEventQueryHasFilters(params EventsQuery) bool {
 	return params.Range != "" && params.Range != "all" ||
 		params.Model != "" ||
 		params.Source != "" ||
-		params.AuthIndex != ""
+		params.AuthIndex != "" ||
+		params.ClientAPI != ""
 }
 
 func dashboardEventPastCutoff(d RequestDetail, cutoff time.Time) bool {
@@ -6125,6 +6209,9 @@ func dashboardEventMatches(d RequestDetail, params EventsQuery, cutoff time.Time
 		}
 	}
 	if params.AuthIndex != "" && d.AuthIndex != params.AuthIndex {
+		return false
+	}
+	if !clientAPISelectorMatchesDetail(params.ClientAPI, d) {
 		return false
 	}
 	return true
@@ -6412,6 +6499,10 @@ func (s *RequestStatistics) QueryAPIDetail(api string, rangeKey string, recentLi
 }
 
 func (s *RequestStatistics) QueryAPIDetailAt(api string, rangeKey string, recentLimit int, errorLimit int, now time.Time) APIDetailResponse {
+	return s.QueryAPIDetailForClientAPIAt(api, rangeKey, "", recentLimit, errorLimit, now)
+}
+
+func (s *RequestStatistics) QueryAPIDetailForClientAPIAt(api string, rangeKey string, clientAPI string, recentLimit int, errorLimit int, now time.Time) APIDetailResponse {
 	startedAt := time.Now()
 	if now.IsZero() {
 		now = startedAt
@@ -6440,7 +6531,7 @@ func (s *RequestStatistics) QueryAPIDetailAt(api string, rangeKey string, recent
 	}
 
 	apiSt := s.apis[api]
-	aggregateScope := cutoff.IsZero()
+	aggregateScope := cutoff.IsZero() && strings.TrimSpace(clientAPI) == ""
 	if aggregateScope {
 		result.Summary = apiDetailSummaryFromAPIStats(apiSt)
 		result.ModelStats = apiDetailModelStatsFromAPIStats(apiSt)
@@ -6466,6 +6557,9 @@ func (s *RequestStatistics) QueryAPIDetailAt(api string, rangeKey string, recent
 		d := dm.requestDetail()
 		if dashboardEventPastCutoff(d, cutoff) {
 			break
+		}
+		if !clientAPISelectorMatchesDetail(clientAPI, d) {
+			continue
 		}
 		totalTokens := detailTotalTokensForRequest(d)
 		inputTokens := nonNegativeInt64(d.Tokens.InputTokens)

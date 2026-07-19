@@ -61,6 +61,7 @@ function createDashboardHarness(options = {}) {
     el.dataset.apiSort = name;
     return el;
   });
+  const clientApiSelectButton = new FakeElement('client-api-select');
   const downloads = [];
   const fetchCalls = [];
   const fetchRequests = [];
@@ -73,12 +74,14 @@ function createDashboardHarness(options = {}) {
   const wrapDashboardResponses = !!options.wrapDashboardResponses;
   const emptyConditionalEtagOk = !!options.emptyConditionalEtagOk;
   const failDashboardSummary = !!options.failDashboardSummary;
+  const failFilteredDashboardSummary = !!options.failFilteredDashboardSummary;
   let failDashboardEvents = !!options.failDashboardEvents;
   const failModelPrices = !!options.failModelPrices;
   const forceSummaryNotModified = !!options.forceSummaryNotModified;
   const nullDashboardSummary = !!options.nullDashboardSummary;
   const nullDashboardData = !!options.nullDashboardData;
   const nullDashboardApiDetail = !!options.nullDashboardApiDetail;
+  const filteredSummaryPayload = options.filteredSummary;
   const apiFailureCount = Number.isFinite(Number(options.apiFailureCount)) ? Number(options.apiFailureCount) : 10;
   const exportJobs = new Map();
   let exportJobSeq = 0;
@@ -95,6 +98,7 @@ function createDashboardHarness(options = {}) {
     },
     querySelectorAll(selector) {
       if (selector === '[data-api-sort]') return sortButtons;
+      if (selector === '[data-client-api-select]') return [clientApiSelectButton];
       return [];
     },
     createElement(tag) {
@@ -536,7 +540,8 @@ function createDashboardHarness(options = {}) {
         payload = { prices, updated_at: new Date().toISOString(), storage: {} };
         if (manualPrices) payload.manual_prices = manualPrices;
       } else if (String(url).includes('dashboard-summary')) {
-        if (failDashboardSummary) {
+        const parsed = new URL(String(url), 'http://test.local/v0/management/plugins/usage-dashboard-zduu/dashboard');
+        if (failDashboardSummary || (failFilteredDashboardSummary && parsed.searchParams.has('client_api'))) {
           return {
             ok: false,
             status: 500,
@@ -546,7 +551,7 @@ function createDashboardHarness(options = {}) {
         }
         summary._meta.last_recorded_at = summaryLastRecordedAt;
         summary._meta.summary_version = summaryVersion;
-        payload = nullDashboardSummary ? null : summary;
+        payload = nullDashboardSummary ? null : (parsed.searchParams.has('client_api') && filteredSummaryPayload ? filteredSummaryPayload : summary);
       }
       else if (String(url).includes('dashboard-api-detail')) payload = nullDashboardApiDetail ? null : apiDetailPayload(String(url));
       else if (String(url).includes('dashboard-data')) payload = nullDashboardData ? null : dashboardDataPayload();
@@ -1633,4 +1638,126 @@ test('event list is not implicitly filtered by selected upstream API', async () 
   const params = new URL(latestEventsCall, 'http://test.local').searchParams;
   assert.strictEqual(params.get('model'), 'gpt-4.1');
   assert.strictEqual(params.get('api'), null);
+});
+
+test('dashboard client API selection filters linked panels and sort buttons restore all data', async () => {
+  const selector = 'h.' + 'a'.repeat(56) + '.c2sqKioqKip4eA';
+  const filteredSummary = {
+    generated_at: new Date().toISOString(),
+    usage: {
+      total_requests: 2,
+      success_count: 2,
+      failure_count: 0,
+      total_tokens: 140,
+      cached_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      avg_latency_ms: 80,
+      apis: {
+        'openai-filtered': {
+          total_requests: 2,
+          success_count: 2,
+          failure_count: 0,
+          total_tokens: 140,
+          avg_latency_ms: 80,
+          models: { 'gpt-filtered': { total_requests: 2, success_count: 2, failure_count: 0, total_tokens: 140 } },
+        },
+      },
+      requests_by_hour: { '12': 2 },
+      tokens_by_hour: { '12': 140 },
+      cost_by_hour: { '12': 0.01 },
+      requests_by_day: {},
+      tokens_by_day: {},
+      cost_by_day: {},
+    },
+    health_grid: [],
+    source_stats: [],
+    credential_stats: [],
+    client_api_stats: [],
+    model_stats: [{ model: 'gpt-filtered', total_requests: 2, success_count: 2, failure_count: 0, total_tokens: 140 }],
+    _meta: { summary_version: 2, current_hour: 12, storage: { enabled: false } },
+  };
+  const { context, document, fetchCalls } = createDashboardHarness({
+    clientApiStats: [{
+      api_key: 'sk******xx',
+      api_key_hash: 'a'.repeat(56),
+      selector,
+      total_requests: 2,
+      success_count: 2,
+      failure_count: 0,
+      total_tokens: 140,
+      models: [],
+    }],
+    filteredSummary,
+  });
+
+  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-events?')));
+  document.querySelectorAll('[data-client-api-select]')[0].onclick();
+  await context.selectClientApiCard(selector, [{ selector, name: 'sk******xx' }]);
+
+  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-summary') && new URL(url, 'http://test.local').searchParams.get('client_api') === selector));
+  const filteredEvent = fetchCalls.filter((url) => url.includes('dashboard-events?')).at(-1);
+  const filteredDetail = fetchCalls.filter((url) => url.includes('dashboard-api-detail')).at(-1);
+  assert.strictEqual(new URL(filteredEvent, 'http://test.local').searchParams.get('client_api'), selector);
+  assert.strictEqual(new URL(filteredDetail, 'http://test.local').searchParams.get('client_api'), selector);
+  assert.match(document.getElementById('apiStats').innerHTML, /openai-filtered/);
+  assert.match(document.getElementById('modelStats').innerHTML, /gpt-filtered/);
+  assert.match(document.getElementById('clientApiStats').innerHTML, /已选中/);
+  assert.match(document.getElementById('clientApiFilterStatus').innerHTML, /当前筛选：sk\*\*\*\*\*\*xx/);
+
+  await document.querySelectorAll('[data-api-sort]')[0].onclick();
+  const restoredEvent = fetchCalls.filter((url) => url.includes('dashboard-events?')).at(-1);
+  assert.strictEqual(new URL(restoredEvent, 'http://test.local').searchParams.get('client_api'), null);
+  assert.match(document.getElementById('apiStats').innerHTML, /openai/);
+  assert.doesNotMatch(document.getElementById('clientApiFilterStatus').innerHTML, /当前筛选/);
+});
+
+test('dashboard explains that client API filtering is unavailable in compatibility mode', async () => {
+  const { document } = createDashboardHarness({ failDashboardSummary: true });
+  await waitFor(() => document.getElementById('updated').textContent.includes('兼容'));
+  document.querySelectorAll('[data-client-api-select]')[0].onclick();
+  assert.match(document.getElementById('clientApiFilterStatus').innerHTML, /兼容数据模式无法可靠应用 API Key 筛选/);
+});
+
+test('dashboard compatibility warning preserves the selected filter and load error', async () => {
+  const selector = 'm.c2sQKioqKip4eA';
+  const { context, document } = createDashboardHarness({
+    failFilteredDashboardSummary: true,
+    clientApiStats: [{
+      api_key: 'sk******xx',
+      total_requests: 2,
+      success_count: 2,
+      failure_count: 0,
+      total_tokens: 140,
+      models: [],
+    }],
+  });
+  document.querySelectorAll('[data-client-api-select]')[0].onclick();
+  await context.selectClientApiCard(selector, [{ selector, name: 'sk******xx' }]);
+
+  const status = document.getElementById('clientApiFilterStatus').innerHTML;
+  assert.match(status, /当前筛选：sk\*\*\*\*\*\*xx/);
+  assert.match(status, /API Key 筛选数据加载失败/);
+  assert.match(status, /兼容数据模式无法可靠应用 API Key 筛选/);
+});
+
+test('dashboard trend shows the client API filter error when filtered summary fails', async () => {
+  const selector = 'm.c2sQKioqKip4eA';
+  const { context, document } = createDashboardHarness({
+    failFilteredDashboardSummary: true,
+    clientApiStats: [{
+      api_key: 'sk******xx',
+      selector,
+      total_requests: 2,
+      success_count: 2,
+      failure_count: 0,
+      total_tokens: 140,
+      models: [],
+    }],
+  });
+  document.querySelectorAll('[data-client-api-select]')[0].onclick();
+  await context.selectClientApiCard(selector, [{ selector, name: 'sk******xx' }]);
+
+  assert.match(document.getElementById('trendChart').innerHTML, /API Key 筛选数据加载失败/);
+  assert.doesNotMatch(document.getElementById('trendChart').innerHTML, /暂无趋势数据/);
 });

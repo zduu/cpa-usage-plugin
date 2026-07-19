@@ -63,11 +63,12 @@
     </div>
     <div class="panel full">
       <div class="panelHead">
-        <div><h2 data-i18n="api_stats_title">API 详细统计</h2><div class="subtle" data-i18n="api_stats_subtle">按调用 CPA 服务的 API key 聚合。</div></div>
+        <div><h2 data-i18n="api_stats_title">API 详细统计</h2><div class="subtle" data-i18n="api_stats_subtle">按调用 CPA 服务的 API key 聚合。</div><div id="clientApiFilterStatus" class="clientApiFilterStatus" aria-live="polite"></div></div>
         <div class="segmented">
           <button class="btn active" data-api-sort="requests" data-i18n="sort_requests">请求次数</button>
           <button class="btn" data-api-sort="tokens" data-i18n="sort_tokens">Token数量</button>
           <button class="btn" data-api-sort="cost" data-i18n="sort_cost">总花费</button>
+          <button class="btn" data-client-api-select data-i18n="client_api_filter">API Key 筛选</button>
         </div>
       </div>
       <div id="clientApiStats"></div>

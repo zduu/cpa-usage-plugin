@@ -67,13 +67,14 @@ func handleDashboardSummary(query map[string][]string, headers map[string][]stri
 	if v, ok := query["range"]; ok && len(v) > 0 {
 		rangeKey = v[0]
 	}
+	clientAPI := queryRawValue(query, "client_api")
 	now := time.Now()
-	etag := dashboardSummaryETag(now, rangeKey)
+	etag := dashboardSummaryETagForClientAPI(now, rangeKey, clientAPI)
 	if dashboardConditionalMatch("dashboard-summary", headers, etag) {
 		return dashboardNotModified(etag)
 	}
-	summary := stats.SummaryWithoutDetailsForRangeAt(rangeKey, now)
-	etag = dashboardSummaryETagForVersion(now, rangeKey, summary.Meta.SummaryVersion)
+	summary := stats.SummaryWithoutDetailsForRangeAndClientAPIAt(rangeKey, clientAPI, now)
+	etag = dashboardSummaryETagForClientAPIVersion(now, rangeKey, clientAPI, summary.Meta.SummaryVersion)
 	responseJSON, err := json.Marshal(summary)
 	if err != nil {
 		return nil, err
@@ -87,10 +88,18 @@ func handleDashboardSummary(query map[string][]string, headers map[string][]stri
 }
 
 func dashboardSummaryETag(now time.Time, rangeKey string) string {
-	return dashboardSummaryETagForVersion(now, rangeKey, stats.DashboardVersion())
+	return dashboardSummaryETagForClientAPI(now, rangeKey, "")
 }
 
 func dashboardSummaryETagForVersion(now time.Time, rangeKey string, version uint64) string {
+	return dashboardSummaryETagForClientAPIVersion(now, rangeKey, "", version)
+}
+
+func dashboardSummaryETagForClientAPI(now time.Time, rangeKey string, clientAPI string) string {
+	return dashboardSummaryETagForClientAPIVersion(now, rangeKey, clientAPI, stats.DashboardVersion())
+}
+
+func dashboardSummaryETagForClientAPIVersion(now time.Time, rangeKey string, clientAPI string, version uint64) string {
 	window := summaryHealthWindow(now).UTC().Format(time.RFC3339)
 	parts := []string{"summary", strconv.FormatUint(version, 10), window}
 	if rangeKey != "" {
@@ -98,6 +107,9 @@ func dashboardSummaryETagForVersion(now time.Time, rangeKey string, version uint
 	}
 	if rangeKey != "" && rangeKey != "all" {
 		parts = append(parts, strconv.FormatInt(summaryRangeCacheBucket(now).Unix(), 10))
+	}
+	if clientAPI != "" {
+		parts = append(parts, clientAPI)
 	}
 	return dashboardWeakETag(parts...)
 }
@@ -131,6 +143,9 @@ func dashboardEventsQuery(query map[string][]string) EventsQuery {
 	}
 	if v, ok := query["api"]; ok && len(v) > 0 {
 		params.API = v[0]
+	}
+	if v, ok := query["client_api"]; ok && len(v) > 0 {
+		params.ClientAPI = queryRawValue(query, "client_api")
 	}
 	return params
 }
@@ -175,6 +190,7 @@ func dashboardEventsETagForVersion(params EventsQuery, now time.Time, version ui
 		key.source,
 		key.authIndex,
 		key.api,
+		key.clientAPI,
 	)
 }
 
@@ -218,6 +234,13 @@ func dashboardEventsExportOptionsFromQuery(query map[string][]string) dashboardE
 func queryValue(query map[string][]string, key string) string {
 	if v, ok := query[key]; ok && len(v) > 0 {
 		return strings.ToLower(strings.TrimSpace(v[0]))
+	}
+	return ""
+}
+
+func queryRawValue(query map[string][]string, key string) string {
+	if v, ok := query[key]; ok && len(v) > 0 {
+		return strings.TrimSpace(v[0])
 	}
 	return ""
 }
@@ -292,6 +315,7 @@ func dashboardEventsExportETagForVersion(params EventsQuery, opts dashboardEvent
 		key.source,
 		key.authIndex,
 		key.api,
+		key.clientAPI,
 	)
 }
 
@@ -445,6 +469,7 @@ func handleDashboardAPIDetail(query map[string][]string, headers map[string][]st
 	if v, ok := query["range"]; ok && len(v) > 0 {
 		rangeKey = v[0]
 	}
+	clientAPI := queryRawValue(query, "client_api")
 	recentLimit := dashboardAPIDetailDefaultRecentLimit
 	if v, ok := query["recent_limit"]; ok && len(v) > 0 {
 		if n, err := strconv.Atoi(v[0]); err == nil && n > 0 {
@@ -460,12 +485,12 @@ func handleDashboardAPIDetail(query map[string][]string, headers map[string][]st
 	recentLimit, errorLimit = normalizeDashboardAPIDetailLimits(recentLimit, errorLimit)
 
 	now := time.Now()
-	etag := dashboardAPIDetailETag(api, rangeKey, recentLimit, errorLimit, now)
+	etag := dashboardAPIDetailETagForClientAPI(api, rangeKey, clientAPI, recentLimit, errorLimit, now)
 	if dashboardConditionalMatch("dashboard-api-detail", headers, etag) {
 		return dashboardNotModified(etag)
 	}
-	result := stats.QueryAPIDetailAt(api, rangeKey, recentLimit, errorLimit, now)
-	etag = dashboardAPIDetailETagForVersion(api, rangeKey, recentLimit, errorLimit, now, result.dashboardVersion)
+	result := stats.QueryAPIDetailForClientAPIAt(api, rangeKey, clientAPI, recentLimit, errorLimit, now)
+	etag = dashboardAPIDetailETagForClientAPIVersion(api, rangeKey, clientAPI, recentLimit, errorLimit, now, result.dashboardVersion)
 	responseJSON, err := json.Marshal(result)
 	if err != nil {
 		return nil, err
@@ -479,10 +504,18 @@ func handleDashboardAPIDetail(query map[string][]string, headers map[string][]st
 }
 
 func dashboardAPIDetailETag(api string, rangeKey string, recentLimit int, errorLimit int, now time.Time) string {
-	return dashboardAPIDetailETagForVersion(api, rangeKey, recentLimit, errorLimit, now, stats.DashboardVersion())
+	return dashboardAPIDetailETagForClientAPI(api, rangeKey, "", recentLimit, errorLimit, now)
 }
 
 func dashboardAPIDetailETagForVersion(api string, rangeKey string, recentLimit int, errorLimit int, now time.Time, version uint64) string {
+	return dashboardAPIDetailETagForClientAPIVersion(api, rangeKey, "", recentLimit, errorLimit, now, version)
+}
+
+func dashboardAPIDetailETagForClientAPI(api string, rangeKey string, clientAPI string, recentLimit int, errorLimit int, now time.Time) string {
+	return dashboardAPIDetailETagForClientAPIVersion(api, rangeKey, clientAPI, recentLimit, errorLimit, now, stats.DashboardVersion())
+}
+
+func dashboardAPIDetailETagForClientAPIVersion(api string, rangeKey string, clientAPI string, recentLimit int, errorLimit int, now time.Time, version uint64) string {
 	recentLimit, errorLimit = normalizeDashboardAPIDetailLimits(recentLimit, errorLimit)
 	timeBucket := int64(0)
 	if rangeKey != "" && rangeKey != "all" {
@@ -494,6 +527,7 @@ func dashboardAPIDetailETagForVersion(api string, rangeKey string, recentLimit i
 		strconv.FormatInt(timeBucket, 10),
 		api,
 		rangeKey,
+		clientAPI,
 		strconv.Itoa(recentLimit),
 		strconv.Itoa(errorLimit),
 	)

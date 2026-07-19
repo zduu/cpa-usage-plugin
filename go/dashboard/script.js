@@ -9,6 +9,11 @@ let modelPrices = {};
 let manualModelPrices = {};
 let selectedApi = '';
 let clientApiSort = 'requests';
+let clientApiSelectMode = false;
+let selectedClientApi = null;
+let filteredSummaryData = null;
+let filteredSummaryContext = '';
+let filteredSummaryError = null;
 let trendMetric = 'cost'; // 'cost' | 'requests' | 'tokens' | 'rpm'
 let pollTimer = null, pollFailures = 0;
 let currentRange = '';
@@ -21,6 +26,18 @@ const apiDetailCache = new Map();
 const conditionalPayloadCache = new Map();
 let apiDetailLastRender = null;
 let updatedState = { type: 'loading', generatedAt: null, message: '' };
+
+function dashboardPanelData() {
+  return selectedClientApi ? filteredSummaryData : summaryData;
+}
+
+function selectedClientApiSelector() {
+  return selectedClientApi && selectedClientApi.selector ? selectedClientApi.selector : '';
+}
+
+function clientApiFilterContext() {
+  return $('range').value + '|' + selectedClientApiSelector();
+}
 
 function manualPricesFromResponse(data) {
   return data && Object.prototype.hasOwnProperty.call(data, 'manual_prices') ? (data.manual_prices || {}) : modelPrices;
@@ -585,9 +602,26 @@ function renderPrices() {
 
 function renderClientApiStats() {
   const stats = summaryData && summaryData.client_api_stats;
+  const filterStatus = $('clientApiFilterStatus');
+  if (filterStatus) {
+    filterStatus.innerHTML = selectedClientApi ? '<span class="clientApiFilterBadge">' + esc(t('client_api_current_filter', selectedClientApi.label)) + '</span>' +
+      (filteredSummaryError ? '<span class="clientApiFilterError">' + esc(t('client_api_filter_failed')) + '</span>' : '') : '';
+  }
+  document.querySelectorAll('[data-api-sort]').forEach((btn) => btn.classList.toggle('active', !clientApiSelectMode && btn.dataset.apiSort === clientApiSort));
+  const selectButton = document.querySelectorAll('[data-client-api-select]')[0];
+  if (selectButton) selectButton.classList.toggle('active', clientApiSelectMode);
   if (!stats || !stats.length) { $('clientApiStats').innerHTML = '<div class="empty">' + t('no_api_data') + '</div>'; return }
+  const hasSelectableClientAPI = stats.some((r) => !!r.selector);
+  if (filterStatus && clientApiSelectMode && !hasSelectableClientAPI) {
+    filterStatus.innerHTML += '<span class="clientApiFilterError">' + esc(t('client_api_filter_compat_unavailable')) + '</span>';
+  }
+  const labelCounts = new Map();
+  stats.forEach((r) => { const label = r.api_key || t('unknown_api'); labelCounts.set(label, (labelCounts.get(label) || 0) + 1) });
   let rows = stats.map((r) => ({
     name: r.api_key || t('unknown_api'),
+    label: r.api_key || t('unknown_api'),
+    selector: r.selector || '',
+    hash: r.api_key_hash || '',
     requests: r.total_requests,
     success: r.success_count,
     failure: r.failure_count,
@@ -597,13 +631,75 @@ function renderClientApiStats() {
   if (clientApiSort === 'tokens') rows.sort((a, b) => b.tokens - a.tokens);
   else if (clientApiSort === 'cost') rows.sort((a, b) => b.cost - a.cost);
   else rows.sort((a, b) => b.requests - a.requests);
-  document.querySelectorAll('[data-api-sort]').forEach((btn) => btn.classList.toggle('active', btn.dataset.apiSort === clientApiSort));
-  $('clientApiStats').innerHTML = rows.length ? '<div class="apiCardGrid">' + rows.map((r) => '<div class="apiCard"><div><div class="apiName">' + esc(r.name) + '</div><div class="apiChips"><span class="chip">' + withLabel('sort_requests', formatInteger(r.requests)) + ' (<span class="ok">' + formatInteger(r.success) + '</span>&nbsp;<span class="bad">' + formatInteger(r.failure) + '</span>)</span><span class="chip">' + withLabel('sort_tokens', compact(r.tokens)) + '</span><span class="chip">' + withLabel('sort_cost', formatUsd(r.cost)) + '</span></div></div></div>').join('') + '</div>' : '<div class="empty">' + t('no_api_data') + '</div>';
+  rows.forEach((r) => {
+    if ((labelCounts.get(r.label) || 0) > 1 && r.hash) r.name = r.label + ' · ' + r.hash.slice(0, 6);
+  });
+  $('clientApiStats').innerHTML = rows.length ? '<div class="apiCardGrid">' + rows.map((r) => {
+    const selected = !!(selectedClientApi && r.selector && selectedClientApi.selector === r.selector);
+    const interactive = clientApiSelectMode && !!r.selector;
+    return '<div class="apiCard' + (interactive ? ' selectable' : '') + (selected ? ' selected' : '') + '"' +
+      (interactive ? ' role="button" tabindex="0" data-client-api-selector="' + esc(r.selector) + '" aria-pressed="' + (selected ? 'true' : 'false') + '"' : '') +
+      '><div><div class="apiName">' + esc(r.name) + (selected ? '<span class="selectedBadge">' + esc(t('client_api_selected')) + '</span>' : '') + '</div><div class="apiChips"><span class="chip">' + withLabel('sort_requests', formatInteger(r.requests)) + ' (<span class="ok">' + formatInteger(r.success) + '</span>&nbsp;<span class="bad">' + formatInteger(r.failure) + '</span>)</span><span class="chip">' + withLabel('sort_tokens', compact(r.tokens)) + '</span><span class="chip">' + withLabel('sort_cost', formatUsd(r.cost)) + '</span></div></div></div>';
+  }).join('') + '</div>' : '<div class="empty">' + t('no_api_data') + '</div>';
+  document.querySelectorAll('[data-client-api-selector]').forEach((card) => {
+    const activate = () => selectClientApiCard(card.getAttribute('data-client-api-selector') || '', rows);
+    card.onclick = activate;
+    card.onkeydown = (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); activate() } };
+  });
+}
+
+async function selectClientApiCard(selector, rows) {
+  if (!selector) return;
+  if (selectedClientApi && selectedClientApi.selector === selector) {
+    selectedClientApi = null;
+    filteredSummaryData = null;
+    filteredSummaryContext = '';
+    filteredSummaryError = null;
+  } else {
+    const row = rows.find((item) => item.selector === selector);
+    selectedClientApi = { selector, label: row ? row.name : t('unknown_api') };
+    filteredSummaryData = null;
+    filteredSummaryContext = '';
+    filteredSummaryError = null;
+    await refreshFilteredSummary();
+  }
+  await rerender({ refreshEvents: true, refreshApiDetail: true });
+}
+
+async function refreshFilteredSummary() {
+  if (!selectedClientApi) return null;
+  const context = clientApiFilterContext();
+  const params = new URLSearchParams();
+  params.set('range', $('range').value);
+  params.set('client_api', selectedClientApi.selector);
+  const url = pluginEndpoint('dashboard-summary') + '?' + params.toString();
+  try {
+    const data = requireObjectPayload(await fetchConditionalJsonPayload('dashboard-summary:' + url, url, pluginFetchOptions({ cache: 'no-store' })), 'dashboard-summary');
+    if (context !== clientApiFilterContext()) return null;
+    filteredSummaryData = data;
+    filteredSummaryContext = context;
+    filteredSummaryError = null;
+    return data;
+  } catch (error) {
+    if (context === clientApiFilterContext()) {
+      if (filteredSummaryContext !== context) filteredSummaryData = null;
+      filteredSummaryError = error;
+    }
+    return null;
+  }
 }
 
 function renderApiStats() {
-  const usage = summaryData && summaryData.usage;
-  if (!usage || !usage.apis) { $('apiStats').innerHTML = '<div class="empty">' + t('no_upstream_data') + '</div>'; $('apiSelect').innerHTML = '<option value="">' + t('upstream_select_none') + '</option>'; return }
+  const panelData = dashboardPanelData();
+  const usage = panelData && panelData.usage;
+  if (!usage || !usage.apis) {
+    selectedApi = '';
+    $('apiStats').innerHTML = '<div class="empty">' + (filteredSummaryError ? t('client_api_filter_failed') : t('no_upstream_data')) + '</div>';
+    $('apiSelect').innerHTML = '<option value="">' + t('upstream_select_none') + '</option>';
+    $('apiSelect').value = '';
+    $('apiSelect').disabled = true;
+    return;
+  }
   const rows = Object.entries(usage.apis).map(([api, a]) => ({
     api,
     requests: a.total_requests,
@@ -655,6 +751,7 @@ async function fetchApiDetailData(api) {
   params.set('range', $('range').value);
   params.set('api', api);
   params.set('recent_limit', String(apiDetailRecentLimit));
+  if (selectedClientApiSelector()) params.set('client_api', selectedClientApiSelector());
   const url = pluginEndpoint('dashboard-api-detail') + '?' + params.toString();
   const data = requireObjectPayload(await fetchConditionalJsonPayload('dashboard-api-detail:' + url, url, pluginFetchOptions({ cache: 'no-store' })), 'dashboard-api-detail');
   data.recent_events = (data.recent_events || []).map(normalizeApiDetailEvent);
@@ -662,7 +759,7 @@ async function fetchApiDetailData(api) {
 }
 
 function apiDetailCacheKey(api) {
-  return api + '|' + $('range').value;
+  return api + '|' + $('range').value + '|' + selectedClientApiSelector();
 }
 
 function apiDetailErrorHtml(errorRows, loading, error, knownFailureCount) {
@@ -715,7 +812,8 @@ function renderApiDetailContent(apiData, detailState) {
 }
 
 async function renderApiDetail() {
-  const usage = summaryData && summaryData.usage;
+  const panelData = dashboardPanelData();
+  const usage = panelData && panelData.usage;
   const apiData = usage && usage.apis && usage.apis[selectedApi];
   if (!apiData) { apiDetailSeq++; apiDetailLastRender = null; setText('apiDetailTitle', t('upstream_detail_select_hint')); $('apiDetail').innerHTML = '<div class="empty">' + t('no_detail_data') + '</div>'; return }
   const api = selectedApi;
@@ -736,7 +834,8 @@ async function renderApiDetail() {
 }
 
 function renderApiDetailFromCache() {
-  const usage = summaryData && summaryData.usage;
+  const panelData = dashboardPanelData();
+  const usage = panelData && panelData.usage;
   const apiData = usage && usage.apis && usage.apis[selectedApi];
   if (!apiData) {
     apiDetailSeq++;
@@ -755,8 +854,9 @@ function renderApiDetailFromCache() {
 }
 
 function renderModelStats() {
-  if (!summaryData || !summaryData.model_stats) { $('modelStats').innerHTML = '<div class="empty">' + t('no_model_data') + '</div>'; return }
-  const rows = summaryData.model_stats;
+  const panelData = dashboardPanelData();
+  if (!panelData || !panelData.model_stats) { $('modelStats').innerHTML = '<div class="empty">' + (filteredSummaryError ? t('client_api_filter_failed') : t('no_model_data')) + '</div>'; return }
+  const rows = panelData.model_stats;
   $('modelStats').innerHTML = rows.length ? '<table><thead><tr><th>' + t('col_model') + '</th><th>' + t('col_requests') + '</th><th>' + t('col_tokens') + '</th><th>' + t('col_avg_latency') + '</th><th>' + t('col_success_rate') + '</th><th>' + t('col_cache_rate') + '</th><th>' + t('col_cost') + '</th><th>' + t('col_cost_per_m') + '</th></tr></thead><tbody>' + rows.map((r) => {
     const rate = r.total_requests ? r.success_count / r.total_requests * 100 : 100;
     const cost = aggregateCost(r, modelPrices, manualModelPrices);
@@ -767,8 +867,9 @@ function renderModelStats() {
 }
 
 function renderTrendChart() {
-  var usage = summaryData && summaryData.usage;
-  if (!usage) { $('trendChart').innerHTML = '<text x="50%" y="50%" text-anchor="middle" class="trendAxisText">' + t('no_trend_data') + '</text>'; clearAnomalyBar(); return }
+  var panelData = dashboardPanelData();
+  var usage = panelData && panelData.usage;
+  if (!usage) { $('trendChart').innerHTML = '<text x="50%" y="50%" text-anchor="middle" class="trendAxisText">' + (filteredSummaryError ? t('client_api_filter_failed') : t('no_trend_data')) + '</text>'; clearAnomalyBar(); return }
 
   var range = $('range').value;
   var useHourly = (range === '7h' || range === '24h');
@@ -786,11 +887,11 @@ function renderTrendChart() {
     var hours = Object.keys(reqHour).concat(Object.keys(tokHour)).concat(Object.keys(costHour));
     var hourSet = new Set();
     hours.forEach(function(k) { hourSet.add(k); });
-    var ordered = orderedRecentHours(Array.from(hourSet), dashboardCurrentHour(summaryData));
+    var ordered = orderedRecentHours(Array.from(hourSet), dashboardCurrentHour(panelData));
     if (!ordered.length) { $('trendChart').innerHTML = '<text x="50%" y="50%" text-anchor="middle" class="trendAxisText">' + t('no_trend_data') + '</text>'; clearAnomalyBar(); return }
 
     var totalCost = 0, totalToks = 0;
-    (summaryData.model_stats || []).forEach(function(r) {
+    (panelData.model_stats || []).forEach(function(r) {
       var t = num(r.total_tokens); if (t > 0) totalToks += t;
       var c = aggregateCost(r, modelPrices, manualModelPrices); if (Number.isFinite(c)) totalCost += c;
     });
@@ -821,7 +922,7 @@ function renderTrendChart() {
   if (!ordered.length) { $('trendChart').innerHTML = '<text x="50%" y="50%" text-anchor="middle" class="trendAxisText">' + t('no_trend_data') + '</text>'; clearAnomalyBar(); return }
 
   var totalCost = 0, totalToks = 0;
-  (summaryData.model_stats || []).forEach(function(r) {
+  (panelData.model_stats || []).forEach(function(r) {
     var t = num(r.total_tokens); if (t > 0) totalToks += t;
     var c = aggregateCost(r, modelPrices, manualModelPrices); if (Number.isFinite(c)) totalCost += c;
   });
@@ -975,6 +1076,7 @@ async function renderEvents() {
   const fm = $('filterModel').value; if (fm) params.set('model', fm);
   const fs = $('filterSource').value; if (fs) params.set('source', fs);
   const fa = $('filterAuth').value; if (fa) params.set('auth', fa);
+  if (selectedClientApiSelector()) params.set('client_api', selectedClientApiSelector());
   try {
     const url = pluginEndpoint('dashboard-events') + '?' + params.toString();
     eventsData = normalizeEventsPayload(await fetchConditionalJsonPayload('dashboard-events:' + url, url, pluginFetchOptions({ cache: 'no-store' })));
@@ -1431,6 +1533,7 @@ async function exportRows(kind) {
   const fm = $('filterModel').value; if (fm) params.set('model', fm);
   const fs = $('filterSource').value; if (fs) params.set('source', fs);
   const fa = $('filterAuth').value; if (fa) params.set('auth', fa);
+  if (selectedClientApiSelector()) params.set('client_api', selectedClientApiSelector());
   try {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     if (kind === 'csv') {
@@ -1457,6 +1560,7 @@ async function exportApiRows(kind) {
   const fm = $('filterModel').value; if (fm) params.set('model', fm);
   const fs = $('filterSource').value; if (fs) params.set('source', fs);
   const fa = $('filterAuth').value; if (fa) params.set('auth', fa);
+  if (selectedClientApiSelector()) params.set('client_api', selectedClientApiSelector());
   params.set('api', selectedApi);
   try {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -1562,9 +1666,10 @@ async function load(options) {
       loadModelPrices().catch(function() { /* prices failure tolerated; stale prices beat wrong stats */ }),
     ]);
     summaryData = requireObjectPayload(data, 'dashboard-summary');
+    if (selectedClientApi) await refreshFilteredSummary();
     updatedState = { type: 'success', generatedAt: data.generated_at || Date.now(), message: '' };
     renderUpdated();
-    const refreshDetails = shouldRefreshDetails(previousSummary, summaryData, forceDetails);
+    const refreshDetails = !!selectedClientApi || shouldRefreshDetails(previousSummary, summaryData, forceDetails);
     await rerender({ refreshEvents: refreshDetails, refreshApiDetail: refreshDetails });
     currentRange = selectedRange;
     pollFailures = 0; schedulePoll(pollDelay());
@@ -1578,6 +1683,11 @@ async function load(options) {
         loadModelPrices().catch(function() { /* prices failure tolerated */ }),
       ]);
       summaryData = buildSummaryFromFullUsage(data, selectedRange);
+      if (selectedClientApi) {
+        filteredSummaryData = null;
+        filteredSummaryContext = '';
+        filteredSummaryError = new Error(t('client_api_filter_compat_unavailable'));
+      }
       updatedState = { type: 'compat', generatedAt: data.generated_at || Date.now(), message: '' };
       renderUpdated();
       const refreshDetails = shouldRefreshDetails(previousSummary, summaryData, forceDetails);
@@ -1616,7 +1726,17 @@ $('savePrice').onclick = async () => {
   }
 };
 $('priceModel').onchange = () => syncPriceFormForModel($('priceModel').value);
-document.querySelectorAll('[data-api-sort]').forEach((btn) => btn.onclick = () => { clientApiSort = btn.dataset.apiSort || 'requests'; renderClientApiStats() });
+document.querySelectorAll('[data-api-sort]').forEach((btn) => btn.onclick = async () => {
+  clientApiSort = btn.dataset.apiSort || 'requests';
+  clientApiSelectMode = false;
+  selectedClientApi = null;
+  filteredSummaryData = null;
+  filteredSummaryContext = '';
+  filteredSummaryError = null;
+  await rerender({ refreshEvents: true, refreshApiDetail: true });
+});
+const clientApiSelectButton = document.querySelectorAll('[data-client-api-select]')[0];
+if (clientApiSelectButton) clientApiSelectButton.onclick = () => { clientApiSelectMode = true; renderClientApiStats() };
 ['filterModel', 'filterSource', 'filterAuth'].forEach((id) => $(id).onchange = renderEvents);
 $('clearFilters').onclick = () => { ['filterModel', 'filterSource', 'filterAuth'].forEach((id) => $(id).value = ''); renderEvents() };
 $('exportRowsCsv').onclick = () => exportRows('csv'); $('exportRowsJson').onclick = () => exportRows('json');
