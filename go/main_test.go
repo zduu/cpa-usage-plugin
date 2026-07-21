@@ -79,9 +79,11 @@ func TestUsageRecordUnmarshalAcceptsLegacyPascalCaseFields(t *testing.T) {
 		"AuthID":"auth-1",
 		"AuthIndex":"2",
 		"AuthType":"api-key",
+		"Endpoint":"/v1/responses",
 		"Source":"deepseek-key",
 		"ReasoningEffort":"medium",
 		"ServiceTier":"default",
+		"Stream":true,
 		"RequestedAt":"2026-06-25T10:00:00Z",
 		"Latency":1500000000,
 		"TTFT":200000000,
@@ -107,6 +109,12 @@ func TestUsageRecordUnmarshalAcceptsLegacyPascalCaseFields(t *testing.T) {
 	if record.Provider != "deepseek" || record.ExecutorType != "OpenAICompatExecutor" || record.Model != "deepseek-v3.1" {
 		t.Fatalf("record identity fields not decoded: %#v", record)
 	}
+	if record.Endpoint != "/v1/responses" {
+		t.Fatalf("record endpoint = %q, want /v1/responses", record.Endpoint)
+	}
+	if !record.Stream {
+		t.Fatal("record stream = false, want true")
+	}
 	if record.Latency != 1500*time.Millisecond || record.TTFT != 200*time.Millisecond {
 		t.Fatalf("duration fields = %v/%v", record.Latency, record.TTFT)
 	}
@@ -124,6 +132,16 @@ func TestUsageRecordUnmarshalAcceptsLegacyPascalCaseFields(t *testing.T) {
 	}
 	if got := record.ResponseHeaders["X-Usage"]; len(got) != 1 || got[0] != "ok" {
 		t.Fatalf("response headers not decoded: %#v", record.ResponseHeaders)
+	}
+}
+
+func TestResponseStreamChunkRequestIsAlwaysMarkedStreaming(t *testing.T) {
+	var request ResponseStreamChunkRequest
+	if err := json.Unmarshal([]byte(`{"SourceFormat":"openai-response","Body":"e30=","ChunkIndex":1}`), &request); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if !request.Stream {
+		t.Fatal("stream chunk request stream = false, want true")
 	}
 }
 
@@ -1424,13 +1442,171 @@ func TestResponseInterceptFallbackUsesUpstreamMetadataWhenAvailable(t *testing.T
 			"upstream_provider": "openai-compatible-opencode-go",
 			"upstream_source":   "opencode-go",
 			"upstream_base_url": "https://api.example.test/v1",
+			"request_path":      "/v1/responses",
 		},
 	})
 	if !ok {
 		t.Fatal("usageRecordFromResponseIntercept() ok = false, want true")
 	}
-	if record.Provider != "openai-compatible-opencode-go" || record.Source != "opencode-go" || record.BaseURL != "https://api.example.test/v1" {
-		t.Fatalf("record upstream fields = provider:%q source:%q base_url:%q", record.Provider, record.Source, record.BaseURL)
+	if record.Provider != "openai-compatible-opencode-go" || record.Source != "opencode-go" || record.BaseURL != "https://api.example.test/v1" || record.Endpoint != "/v1/responses" {
+		t.Fatalf("record upstream fields = provider:%q source:%q base_url:%q endpoint:%q", record.Provider, record.Source, record.BaseURL, record.Endpoint)
+	}
+}
+
+func TestResponseInterceptMetadataEnrichesRecentNativeUsage(t *testing.T) {
+	previousStats := stats
+	stats = NewRequestStatistics()
+	t.Cleanup(func() { stats = previousStats })
+
+	coordinator := newUsageFallbackCoordinator()
+	native := UsageRecord{
+		Provider:    "openai-compatible",
+		Model:       "gpt-5.5",
+		APIKey:      "sk-client-alpha-0000xx",
+		RequestedAt: time.Now(),
+		Latency:     11 * time.Second,
+		TTFT:        time.Second,
+		Detail:      UsageDetail{InputTokens: 100, OutputTokens: 358},
+	}
+	var accepted bool
+	native, accepted = coordinator.HandleNative(native)
+	if !accepted {
+		t.Fatal("HandleNative() = false, want native record accepted")
+	}
+	stats.Record(native)
+
+	interceptorRecord := native
+	interceptorRecord.RequestedAt = time.Now()
+	interceptorRecord.Endpoint = "/v1/responses"
+	interceptorRecord.ReasoningEffort = "xhigh"
+	interceptorRecord.Stream = true
+	coordinator.Schedule(interceptorRecord)
+
+	detail := stats.QueryAPIDetail("openai-compatible", "24h", 10, 10)
+	if len(detail.RecentEvents) != 1 {
+		t.Fatalf("recent events = %d, want 1", len(detail.RecentEvents))
+	}
+	event := detail.RecentEvents[0]
+	if event.Endpoint != "/v1/responses" || event.Thinking.Intensity != "xhigh" || !event.Stream {
+		t.Fatalf("enriched endpoint/thinking/stream = %q/%#v/%t", event.Endpoint, event.Thinking, event.Stream)
+	}
+}
+
+func TestPendingInterceptorMetadataEnrichesLaterNativeUsage(t *testing.T) {
+	coordinator := newUsageFallbackCoordinator()
+	interceptorRecord := UsageRecord{
+		Provider:        "openai-compatible",
+		Model:           "gpt-5.5",
+		APIKey:          "sk-client-alpha-0000xx",
+		Endpoint:        "/v1/responses",
+		ReasoningEffort: "xhigh",
+		Stream:          true,
+		RequestedAt:     time.Now(),
+		Detail:          UsageDetail{InputTokens: 100, OutputTokens: 358},
+	}
+	coordinator.Schedule(interceptorRecord)
+
+	native := interceptorRecord
+	native.Endpoint = ""
+	native.ReasoningEffort = ""
+	native, accepted := coordinator.HandleNative(native)
+	if !accepted {
+		t.Fatal("HandleNative() = false, want native record accepted")
+	}
+	if native.Endpoint != "/v1/responses" || native.ReasoningEffort != "xhigh" || !native.Stream {
+		t.Fatalf("enriched native endpoint/effort/stream = %q/%q/%t", native.Endpoint, native.ReasoningEffort, native.Stream)
+	}
+}
+
+func TestReplayStorageAppliesMetadataOnlyUpdate(t *testing.T) {
+	requestedAt := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	base := RequestDetail{
+		Model:      "gpt-5.5",
+		Timestamp:  requestedAt,
+		LatencyMs:  11000,
+		TTFTMs:     1000,
+		Source:     "openai",
+		Provider:   "openai",
+		Tokens:     TokenStats{InputTokens: 100, OutputTokens: 358, TotalTokens: 458},
+		StatusCode: 200,
+	}
+	update := base
+	update.Endpoint = "/v1/responses"
+	update.Stream = true
+	update.Thinking = UsageThinking{Intensity: "xhigh", Level: "xhigh"}
+	baseLine, err := json.Marshal(persistedDetail{API: "openai", Model: "gpt-5.5", Detail: base})
+	if err != nil {
+		t.Fatalf("marshal base detail: %v", err)
+	}
+	updateLine, err := json.Marshal(persistedDetail{API: "openai", Model: "gpt-5.5", Detail: update, MetadataOnly: true})
+	if err != nil {
+		t.Fatalf("marshal metadata update: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "usage.jsonl")
+	if err := os.WriteFile(path, append(append(baseLine, '\n'), append(updateLine, '\n')...), 0o600); err != nil {
+		t.Fatalf("write storage fixture: %v", err)
+	}
+
+	replayed := NewRequestStatistics()
+	replayed.mu.Lock()
+	err = replayed.replayStorageLocked(path)
+	replayed.mu.Unlock()
+	if err != nil {
+		t.Fatalf("replayStorageLocked() error = %v", err)
+	}
+	detail := replayed.QueryAPIDetail("openai", "all", 10, 10)
+	if len(detail.RecentEvents) != 1 {
+		t.Fatalf("recent events = %d, want 1", len(detail.RecentEvents))
+	}
+	event := detail.RecentEvents[0]
+	if event.Endpoint != "/v1/responses" || event.Thinking.Intensity != "xhigh" || !event.Stream {
+		t.Fatalf("replayed endpoint/thinking/stream = %q/%#v/%t", event.Endpoint, event.Thinking, event.Stream)
+	}
+}
+
+func TestReplayStorageAppliesMetadataOnlyUpdateBeforeBaseDetail(t *testing.T) {
+	requestedAt := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	base := RequestDetail{
+		Model:      "gpt-5.5",
+		Timestamp:  requestedAt,
+		LatencyMs:  11000,
+		TTFTMs:     1000,
+		Source:     "openai",
+		Provider:   "openai",
+		Tokens:     TokenStats{InputTokens: 100, OutputTokens: 358, TotalTokens: 458},
+		StatusCode: 200,
+	}
+	update := base
+	update.Endpoint = "/v1/responses"
+	update.Stream = true
+	update.Thinking = UsageThinking{Intensity: "xhigh", Level: "xhigh"}
+	baseLine, err := json.Marshal(persistedDetail{API: "openai", Model: "gpt-5.5", Detail: base})
+	if err != nil {
+		t.Fatalf("marshal base detail: %v", err)
+	}
+	updateLine, err := json.Marshal(persistedDetail{API: "openai", Model: "gpt-5.5", Detail: update, MetadataOnly: true})
+	if err != nil {
+		t.Fatalf("marshal metadata update: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "usage.jsonl")
+	if err := os.WriteFile(path, append(append(updateLine, '\n'), append(baseLine, '\n')...), 0o600); err != nil {
+		t.Fatalf("write storage fixture: %v", err)
+	}
+
+	replayed := NewRequestStatistics()
+	replayed.mu.Lock()
+	err = replayed.replayStorageLocked(path)
+	replayed.mu.Unlock()
+	if err != nil {
+		t.Fatalf("replayStorageLocked() error = %v", err)
+	}
+	detail := replayed.QueryAPIDetail("openai", "all", 10, 10)
+	if len(detail.RecentEvents) != 1 {
+		t.Fatalf("recent events = %d, want 1", len(detail.RecentEvents))
+	}
+	event := detail.RecentEvents[0]
+	if event.Endpoint != "/v1/responses" || event.Thinking.Intensity != "xhigh" || !event.Stream {
+		t.Fatalf("replayed endpoint/thinking/stream = %q/%#v/%t", event.Endpoint, event.Thinking, event.Stream)
 	}
 }
 

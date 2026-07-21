@@ -1036,6 +1036,48 @@ test('dashboard api detail renders long error and source cells with safe wrapper
   assert.match(barsHtml, /class="barValue">8 请求/);
 });
 
+test('dashboard api detail shows reasoning effort, endpoint and generation speed', () => {
+  const { context } = createDashboardHarness();
+  const recentHtml = context.apiDetailRecentHtml([{
+    timestamp_ms: Date.UTC(2026, 6, 21, 12, 0, 0),
+    model: 'gpt-5.5',
+    thinking: { intensity: 'xhigh' },
+    endpoint: '/v1/responses',
+    failed: false,
+    stream: true,
+    latency_ms: 11000,
+    ttft_ms: 1000,
+    total_tokens: 458,
+    tokens: { input_tokens: 100, output_tokens: 358, total_tokens: 458 },
+    source: 'codex',
+    provider: 'codex',
+  }], false, null);
+
+  assert.match(recentHtml, />推理强度</);
+  assert.match(recentHtml, />端点</);
+  assert.match(recentHtml, />生成速度</);
+  assert.match(recentHtml, />xhigh</);
+  assert.match(recentHtml, />\/v1\/responses</);
+  assert.match(recentHtml, />35\.8 t\/s</);
+});
+
+test('dashboard api detail suppresses invalid generation speeds', () => {
+  const { context } = createDashboardHarness();
+  assert.strictEqual(context.generationSpeedText({ stream: true, tokens: { output_tokens: 10 }, latency_ms: 1000, ttft_ms: 1000 }), '-');
+  assert.strictEqual(context.generationSpeedText({ tokens: { output_tokens: 0 }, latency_ms: 1000, ttft_ms: 100 }), '-');
+  assert.strictEqual(context.generationSpeedText({ tokens: { output_tokens: 10 }, latency_ms: 0, ttft_ms: 0 }), '-');
+  assert.strictEqual(context.generationSpeedText({ tokens: { output_tokens: 36 }, latency_ms: 1009, ttft_ms: 1007 }), '35.7 t/s');
+});
+
+test('dashboard translations include recent request metadata columns', () => {
+  const { context } = createDashboardHarness();
+  for (const language of ['zh-CN', 'zh-TW', 'en', 'ru']) {
+    for (const key of ['col_reasoning_effort', 'col_endpoint', 'col_generation_speed']) {
+      assert.ok(context.I18N_MAP[language][key], language + ' missing ' + key);
+    }
+  }
+});
+
 test('dashboard api detail shows the full upstream interface for source rows', () => {
   const { context, document } = createDashboardHarness();
   const api = 'codex · 上游 b374b8e7c98ca23c';

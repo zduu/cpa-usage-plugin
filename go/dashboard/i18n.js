@@ -115,6 +115,9 @@ var I18N_MAP = {
     col_models: '模型',
     col_cost: '花费',
     col_status: '状态码',
+    col_reasoning_effort: '推理强度',
+    col_endpoint: '端点',
+    col_generation_speed: '生成速度',
 
     // ---- filters ----
     filter_all_models: '全部模型',
@@ -331,6 +334,9 @@ var I18N_MAP = {
     col_models: '模型',
     col_cost: '花費',
     col_status: '狀態碼',
+    col_reasoning_effort: '推理強度',
+    col_endpoint: '端點',
+    col_generation_speed: '生成速度',
 
     filter_all_models: '全部模型',
     filter_all_sources: '全部來源',
@@ -535,6 +541,9 @@ var I18N_MAP = {
     col_models: 'Models',
     col_cost: 'Cost',
     col_status: 'Status',
+    col_reasoning_effort: 'Reasoning Effort',
+    col_endpoint: 'Endpoint',
+    col_generation_speed: 'Generation Speed',
 
     filter_all_models: 'All Models',
     filter_all_sources: 'All Sources',
@@ -739,6 +748,9 @@ var I18N_MAP = {
     col_models: 'Модели',
     col_cost: 'Стоимость',
     col_status: 'Статус',
+    col_reasoning_effort: 'Усилие рассуждения',
+    col_endpoint: 'Эндпоинт',
+    col_generation_speed: 'Скорость генерации',
 
     filter_all_models: 'Все модели',
     filter_all_sources: 'Все источники',

@@ -98,6 +98,10 @@ func (r *ResponseStreamChunkRequest) UnmarshalJSON(data []byte) error {
 	if err := unmarshalResponseInterceptRequest(data, &r.ResponseInterceptRequest); err != nil {
 		return err
 	}
+	// The host stream-chunk ABI has no Stream field because this callback is
+	// intrinsically streaming. Mark it explicitly for persisted throughput
+	// calculations and native/fallback metadata reconciliation.
+	r.Stream = true
 	var wire struct {
 		HistoryChunks      [][]byte `json:"HistoryChunks"`
 		HistoryChunksSnake [][]byte `json:"history_chunks"`
@@ -292,8 +296,10 @@ func usageRecordFromValues(req ResponseInterceptRequest, responseValues []any, d
 		AuthID:          authID,
 		AuthIndex:       fallbackAuthIndex(req.Metadata, authID),
 		AuthType:        fallbackAuthType(req.Metadata, authID),
+		Endpoint:        metadataString(req.Metadata, "request_path", "endpoint", "request_endpoint"),
 		ReasoningEffort: metadataString(req.Metadata, "reasoning_effort"),
 		ServiceTier:     firstNonEmpty(metadataString(req.Metadata, "service_tier"), jsonStringPath(requestRoot, "service_tier")),
+		Stream:          req.Stream,
 		RequestedAt:     time.Now(),
 		Detail:          detail,
 		BaseURL:         metadataString(req.Metadata, "upstream_base_url", "provider_base_url", "base_url", "baseURL"),
@@ -539,6 +545,7 @@ type pendingUsageFallback struct {
 type usageFallbackOccurrence struct {
 	requestAt  time.Time
 	observedAt time.Time
+	record     UsageRecord
 }
 
 func newUsageFallbackCoordinator() *usageFallbackCoordinator {
@@ -574,8 +581,9 @@ func (c *usageFallbackCoordinator) Schedule(record UsageRecord) {
 	}
 	now := time.Now()
 	c.cleanupLocked(now)
-	if c.consumeNativeRecentLocked(key, requestAt, now) {
+	if nativeRecord, ok := c.consumeNativeRecentLocked(key, requestAt, now); ok {
 		c.mu.Unlock()
+		stats.EnrichRecordedUsage(nativeRecord, record)
 		return
 	}
 	c.pending[key] = append(c.pending[key], pending)
@@ -585,17 +593,18 @@ func (c *usageFallbackCoordinator) Schedule(record UsageRecord) {
 	c.mu.Unlock()
 }
 
-func (c *usageFallbackCoordinator) HandleNative(record UsageRecord) bool {
+func (c *usageFallbackCoordinator) HandleNative(record UsageRecord) (UsageRecord, bool) {
 	if c == nil {
-		return true
+		return record, true
 	}
 	key := usageRecordFingerprint(record)
 	if key == "" {
-		return true
+		return record, true
 	}
 	requestAt := record.RequestedAt
 	if requestAt.IsZero() {
 		requestAt = time.Now()
+		record.RequestedAt = requestAt
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -606,13 +615,26 @@ func (c *usageFallbackCoordinator) HandleNative(record UsageRecord) bool {
 		if pending.timer != nil {
 			pending.timer.Stop()
 		}
-		return true
+		return enrichUsageRecord(record, pending.record), true
 	}
 	if c.matchesFallbackRecentLocked(key, requestAt, now) {
-		return false
+		return record, false
 	}
-	c.nativeRecent[key] = append(c.nativeRecent[key], usageFallbackOccurrence{requestAt: requestAt, observedAt: now})
-	return true
+	c.nativeRecent[key] = append(c.nativeRecent[key], usageFallbackOccurrence{requestAt: requestAt, observedAt: now, record: record})
+	return record, true
+}
+
+func enrichUsageRecord(record UsageRecord, enrichment UsageRecord) UsageRecord {
+	if strings.TrimSpace(record.Endpoint) == "" {
+		record.Endpoint = strings.TrimSpace(enrichment.Endpoint)
+	}
+	if strings.TrimSpace(record.ReasoningEffort) == "" {
+		record.ReasoningEffort = strings.TrimSpace(enrichment.ReasoningEffort)
+	}
+	if enrichment.Stream {
+		record.Stream = true
+	}
+	return record
 }
 
 // Supersede cancels pending fallbacks whose fingerprints were derived from
@@ -731,7 +753,7 @@ func (c *usageFallbackCoordinator) removePendingLocked(pending *pendingUsageFall
 	}
 }
 
-func (c *usageFallbackCoordinator) consumeNativeRecentLocked(key string, requestAt time.Time, now time.Time) bool {
+func (c *usageFallbackCoordinator) consumeNativeRecentLocked(key string, requestAt time.Time, now time.Time) (UsageRecord, bool) {
 	items := c.nativeRecent[key]
 	for i, item := range items {
 		if now.Sub(item.observedAt) > usageFallbackNativeRecentWindow {
@@ -744,9 +766,9 @@ func (c *usageFallbackCoordinator) consumeNativeRecentLocked(key string, request
 		if len(c.nativeRecent[key]) == 0 {
 			delete(c.nativeRecent, key)
 		}
-		return true
+		return item.record, true
 	}
-	return false
+	return UsageRecord{}, false
 }
 
 func (c *usageFallbackCoordinator) matchesFallbackRecentLocked(key string, requestAt time.Time, now time.Time) bool {

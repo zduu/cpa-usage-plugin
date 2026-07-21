@@ -771,11 +771,25 @@ function apiDetailErrorHtml(errorRows, loading, error, knownFailureCount) {
     '</div>';
 }
 
+function reasoningEffortText(detail) {
+  const thinking = detail && detail.thinking || {};
+  return String(thinking.intensity || thinking.level || thinking.mode || detail && detail.reasoning_effort || '').trim() || '-';
+}
+
+function generationSpeedText(detail) {
+  const tokens = num(detail && detail.tokens && detail.tokens.output_tokens);
+  const latencyMs = num(detail && detail.latency_ms);
+  const ttftMs = Math.max(num(detail && detail.ttft_ms), 0);
+  const generationMs = detail && detail.stream ? latencyMs - ttftMs : latencyMs;
+  if (tokens <= 0 || generationMs <= 0) return '-';
+  return (tokens * 1000 / generationMs).toFixed(1) + ' t/s';
+}
+
 function apiDetailRecentHtml(rows, loading, error) {
   if (loading && !rows.length) return '<div><div class="subtle" style="margin-bottom:8px">' + t('recent_requests') + '</div><div class="empty">' + t('loading_api_detail') + '</div></div>';
   if (error && !rows.length) return '<div><div class="subtle" style="margin-bottom:8px">' + t('recent_requests') + '</div><div class="empty">' + t('detail_load_failed') + '</div></div>';
   return '<div><div class="subtle" style="margin-bottom:8px">' + t('recent_requests') + '</div>' +
-    (rows.length ? '<div class="tableWrap"><table><thead><tr><th>' + t('col_time') + '</th><th>' + t('col_model') + '</th><th>' + t('col_result') + '</th><th>' + t('col_latency') + '</th><th>' + t('col_tokens') + '</th><th>' + t('col_source') + '</th></tr></thead><tbody>' + rows.slice(0, apiDetailRecentLimit).map((d) => '<tr><td>' + formatDateTime(d.timestamp_ms) + '</td><td class="nameCell">' + esc(d.model) + '</td><td class="' + (d.failed ? 'bad' : 'ok') + '">' + statusText(d.failed) + '</td><td>' + formatDurationAndTTFT(d.latency_ms, d.ttft_ms) + '</td><td>' + formatInteger(d.total_tokens) + '</td><td class="nameCell">' + esc(sourceLabel(d)) + '</td></tr>').join('') + '</tbody></table></div>' : '<div class="empty">' + t('no_detail') + '</div>') +
+    (rows.length ? '<div class="tableWrap"><table><thead><tr><th>' + t('col_time') + '</th><th>' + t('col_model') + '</th><th>' + t('col_reasoning_effort') + '</th><th>' + t('col_endpoint') + '</th><th>' + t('col_generation_speed') + '</th><th>' + t('col_result') + '</th><th>' + t('col_latency') + '</th><th>' + t('col_tokens') + '</th><th>' + t('col_source') + '</th></tr></thead><tbody>' + rows.slice(0, apiDetailRecentLimit).map((d) => '<tr><td>' + formatDateTime(d.timestamp_ms) + '</td><td class="nameCell">' + esc(d.model) + '</td><td>' + esc(reasoningEffortText(d)) + '</td><td class="nameCell">' + esc(d.endpoint || '-') + '</td><td>' + esc(generationSpeedText(d)) + '</td><td class="' + (d.failed ? 'bad' : 'ok') + '">' + statusText(d.failed) + '</td><td>' + formatDurationAndTTFT(d.latency_ms, d.ttft_ms) + '</td><td>' + formatInteger(d.total_tokens) + '</td><td class="nameCell">' + esc(sourceLabel(d)) + '</td></tr>').join('') + '</tbody></table></div>' : '<div class="empty">' + t('no_detail') + '</div>') +
     '</div>';
 }
 

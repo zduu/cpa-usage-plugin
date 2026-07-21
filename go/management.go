@@ -13,9 +13,16 @@ func handleUsage(requestBody []byte) ([]byte, error) {
 	if err := json.Unmarshal(requestBody, &usageRecord); err != nil {
 		return nil, fmt.Errorf("failed to parse usage record: %w", err)
 	}
+	if usageRecord.RequestedAt.IsZero() {
+		usageRecord.RequestedAt = time.Now()
+	}
 
 	authIndexes.Learn(usageRecord.AuthID, usageRecord.AuthIndex)
-	if usageFallbacks == nil || usageFallbacks.HandleNative(usageRecord) {
+	accepted := true
+	if usageFallbacks != nil {
+		usageRecord, accepted = usageFallbacks.HandleNative(usageRecord)
+	}
+	if accepted {
 		stats.Record(usageRecord)
 	}
 

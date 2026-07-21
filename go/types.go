@@ -118,10 +118,12 @@ type UsageRecord struct {
 	AuthID          string              `json:"auth_id"`
 	AuthIndex       string              `json:"auth_index"`
 	AuthType        string              `json:"auth_type"`
+	Endpoint        string              `json:"endpoint"`
 	BaseURL         string              `json:"base_url"`
 	Source          string              `json:"source"`
 	ReasoningEffort string              `json:"reasoning_effort"`
 	ServiceTier     string              `json:"service_tier"`
+	Stream          bool                `json:"stream"`
 	RequestedAt     time.Time           `json:"requested_at"`
 	Latency         time.Duration       `json:"latency"`
 	TTFT            time.Duration       `json:"ttft"`
@@ -141,10 +143,12 @@ func (r *UsageRecord) UnmarshalJSON(data []byte) error {
 		AuthID          string              `json:"auth_id"`
 		AuthIndex       string              `json:"auth_index"`
 		AuthType        string              `json:"auth_type"`
+		Endpoint        string              `json:"endpoint"`
 		BaseURL         string              `json:"base_url"`
 		Source          string              `json:"source"`
 		ReasoningEffort string              `json:"reasoning_effort"`
 		ServiceTier     string              `json:"service_tier"`
+		Stream          bool                `json:"stream"`
 		RequestedAt     json.RawMessage     `json:"requested_at"`
 		RequestedAtMs   json.RawMessage     `json:"requested_at_ms"`
 		Latency         json.RawMessage     `json:"latency"`
@@ -168,11 +172,13 @@ func (r *UsageRecord) UnmarshalJSON(data []byte) error {
 		AuthID          string              `json:"AuthID"`
 		AuthIndex       string              `json:"AuthIndex"`
 		AuthType        string              `json:"AuthType"`
+		Endpoint        string              `json:"Endpoint"`
 		BaseURL         string              `json:"BaseURL"`
 		BaseUrl         string              `json:"BaseUrl"`
 		Source          string              `json:"Source"`
 		ReasoningEffort string              `json:"ReasoningEffort"`
 		ServiceTier     string              `json:"ServiceTier"`
+		Stream          bool                `json:"Stream"`
 		RequestedAt     json.RawMessage     `json:"RequestedAt"`
 		RequestedAtMs   json.RawMessage     `json:"RequestedAtMs"`
 		Latency         json.RawMessage     `json:"Latency"`
@@ -190,6 +196,8 @@ func (r *UsageRecord) UnmarshalJSON(data []byte) error {
 	var aliases struct {
 		BaseURLCamel string `json:"baseURL"`
 		BaseUrlCamel string `json:"baseUrl"`
+		Streaming    bool   `json:"streaming"`
+		StreamingOld bool   `json:"Streaming"`
 	}
 	if err := json.Unmarshal(data, &aliases); err != nil {
 		return err
@@ -204,10 +212,12 @@ func (r *UsageRecord) UnmarshalJSON(data []byte) error {
 		AuthID:          firstNonEmpty(current.AuthID, legacy.AuthID),
 		AuthIndex:       firstNonEmpty(current.AuthIndex, legacy.AuthIndex),
 		AuthType:        firstNonEmpty(current.AuthType, legacy.AuthType),
+		Endpoint:        firstNonEmpty(current.Endpoint, legacy.Endpoint),
 		BaseURL:         firstNonEmpty(current.BaseURL, aliases.BaseURLCamel, aliases.BaseUrlCamel, legacy.BaseURL, legacy.BaseUrl),
 		Source:          firstNonEmpty(current.Source, legacy.Source),
 		ReasoningEffort: firstNonEmpty(current.ReasoningEffort, legacy.ReasoningEffort),
 		ServiceTier:     firstNonEmpty(current.ServiceTier, legacy.ServiceTier),
+		Stream:          current.Stream || legacy.Stream || aliases.Streaming || aliases.StreamingOld,
 		RequestedAt:     firstNonZeroTime(parseFlexibleTime(current.RequestedAt), parseFlexibleTime(current.RequestedAtMs), parseFlexibleTime(legacy.RequestedAt), parseFlexibleTime(legacy.RequestedAtMs)),
 		Latency:         firstNonZeroDuration(parseFlexibleDuration(current.Latency, time.Nanosecond), parseFlexibleDuration(current.LatencyMs, time.Millisecond), parseFlexibleDuration(legacy.Latency, time.Nanosecond), parseFlexibleDuration(legacy.LatencyMs, time.Millisecond)),
 		TTFT:            firstNonZeroDuration(parseFlexibleDuration(current.TTFT, time.Nanosecond), parseFlexibleDuration(current.TTFTMs, time.Millisecond), parseFlexibleDuration(legacy.TTFT, time.Nanosecond), parseFlexibleDuration(legacy.TTFTMs, time.Millisecond)),
@@ -720,7 +730,9 @@ type RequestDetail struct {
 	AuthID      string              `json:"auth_id,omitempty"`
 	AuthIndex   string              `json:"auth_index"`
 	AuthType    string              `json:"auth_type,omitempty"`
+	Endpoint    string              `json:"endpoint,omitempty"`
 	BaseURL     string              `json:"base_url,omitempty"`
+	Stream      bool                `json:"stream,omitempty"`
 	Thinking    UsageThinking       `json:"thinking,omitempty"`
 	Tokens      TokenStats          `json:"tokens"`
 	Failed      bool                `json:"failed"`

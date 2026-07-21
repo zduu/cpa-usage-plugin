@@ -1568,6 +1568,32 @@ func TestDashboardAPIDetailAggregatesErrorsAndRecentEvents(t *testing.T) {
 	}
 }
 
+func TestDashboardAPIDetailRecentEventsPreserveReasoningEffortAndEndpoint(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{MaxDetailsPerModel: 20, DedupWindowMinutes: 0})
+	stats.Record(UsageRecord{
+		Provider:        "openai",
+		Source:          "openai",
+		Model:           "gpt-5.5",
+		Endpoint:        "/v1/responses",
+		ReasoningEffort: "xhigh",
+		Stream:          true,
+		RequestedAt:     time.Now(),
+		Latency:         11 * time.Second,
+		TTFT:            time.Second,
+		Detail:          UsageDetail{InputTokens: 100, OutputTokens: 358},
+	})
+
+	result := stats.QueryAPIDetail("openai", "24h", 10, 10)
+	if len(result.RecentEvents) != 1 {
+		t.Fatalf("recent events = %d, want 1", len(result.RecentEvents))
+	}
+	event := result.RecentEvents[0]
+	if event.Endpoint != "/v1/responses" || event.Thinking.Intensity != "xhigh" || !event.Stream {
+		t.Fatalf("recent event endpoint/thinking/stream = %q/%#v/%t", event.Endpoint, event.Thinking, event.Stream)
+	}
+}
+
 func TestDashboardAPIDetailAllRangeUsesAggregatesAfterDetailTrim(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{MaxDetailsPerModel: 2, DedupWindowMinutes: 0, RetentionDays: 0})

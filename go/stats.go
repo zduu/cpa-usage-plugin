@@ -220,6 +220,12 @@ type apiDetailErrorKey struct {
 	failure    string
 }
 
+// requestDedupKey is the identity of a persisted detail within a day.  Endpoint,
+// Stream, Thinking, BaseURL and similar metadata attached after the fact by
+// response interceptors are deliberately excluded — otherwise a native record
+// that lacks them could never match the interceptor enrichment (EnrichRecordedUsage
+// computes the key from the native record).  Add fields here only when the value
+// is known identically on both sides by construction.
 type requestDedupKey struct {
 	apiName          string
 	modelName        string
@@ -715,45 +721,9 @@ func (s *RequestStatistics) Record(record UsageRecord) {
 	if timestamp.IsZero() {
 		timestamp = time.Now()
 	}
-
-	cacheReadTokens, cacheWriteTokens, cacheTokens := usageDetailCacheTokenParts(record.Detail)
-	totalTokens := usageDetailTotalTokens(record.Detail, record.Provider)
-
 	statsKey := usageGroupKey(record)
-
-	modelName := record.Model
-	if modelName == "" {
-		modelName = "unknown"
-	}
-
-	detail := RequestDetail{
-		Model:      modelName,
-		Timestamp:  timestamp,
-		LatencyMs:  record.Latency.Milliseconds(),
-		TTFTMs:     record.TTFT.Milliseconds(),
-		APIKey:     maskAPIKey(canonicalClientAPIKey(record.APIKey)),
-		APIKeyHash: hashAPIKey(record.APIKey),
-		Source:     usageSource(record),
-		Provider:   strings.TrimSpace(record.Provider),
-		AuthID:     strings.TrimSpace(record.AuthID),
-		AuthIndex:  strings.TrimSpace(record.AuthIndex),
-		AuthType:   strings.TrimSpace(record.AuthType),
-		BaseURL:    strings.TrimSpace(record.BaseURL),
-		Thinking:   usageThinking(record),
-		Tokens: TokenStats{
-			InputTokens:      record.Detail.InputTokens,
-			OutputTokens:     record.Detail.OutputTokens,
-			ReasoningTokens:  record.Detail.ReasoningTokens,
-			CachedTokens:     cacheReadTokens,
-			CacheTokens:      cacheTokens,
-			CacheWriteTokens: cacheWriteTokens,
-			TotalTokens:      totalTokens,
-		},
-		Failed:     record.Failed,
-		StatusCode: record.Failure.StatusCode,
-		Failure:    trimLong(redactSensitiveText(record.Failure.Body), 500),
-		Headers:    filterHeaders(record.ResponseHeaders, s.logResponseHeaders),
-	}
+	modelName := firstNonEmpty(record.Model, "unknown")
+	detail := requestDetailFromUsageRecord(record, timestamp, s.logResponseHeaders)
 	var persistDetail *persistedDetail
 	s.mu.Lock()
 
@@ -771,11 +741,108 @@ func (s *RequestStatistics) Record(record UsageRecord) {
 	}
 }
 
+func requestDetailFromUsageRecord(record UsageRecord, timestamp time.Time, whitelist headerWhitelist) RequestDetail {
+	cacheReadTokens, cacheWriteTokens, cacheTokens := usageDetailCacheTokenParts(record.Detail)
+	totalTokens := usageDetailTotalTokens(record.Detail, record.Provider)
+	return RequestDetail{
+		Model:      firstNonEmpty(record.Model, "unknown"),
+		Timestamp:  timestamp,
+		LatencyMs:  record.Latency.Milliseconds(),
+		TTFTMs:     record.TTFT.Milliseconds(),
+		APIKey:     maskAPIKey(canonicalClientAPIKey(record.APIKey)),
+		APIKeyHash: hashAPIKey(record.APIKey),
+		Source:     usageSource(record),
+		Provider:   strings.TrimSpace(record.Provider),
+		AuthID:     strings.TrimSpace(record.AuthID),
+		AuthIndex:  strings.TrimSpace(record.AuthIndex),
+		AuthType:   strings.TrimSpace(record.AuthType),
+		Endpoint:   strings.TrimSpace(record.Endpoint),
+		BaseURL:    strings.TrimSpace(record.BaseURL),
+		Stream:     record.Stream,
+		Thinking:   usageThinking(record),
+		Tokens: TokenStats{
+			InputTokens:      record.Detail.InputTokens,
+			OutputTokens:     record.Detail.OutputTokens,
+			ReasoningTokens:  record.Detail.ReasoningTokens,
+			CachedTokens:     cacheReadTokens,
+			CacheTokens:      cacheTokens,
+			CacheWriteTokens: cacheWriteTokens,
+			TotalTokens:      totalTokens,
+		},
+		Failed:     record.Failed,
+		StatusCode: record.Failure.StatusCode,
+		Failure:    trimLong(redactSensitiveText(record.Failure.Body), 500),
+		Headers:    filterHeaders(record.ResponseHeaders, whitelist),
+	}
+}
+
+// EnrichRecordedUsage merges request metadata that response interceptors have
+// but older native CPA usage records do not carry.
+func (s *RequestStatistics) EnrichRecordedUsage(record UsageRecord, enrichment UsageRecord) bool {
+	if s == nil || record.RequestedAt.IsZero() {
+		return false
+	}
+	apiName := usageGroupKey(record)
+	modelName := firstNonEmpty(record.Model, "unknown")
+	target := dedupKey(apiName, modelName, requestDetailFromUsageRecord(record, record.RequestedAt, headerWhitelist{}))
+
+	s.mu.Lock()
+	apiSt := s.apis[apiName]
+	if apiSt == nil || apiSt.Models[modelName] == nil {
+		s.mu.Unlock()
+		return false
+	}
+	details := apiSt.Models[modelName].Details
+	for i := len(details) - 1; i >= 0; i-- {
+		if dedupKey(apiName, modelName, details[i]) != target {
+			continue
+		}
+		update := requestDetailFromUsageRecord(enrichment, details[i].Timestamp, headerWhitelist{})
+		changed := enrichRequestDetailMetadata(&details[i], update)
+		var persistUpdate *persistedDetail
+		if changed {
+			apiSt.Models[modelName].Details = details
+			s.invalidateSummaryLocked()
+			if s.storageEnabled {
+				persistUpdate = &persistedDetail{API: apiName, Model: modelName, Detail: details[i], MetadataOnly: true}
+			}
+		}
+		s.mu.Unlock()
+		if persistUpdate != nil {
+			s.enqueueStorageDetail(*persistUpdate)
+		}
+		return changed
+	}
+	s.mu.Unlock()
+	return false
+}
+
+func enrichRequestDetailMetadata(detail *RequestDetail, update RequestDetail) bool {
+	if detail == nil {
+		return false
+	}
+	changed := false
+	if detail.Endpoint == "" && strings.TrimSpace(update.Endpoint) != "" {
+		detail.Endpoint = strings.TrimSpace(update.Endpoint)
+		changed = true
+	}
+	if detail.Thinking == (UsageThinking{}) && update.Thinking != (UsageThinking{}) {
+		detail.Thinking = update.Thinking
+		changed = true
+	}
+	if !detail.Stream && update.Stream {
+		detail.Stream = true
+		changed = true
+	}
+	return changed
+}
+
 type persistedDetail struct {
-	API        string        `json:"api"`
-	Model      string        `json:"model"`
-	Detail     RequestDetail `json:"detail"`
-	enqueuedAt time.Time     `json:"-"`
+	API          string        `json:"api"`
+	Model        string        `json:"model"`
+	Detail       RequestDetail `json:"detail"`
+	MetadataOnly bool          `json:"metadata_only,omitempty"`
+	enqueuedAt   time.Time     `json:"-"`
 }
 
 type persistedStorageSnapshot struct {
@@ -2657,6 +2724,7 @@ func (s *RequestStatistics) replayStorageLocked(path string) error {
 	scanner.Buffer(buf, 10*1024*1024)
 	now := time.Now()
 	existing := s.detailKeysLocked()
+	pendingMetadata := make(map[requestDedupKey]RequestDetail)
 	var invalidLines int
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -2684,11 +2752,30 @@ func (s *RequestStatistics) replayStorageLocked(path string) error {
 		apiName = usageGroupKeyFromDetail(apiName, detail)
 		detail = normalizeStoredClientAPIIdentity(detail)
 		key := dedupKey(apiName, modelName, detail)
+		if persisted.MetadataOnly {
+			if !s.enrichPersistedDetailMetadataLocked(apiName, modelName, key, detail) {
+				if pending, ok := pendingMetadata[key]; ok {
+					enrichRequestDetailMetadata(&pending, detail)
+					pendingMetadata[key] = pending
+				} else {
+					pendingMetadata[key] = detail
+				}
+			}
+			continue
+		}
 		if _, ok := existing[key]; ok {
+			if pending, ok := pendingMetadata[key]; ok {
+				s.enrichPersistedDetailMetadataLocked(apiName, modelName, key, pending)
+				delete(pendingMetadata, key)
+			}
 			continue
 		}
 		if s.recordDetailLocked(apiName, modelName, detail, key, now, false) {
 			existing[key] = struct{}{}
+			if pending, ok := pendingMetadata[key]; ok {
+				s.enrichPersistedDetailMetadataLocked(apiName, modelName, key, pending)
+				delete(pendingMetadata, key)
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -2698,6 +2785,29 @@ func (s *RequestStatistics) replayStorageLocked(path string) error {
 		return fmt.Errorf("replay storage skipped %d invalid line(s)", invalidLines)
 	}
 	return nil
+}
+
+func (s *RequestStatistics) enrichPersistedDetailMetadataLocked(apiName, modelName string, target requestDedupKey, update RequestDetail) bool {
+	if s == nil {
+		return false
+	}
+	apiSt := s.apis[apiName]
+	if apiSt == nil || apiSt.Models[modelName] == nil {
+		return false
+	}
+	details := apiSt.Models[modelName].Details
+	for i := len(details) - 1; i >= 0; i-- {
+		if dedupKey(apiName, modelName, details[i]) != target {
+			continue
+		}
+		if !enrichRequestDetailMetadata(&details[i], update) {
+			return false
+		}
+		apiSt.Models[modelName].Details = details
+		s.invalidateSummaryLocked()
+		return true
+	}
+	return false
 }
 
 func (s *RequestStatistics) detailKeysLocked() map[requestDedupKey]struct{} {
