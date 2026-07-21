@@ -31,8 +31,8 @@ plugins:
     usage-dashboard-zduu:
       enabled: true
       store:
-        version: "2.5.0"
-        release-tag: "v2.5.0"
+        version: "2.5.1"
+        release-tag: "v2.5.1"
         repository: "https://github.com/zduu/cpa-usage-plugin"
       # 其他配置项见第 4 节 ...
 ```
@@ -265,8 +265,8 @@ plugins:
     usage-dashboard-zduu:
       enabled: true
       store:
-        version: "2.5.0"
-        release-tag: "v2.5.0"
+        version: "2.5.1"
+        release-tag: "v2.5.1"
         repository: "https://github.com/zduu/cpa-usage-plugin"
       # 每个上游接口/模型最多保留的请求明细条数。默认 5000。
       max_details_per_model: 5000
@@ -304,7 +304,7 @@ plugins:
       models_dev_prices_refresh_interval_seconds: 43200
       # 可选：允许外部脚本更新插件文件。默认 false。
       update_enabled: false
-      # 可选：latest 或指定版本号，例如 v2.5.0。
+      # 可选：latest 或指定版本号，例如 v2.5.1。
       update_version: latest
 ```
 
@@ -330,8 +330,8 @@ cd CLIProxyAPI
 启动后查看日志确认插件加载成功：
 
 ```text
-pluginhost: plugin loaded plugin_id=usage-dashboard-zduu version=2.5.0 path=plugins/usage-dashboard-zduu-v2.5.0.so
-pluginhost: plugin registered plugin_id=usage-dashboard-zduu plugin_name=用量统计 version=2.5.0 path=plugins/usage-dashboard-zduu-v2.5.0.so
+pluginhost: plugin loaded plugin_id=usage-dashboard-zduu version=2.5.1 path=plugins/usage-dashboard-zduu-v2.5.1.so
+pluginhost: plugin registered plugin_id=usage-dashboard-zduu plugin_name=用量统计 version=2.5.1 path=plugins/usage-dashboard-zduu-v2.5.1.so
 ```
 
 > `store-sources` 引入插件商店注册表，管理面板可浏览安装。`store` 块标记当前期望版本，pluginhost 会匹配 `usage-dashboard-zduu-v{版本号}.{ext}` 文件名，并自动清理旧版本文件。
@@ -362,7 +362,7 @@ pluginhost: plugin registered plugin_id=usage-dashboard-zduu plugin_name=用量�
 - **统计卡片**：总请求数、成功/失败、总 token、每分钟请求、估算花费，附带小时级折线图。
 - **服务健康监测**：7 天 × 15 分钟粒度的彩色网格，鼠标悬停显示窗口详情，灰色格表示无请求。
 - **API 详细统计**：按调用 CPA 服务的客户端 API key 聚合。页面显示脱敏 key；点击右侧“API Key 筛选”后再点击具体 key，可联动筛选上游接口统计、上游接口详情、模型统计、请求事件明细和用量趋势。被选中的 key 会明确显示“已选中”；再次点击可取消，点击“请求次数 / Token数量 / 总花费”任一排序项也会恢复全量。API key 不是必选项，默认只应用全局时间范围。
-- **上游接口统计**：按上游接口聚合，点击查看模型分布详情。
+- **上游接口统计**：按上游接口聚合，点击查看模型分布和最近请求详情；最近请求会在有数据时显示推理强度、请求端点和生成速度。
 - **模型统计**：跨接口的模型汇总，包含请求数、token、平均延迟、成功率和费用。
 - **模型价格设置**：在后端全局保存输入、输出、缓存读取和缓存写入价格（US$/M token），跨设备访问看板可见同一份最新价格。可启用 models.dev 默认价格源，后端定时拉取 `input`/`output`/`cache_read`/`cache_write` 基础价格；缺少 `cache_write` 时视为价格未知并默认使用 0，不自动推算写入费率。手动价格覆盖默认价格，模型名匹配大小写不敏感；收费模型需显式填写实际写入价格，免费模型填写 0。models.dev 的分层价格需要当前请求上下文长度等字段，CPA v7 当前 usage 插件接口未提供这些字段，因此本插件暂不使用 `tiers`/`context_over_200k`。
 - **请求事件明细**：按模型、来源、凭证筛选，滚动表格查看。默认最多显示 500 条。
@@ -563,7 +563,7 @@ plugins:
     usage-dashboard-zduu:
       enabled: true
       update_enabled: true
-      update_version: latest   # 或 v2.5.0
+      update_version: latest   # 或 v2.5.1
 ```
 
 执行脚本：
