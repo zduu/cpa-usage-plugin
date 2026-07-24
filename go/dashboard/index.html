@@ -49,18 +49,40 @@
     <div class="trendChartWrap"><svg id="trendChart" class="trendSvg"></svg></div>
   </section>
   <section class="layout">
-    <div class="panel full pricePanel">
-      <div class="panelHead"><h2 data-i18n="price_title">模型价格设置</h2><span class="subtle" data-i18n="price_unit">单位：US$/M token</span></div>
-      <div class="priceGrid">
-        <div><label class="subtle" data-i18n="model_label">模型</label><input id="priceModel" class="input" list="priceModelOptions" data-i18n-placeholder="input_model_placeholder" placeholder="输入或选择模型"><datalist id="priceModelOptions"></datalist></div>
-        <div><label class="subtle" data-i18n="input_price">输入价格</label><input id="pricePrompt" class="input" type="number" min="0" step="0.0001" placeholder="0.0000"></div>
-        <div><label class="subtle" data-i18n="output_price">输出价格</label><input id="priceCompletion" class="input" type="number" min="0" step="0.0001" placeholder="0.0000"></div>
-        <div><label class="subtle" data-i18n="cache_price">缓存命中价格</label><input id="priceCache" class="input" type="number" min="0" step="0.0001" data-i18n-placeholder="cache_placeholder" placeholder="默认同输入"></div>
-        <div><label class="subtle" data-i18n="cache_write_price">缓存创建价格</label><input id="priceCacheWrite" class="input" type="number" min="0" step="0.0001" data-i18n-placeholder="cache_write_placeholder" placeholder="未知时默认 0"></div>
-        <button id="savePrice" class="btn primary" data-i18n="save">保存</button>
+    <details class="panel full pricePanel" id="priceSettings">
+      <summary class="priceSummary">
+        <span class="priceSummaryMain"><span class="priceSummaryTitle"><span class="priceSummaryHeading" role="heading" aria-level="2" data-i18n="price_title">模型价格设置</span><span class="subtle" data-i18n="price_unit">单位：US$/M token</span></span><span class="subtle" data-i18n="price_summary_hint">查询与设置默认收起，点击此处展开。</span></span>
+        <span class="priceSummaryToggle" aria-hidden="true">⌄</span>
+      </summary>
+      <div class="priceSettingsBody">
+        <div class="priceReferenceSection">
+          <div class="priceReferenceHead">
+            <div><h3 data-i18n="price_reference_title">模型价格查询</h3><div class="subtle" data-i18n="price_reference_subtle">输入模型名筛选当前价格表，选择后查看输入、输出和缓存价格；此处不会修改设置。</div></div>
+            <span class="subtle" data-i18n="price_unit">单位：US$/M token</span>
+          </div>
+          <div class="toolbar priceReferenceToolbar">
+            <label for="priceReferenceModel" class="subtle" data-i18n="price_reference_label">查询模型</label>
+            <div class="searchCombo" id="priceReferenceCombo">
+              <input id="priceReferenceModel" class="input" type="search" autocomplete="off" spellcheck="false" role="combobox" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded="false" aria-controls="priceReferenceOptions" data-i18n-placeholder="price_reference_search_placeholder" placeholder="输入模型名或 provider/model 搜索">
+              <div id="priceReferenceOptions" class="searchComboOptions" role="listbox" hidden></div>
+            </div>
+          </div>
+          <div id="priceReferenceInfo" class="priceReferenceInfo"><div class="empty" data-i18n="price_reference_empty">请选择模型查看价格信息。</div></div>
+        </div>
+        <div class="priceSettingsDivider" aria-hidden="true"></div>
+        <div class="subtle priceSettingsHint" data-i18n="price_settings_hint">可从实际用量中的 provider/model 候选中选择；裸模型名仍可手动输入，作为所有上游的回退价格。</div>
+        <div class="priceGrid">
+          <div><label class="subtle" data-i18n="model_label">模型</label><input id="priceModel" class="input" list="priceModelOptions" data-i18n-placeholder="input_model_placeholder" placeholder="输入或选择 provider/modelname"><datalist id="priceModelOptions"></datalist></div>
+          <div><label class="subtle" data-i18n="input_price">输入价格</label><input id="pricePrompt" class="input" type="number" min="0" step="0.0001" placeholder="0.0000"></div>
+          <div><label class="subtle" data-i18n="output_price">输出价格</label><input id="priceCompletion" class="input" type="number" min="0" step="0.0001" placeholder="0.0000"></div>
+          <div><label class="subtle" data-i18n="cache_price">缓存命中价格</label><input id="priceCache" class="input" type="number" min="0" step="0.0001" data-i18n-placeholder="cache_placeholder" placeholder="默认同输入"></div>
+          <div><label class="subtle" data-i18n="cache_write_price">缓存创建价格</label><input id="priceCacheWrite" class="input" type="number" min="0" step="0.0001" data-i18n-placeholder="cache_write_placeholder" placeholder="未知时默认 0"></div>
+          <button id="savePrice" class="btn primary" data-i18n="save">保存</button>
+        </div>
+        <div class="priceListHead subtle" data-i18n="manual_price_list_title">已设置的手动价格</div>
+        <div class="priceList" id="priceList"></div>
       </div>
-      <div class="priceList" id="priceList"></div>
-    </div>
+    </details>
     <div class="panel full">
       <div class="panelHead">
         <div><h2 data-i18n="api_stats_title">API 详细统计</h2><div class="subtle" data-i18n="api_stats_subtle">按调用 CPA 服务的 API key 聚合。</div><div id="clientApiFilterStatus" class="clientApiFilterStatus" aria-live="polite"></div></div>

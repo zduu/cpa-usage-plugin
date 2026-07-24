@@ -181,6 +181,25 @@ test('detailCost uses provider-specific prices with manual override first', () =
   assert.ok(Math.abs(manualCost - 6.8) < 0.01, 'cost should use manual pricing, got ' + manualCost);
 });
 
+test('bare manual price applies to every provider unless that provider has a manual override', () => {
+  const prices = {
+    'openai/same-model': { prompt: 1, completion: 0, cache: 0 },
+    'openrouter/same-model': { prompt: 9, completion: 0, cache: 0 },
+  };
+  const bareManual = { 'same-model': { prompt: 3, completion: 0, cache: 0 } };
+  const openAI = { provider: 'openai', model: 'same-model', tokens: { input_tokens: 1000000 } };
+  const openRouter = { provider: 'openrouter', model: 'same-model', tokens: { input_tokens: 1000000 } };
+
+  assert.strictEqual(helpers.detailCost(openAI, prices, bareManual), 3);
+  assert.strictEqual(helpers.detailCost(openRouter, prices, bareManual), 3);
+
+  const scopedManual = Object.assign({}, bareManual, {
+    'openrouter/same-model': { prompt: 7, completion: 0, cache: 0 },
+  });
+  assert.strictEqual(helpers.detailCost(openAI, prices, scopedManual), 3);
+  assert.strictEqual(helpers.detailCost(openRouter, prices, scopedManual), 7);
+});
+
 test('detailCost falls back from provider-prefixed model to bare model price', () => {
   const prices = { 'gpt-5.5': { prompt: 1.25, completion: 10, cache: 0.125 } };
   const detail = {

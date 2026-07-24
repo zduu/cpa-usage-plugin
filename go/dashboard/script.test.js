@@ -186,6 +186,7 @@ function createDashboardHarness(options = {}) {
   summary.source_stats[0].success_count = summary.source_stats[0].total_requests - apiFailureCount;
   summary.model_stats[0].failure_count = apiFailureCount;
   summary.model_stats[0].success_count = summary.model_stats[0].total_requests - apiFailureCount;
+  if (options.summaryModelProviders) summary.model_stats[0].providers = options.summaryModelProviders;
   if (options.storage) summary._meta.storage = options.storage;
   if (options.clientApiStats) summary.client_api_stats = options.clientApiStats;
   if (options.credentialStats) summary.credential_stats = options.credentialStats;
@@ -533,12 +534,15 @@ function createDashboardHarness(options = {}) {
         if (options.method === 'PUT') {
           const body = JSON.parse(options.body || '{}');
           prices[body.model] = body.price;
+          if (manualPrices !== undefined) manualPrices[body.model] = body.price;
         } else if (options.method === 'DELETE') {
           const parsed = new URL(String(url), 'http://test.local/v0/management/plugins/usage-dashboard-zduu/dashboard');
-          delete prices[parsed.searchParams.get('model')];
+          const model = parsed.searchParams.get('model');
+          delete prices[model];
+          if (manualPrices !== undefined) delete manualPrices[model];
         }
         payload = { prices, updated_at: new Date().toISOString(), storage: {} };
-        if (manualPrices) payload.manual_prices = manualPrices;
+        if (manualPrices !== undefined) payload.manual_prices = manualPrices;
       } else if (String(url).includes('dashboard-summary')) {
         const parsed = new URL(String(url), 'http://test.local/v0/management/plugins/usage-dashboard-zduu/dashboard');
         if (failDashboardSummary || (failFilteredDashboardSummary && parsed.searchParams.has('client_api'))) {
@@ -973,13 +977,14 @@ test('dashboard api detail export uses management endpoints from resource iframe
   assert.match(downloadsReq[0].url, /^\/v0\/management\/plugins\/usage-dashboard-zduu\/dashboard-events-export-download\?/);
 });
 
-test('dashboard price form shows models.dev effective prices', async () => {
-  const { document } = createDashboardHarness({
+test('dashboard bare model input can use a price-source value as an override starting point', async () => {
+  const { context, document } = createDashboardHarness({
     prices: { 'gpt-4.1': { prompt: 1.25, completion: 10, cache: 0.125, cache_write: 1.5 } },
     manualPrices: {},
   });
 
-  await waitFor(() => document.getElementById('priceModelOptions').innerHTML.includes('gpt-4.1'));
+  await waitFor(() => Array.from(context.priceReferenceOptions()).includes('gpt-4.1'));
+  assert.doesNotMatch(document.getElementById('priceModelOptions').innerHTML, /gpt-4\.1/);
   document.getElementById('priceModel').value = 'gpt-4.1';
   document.getElementById('priceModel').onchange();
 
@@ -987,6 +992,157 @@ test('dashboard price form shows models.dev effective prices', async () => {
   assert.strictEqual(document.getElementById('priceCompletion').value, 10);
   assert.strictEqual(document.getElementById('priceCache').value, 0.125);
   assert.strictEqual(document.getElementById('priceCacheWrite').value, 1.5);
+});
+
+test('dashboard separates upstream price settings from the read-only price source lookup', async () => {
+  const { context, document } = createDashboardHarness({
+    prices: {
+      'gpt-4.1': { prompt: 1.25, completion: 10, cache: 0.125, cache_write: 1.5 },
+      'openai/gpt-4.1': { prompt: 1.25, completion: 10, cache: 0.125, cache_write: 1.5 },
+      'openrouter/gpt-4.1': { prompt: 9, completion: 90, cache: 0.9, cache_write: 0 },
+      'catalog-only/model-x': { prompt: 4, completion: 12, cache: 1, cache_write: 2 },
+    },
+    manualPrices: {
+      'openai/gpt-4.1': { prompt: 3, completion: 11, cache: 0.3, cache_write: 1 },
+    },
+    summaryModelProviders: [{ provider: 'openai' }, { provider: 'openrouter' }],
+  });
+
+  await waitFor(() => Array.from(context.priceReferenceOptions()).includes('catalog-only/model-x'));
+
+  assert.deepStrictEqual(Array.from(context.priceModelOptions()), ['openai/gpt-4.1', 'openrouter/gpt-4.1']);
+  const settingOptions = document.getElementById('priceModelOptions').innerHTML;
+  assert.match(settingOptions, /openai\/gpt-4\.1/);
+  assert.match(settingOptions, /openrouter\/gpt-4\.1/);
+  assert.doesNotMatch(settingOptions, /catalog-only\/model-x/);
+
+  document.getElementById('priceReferenceModel').value = 'catalog-only/model-x';
+  document.getElementById('priceReferenceModel').onchange();
+  assert.match(document.getElementById('priceReferenceInfo').innerHTML, /catalog-only\/model-x/);
+  assert.match(document.getElementById('priceReferenceInfo').innerHTML, /4\.0000/);
+  assert.match(document.getElementById('priceReferenceInfo').innerHTML, /价格源/);
+  assert.strictEqual(document.getElementById('pricePrompt').value, '');
+
+  document.getElementById('priceReferenceModel').value = 'openai/gpt-4.1';
+  document.getElementById('priceReferenceModel').onchange();
+  assert.match(document.getElementById('priceReferenceInfo').innerHTML, /手动设置/);
+  assert.match(document.getElementById('priceReferenceInfo').innerHTML, /3\.0000/);
+});
+
+test('price lookup filters a bounded custom result list and supports keyboard selection', async () => {
+  const prices = {
+    'openai/gpt-4.1': { prompt: 1, completion: 2 },
+    'openrouter/gpt-4.1': { prompt: 3, completion: 4 },
+    'catalog-only/model-x': { prompt: 5, completion: 6 },
+  };
+  for (let i = 0; i < 55; i++) prices['bulk/model-' + i] = { prompt: i, completion: i + 1 };
+  const { context, document } = createDashboardHarness({ prices, manualPrices: {} });
+
+  await waitFor(() => Array.from(context.priceReferenceOptions()).includes('openrouter/gpt-4.1'));
+  const input = document.getElementById('priceReferenceModel');
+  const results = document.getElementById('priceReferenceOptions');
+
+  input.value = 'OPENROUTER';
+  input.oninput();
+  assert.match(results.innerHTML, /openrouter\/gpt-4\.1/);
+  assert.doesNotMatch(results.innerHTML, /openai\/gpt-4\.1|catalog-only\/model-x/);
+  assert.strictEqual(input.getAttribute('aria-expanded'), 'true');
+
+  input.onkeydown({ key: 'ArrowDown', preventDefault() {} });
+  input.onkeydown({ key: 'Enter', preventDefault() {} });
+  assert.strictEqual(input.value, 'openrouter/gpt-4.1');
+  assert.match(document.getElementById('priceReferenceInfo').innerHTML, /3\.0000/);
+
+  input.value = 'bulk/';
+  input.oninput();
+  assert.match(results.innerHTML, /显示前 50 项（共 55 项）/);
+  assert.strictEqual((results.innerHTML.match(/class="searchComboOption/g) || []).length, 50);
+});
+
+test('dashboard saves provider-scoped model prices as provider/modelname keys', async () => {
+  const { context, document, fetchRequests } = createDashboardHarness({
+    manualPrices: {},
+  });
+
+  await waitFor(() => Array.from(context.priceReferenceOptions()).includes('gpt-4.1'));
+  assert.strictEqual(document.getElementById('priceModelOptions').innerHTML, '');
+  document.getElementById('priceModel').value = 'openrouter/gpt-4.1';
+  document.getElementById('pricePrompt').value = '7';
+  document.getElementById('priceCompletion').value = '21';
+  document.getElementById('priceCache').value = '0.7';
+  document.getElementById('priceCacheWrite').value = '1.4';
+  await document.getElementById('savePrice').onclick();
+
+  const put = fetchRequests.find((request) => request.url.includes('model-prices') && request.options.method === 'PUT');
+  assert.ok(put);
+  assert.deepStrictEqual(JSON.parse(put.options.body), {
+    model: 'openrouter/gpt-4.1',
+    price: { prompt: 7, completion: 21, cache: 0.7, cache_write: 1.4 },
+  });
+  assert.match(document.getElementById('priceList').innerHTML, /openrouter\/gpt-4\.1/);
+});
+
+test('price lookup shows the bare manual fallback used by a provider-scoped model', async () => {
+  const { context, document, setLanguage } = createDashboardHarness({
+    prices: {
+      'openrouter/openai/same-model': { prompt: 9, completion: 90, cache: 0.9, cache_write: 0 },
+    },
+    manualPrices: {
+      'same-model': { prompt: 3, completion: 6, cache: 0.3, cache_write: 0.6 },
+    },
+  });
+
+  await waitFor(() => Array.from(context.priceReferenceOptions()).includes('openrouter/openai/same-model'));
+  document.getElementById('priceReferenceModel').value = 'openrouter/openai/same-model';
+  document.getElementById('priceReferenceModel').onchange();
+  assert.match(document.getElementById('priceReferenceInfo').innerHTML, /手动设置 · 匹配 same-model/);
+  assert.match(document.getElementById('priceReferenceInfo').innerHTML, /3\.0000/);
+
+  setLanguage('en');
+  await waitFor(() => document.getElementById('priceReferenceInfo').innerHTML.includes('Manual setting'));
+  assert.strictEqual(document.getElementById('priceReferenceModel').value, 'openrouter/openai/same-model');
+  assert.match(document.getElementById('priceReferenceInfo').innerHTML, /matched same-model/);
+});
+
+test('price lookup handles empty data and escapes catalogue model keys', async () => {
+  const empty = createDashboardHarness({ prices: {}, manualPrices: {} });
+  await waitFor(() => empty.document.getElementById('priceReferenceInfo').innerHTML.includes('当前没有可查询的模型价格'));
+  assert.strictEqual(empty.document.getElementById('priceReferenceModel').disabled, true);
+
+  const unsafeModel = '<img src=x onerror=alert(1)>';
+  const unsafe = createDashboardHarness({
+    prices: { [unsafeModel]: { prompt: 2, completion: 4, cache: 1, cache_write: 0 } },
+    manualPrices: {},
+  });
+  await waitFor(() => Array.from(unsafe.context.priceReferenceOptions()).includes(unsafeModel));
+  assert.match(unsafe.document.getElementById('priceReferenceOptions').innerHTML, /&lt;img/);
+  assert.doesNotMatch(unsafe.document.getElementById('priceReferenceOptions').innerHTML, /<img/);
+  unsafe.document.getElementById('priceReferenceModel').value = unsafeModel;
+  unsafe.document.getElementById('priceReferenceModel').onchange();
+  assert.match(unsafe.document.getElementById('priceReferenceInfo').innerHTML, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.doesNotMatch(unsafe.document.getElementById('priceReferenceInfo').innerHTML, /<img/);
+});
+
+test('model price settings use a details element that is closed by default', () => {
+  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
+  const match = html.match(/<details\b[^>]*id="priceSettings"[^>]*>/);
+  assert.ok(match, 'expected model price settings to use a details element');
+  assert.doesNotMatch(match[0], /\sopen(?:\s|=|>)/i);
+  const detailsStart = html.indexOf(match[0]);
+  const detailsEnd = html.indexOf('</details>', detailsStart);
+  const lookupIndex = html.indexOf('id="priceReferenceModel"');
+  assert.ok(lookupIndex > detailsStart && lookupIndex < detailsEnd, 'expected price lookup inside the collapsible settings panel');
+  assert.match(html, /id="priceReferenceModel"[^>]*role="combobox"/);
+  assert.doesNotMatch(html, /<select[^>]*id="priceReferenceModel"/);
+});
+
+test('price rerenders preserve the settings details open state', async () => {
+  const { context, document } = createDashboardHarness({ manualPrices: {} });
+  await waitFor(() => Array.from(context.priceReferenceOptions()).includes('gpt-4.1'));
+  const settings = document.getElementById('priceSettings');
+  settings.open = true;
+  context.renderPrices();
+  assert.strictEqual(settings.open, true);
 });
 
 test('dashboard export truncation headers produce a user notice', () => {
@@ -1075,6 +1231,28 @@ test('dashboard translations include recent request metadata columns', () => {
     for (const key of ['col_reasoning_effort', 'col_endpoint', 'col_generation_speed']) {
       assert.ok(context.I18N_MAP[language][key], language + ' missing ' + key);
     }
+  }
+});
+
+test('dashboard translations include price lookup and scoped setting copy', () => {
+  const { context } = createDashboardHarness();
+  const keys = [
+    'price_reference_title',
+    'price_reference_subtle',
+    'price_reference_select',
+    'price_reference_search_placeholder',
+    'price_reference_no_match',
+    'price_reference_result_limit',
+    'price_reference_none',
+    'price_source_manual',
+    'price_source_default',
+    'price_match_key',
+    'price_summary_hint',
+    'price_settings_hint',
+    'manual_price_list_title',
+  ];
+  for (const language of ['zh-CN', 'zh-TW', 'en', 'ru']) {
+    for (const key of keys) assert.ok(context.I18N_MAP[language][key], language + ' missing ' + key);
   }
 });
 

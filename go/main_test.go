@@ -4481,6 +4481,31 @@ func TestModelPricesUseModelsDevDefaultsWithManualOverride(t *testing.T) {
 	}
 }
 
+func TestManualModelPricesUseProviderScopeBeforeBareFallback(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{PriceStoragePath: filepath.Join(t.TempDir(), "prices.json")})
+	t.Cleanup(func() { stats.Close() })
+
+	if _, err := stats.UpsertModelPrice("same-model", ModelPrice{Prompt: 3, Completion: 6, Cache: 0.3}); err != nil {
+		t.Fatalf("UpsertModelPrice(bare) error = %v", err)
+	}
+	if _, err := stats.UpsertModelPrice("openrouter/same-model", ModelPrice{Prompt: 7, Completion: 14, Cache: 0.7}); err != nil {
+		t.Fatalf("UpsertModelPrice(scoped) error = %v", err)
+	}
+
+	stats.mu.RLock()
+	openAI, openAIOK := stats.priceForDetailLocked("same-model", "openai")
+	openRouter, openRouterOK := stats.priceForDetailLocked("same-model", "OpenRouter")
+	stats.mu.RUnlock()
+
+	if !openAIOK || openAI.Prompt != 3 || openAI.Completion != 6 || openAI.Cache != 0.3 {
+		t.Fatalf("bare fallback price = %#v ok=%v", openAI, openAIOK)
+	}
+	if !openRouterOK || openRouter.Prompt != 7 || openRouter.Completion != 14 || openRouter.Cache != 0.7 {
+		t.Fatalf("provider-scoped price = %#v ok=%v", openRouter, openRouterOK)
+	}
+}
+
 func TestModelsDevPriceWorkerReconfiguresURL(t *testing.T) {
 	stats := NewRequestStatistics()
 	t.Cleanup(func() { stats.Close() })

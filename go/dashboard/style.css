@@ -328,6 +328,40 @@ tbody td{transition:background-color .12s}
 .priceItem{display:flex;justify-content:space-between;gap:10px;align-items:center;border:1px solid var(--cpa-border-light);border-radius:10px;padding:9px 12px;background:var(--cpa-bg-raised)}
 .priceMeta{display:flex;gap:10px;color:var(--cpa-text-dim);font-size:12px;flex-wrap:wrap}
 .priceActions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+.priceReferenceSection{position:relative}
+.priceReferenceSection h3{margin:0;font-size:15px;line-height:1.4;color:var(--cpa-text-secondary)}
+.priceReferenceToolbar{align-items:center}
+.priceReferenceToolbar .searchCombo{flex:1 1 360px;max-width:620px}
+.priceReferenceInfo{min-height:74px}
+.priceReferenceCard{border:1px solid var(--cpa-border-light);border-radius:10px;padding:12px;background:var(--cpa-bg-raised)}
+.priceReferenceHead{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+.priceReferenceModel{font-weight:700;color:var(--cpa-text-secondary);overflow-wrap:anywhere}
+.priceReferenceSource{display:inline-flex;align-items:center;border:1px solid var(--cpa-border-light);background:var(--cpa-bg-pill);border-radius:999px;padding:2px 8px;color:var(--cpa-text-dim);font-size:11px;white-space:nowrap}
+.priceReferenceGrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.priceReferenceValue{border:1px solid var(--cpa-border-light);border-radius:8px;padding:8px;background:var(--cpa-bg-surface);min-width:0}
+.priceReferenceValueLabel{display:block;color:var(--cpa-text-tertiary);font-size:11px;margin-bottom:4px}
+.priceReferenceValueNumber{display:block;font-size:14px;font-weight:700;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.priceSummary{list-style:none;display:flex;justify-content:space-between;align-items:center;gap:12px;cursor:pointer;user-select:none}
+.priceSummary::-webkit-details-marker{display:none}
+.priceSummary:focus-visible{outline:3px solid var(--cpa-accent-soft);outline-offset:4px;border-radius:8px}
+.priceSummaryMain{display:flex;flex-direction:column;gap:5px;min-width:0}
+.priceSummaryTitle{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.priceSummaryHeading{font-size:16px;line-height:1.4;font-weight:700;letter-spacing:-.01em}
+.priceSummaryToggle{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:1px solid var(--cpa-border-light);border-radius:8px;color:var(--cpa-text-tertiary);font-size:18px;line-height:1;transition:transform .15s,background-color .15s}
+.priceSummary:hover .priceSummaryToggle{background:var(--cpa-bg-hover)}
+.pricePanel[open] .priceSummaryToggle{transform:rotate(180deg)}
+.priceSettingsBody{margin-top:14px;padding-top:14px;border-top:1px solid var(--cpa-border-light)}
+.priceSettingsDivider{height:1px;background:var(--cpa-border-light);margin:18px 0 14px}
+.priceSettingsHint{margin-bottom:12px}
+.priceListHead{margin-top:14px}
+.searchCombo{position:relative;min-width:0}
+.searchCombo .input{width:100%;box-sizing:border-box}
+.searchComboOptions{position:absolute;z-index:30;left:0;right:0;top:calc(100% + 4px);max-height:280px;overflow:auto;border:1px solid var(--cpa-border);border-radius:10px;background:var(--cpa-bg-surface);box-shadow:var(--cpa-shadow-hover);padding:4px}
+.searchComboOptions[hidden]{display:none}
+.searchComboOption{display:block;width:100%;border:0;border-radius:7px;background:transparent;color:var(--cpa-text-secondary);cursor:pointer;font:inherit;text-align:left;padding:8px 10px;overflow-wrap:anywhere}
+.searchComboOption:hover,.searchComboOption.active{background:var(--cpa-bg-selected);color:var(--cpa-accent-strong)}
+.searchComboEmpty,.searchComboStatus{display:block;color:var(--cpa-text-tertiary);font-size:12px;line-height:1.5;padding:8px 10px}
+.searchComboStatus{border-top:1px solid var(--cpa-border-light);margin-top:4px;padding-top:7px}
 
 /* ---- 健康监测网格 ---- */
 .healthSummary{display:flex;gap:14px;align-items:baseline;flex-wrap:wrap}
@@ -381,8 +415,8 @@ html[data-cpa-theme="light"] .anomalyBar.muted{background:#f8f9fb;border-color:#
 /* ---- 响应式 ---- */
 @media(max-width:1120px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.layout{grid-template-columns:1fr}.detailGrid{grid-template-columns:repeat(3,minmax(0,1fr))}.splitGrid{grid-template-columns:1fr}}
 @media(max-width:1000px){.priceGrid{grid-template-columns:repeat(3,minmax(0,1fr))}.priceGrid .btn{width:100%}}
-@media(max-width:760px){.priceGrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:640px){.shell{padding:14px}h1{font-size:20px}.cards{grid-template-columns:1fr}.value{font-size:24px}.priceGrid{grid-template-columns:1fr}.priceItem{align-items:stretch;flex-direction:column}.priceActions{justify-content:stretch}.priceActions .btn{flex:1 1 120px}.detailGrid{grid-template-columns:1fr}.barItem{grid-template-columns:1fr}.barValue{justify-self:start}.apiCard{grid-template-columns:1fr}.btn,.select,.input{width:100%}.toolbar{width:100%}.toolbar>*{flex:1 1 150px}table{font-size:11px}th,td{padding:6px 6px;white-space:normal;word-break:break-word}.nameCell{min-width:80px;font-size:11px}.errorText{max-width:none;min-width:max-content;white-space:nowrap;word-break:normal;overflow:visible}.header{padding-right:0}}
+@media(max-width:760px){.priceGrid,.priceReferenceGrid{grid-template-columns:repeat(2,minmax(0,1fr))}.priceReferenceToolbar .searchCombo{max-width:none}}
+@media(max-width:640px){.shell{padding:14px}h1{font-size:20px}.cards{grid-template-columns:1fr}.value{font-size:24px}.priceGrid{grid-template-columns:1fr}.priceReferenceGrid{grid-template-columns:1fr}.priceItem{align-items:stretch;flex-direction:column}.priceActions{justify-content:stretch}.priceActions .btn{flex:1 1 120px}.detailGrid{grid-template-columns:1fr}.barItem{grid-template-columns:1fr}.barValue{justify-self:start}.apiCard{grid-template-columns:1fr}.btn,.select,.input{width:100%}.toolbar{width:100%}.toolbar>*{flex:1 1 150px}table{font-size:11px}th,td{padding:6px 6px;white-space:normal;word-break:break-word}.nameCell{min-width:80px;font-size:11px}.errorText{max-width:none;min-width:max-content;white-space:nowrap;word-break:normal;overflow:visible}.header{padding-right:0}}
 
 /* ---- 动画偏好 ---- */
 @media(prefers-reduced-motion:reduce){*{transition-duration:0s!important;animation-duration:0s!important}}
