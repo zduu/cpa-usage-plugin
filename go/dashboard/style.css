@@ -347,9 +347,9 @@ tbody td{transition:background-color .12s}
 .priceSummaryMain{display:flex;flex-direction:column;gap:5px;min-width:0}
 .priceSummaryTitle{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
 .priceSummaryHeading{font-size:16px;line-height:1.4;font-weight:700;letter-spacing:-.01em}
-.priceSummaryToggle{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:1px solid var(--cpa-border-light);border-radius:8px;color:var(--cpa-text-tertiary);font-size:18px;line-height:1;transition:transform .15s,background-color .15s}
-.priceSummary:hover .priceSummaryToggle{background:var(--cpa-bg-hover)}
-.pricePanel[open] .priceSummaryToggle{transform:rotate(180deg)}
+.priceSummaryToggle{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:1px solid var(--cpa-border-light);border-radius:8px;color:var(--cpa-text-tertiary);transition:transform .2s ease,background-color .15s,color .15s}
+.priceSummary:hover .priceSummaryToggle{background:var(--cpa-bg-hover);color:var(--cpa-text-secondary)}
+.pricePanel[open] .priceSummaryToggle{transform:rotate(180deg);color:var(--cpa-accent-strong);border-color:var(--cpa-accent-soft)}
 .priceSettingsBody{margin-top:14px;padding-top:14px;border-top:1px solid var(--cpa-border-light)}
 .priceSettingsDivider{height:1px;background:var(--cpa-border-light);margin:18px 0 14px}
 .priceSettingsHint{margin-bottom:12px}

@@ -22,7 +22,7 @@ let pollTimer = null, pollFailures = 0;
 let currentRange = '';
 const eventsLimit = 500;
 const apiDetailRecentLimit = 120;
-const priceReferenceResultLimit = 50;
+const priceReferenceResultLimit = 100;
 const visiblePollDelayMs = 30000;
 const hiddenPollDelayMs = 300000;
 let apiDetailSeq = 0;

@@ -1035,7 +1035,7 @@ test('price lookup filters a bounded custom result list and supports keyboard se
     'openrouter/gpt-4.1': { prompt: 3, completion: 4 },
     'catalog-only/model-x': { prompt: 5, completion: 6 },
   };
-  for (let i = 0; i < 55; i++) prices['bulk/model-' + i] = { prompt: i, completion: i + 1 };
+  for (let i = 0; i < 105; i++) prices['bulk/model-' + i] = { prompt: i, completion: i + 1 };
   const { context, document } = createDashboardHarness({ prices, manualPrices: {} });
 
   await waitFor(() => Array.from(context.priceReferenceOptions()).includes('openrouter/gpt-4.1'));
@@ -1055,8 +1055,14 @@ test('price lookup filters a bounded custom result list and supports keyboard se
 
   input.value = 'bulk/';
   input.oninput();
-  assert.match(results.innerHTML, /显示前 50 项（共 55 项）/);
-  assert.strictEqual((results.innerHTML.match(/class="searchComboOption/g) || []).length, 50);
+  assert.match(results.innerHTML, /bulk\/model-0/);
+  assert.match(results.innerHTML, /显示前 100 项（共 105 项）/);
+  assert.strictEqual((results.innerHTML.match(/class="searchComboOption/g) || []).length, 100);
+
+  input.value = 'bulk/model-104';
+  input.oninput();
+  assert.match(results.innerHTML, /bulk\/model-104/);
+  assert.strictEqual((results.innerHTML.match(/class="searchComboOption/g) || []).length, 1);
 });
 
 test('dashboard saves provider-scoped model prices as provider/modelname keys', async () => {
