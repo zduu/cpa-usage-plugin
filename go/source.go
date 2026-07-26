@@ -158,6 +158,7 @@ func friendlySourceName(record UsageRecord) string {
 	provider := strings.TrimSpace(record.Provider)
 	executor := strings.TrimSpace(record.ExecutorType)
 	source := stripRecordCredentialSuffix(record.Source, record)
+	source = recoverCodexOAuthSource(provider, executor, source, record.AuthID, record.AuthType)
 
 	if isProviderSpecificOpenAICompatible(provider) {
 		return provider
@@ -180,6 +181,7 @@ func usageGroupKey(record UsageRecord) string {
 	provider := strings.TrimSpace(record.Provider)
 	executor := strings.TrimSpace(record.ExecutorType)
 	source := stripRecordCredentialSuffix(record.Source, record)
+	source = recoverCodexOAuthSource(provider, executor, source, record.AuthID, record.AuthType)
 	baseURL := strings.TrimSpace(record.BaseURL)
 	primary := provider
 	if primary == "" {
@@ -225,6 +227,7 @@ func usageGroupKey(record UsageRecord) string {
 func cleanImportedDetailSource(detail RequestDetail) string {
 	source := stripDetailCredentialSuffix(detail.Source, detail)
 	provider := strings.TrimSpace(detail.Provider)
+	source = recoverCodexOAuthSource(provider, "", source, detail.AuthID, detail.AuthType)
 	if isProviderSpecificOpenAICompatible(provider) {
 		return provider
 	}
@@ -235,6 +238,93 @@ func cleanImportedDetailSource(detail RequestDetail) string {
 		return provider
 	}
 	return ""
+}
+
+// recoverCodexOAuthSource keeps the dashboard group stable when CPA briefly
+// emits the provider name instead of the account email as Source. Generated
+// Codex OAuth auth IDs are persisted credential filenames, so their email is a
+// more stable identity than the optional per-request source metadata.
+func recoverCodexOAuthSource(provider, executor, source, authID, authType string) string {
+	primary := strings.TrimSpace(provider)
+	if primary == "" {
+		primary = strings.TrimSpace(executor)
+	}
+	if !strings.EqualFold(primary, "codex") {
+		return source
+	}
+	authType = strings.TrimSpace(authType)
+	if authType != "" && !strings.EqualFold(authType, "oauth") {
+		return source
+	}
+	if source != "" && !strings.EqualFold(source, primary) && !strings.EqualFold(source, strings.TrimSpace(executor)) {
+		return source
+	}
+	if email := codexOAuthEmailFromAuthID(authID); email != "" {
+		return email
+	}
+	return source
+}
+
+func codexOAuthEmailFromAuthID(authID string) string {
+	name := strings.TrimSpace(authID)
+	if cut := strings.LastIndexAny(name, "/\\"); cut >= 0 {
+		name = name[cut+1:]
+	}
+	if len(name) <= len("codex-.json") || !strings.EqualFold(name[:len("codex-")], "codex-") || !strings.EqualFold(name[len(name)-len(".json"):], ".json") {
+		return ""
+	}
+
+	identity := name[len("codex-") : len(name)-len(".json")]
+	if dash := strings.IndexByte(identity, '-'); dash == 8 && isHexString(identity[:dash]) && strings.Contains(identity[dash+1:], "@") {
+		identity = identity[dash+1:]
+	}
+
+	// CPA appends the normalized ChatGPT plan after the email. The boundary is
+	// otherwise ambiguous with hyphens that legitimately occur in email domains,
+	// so only strip plan names that CPA currently emits.
+	for _, plan := range []string{
+		"team-plan", "enterprise", "education", "business",
+		"plus", "team", "free", "pro", "edu", "k12",
+	} {
+		suffix := "-" + plan
+		if len(identity) > len(suffix) && strings.EqualFold(identity[len(identity)-len(suffix):], suffix) {
+			if email := strings.TrimSpace(identity[:len(identity)-len(suffix)]); looksLikeEmailSource(email) {
+				return email
+			}
+		}
+	}
+	if looksLikeEmailSource(identity) {
+		return identity
+	}
+	return ""
+}
+
+func isHexString(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, ch := range value {
+		if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+func looksLikeEmailSource(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.ContainsAny(value, " \t\r\n/\\") || strings.Count(value, "@") != 1 {
+		return false
+	}
+	at := strings.IndexByte(value, '@')
+	if at <= 0 || at == len(value)-1 {
+		return false
+	}
+	domain := value[at+1:]
+	if !strings.Contains(domain, ".") || strings.HasPrefix(domain, ".") || strings.HasSuffix(domain, ".") || strings.Contains(domain, "..") {
+		return false
+	}
+	return true
 }
 
 func trimLeadingNamePart(value string, leading string) string {

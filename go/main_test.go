@@ -1134,7 +1134,7 @@ func TestResponseStreamChunkDoesNotDoubleCountNativeCodexUsage(t *testing.T) {
 		stats = previousStats
 	})
 
-	authID := "codex-xpspwc9mfb@privaterelay.appleid.com-plus.json"
+	authID := "codex-hide-my-email@privaterelay.example.com-plus.json"
 	streamReq := ResponseStreamChunkRequest{
 		ResponseInterceptRequest: ResponseInterceptRequest{
 			SourceFormat:   "openai",
@@ -1174,7 +1174,7 @@ func TestResponseStreamChunkDoesNotDoubleCountNativeCodexUsage(t *testing.T) {
 		AuthID:          authID,
 		AuthIndex:       "a2f9cd186fd7dee9",
 		AuthType:        "oauth",
-		Source:          "xpspwc9mfb@privaterelay.appleid.com",
+		Source:          "hide-my-email@privaterelay.example.com",
 		ReasoningEffort: "high",
 		RequestedAt:     time.Now(),
 		Latency:         5062 * time.Millisecond,
@@ -1201,7 +1201,7 @@ func TestResponseStreamChunkDoesNotDoubleCountNativeCodexUsage(t *testing.T) {
 	if _, ok := summary.Usage.APIs["openai-compatible"]; ok {
 		t.Fatalf("summary APIs = %#v, did not expect fallback openai-compatible record", summary.Usage.APIs)
 	}
-	if _, ok := summary.Usage.APIs["codex · xpspwc9mfb@privaterelay.appleid.com"]; !ok {
+	if _, ok := summary.Usage.APIs["codex · hide-my-email@privaterelay.example.com"]; !ok {
 		t.Fatalf("summary APIs = %#v, want native Codex API key", summary.Usage.APIs)
 	}
 }
@@ -5516,6 +5516,237 @@ func TestUsageGroupKey_DifferentiatesSameProviderChannels(t *testing.T) {
 	}
 	if k2 != "codex · user-a@example.invalid" {
 		t.Fatalf("second key = %q, want source without credential label", k2)
+	}
+}
+
+func TestUsageGroupKeyRecoversCodexOAuthEmailWhenSourceFallsBackToProvider(t *testing.T) {
+	authID := "codex-deadbeef-hide-my-email@privaterelay.example.com-plus.json"
+	complete := UsageRecord{
+		Provider:  "codex",
+		Source:    "hide-my-email@privaterelay.example.com",
+		AuthID:    authID,
+		AuthIndex: "ba5eba11ba5eba11",
+		AuthType:  "oauth",
+	}
+	fallback := complete
+	fallback.Source = "codex"
+
+	want := "codex · hide-my-email@privaterelay.example.com"
+	if got := usageGroupKey(complete); got != want {
+		t.Fatalf("complete key = %q, want %q", got, want)
+	}
+	if got := usageGroupKey(fallback); got != want {
+		t.Fatalf("fallback key = %q, want %q", got, want)
+	}
+	if got := usageSource(fallback); got != "hide-my-email@privaterelay.example.com" {
+		t.Fatalf("fallback source = %q, want recovered OAuth email", got)
+	}
+}
+
+func TestUsageGroupKeyDoesNotOverrideStableCodexSourceOrAPIKeyIdentity(t *testing.T) {
+	authID := "codex-deadbeef-user@example.com-plus.json"
+	stableSource := UsageRecord{
+		Provider:  "codex",
+		Source:    "team-primary",
+		AuthID:    authID,
+		AuthIndex: "channel-a",
+		AuthType:  "oauth",
+	}
+	if got := usageGroupKey(stableSource); got != "codex · team-primary" {
+		t.Fatalf("stable source key = %q, want explicit source preserved", got)
+	}
+
+	apiKey := stableSource
+	apiKey.Source = "codex"
+	apiKey.AuthType = "apikey"
+	if got := usageGroupKey(apiKey); got != "codex · 上游 channel-a" {
+		t.Fatalf("API-key key = %q, want credential channel instead of OAuth filename email", got)
+	}
+}
+
+func TestCodexOAuthEmailFromAuthID(t *testing.T) {
+	tests := map[string]string{
+		"codex-deadbeef-user@example.com-plus.json":            "user@example.com",
+		"codex-user@example.com.json":                          "user@example.com",
+		"/auth/codex-deadbeef-user-name@example.com-team.json": "user-name@example.com",
+		"codex-user@example.com-team-plan.json":                "user@example.com",
+		"codex-user@example.foo-bar-plus.json":                 "user@example.foo-bar",
+		"codex-user@example.xn--fiqs8s-plus.json":              "user@example.xn--fiqs8s",
+		"codex:apikey:abcdef123456":                            "",
+		"claude-user@example.com.json":                         "",
+		"codex-not-an-email-plus.json":                         "",
+	}
+	for authID, want := range tests {
+		if got := codexOAuthEmailFromAuthID(authID); got != want {
+			t.Errorf("codexOAuthEmailFromAuthID(%q) = %q, want %q", authID, got, want)
+		}
+	}
+}
+
+func TestRecordMergesCodexOAuthProviderFallbackIntoEmailGroup(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{DedupWindowMinutes: 0})
+	authID := "codex-deadbeef-hide-my-email@privaterelay.example.com-plus.json"
+	base := UsageRecord{
+		Provider:    "codex",
+		Model:       "gpt-5.6-sol",
+		AuthID:      authID,
+		AuthIndex:   "ba5eba11ba5eba11",
+		AuthType:    "oauth",
+		RequestedAt: time.Date(2026, 7, 26, 12, 53, 16, 0, time.FixedZone("CST", 8*60*60)),
+		Detail:      UsageDetail{TotalTokens: 72_001},
+	}
+	complete := base
+	complete.Source = "hide-my-email@privaterelay.example.com"
+	fallback := base
+	fallback.Source = "codex"
+	fallback.RequestedAt = fallback.RequestedAt.Add(time.Minute)
+	fallback.Detail.TotalTokens = 223_842
+
+	stats.Record(complete)
+	stats.Record(fallback)
+
+	snapshot := stats.Snapshot()
+	wantAPI := "codex · hide-my-email@privaterelay.example.com"
+	if len(snapshot.APIs) != 1 {
+		t.Fatalf("snapshot APIs = %#v, want one stable Codex OAuth group", snapshot.APIs)
+	}
+	api := snapshot.APIs[wantAPI]
+	if api.TotalRequests != 2 || api.TotalTokens != 295_843 {
+		t.Fatalf("merged API = %#v, want two requests and 295843 tokens; all APIs=%#v", api, snapshot.APIs)
+	}
+	for _, detail := range api.Models["gpt-5.6-sol"].Details {
+		if detail.Source != "hide-my-email@privaterelay.example.com" {
+			t.Fatalf("detail source = %q, want recovered OAuth email", detail.Source)
+		}
+	}
+}
+
+func TestMergeSnapshotMergesCodexOAuthProviderFallbackIntoEmailGroup(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{RetentionDays: 0, DedupWindowMinutes: 0})
+	when := time.Date(2026, 7, 26, 12, 53, 16, 0, time.FixedZone("CST", 8*60*60))
+	authID := "codex-deadbeef-hide-my-email@privaterelay.example.com-plus.json"
+	detail := func(source string, timestamp time.Time, tokens int64) RequestDetail {
+		return RequestDetail{
+			Model:     "gpt-5.6-sol",
+			Timestamp: timestamp,
+			Source:    source,
+			Provider:  "codex",
+			AuthID:    authID,
+			AuthIndex: "ba5eba11ba5eba11",
+			AuthType:  "oauth",
+			Tokens:    TokenStats{TotalTokens: tokens},
+		}
+	}
+	snapshot := StatisticsSnapshot{
+		APIs: map[string]APISnapshot{
+			"codex · hide-my-email@privaterelay.example.com": {
+				Models: map[string]ModelSnapshot{
+					"gpt-5.6-sol": {Details: []RequestDetail{detail("hide-my-email@privaterelay.example.com", when, 72_001)}},
+				},
+			},
+			"codex · 上游 ba5eba11ba5eba11": {
+				Models: map[string]ModelSnapshot{
+					"gpt-5.6-sol": {Details: []RequestDetail{detail("codex", when.Add(time.Minute), 223_842)}},
+				},
+			},
+		},
+	}
+
+	result := stats.MergeSnapshot(snapshot)
+	if result.Added != 2 || result.Skipped != 0 {
+		t.Fatalf("merge result = %#v, want both distinct requests imported", result)
+	}
+	merged := stats.Snapshot()
+	wantAPI := "codex · hide-my-email@privaterelay.example.com"
+	if len(merged.APIs) != 1 {
+		t.Fatalf("snapshot APIs = %#v, want imported legacy groups merged", merged.APIs)
+	}
+	api := merged.APIs[wantAPI]
+	if api.TotalRequests != 2 || api.TotalTokens != 295_843 {
+		t.Fatalf("merged API = %#v, want two requests and 295843 tokens", api)
+	}
+}
+
+func TestStorageSnapshotRestoreMergesCodexOAuthProviderFallbackIntoEmailGroup(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "usage-statistics")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir storage dir: %v", err)
+	}
+	when := time.Date(2026, 7, 26, 12, 53, 16, 0, time.FixedZone("CST", 8*60*60))
+	authID := "codex-deadbeef-hide-my-email@privaterelay.example.com-plus.json"
+	detail := func(source string, timestamp time.Time, tokens int64) RequestDetail {
+		return RequestDetail{
+			Model:     "gpt-5.6-sol",
+			Timestamp: timestamp,
+			Source:    source,
+			Provider:  "codex",
+			AuthID:    authID,
+			AuthIndex: "ba5eba11ba5eba11",
+			AuthType:  "oauth",
+			Tokens:    TokenStats{TotalTokens: tokens},
+		}
+	}
+	payload := persistedStorageSnapshot{
+		Version:     currentStorageSnapshotVersion,
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		Usage: StatisticsSnapshot{
+			TotalRequests: 2,
+			SuccessCount:  2,
+			TotalTokens:   295_843,
+			APIs: map[string]APISnapshot{
+				"codex · hide-my-email@privaterelay.example.com": {
+					TotalRequests: 1,
+					SuccessCount:  1,
+					TotalTokens:   72_001,
+					Models: map[string]ModelSnapshot{
+						"gpt-5.6-sol": {
+							TotalRequests: 1, SuccessCount: 1, TotalTokens: 72_001,
+							Details: []RequestDetail{detail("hide-my-email@privaterelay.example.com", when, 72_001)},
+						},
+					},
+				},
+				"codex · 上游 ba5eba11ba5eba11": {
+					TotalRequests: 1,
+					SuccessCount:  1,
+					TotalTokens:   223_842,
+					Models: map[string]ModelSnapshot{
+						"gpt-5.6-sol": {
+							TotalRequests: 1, SuccessCount: 1, TotalTokens: 223_842,
+							Details: []RequestDetail{detail("codex", when.Add(time.Minute), 223_842)},
+						},
+					},
+				},
+			},
+			RequestsByDay:  map[string]int64{when.Format("2006-01-02"): 2},
+			RequestsByHour: map[string]int64{hourKeys[when.Hour()]: 2},
+			TokensByDay:    map[string]int64{when.Format("2006-01-02"): 295_843},
+			TokensByHour:   map[string]int64{hourKeys[when.Hour()]: 295_843},
+		},
+	}
+	if err := os.WriteFile(storageSnapshotPath(dir), mustMarshal(payload), 0o600); err != nil {
+		t.Fatalf("write storage snapshot: %v", err)
+	}
+
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		MaxDetailsPerModel: 100,
+		RetentionDays:      0,
+		DedupWindowMinutes: 0,
+		StorageEnabled:     true,
+		StoragePath:        dir,
+	})
+	defer stats.Close()
+
+	snapshot := stats.Snapshot()
+	wantAPI := "codex · hide-my-email@privaterelay.example.com"
+	if len(snapshot.APIs) != 1 {
+		t.Fatalf("snapshot APIs = %#v, want restored legacy groups merged", snapshot.APIs)
+	}
+	api := snapshot.APIs[wantAPI]
+	if api.TotalRequests != 2 || api.TotalTokens != 295_843 {
+		t.Fatalf("restored API = %#v, want two requests and 295843 tokens", api)
 	}
 }
 

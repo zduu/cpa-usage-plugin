@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "plugin": "2.5.3",
+  "detail_count": 2,
+  "usage": {
+    "total_requests": 2,
+    "success_count": 2,
+    "failure_count": 0,
+    "total_tokens": 295843,
+    "apis": {
+      "codex · hide-my-email@privaterelay.example.com": {
+        "total_requests": 1,
+        "success_count": 1,
+        "failure_count": 0,
+        "total_tokens": 72001,
+        "models": {
+          "gpt-5.6-sol": {
+            "total_requests": 1,
+            "success_count": 1,
+            "failure_count": 0,
+            "total_tokens": 72001,
+            "details": [
+              {
+                "model": "gpt-5.6-sol",
+                "timestamp": "2026-07-26T12:53:15+08:00",
+                "source": "hide-my-email@privaterelay.example.com",
+                "provider": "codex",
+                "auth_id": "codex-deadbeef-hide-my-email@privaterelay.example.com-plus.json",
+                "auth_index": "ba5eba11ba5eba11",
+                "auth_type": "oauth",
+                "tokens": {
+                  "total_tokens": 72001
+                },
+                "failed": false
+              }
+            ]
+          }
+        }
+      },
+      "codex · 上游 ba5eba11ba5eba11": {
+        "total_requests": 1,
+        "success_count": 1,
+        "failure_count": 0,
+        "total_tokens": 223842,
+        "models": {
+          "gpt-5.6-sol": {
+            "total_requests": 1,
+            "success_count": 1,
+            "failure_count": 0,
+            "total_tokens": 223842,
+            "details": [
+              {
+                "model": "gpt-5.6-sol",
+                "timestamp": "2026-07-26T12:53:16+08:00",
+                "source": "codex",
+                "provider": "codex",
+                "auth_id": "codex-deadbeef-hide-my-email@privaterelay.example.com-plus.json",
+                "auth_index": "ba5eba11ba5eba11",
+                "auth_type": "oauth",
+                "tokens": {
+                  "total_tokens": 223842
+                },
+                "failed": false
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}
