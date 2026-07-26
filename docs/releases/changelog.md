@@ -4,6 +4,16 @@
 
 `v1.0.0` 到 `v1.2.18` 为规范化发布流程建立前的 legacy 历史版本，不在本文件中回填；对应说明见 [v1-history.md](v1-history.md)。
 
+## v2.5.4 - 2026-07-26
+
+### Codex OAuth 源回退修复
+- 当 CPA 短暂将 Codex OAuth 请求的 Source 回退为 provider 名称时，插件自动从持久化的 OAuth credential 文件名（authID）中恢复邮箱作为分组标识，避免仪表盘出现两个分组的重复统计
+- 恢复逻辑仅在 provider 为 codex、认证方式为 OAuth、且 Source 已回退为 provider/executor 名称时才生效，不影响已有有效 Source 或 API Key 认证的请求
+
+### 测试数据脱敏
+- 将测试中疑似真实 Apple Hide My Email 地址替换为虚构的 `privaterelay.example.com` 域名
+- 将测试中的 hex 标识符替换为明显虚构值
+
 ## v2.5.3 - 2026-07-25
 
 ### 模型价格查询优化
