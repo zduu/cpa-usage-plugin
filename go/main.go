@@ -116,6 +116,9 @@ func cliproxyPluginShutdown() {
 	if usageFallbacks != nil {
 		usageFallbacks.Flush()
 	}
+	if upstreamAttributions != nil {
+		upstreamAttributions.Flush()
+	}
 	if stats != nil {
 		stats.Close()
 	}

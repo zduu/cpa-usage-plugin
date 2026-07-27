@@ -158,6 +158,12 @@ func handleRegister(requestBody []byte) ([]byte, error) {
 }
 
 func handleReconfigure(requestBody []byte) ([]byte, error) {
+	if upstreamAttributions != nil {
+		upstreamAttributions.Reset()
+	}
+	if stats != nil {
+		stats.ReconcileProtocolFallbacks()
+	}
 	return handleRegister(requestBody)
 }
 

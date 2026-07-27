@@ -1533,6 +1533,8 @@ func (s *RequestStatistics) restoreStorageSnapshotLocked(snapshot StatisticsSnap
 	if s == nil {
 		return
 	}
+	snapshot, _ = reconcileProtocolFallbackSnapshot(snapshot)
+	snapshot, _ = reconcileUpstreamAttributionSnapshot(snapshot, newUpstreamRouteResolver(maxHistoricalAttributionRoutes))
 	s.totalRequests = nonNegativeInt64(snapshot.TotalRequests)
 	s.successCount = nonNegativeInt64(snapshot.SuccessCount)
 	s.failureCount = nonNegativeInt64(snapshot.FailureCount)
@@ -2722,9 +2724,7 @@ func (s *RequestStatistics) replayStorageLocked(path string) error {
 	scanner := bufio.NewScanner(file)
 	buf := make([]byte, 0, 1024*1024)
 	scanner.Buffer(buf, 10*1024*1024)
-	now := time.Now()
-	existing := s.detailKeysLocked()
-	pendingMetadata := make(map[requestDedupKey]RequestDetail)
+	var records []persistedDetail
 	var invalidLines int
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -2741,6 +2741,22 @@ func (s *RequestStatistics) replayStorageLocked(path string) error {
 			invalidLines++
 			continue
 		}
+		records = append(records, persisted)
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("scan storage: %w", err)
+	}
+
+	now := time.Now()
+	resolver := s.upstreamRouteResolverLocked()
+	records = reconcilePersistedUpstreamAttributions(records, resolver)
+	records, _ = reconcilePersistedProtocolFallbacks(records)
+	s.reconcileRecordedUpstreamAttributionsWithResolverLocked(now, resolver)
+	s.reconcileRecordedProtocolFallbacksLocked(now)
+	existing := s.detailKeysLocked()
+	pendingMetadata := make(map[requestDedupKey]RequestDetail)
+	for _, persisted := range records {
+		apiName := strings.TrimSpace(persisted.API)
 		detail := persisted.Detail
 		modelName := normalizeDetailModelName(persisted.Model, detail.Model)
 		detail.Model = modelName
@@ -2778,9 +2794,8 @@ func (s *RequestStatistics) replayStorageLocked(path string) error {
 			}
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("scan storage: %w", err)
-	}
+	s.reconcileRecordedUpstreamAttributionsLocked(now)
+	s.reconcileRecordedProtocolFallbacksLocked(now)
 	if invalidLines > 0 {
 		return fmt.Errorf("replay storage skipped %d invalid line(s)", invalidLines)
 	}
@@ -4230,6 +4245,13 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, persist bool, now time.Time) (MergeResult, []persistedDetail) {
 	result := MergeResult{}
 	var persisted []persistedDetail
+	var reconciledProtocolFallbacks int
+	snapshot, reconciledProtocolFallbacks = reconcileProtocolFallbackSnapshot(snapshot)
+	result.Skipped += int64(reconciledProtocolFallbacks)
+	s.reconcileRecordedProtocolFallbacksLocked(now)
+	resolver := s.upstreamRouteResolverLocked()
+	snapshot, _ = reconcileUpstreamAttributionSnapshot(snapshot, resolver)
+	s.reconcileRecordedUpstreamAttributionsWithResolverLocked(now, resolver)
 	var cutoff time.Time
 	if s.retention > 0 {
 		cutoff = now.Add(-s.retention)
@@ -4302,6 +4324,11 @@ func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, per
 	}
 
 	s.pruneLocked(now, true)
+	reconciledRecorded := s.reconcileRecordedProtocolFallbacksLocked(now)
+	if reconciledRecorded > 0 {
+		result.Skipped += int64(reconciledRecorded)
+		result.Added = maxInt64(result.Added-int64(reconciledRecorded), 0)
+	}
 	s.rebuildSeenLocked(now)
 	return result, persisted
 }

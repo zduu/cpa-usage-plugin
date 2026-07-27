@@ -4,6 +4,19 @@
 
 `v1.0.0` 到 `v1.2.18` 为规范化发布流程建立前的 legacy 历史版本，不在本文件中回填；对应说明见 [v1-history.md](v1-history.md)。
 
+## Unreleased
+
+### Codex OpenAI 协议兜底去重
+- 修复 CPA 响应拦截元数据缺少 `selected_auth_id` 时，同一 Codex 请求同时落入 `openai-compatible` 与 Codex OAuth 上游组的问题；仅对无认证身份、零延迟的 `/v1/chat/completions` 或 `/v1/responses` 兜底，在相同模型、客户端 API、token 明细和 1 秒完成时间窗口内与 Codex 原生 usage 一对一合并
+- 保留原生 Codex 的认证、延迟和 TTFT，并从响应兜底补齐端点、推理强度与流式标记；即使 CPA 未提供相关元数据，也会从 OpenAI 请求协议恢复端点和显式 reasoning effort
+- 支持兜底先到、原生先到和兜底已提交后的乱序情况，并在导入、storage snapshot、JSONL 重放及热重载时修复已有重复；无原生对应项、跨时间窗口及非 Codex 上游不会被合并
+
+### DeepSeek 上游归因兼容
+- 兼容新版 CPA 将成功的 `deepseek-*` 原生 usage 记录成 `claude:apikey` 身份的情况，避免看板产生 `claude · 上游 <auth_index>` 错误分组
+- 只有同一客户端 API、同一 DeepSeek 型号族存在唯一的 `openai-compatible-<name>` 具体身份旁证时才纠正；优先限定同一端点，旧记录缺少端点时要求跨端点候选仍唯一；候选冲突、失败请求、匿名请求和真实 Claude 模型均保留原记录
+- 实时可疑记录最多等待 90 秒，同时支持导入、storage snapshot 和跨 JSONL 分片冷启动恢复时迁移已有异常明细
+- 归因迁移保留原始模型、时间、延迟、TTFT 和执行器信息，并同步转换 Claude 独占缓存输入口径，避免影响 token 与费用计算
+
 ## v2.5.4 - 2026-07-26
 
 ### Codex OAuth 源回退修复

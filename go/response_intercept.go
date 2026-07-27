@@ -296,8 +296,8 @@ func usageRecordFromValues(req ResponseInterceptRequest, responseValues []any, d
 		AuthID:          authID,
 		AuthIndex:       fallbackAuthIndex(req.Metadata, authID),
 		AuthType:        fallbackAuthType(req.Metadata, authID),
-		Endpoint:        metadataString(req.Metadata, "request_path", "endpoint", "request_endpoint"),
-		ReasoningEffort: metadataString(req.Metadata, "reasoning_effort"),
+		Endpoint:        fallbackRequestEndpoint(req),
+		ReasoningEffort: fallbackReasoningEffort(req, requestRoot),
 		ServiceTier:     firstNonEmpty(metadataString(req.Metadata, "service_tier"), jsonStringPath(requestRoot, "service_tier")),
 		Stream:          req.Stream,
 		RequestedAt:     time.Now(),
@@ -306,6 +306,30 @@ func usageRecordFromValues(req ResponseInterceptRequest, responseValues []any, d
 		Source:          metadataString(req.Metadata, "upstream_source", "provider_source", "selected_source"),
 		ResponseHeaders: req.ResponseHeaders,
 	}, true
+}
+
+func fallbackRequestEndpoint(req ResponseInterceptRequest) string {
+	if endpoint := metadataString(req.Metadata, "request_path", "endpoint", "request_endpoint"); endpoint != "" {
+		return endpoint
+	}
+	switch strings.ToLower(strings.TrimSpace(req.SourceFormat)) {
+	case "openai":
+		return "/v1/chat/completions"
+	case "openai-response", "openai-responses":
+		return "/v1/responses"
+	default:
+		return ""
+	}
+}
+
+func fallbackReasoningEffort(req ResponseInterceptRequest, requestRoot any) string {
+	return firstNonEmpty(
+		metadataString(req.Metadata, "reasoning_effort"),
+		jsonStringPath(requestRoot, "reasoning_effort"),
+		jsonStringPath(requestRoot, "reasoning.effort"),
+		jsonStringPath(requestRoot, "thinking.effort"),
+		jsonStringPath(requestRoot, "thinking.level"),
+	)
 }
 
 func responseUsesAnthropicUsageAccounting(req ResponseInterceptRequest) bool {
@@ -527,32 +551,41 @@ func usageDetailHasTokens(detail UsageDetail) bool {
 }
 
 type usageFallbackCoordinator struct {
-	mu             sync.Mutex
-	pending        map[string][]*pendingUsageFallback
-	nativeRecent   map[string][]usageFallbackOccurrence
-	fallbackRecent map[string][]usageFallbackOccurrence
-	closed         bool
+	mu                       sync.Mutex
+	pending                  map[string][]*pendingUsageFallback
+	pendingCorrelated        map[string][]*pendingUsageFallback
+	nativeRecent             map[string][]*usageFallbackOccurrence
+	nativeRecentCorrelated   map[string][]*usageFallbackOccurrence
+	fallbackRecent           map[string][]*usageFallbackOccurrence
+	fallbackRecentCorrelated map[string][]*usageFallbackOccurrence
+	closed                   bool
 }
 
 type pendingUsageFallback struct {
-	key       string
-	record    UsageRecord
-	requestAt time.Time
-	timer     *time.Timer
-	cancelled bool
+	key            string
+	correlationKey string
+	record         UsageRecord
+	requestAt      time.Time
+	timer          *time.Timer
+	cancelled      bool
 }
 
 type usageFallbackOccurrence struct {
-	requestAt  time.Time
-	observedAt time.Time
-	record     UsageRecord
+	key            string
+	correlationKey string
+	requestAt      time.Time
+	observedAt     time.Time
+	record         UsageRecord
 }
 
 func newUsageFallbackCoordinator() *usageFallbackCoordinator {
 	return &usageFallbackCoordinator{
-		pending:        make(map[string][]*pendingUsageFallback),
-		nativeRecent:   make(map[string][]usageFallbackOccurrence),
-		fallbackRecent: make(map[string][]usageFallbackOccurrence),
+		pending:                  make(map[string][]*pendingUsageFallback),
+		pendingCorrelated:        make(map[string][]*pendingUsageFallback),
+		nativeRecent:             make(map[string][]*usageFallbackOccurrence),
+		nativeRecentCorrelated:   make(map[string][]*usageFallbackOccurrence),
+		fallbackRecent:           make(map[string][]*usageFallbackOccurrence),
+		fallbackRecentCorrelated: make(map[string][]*usageFallbackOccurrence),
 	}
 }
 
@@ -573,7 +606,11 @@ func (c *usageFallbackCoordinator) Schedule(record UsageRecord) {
 	if delay < 0 {
 		delay = 0
 	}
-	pending := &pendingUsageFallback{key: key, record: record, requestAt: requestAt}
+	correlationKey := ""
+	if isAnonymousOpenAIProtocolFallback(record) {
+		correlationKey = usageProtocolCorrelationKey(record)
+	}
+	pending := &pendingUsageFallback{key: key, correlationKey: correlationKey, record: record, requestAt: requestAt}
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -583,10 +620,24 @@ func (c *usageFallbackCoordinator) Schedule(record UsageRecord) {
 	c.cleanupLocked(now)
 	if nativeRecord, ok := c.consumeNativeRecentLocked(key, requestAt, now); ok {
 		c.mu.Unlock()
-		stats.EnrichRecordedUsage(nativeRecord, record)
+		if !stats.EnrichRecordedUsage(nativeRecord, record) && upstreamAttributions != nil {
+			upstreamAttributions.EnrichPending(nativeRecord, record)
+		}
 		return
 	}
+	if correlationKey != "" {
+		if nativeRecord, ok := c.consumeCorrelatedNativeRecentLocked(correlationKey, record, now); ok {
+			c.mu.Unlock()
+			if !stats.EnrichRecordedUsage(nativeRecord, record) && upstreamAttributions != nil {
+				upstreamAttributions.EnrichPending(nativeRecord, record)
+			}
+			return
+		}
+	}
 	c.pending[key] = append(c.pending[key], pending)
+	if correlationKey != "" {
+		c.pendingCorrelated[correlationKey] = append(c.pendingCorrelated[correlationKey], pending)
+	}
 	pending.timer = time.AfterFunc(delay, func() {
 		c.commit(pending)
 	})
@@ -606,8 +657,11 @@ func (c *usageFallbackCoordinator) HandleNative(record UsageRecord) (UsageRecord
 		requestAt = time.Now()
 		record.RequestedAt = requestAt
 	}
+	correlationKey := ""
+	if isNativeProtocolCorrelationRecord(record) {
+		correlationKey = usageProtocolCorrelationKey(record)
+	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	now := time.Now()
 	c.cleanupLocked(now)
 	if pending := c.popPendingLocked(key); pending != nil {
@@ -615,12 +669,43 @@ func (c *usageFallbackCoordinator) HandleNative(record UsageRecord) (UsageRecord
 		if pending.timer != nil {
 			pending.timer.Stop()
 		}
+		c.mu.Unlock()
 		return enrichUsageRecord(record, pending.record), true
 	}
-	if c.matchesFallbackRecentLocked(key, requestAt, now) {
+	if correlationKey != "" {
+		if pending := c.popCorrelatedPendingLocked(correlationKey, record); pending != nil {
+			pending.cancelled = true
+			if pending.timer != nil {
+				pending.timer.Stop()
+			}
+			c.mu.Unlock()
+			return enrichUsageRecord(record, pending.record), true
+		}
+	}
+	if fallbackRecord, ok := c.consumeFallbackRecentLocked(key, requestAt, now); ok {
+		c.mu.Unlock()
+		if stats.RemoveRecordedUsage(fallbackRecord) {
+			return enrichUsageRecord(record, fallbackRecord), true
+		}
 		return record, false
 	}
-	c.nativeRecent[key] = append(c.nativeRecent[key], usageFallbackOccurrence{requestAt: requestAt, observedAt: now, record: record})
+	if correlationKey != "" {
+		if fallbackRecord, ok := c.consumeCorrelatedFallbackRecentLocked(correlationKey, record, now); ok {
+			c.mu.Unlock()
+			if stats.RemoveRecordedUsage(fallbackRecord) {
+				return enrichUsageRecord(record, fallbackRecord), true
+			}
+			return record, false
+		}
+	}
+	occurrence := &usageFallbackOccurrence{
+		key: key, correlationKey: correlationKey, requestAt: requestAt, observedAt: now, record: record,
+	}
+	c.nativeRecent[key] = append(c.nativeRecent[key], occurrence)
+	if correlationKey != "" {
+		c.nativeRecentCorrelated[correlationKey] = append(c.nativeRecentCorrelated[correlationKey], occurrence)
+	}
+	c.mu.Unlock()
 	return record, true
 }
 
@@ -683,9 +768,10 @@ func (c *usageFallbackCoordinator) Flush() {
 		}
 		delete(c.pending, key)
 	}
+	c.pendingCorrelated = make(map[string][]*pendingUsageFallback)
 	c.mu.Unlock()
 	for _, record := range records {
-		stats.Record(record)
+		recordUsageWithAttribution(record)
 	}
 }
 
@@ -702,10 +788,17 @@ func (c *usageFallbackCoordinator) commit(pending *pendingUsageFallback) {
 	pending.cancelled = true
 	c.removePendingLocked(pending)
 	now := time.Now()
-	c.fallbackRecent[pending.key] = append(c.fallbackRecent[pending.key], usageFallbackOccurrence{
-		requestAt:  pending.requestAt,
-		observedAt: now,
-	})
+	occurrence := &usageFallbackOccurrence{
+		key:            pending.key,
+		correlationKey: pending.correlationKey,
+		requestAt:      pending.requestAt,
+		observedAt:     now,
+		record:         pending.record,
+	}
+	c.fallbackRecent[pending.key] = append(c.fallbackRecent[pending.key], occurrence)
+	if pending.correlationKey != "" {
+		c.fallbackRecentCorrelated[pending.correlationKey] = append(c.fallbackRecentCorrelated[pending.correlationKey], occurrence)
+	}
 	c.cleanupLocked(now)
 	record := pending.record
 	c.mu.Unlock()
@@ -716,7 +809,7 @@ func (c *usageFallbackCoordinator) commit(pending *pendingUsageFallback) {
 			record.AuthIndex = learned
 		}
 	}
-	stats.Record(record)
+	recordUsageWithAttribution(record)
 }
 
 func (c *usageFallbackCoordinator) popPendingLocked(key string) *pendingUsageFallback {
@@ -729,6 +822,7 @@ func (c *usageFallbackCoordinator) popPendingLocked(key string) *pendingUsageFal
 		if len(c.pending[key]) == 0 {
 			delete(c.pending, key)
 		}
+		c.removeCorrelatedPendingLocked(item)
 		return item
 	}
 	if len(items) == 0 {
@@ -748,52 +842,168 @@ func (c *usageFallbackCoordinator) removePendingLocked(pending *pendingUsageFall
 			if len(c.pending[pending.key]) == 0 {
 				delete(c.pending, pending.key)
 			}
+			c.removeCorrelatedPendingLocked(pending)
 			return
 		}
 	}
+	c.removeCorrelatedPendingLocked(pending)
+}
+
+func (c *usageFallbackCoordinator) removeCorrelatedPendingLocked(pending *pendingUsageFallback) {
+	if pending == nil || pending.correlationKey == "" {
+		return
+	}
+	items := c.pendingCorrelated[pending.correlationKey]
+	for i, item := range items {
+		if item != pending {
+			continue
+		}
+		c.pendingCorrelated[pending.correlationKey] = append(items[:i], items[i+1:]...)
+		if len(c.pendingCorrelated[pending.correlationKey]) == 0 {
+			delete(c.pendingCorrelated, pending.correlationKey)
+		}
+		return
+	}
+}
+
+func (c *usageFallbackCoordinator) popCorrelatedPendingLocked(correlationKey string, native UsageRecord) *pendingUsageFallback {
+	items := c.pendingCorrelated[correlationKey]
+	var selected *pendingUsageFallback
+	var selectedDistance time.Duration
+	for _, item := range items {
+		if item == nil || item.cancelled {
+			continue
+		}
+		distance, ok := protocolUsageCompletionDistance(item.record, native)
+		if !ok || (selected != nil && distance >= selectedDistance) {
+			continue
+		}
+		selected = item
+		selectedDistance = distance
+	}
+	if selected != nil {
+		c.removePendingLocked(selected)
+	}
+	return selected
 }
 
 func (c *usageFallbackCoordinator) consumeNativeRecentLocked(key string, requestAt time.Time, now time.Time) (UsageRecord, bool) {
 	items := c.nativeRecent[key]
-	for i, item := range items {
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
 		if now.Sub(item.observedAt) > usageFallbackNativeRecentWindow {
 			continue
 		}
 		if !item.requestAt.IsZero() && item.requestAt.After(requestAt.Add(time.Second)) {
 			continue
 		}
-		c.nativeRecent[key] = append(items[:i], items[i+1:]...)
-		if len(c.nativeRecent[key]) == 0 {
-			delete(c.nativeRecent, key)
-		}
+		c.removeNativeRecentLocked(item)
 		return item.record, true
 	}
 	return UsageRecord{}, false
 }
 
-func (c *usageFallbackCoordinator) matchesFallbackRecentLocked(key string, requestAt time.Time, now time.Time) bool {
+func (c *usageFallbackCoordinator) consumeFallbackRecentLocked(key string, requestAt time.Time, now time.Time) (UsageRecord, bool) {
 	items := c.fallbackRecent[key]
-	for i, item := range items {
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
 		if now.Sub(item.observedAt) > usageFallbackLateNativeWindow {
 			continue
 		}
 		if requestAt.IsZero() || !requestAt.After(item.requestAt.Add(time.Second)) {
-			c.fallbackRecent[key] = append(items[:i], items[i+1:]...)
-			if len(c.fallbackRecent[key]) == 0 {
-				delete(c.fallbackRecent, key)
-			}
-			return true
+			c.removeFallbackRecentLocked(item)
+			return item.record, true
 		}
 	}
-	return false
+	return UsageRecord{}, false
+}
+
+func (c *usageFallbackCoordinator) consumeCorrelatedNativeRecentLocked(correlationKey string, fallback UsageRecord, now time.Time) (UsageRecord, bool) {
+	items := c.nativeRecentCorrelated[correlationKey]
+	var selected *usageFallbackOccurrence
+	var selectedDistance time.Duration
+	for _, item := range items {
+		if item == nil || now.Sub(item.observedAt) > usageFallbackNativeRecentWindow {
+			continue
+		}
+		distance, ok := protocolUsageCompletionDistance(fallback, item.record)
+		if !ok || (selected != nil && distance >= selectedDistance) {
+			continue
+		}
+		selected = item
+		selectedDistance = distance
+	}
+	if selected == nil {
+		return UsageRecord{}, false
+	}
+	c.removeNativeRecentLocked(selected)
+	return selected.record, true
+}
+
+func (c *usageFallbackCoordinator) consumeCorrelatedFallbackRecentLocked(correlationKey string, native UsageRecord, now time.Time) (UsageRecord, bool) {
+	items := c.fallbackRecentCorrelated[correlationKey]
+	var selected *usageFallbackOccurrence
+	var selectedDistance time.Duration
+	for _, item := range items {
+		if item == nil || now.Sub(item.observedAt) > usageFallbackLateNativeWindow {
+			continue
+		}
+		distance, ok := protocolUsageCompletionDistance(item.record, native)
+		if !ok || (selected != nil && distance >= selectedDistance) {
+			continue
+		}
+		selected = item
+		selectedDistance = distance
+	}
+	if selected == nil {
+		return UsageRecord{}, false
+	}
+	c.removeFallbackRecentLocked(selected)
+	return selected.record, true
+}
+
+func (c *usageFallbackCoordinator) removeNativeRecentLocked(target *usageFallbackOccurrence) {
+	c.removeOccurrenceLocked(c.nativeRecent, target.key, target)
+	if target.correlationKey != "" {
+		c.removeOccurrenceLocked(c.nativeRecentCorrelated, target.correlationKey, target)
+	}
+}
+
+func (c *usageFallbackCoordinator) removeFallbackRecentLocked(target *usageFallbackOccurrence) {
+	c.removeOccurrenceLocked(c.fallbackRecent, target.key, target)
+	if target.correlationKey != "" {
+		c.removeOccurrenceLocked(c.fallbackRecentCorrelated, target.correlationKey, target)
+	}
+}
+
+func (c *usageFallbackCoordinator) removeOccurrenceLocked(index map[string][]*usageFallbackOccurrence, key string, target *usageFallbackOccurrence) {
+	items := index[key]
+	for i, item := range items {
+		if item != target {
+			continue
+		}
+		index[key] = append(items[:i], items[i+1:]...)
+		if len(index[key]) == 0 {
+			delete(index, key)
+		}
+		return
+	}
 }
 
 func (c *usageFallbackCoordinator) cleanupLocked(now time.Time) {
+	c.nativeRecentCorrelated = make(map[string][]*usageFallbackOccurrence)
 	for key, items := range c.nativeRecent {
 		kept := items[:0]
 		for _, item := range items {
-			if now.Sub(item.observedAt) <= usageFallbackNativeRecentWindow {
+			if item != nil && now.Sub(item.observedAt) <= usageFallbackNativeRecentWindow {
 				kept = append(kept, item)
+				if item.correlationKey != "" {
+					c.nativeRecentCorrelated[item.correlationKey] = append(c.nativeRecentCorrelated[item.correlationKey], item)
+				}
 			}
 		}
 		if len(kept) == 0 {
@@ -802,11 +1012,15 @@ func (c *usageFallbackCoordinator) cleanupLocked(now time.Time) {
 			c.nativeRecent[key] = kept
 		}
 	}
+	c.fallbackRecentCorrelated = make(map[string][]*usageFallbackOccurrence)
 	for key, items := range c.fallbackRecent {
 		kept := items[:0]
 		for _, item := range items {
-			if now.Sub(item.observedAt) <= usageFallbackLateNativeWindow {
+			if item != nil && now.Sub(item.observedAt) <= usageFallbackLateNativeWindow {
 				kept = append(kept, item)
+				if item.correlationKey != "" {
+					c.fallbackRecentCorrelated[item.correlationKey] = append(c.fallbackRecentCorrelated[item.correlationKey], item)
+				}
 			}
 		}
 		if len(kept) == 0 {
@@ -815,11 +1029,15 @@ func (c *usageFallbackCoordinator) cleanupLocked(now time.Time) {
 			c.fallbackRecent[key] = kept
 		}
 	}
+	c.pendingCorrelated = make(map[string][]*pendingUsageFallback)
 	for key, items := range c.pending {
 		kept := items[:0]
 		for _, item := range items {
 			if item != nil && !item.cancelled {
 				kept = append(kept, item)
+				if item.correlationKey != "" {
+					c.pendingCorrelated[item.correlationKey] = append(c.pendingCorrelated[item.correlationKey], item)
+				}
 			}
 		}
 		if len(kept) == 0 {

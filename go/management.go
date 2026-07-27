@@ -23,7 +23,7 @@ func handleUsage(requestBody []byte) ([]byte, error) {
 		usageRecord, accepted = usageFallbacks.HandleNative(usageRecord)
 	}
 	if accepted {
-		stats.Record(usageRecord)
+		recordUsageWithAttribution(usageRecord)
 	}
 
 	return okEnvelopeJSON("{}")
