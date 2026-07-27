@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+## v2.5.5 - 2026-07-28
+
 ### Codex OpenAI 协议兜底去重
 - 修复 CPA 响应拦截元数据缺少 `selected_auth_id` 时，同一 Codex 请求同时落入 `openai-compatible` 与 Codex OAuth 上游组的问题；仅对无认证身份、零延迟的 `/v1/chat/completions` 或 `/v1/responses` 兜底，在相同模型、客户端 API、token 明细和 1 秒完成时间窗口内与 Codex 原生 usage 一对一合并
 - 保留原生 Codex 的认证、延迟和 TTFT，并从响应兜底补齐端点、推理强度与流式标记；即使 CPA 未提供相关元数据，也会从 OpenAI 请求协议恢复端点和显式 reasoning effort
