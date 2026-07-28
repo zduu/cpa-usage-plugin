@@ -146,7 +146,8 @@ jobs:
           case "${{ matrix.goos }}" in
             linux) readelf -Ws "$asset" | grep ' cliproxy_plugin_init$' ;;
             darwin) nm -gU "$asset" | grep ' _cliproxy_plugin_init$' ;;
-            windows) x86_64-w64-mingw32-nm -g "$asset" | grep ' cliproxy_plugin_init$' ;;
+            # -s strips the COFF symbol table, so verify the exported ABI symbol instead.
+            windows) x86_64-w64-mingw32-objdump -p "$asset" | grep -q 'cliproxy_plugin_init' ;;
           esac
 
       - name: Package plugin store zip
