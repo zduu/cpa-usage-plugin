@@ -145,6 +145,110 @@ func TestDashboardSummaryHasHealthGrid(t *testing.T) {
 	}
 }
 
+func TestDashboardSummaryCompactHealthGridResponse(t *testing.T) {
+	previousStats := stats
+	stats = NewRequestStatistics()
+	t.Cleanup(func() { stats = previousStats })
+	now := time.Now()
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-4.1",
+		RequestedAt: now,
+		Detail:      UsageDetail{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+	})
+
+	legacyResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "GET",
+		Path:   "/v0/management/plugins/usage-dashboard-zduu/dashboard-summary",
+		Query:  map[string][]string{"range": {"24h"}},
+	}), nil)
+	compactResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "GET",
+		Path:   "/v0/management/plugins/usage-dashboard-zduu/dashboard-summary",
+		Query:  map[string][]string{"range": {"24h"}, "compact_health": {"1"}},
+	}), nil)
+
+	var legacy, compact DashboardSummary
+	if err := json.Unmarshal(legacyResp.Body, &legacy); err != nil {
+		t.Fatalf("unmarshal legacy summary: %v", err)
+	}
+	if err := json.Unmarshal(compactResp.Body, &compact); err != nil {
+		t.Fatalf("unmarshal compact summary: %v", err)
+	}
+	if len(legacy.HealthGrid) != dashboardHealthSlotCount || legacy.HealthGridV2 != nil {
+		t.Fatalf("legacy health representation = slots %d compact %#v", len(legacy.HealthGrid), legacy.HealthGridV2)
+	}
+	if len(compact.HealthGrid) != 0 || compact.HealthGridV2 == nil {
+		t.Fatalf("compact health representation = slots %d compact %#v", len(compact.HealthGrid), compact.HealthGridV2)
+	}
+	if compact.HealthGridV2.Count != dashboardHealthSlotCount || compact.HealthGridV2.StepSeconds != int64(dashboardHealthStep/time.Second) || len(compact.HealthGridV2.Slots) != 1 {
+		t.Fatalf("compact grid = %#v", compact.HealthGridV2)
+	}
+	if len(compactResp.Body) >= len(legacyResp.Body)/2 {
+		t.Fatalf("compact summary size = %d, legacy = %d; expected at least 50%% reduction", len(compactResp.Body), len(legacyResp.Body))
+	}
+	legacyGzip, _ := gzipBytes(legacyResp.Body)
+	compactGzip, _ := gzipBytes(compactResp.Body)
+	t.Logf("summary bytes: legacy=%d/%d gzip, compact=%d/%d gzip", len(legacyResp.Body), len(legacyGzip), len(compactResp.Body), len(compactGzip))
+	if legacyResp.Headers["ETag"][0] == compactResp.Headers["ETag"][0] {
+		t.Fatal("legacy and compact representations must use different ETags")
+	}
+}
+
+func TestDashboardSummaryIncludesEstimatedCosts(t *testing.T) {
+	stats := NewRequestStatistics()
+	stats.modelPrices = map[string]ModelPrice{
+		"openai/gpt-4.1": {Prompt: 2, Completion: 8, Cache: 0.5, CacheWrite: 1},
+	}
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-4.1",
+		APIKey:      "sk-client-cost",
+		RequestedAt: time.Now(),
+		Detail:      UsageDetail{InputTokens: 1_000_000, OutputTokens: 1_000_000, TotalTokens: 2_000_000},
+	})
+
+	summary := stats.SummaryWithoutDetailsForRange("24h")
+	if math.Abs(summary.Usage.TotalCost-10) > 1e-9 {
+		t.Fatalf("total cost = %v, want 10", summary.Usage.TotalCost)
+	}
+	if len(summary.ModelStats) != 1 || math.Abs(summary.ModelStats[0].EstimatedCost-10) > 1e-9 {
+		t.Fatalf("model costs = %#v, want 10", summary.ModelStats)
+	}
+	api := summary.Usage.APIs["openai"]
+	if math.Abs(api.EstimatedCost-10) > 1e-9 || math.Abs(api.Models["gpt-4.1"].EstimatedCost-10) > 1e-9 {
+		t.Fatalf("api costs = %#v, want 10", api)
+	}
+	if len(summary.ClientAPIStats) != 1 || math.Abs(summary.ClientAPIStats[0].EstimatedCost-10) > 1e-9 {
+		t.Fatalf("client API costs = %#v, want 10", summary.ClientAPIStats)
+	}
+}
+
+func TestQueryModelPricesSupportsSearchPaginationAndUsedScope(t *testing.T) {
+	stats := NewRequestStatistics()
+	_ = stats.ModelPrices()
+	stats.modelPrices = map[string]ModelPrice{
+		"openai/gpt-4.1":       {Prompt: 1, Completion: 2},
+		"openrouter/gpt-4.1":   {Prompt: 3, Completion: 4},
+		"catalogue/unused-one": {Prompt: 5, Completion: 6},
+	}
+	stats.modelPriceIndex = normalizedModelPriceIndex(stats.modelPrices)
+	stats.priceVersion = 7
+	stats.Record(UsageRecord{Provider: "openai", Model: "gpt-4.1", RequestedAt: time.Now(), Detail: UsageDetail{TotalTokens: 1}})
+
+	page := stats.QueryModelPrices("catalogue", "gpt-4.1", 1, 1)
+	if page.Total != 2 || page.Limit != 1 || page.Offset != 1 || len(page.Prices) != 1 {
+		t.Fatalf("catalogue page = %#v", page)
+	}
+	used := stats.QueryModelPrices("used", "", 0, 0)
+	if used.Total != 1 || len(used.Prices) != 1 {
+		t.Fatalf("used prices = %#v, want only the effective OpenAI model", used)
+	}
+	if _, ok := used.Prices["openai/gpt-4.1"]; !ok {
+		t.Fatalf("used prices missing provider-scoped match: %#v", used.Prices)
+	}
+}
+
 func TestDashboardSummaryHasSourceStats(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0})

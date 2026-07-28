@@ -120,7 +120,11 @@
         <select id="filterSource" class="select"></select>
         <select id="filterAuth" class="select"></select>
       </div>
-      <div class="eventsMeta"><span id="eventsCount">-</span><span data-i18n="events_latency_unit">用时 / 首字按时长显示 ms/s</span></div>
+      <div class="eventsMeta">
+        <span id="eventsCount">-</span>
+        <div class="eventsPager"><button id="eventsPrev" class="iconBtn" type="button">&larr;</button><span id="eventsPage">-</span><button id="eventsNext" class="iconBtn" type="button">&rarr;</button></div>
+        <span data-i18n="events_latency_unit">用时 / 首字按时长显示 ms/s</span>
+      </div>
       <div class="tableWrap" id="events"></div>
     </div>
   </section>

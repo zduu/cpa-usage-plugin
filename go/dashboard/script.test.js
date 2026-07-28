@@ -673,6 +673,13 @@ async function waitFor(fn) {
   throw new Error('condition not met');
 }
 
+async function openPriceSettings(document) {
+  const settings = document.getElementById('priceSettings');
+  settings.open = true;
+  if (typeof settings.ontoggle === 'function') await settings.ontoggle();
+  return settings;
+}
+
 function optionHeaderValue(options, name) {
   const headers = options && options.headers;
   if (!headers) return '';
@@ -741,6 +748,101 @@ test('dashboard loads summary and export button uses backend event export', asyn
   assert.match(csvExport.text, /,1,5,,7,2,15,/);
   const exported = JSON.parse(downloads.find((d) => d.text && d.text.startsWith('[')).text);
   assert.strictEqual(exported.length, 1200);
+});
+
+test('dashboard keeps the full price catalogue off the initial critical path', async () => {
+  const { context, document, fetchCalls } = createDashboardHarness({
+    summaryUsage: { total_cost: 0.05 },
+  });
+
+  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-events')));
+  assert.ok(!fetchCalls.some((url) => url.includes('model-prices') && url.includes('scope=catalogue')));
+  assert.strictEqual(document.getElementById('totalCost').textContent, 'US$0.05');
+
+  await openPriceSettings(document);
+  await waitFor(() => fetchCalls.some((url) => url.includes('model-prices') && url.includes('scope=catalogue')));
+  assert.ok(Array.from(context.priceReferenceOptions()).length > 0);
+});
+
+test('dashboard events use bounded pages and navigate by offset', async () => {
+  const { document, fetchRequests } = createDashboardHarness({ summaryUsage: { total_cost: 0.05 } });
+  const eventRequests = () => fetchRequests.filter((request) => request.url.includes('dashboard-events?'));
+
+  await waitFor(() => eventRequests().length > 0);
+  assert.match(eventRequests()[0].url, /limit=50/);
+  assert.match(eventRequests()[0].url, /offset=0/);
+  assert.strictEqual(document.getElementById('eventsPage').textContent, '第 1 / 24 页');
+
+  await document.getElementById('eventsNext').onclick();
+  assert.match(eventRequests().at(-1).url, /offset=50/);
+  assert.strictEqual(document.getElementById('eventsPage').textContent, '第 2 / 24 页');
+  assert.strictEqual(document.getElementById('eventsPrev').disabled, false);
+});
+
+test('dashboard expands compact health grid payloads', () => {
+  const { context } = createDashboardHarness({ summaryUsage: { total_cost: 0.05 } });
+  const grid = context.dashboardHealthGrid({
+    generated_at: '2026-07-28T00:00:00Z',
+    health_grid_v2: {
+      start: '2026-07-21T00:00:00Z',
+      step_seconds: 900,
+      count: 3,
+      slots: [[1, 4, 2]],
+    },
+  });
+
+  assert.strictEqual(grid.length, 3);
+  assert.deepStrictEqual({ success: grid[1].success, failure: grid[1].failure, total: grid[1].total }, { success: 4, failure: 2, total: 6 });
+  assert.strictEqual(grid[1].start, '2026-07-21T00:15:00.000Z');
+  assert.strictEqual(grid[2].total, 0);
+});
+
+test('dashboard skips rerender when summary polling returns 304', async () => {
+  const { context, fetchCalls } = createDashboardHarness({ dashboardEtags: true, summaryUsage: { total_cost: 0.05 } });
+  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-events')));
+  const original = context.rerender;
+  let rerenders = 0;
+  context.rerender = async function(options) { rerenders++; return original(options) };
+
+  await context.load();
+
+  assert.strictEqual(rerenders, 0);
+});
+
+test('dashboard skips rerender when base and client-filtered summaries return 304', async () => {
+  const { context, fetchCalls } = createDashboardHarness({ dashboardEtags: true, summaryUsage: { total_cost: 0.05 } });
+  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-events')));
+  await context.selectClientApiCard('api_key_hash:client-a', [{ selector: 'api_key_hash:client-a', name: 'client-a' }]);
+  const original = context.rerender;
+  let rerenders = 0;
+  context.rerender = async function(options) { rerenders++; return original(options) };
+
+  await context.load();
+
+  assert.strictEqual(rerenders, 0);
+});
+
+test('dashboard ignores an older events response that finishes after a newer page', async () => {
+  const { context, document, fetchCalls } = createDashboardHarness({ summaryUsage: { total_cost: 0.05 } });
+  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-events')));
+  const originalFetch = context.fetchConditionalJsonPayload;
+  const pending = [];
+  context.fetchConditionalJsonPayload = function(cacheKey, url, options) {
+    if (!String(url).includes('dashboard-events?')) return originalFetch(cacheKey, url, options);
+    return new Promise((resolve) => pending.push({ url: String(url), resolve }));
+  };
+
+  const older = document.getElementById('eventsNext').onclick();
+  const newer = document.getElementById('eventsNext').onclick();
+  await waitFor(() => pending.length === 2);
+  pending[1].resolve({ total: 1200, limit: 50, offset: 100, events: [{ timestamp: new Date().toISOString(), model: 'newer', tokens: {} }] });
+  await newer;
+  pending[0].resolve({ total: 1200, limit: 50, offset: 50, events: [{ timestamp: new Date().toISOString(), model: 'older', tokens: {} }] });
+  await older;
+
+  assert.strictEqual(document.getElementById('eventsPage').textContent, '第 3 / 24 页');
+  assert.match(document.getElementById('events').innerHTML, /newer/);
+  assert.doesNotMatch(document.getElementById('events').innerHTML, /older/);
 });
 
 test('dashboard blob downloads keep object URLs alive for Safari', () => {
@@ -831,11 +933,12 @@ test('dashboard follows runtime language changes', async () => {
   const { document, setLanguage } = createDashboardHarness();
 
   await waitFor(() => document.getElementById('eventsCount').textContent.includes('共'));
+  await openPriceSettings(document);
   setLanguage('en', { persisted: true });
 
   await waitFor(() => document.documentElement.lang === 'en');
   await waitFor(() => document.getElementById('successText').textContent.includes('Success requests:'));
-  await waitFor(() => document.getElementById('eventsCount').textContent.includes('Total 1,200, showing 500'));
+  await waitFor(() => document.getElementById('eventsCount').textContent.includes('Total 1,200, showing 50'));
   await waitFor(() => document.getElementById('modelStats').innerHTML.includes('Success Rate'));
   await waitFor(() => document.getElementById('priceList').innerHTML.includes('Edit'));
   await waitFor(() => document.getElementById('updated').textContent.includes('Updated at:'));
@@ -983,6 +1086,7 @@ test('dashboard bare model input can use a price-source value as an override sta
     manualPrices: {},
   });
 
+  await openPriceSettings(document);
   await waitFor(() => Array.from(context.priceReferenceOptions()).includes('gpt-4.1'));
   assert.doesNotMatch(document.getElementById('priceModelOptions').innerHTML, /gpt-4\.1/);
   document.getElementById('priceModel').value = 'gpt-4.1';
@@ -1008,6 +1112,7 @@ test('dashboard separates upstream price settings from the read-only price sourc
     summaryModelProviders: [{ provider: 'openai' }, { provider: 'openrouter' }],
   });
 
+  await openPriceSettings(document);
   await waitFor(() => Array.from(context.priceReferenceOptions()).includes('catalog-only/model-x'));
 
   assert.deepStrictEqual(Array.from(context.priceModelOptions()), ['openai/gpt-4.1', 'openrouter/gpt-4.1']);
@@ -1038,6 +1143,7 @@ test('price lookup filters a bounded custom result list and supports keyboard se
   for (let i = 0; i < 105; i++) prices['bulk/model-' + i] = { prompt: i, completion: i + 1 };
   const { context, document } = createDashboardHarness({ prices, manualPrices: {} });
 
+  await openPriceSettings(document);
   await waitFor(() => Array.from(context.priceReferenceOptions()).includes('openrouter/gpt-4.1'));
   const input = document.getElementById('priceReferenceModel');
   const results = document.getElementById('priceReferenceOptions');
@@ -1070,6 +1176,7 @@ test('dashboard saves provider-scoped model prices as provider/modelname keys', 
     manualPrices: {},
   });
 
+  await openPriceSettings(document);
   await waitFor(() => Array.from(context.priceReferenceOptions()).includes('gpt-4.1'));
   assert.strictEqual(document.getElementById('priceModelOptions').innerHTML, '');
   document.getElementById('priceModel').value = 'openrouter/gpt-4.1';
@@ -1098,6 +1205,7 @@ test('price lookup shows the bare manual fallback used by a provider-scoped mode
     },
   });
 
+  await openPriceSettings(document);
   await waitFor(() => Array.from(context.priceReferenceOptions()).includes('openrouter/openai/same-model'));
   document.getElementById('priceReferenceModel').value = 'openrouter/openai/same-model';
   document.getElementById('priceReferenceModel').onchange();
@@ -1112,6 +1220,7 @@ test('price lookup shows the bare manual fallback used by a provider-scoped mode
 
 test('price lookup handles empty data and escapes catalogue model keys', async () => {
   const empty = createDashboardHarness({ prices: {}, manualPrices: {} });
+  await openPriceSettings(empty.document);
   await waitFor(() => empty.document.getElementById('priceReferenceInfo').innerHTML.includes('当前没有可查询的模型价格'));
   assert.strictEqual(empty.document.getElementById('priceReferenceModel').disabled, true);
 
@@ -1120,6 +1229,7 @@ test('price lookup handles empty data and escapes catalogue model keys', async (
     prices: { [unsafeModel]: { prompt: 2, completion: 4, cache: 1, cache_write: 0 } },
     manualPrices: {},
   });
+  await openPriceSettings(unsafe.document);
   await waitFor(() => Array.from(unsafe.context.priceReferenceOptions()).includes(unsafeModel));
   assert.match(unsafe.document.getElementById('priceReferenceOptions').innerHTML, /&lt;img/);
   assert.doesNotMatch(unsafe.document.getElementById('priceReferenceOptions').innerHTML, /<img/);
@@ -1652,9 +1762,9 @@ test('dashboard api detail uses summary failure count when backend returns null 
 
 test('dashboard fallback keeps health grid visible when summary endpoint fails', async () => {
   const { document, fetchCalls } = createDashboardHarness({ failDashboardSummary: true });
-  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-data')) && document.getElementById('healthGrid').innerHTML.includes('healthCell'));
+  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-data')) && document.getElementById('healthGrid').children.length === 672);
 
-  const cells = (document.getElementById('healthGrid').innerHTML.match(/healthCell/g) || []).length;
+  const cells = document.getElementById('healthGrid').children.filter((cell) => String(cell.className).includes('healthCell')).length;
   assert.strictEqual(cells, 672);
   assert.strictEqual(document.getElementById('healthSuccess').textContent, '成功 1');
   assert.strictEqual(document.getElementById('healthFailure').textContent, '失败 1');
@@ -1663,9 +1773,9 @@ test('dashboard fallback keeps health grid visible when summary endpoint fails',
 
 test('dashboard fallback handles null summary payload', async () => {
   const { document, fetchCalls } = createDashboardHarness({ nullDashboardSummary: true });
-  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-data')) && document.getElementById('healthGrid').innerHTML.includes('healthCell'));
+  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-data')) && document.getElementById('healthGrid').children.length === 672);
 
-  const cells = (document.getElementById('healthGrid').innerHTML.match(/healthCell/g) || []).length;
+  const cells = document.getElementById('healthGrid').children.filter((cell) => String(cell.className).includes('healthCell')).length;
   assert.strictEqual(cells, 672);
   assert.match(document.getElementById('updated').textContent, /兼容模式/);
 });
@@ -1812,6 +1922,7 @@ test('model price settings are loaded and saved through backend API', async () =
     managementKey: 'test-management-key',
   });
 
+  await openPriceSettings(document);
   await waitFor(() => /gpt-4\.1/.test(document.getElementById('priceList').innerHTML));
   assert.match(document.getElementById('priceList').innerHTML, /gpt-4\.1/);
 

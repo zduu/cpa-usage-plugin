@@ -137,7 +137,7 @@ jobs:
           export CGO_ENABLED=1
           export GOOS="${{ matrix.goos }}"
           export GOARCH="${{ matrix.goarch }}"
-          go build -buildmode=c-shared -buildvcs=false -o "$output" .
+          go build -buildmode=c-shared -buildvcs=false -trimpath -ldflags="-s -w" -o "$output" .
           cd ..
           rm -f usage-dashboard-zduu*.h
           asset="usage-dashboard-zduu-${{ matrix.platform }}.${{ matrix.ext }}"

@@ -4392,6 +4392,71 @@ func TestManagementModelPricesCRUDAndPersistence(t *testing.T) {
 	}
 }
 
+func TestManagementUsedModelPricesETagTracksAtomicUsageSnapshot(t *testing.T) {
+	previousStats := stats
+	stats = NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		PriceStoragePath:   filepath.Join(t.TempDir(), "prices.json"),
+		DedupWindowMinutes: 0,
+	})
+	t.Cleanup(func() { stats = previousStats })
+
+	stats.mu.Lock()
+	stats.modelPrices = map[string]ModelPrice{
+		"openai/gpt-4.1": {Prompt: 1, Completion: 2},
+		"openai/gpt-5":   {Prompt: 3, Completion: 4},
+	}
+	stats.modelPriceIndex = normalizedModelPriceIndex(stats.modelPrices)
+	stats.priceVersion++
+	stats.mu.Unlock()
+
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-4.1",
+		RequestedAt: time.Now(),
+		Detail:      UsageDetail{TotalTokens: 1},
+	})
+	request := ManagementRequest{
+		Method: "GET",
+		Path:   "/v0/management/plugins/usage-dashboard-zduu/model-prices",
+		// Scope matching is case-insensitive, so the ETag dependency must be too.
+		Query: map[string][]string{"scope": {"USED"}},
+	}
+	first := decodeManagementResponse(t, invokeManagement(t, request), nil)
+	var firstData ModelPricesResponse
+	if err := json.Unmarshal(first.Body, &firstData); err != nil {
+		t.Fatalf("unmarshal first used prices: %v", err)
+	}
+	if _, ok := firstData.Prices["openai/gpt-4.1"]; !ok {
+		t.Fatalf("first used prices = %#v", firstData.Prices)
+	}
+	if len(first.Headers["ETag"]) != 1 || first.Headers["ETag"][0] == "" {
+		t.Fatalf("first used-price ETag = %#v", first.Headers["ETag"])
+	}
+
+	stats.Record(UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-5",
+		RequestedAt: time.Now().Add(time.Millisecond),
+		Detail:      UsageDetail{TotalTokens: 1},
+	})
+	request.Headers = map[string][]string{"If-None-Match": {first.Headers["ETag"][0]}}
+	second := decodeManagementResponse(t, invokeManagement(t, request), nil)
+	if second.StatusCode != http.StatusOK {
+		t.Fatalf("changed used-price response status = %d, want 200", second.StatusCode)
+	}
+	var secondData ModelPricesResponse
+	if err := json.Unmarshal(second.Body, &secondData); err != nil {
+		t.Fatalf("unmarshal second used prices: %v", err)
+	}
+	if _, ok := secondData.Prices["openai/gpt-5"]; !ok {
+		t.Fatalf("updated used prices missing gpt-5: %#v", secondData.Prices)
+	}
+	if len(second.Headers["ETag"]) != 1 || second.Headers["ETag"][0] == first.Headers["ETag"][0] {
+		t.Fatalf("used-price ETag did not change: first=%#v second=%#v", first.Headers["ETag"], second.Headers["ETag"])
+	}
+}
+
 func TestModelPricesUseModelsDevDefaultsWithManualOverride(t *testing.T) {
 	previousStats := stats
 	pricePath := filepath.Join(t.TempDir(), "prices.json")
@@ -5118,6 +5183,74 @@ func TestDashboardMarkupContainsHealthRowsApiSelectorAndBackoff(t *testing.T) {
 		if !strings.Contains(completeDashboardHTML, needle) {
 			t.Fatalf("%s: completeDashboardHTML missing %q", name, needle)
 		}
+	}
+}
+
+func TestDashboardPageSupportsGzipAndConditionalRequests(t *testing.T) {
+	gzipResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method:  "GET",
+		Path:    "/v0/management/plugins/usage-dashboard-zduu/dashboard",
+		Headers: map[string][]string{"Accept-Encoding": {"br, gzip"}},
+	}), nil)
+	if gzipResp.StatusCode != http.StatusOK || len(gzipResp.Headers["Content-Encoding"]) != 1 || gzipResp.Headers["Content-Encoding"][0] != "gzip" {
+		t.Fatalf("gzip dashboard response = status %d headers %#v", gzipResp.StatusCode, gzipResp.Headers)
+	}
+	reader, err := gzip.NewReader(bytes.NewReader(gzipResp.Body))
+	if err != nil {
+		t.Fatalf("open dashboard gzip: %v", err)
+	}
+	decompressed, err := io.ReadAll(reader)
+	if closeErr := reader.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("read dashboard gzip: %v", err)
+	}
+	if string(decompressed) != completeDashboardHTML {
+		t.Fatal("decompressed dashboard does not match embedded HTML")
+	}
+	if len(gzipResp.Body) >= len(decompressed) {
+		t.Fatalf("gzip dashboard size = %d, raw = %d", len(gzipResp.Body), len(decompressed))
+	}
+	t.Logf("dashboard bytes: raw=%d gzip=%d", len(decompressed), len(gzipResp.Body))
+	etag := gzipResp.Headers["ETag"]
+	if len(etag) != 1 || etag[0] == "" {
+		t.Fatalf("dashboard ETag = %#v", etag)
+	}
+	notModified := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method: "GET",
+		Path:   "/v0/management/plugins/usage-dashboard-zduu/dashboard",
+		Headers: map[string][]string{
+			"Accept-Encoding": {"gzip"},
+			"If-None-Match":   {etag[0]},
+		},
+	}), nil)
+	if notModified.StatusCode != http.StatusNotModified || len(notModified.Body) != 0 {
+		t.Fatalf("conditional dashboard = status %d body %d", notModified.StatusCode, len(notModified.Body))
+	}
+	rawResp := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method:  "GET",
+		Path:    "/v0/management/plugins/usage-dashboard-zduu/dashboard",
+		Headers: map[string][]string{"Accept-Encoding": {"gzip;q=0"}},
+	}), nil)
+	if len(rawResp.Headers["Content-Encoding"]) != 0 || string(rawResp.Body) != completeDashboardHTML {
+		t.Fatalf("identity dashboard response = headers %#v body %d", rawResp.Headers, len(rawResp.Body))
+	}
+	explicitDisabled := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method:  "GET",
+		Path:    "/v0/management/plugins/usage-dashboard-zduu/dashboard",
+		Headers: map[string][]string{"Accept-Encoding": {"gzip;q=0.0, *;q=1"}},
+	}), nil)
+	if len(explicitDisabled.Headers["Content-Encoding"]) != 0 {
+		t.Fatalf("explicit gzip exclusion ignored: %#v", explicitDisabled.Headers)
+	}
+	uppercaseQuality := decodeManagementResponse(t, invokeManagement(t, ManagementRequest{
+		Method:  "GET",
+		Path:    "/v0/management/plugins/usage-dashboard-zduu/dashboard",
+		Headers: map[string][]string{"Accept-Encoding": {"gzip;Q=0"}},
+	}), nil)
+	if len(uppercaseQuality.Headers["Content-Encoding"]) != 0 {
+		t.Fatalf("case-insensitive gzip exclusion ignored: %#v", uppercaseQuality.Headers)
 	}
 }
 
@@ -6208,6 +6341,43 @@ func BenchmarkSummaryWithoutDetailsRebuild100k(b *testing.B) {
 		stats.invalidateSummaryLocked()
 		stats.mu.Unlock()
 		_ = stats.SummaryWithoutDetails()
+	}
+}
+
+func clearBenchmarkSummaryRangeCache(stats *RequestStatistics) {
+	stats.mu.Lock()
+	stats.summaryRangeCache = nil
+	stats.summaryRangeCacheWindow = nil
+	stats.mu.Unlock()
+}
+
+func BenchmarkSummaryRange7d100k(b *testing.B) {
+	stats := buildBenchmarkStats(100000)
+	now := time.Now()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		clearBenchmarkSummaryRangeCache(stats)
+		_ = stats.SummaryWithoutDetailsForRangeAt("7d", now)
+	}
+}
+
+func BenchmarkSummaryRange7d100kPrices5000(b *testing.B) {
+	stats := buildBenchmarkStats(100000)
+	stats.mu.Lock()
+	stats.modelPrices = make(map[string]ModelPrice, 5004)
+	for i := 0; i < 5000; i++ {
+		stats.modelPrices[fmt.Sprintf("catalogue/model-%04d", i)] = ModelPrice{Prompt: 1, Completion: 2, Cache: 0.1}
+	}
+	for _, item := range [][2]string{{"openai", "gpt-4.1"}, {"deepseek", "deepseek-v3"}, {"claude", "claude-sonnet"}, {"gemini", "gemini-pro"}} {
+		stats.modelPrices[item[0]+"/"+item[1]] = ModelPrice{Prompt: 2, Completion: 8, Cache: 0.5}
+	}
+	stats.modelPriceIndex = normalizedModelPriceIndex(stats.modelPrices)
+	stats.mu.Unlock()
+	now := time.Now()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		clearBenchmarkSummaryRangeCache(stats)
+		_ = stats.SummaryWithoutDetailsForRangeAt("7d", now)
 	}
 }
 

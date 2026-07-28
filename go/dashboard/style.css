@@ -379,6 +379,11 @@ tbody td{transition:background-color .12s}
 /* ---- 筛选器 ---- */
 .filters{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
 .eventsMeta{display:flex;justify-content:space-between;color:var(--cpa-text-tertiary);font-size:12px;margin-bottom:6px;gap:8px;flex-wrap:wrap}
+.eventsPager{display:flex;align-items:center;justify-content:center;gap:8px;min-width:150px}
+.iconBtn{display:inline-grid;place-items:center;width:30px;height:30px;padding:0;border:1px solid var(--cpa-btn-border);border-radius:7px;background:var(--cpa-btn-bg);color:var(--cpa-btn-text);font-size:16px;line-height:1}
+.iconBtn:hover:not(:disabled){border-color:var(--cpa-btn-hover-border);background:var(--cpa-btn-hover-bg)}
+.iconBtn:focus-visible{outline:none;border-color:var(--cpa-accent);box-shadow:0 0 0 3px var(--cpa-accent-ring)}
+.iconBtn:disabled{opacity:.4;cursor:not-allowed}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace}
 .nowrap{white-space:nowrap}
 

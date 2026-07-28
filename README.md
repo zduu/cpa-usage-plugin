@@ -72,21 +72,21 @@ CPA 用量统计插件，用于在 CLIProxyAPI/CPA v7 插件系统中记录请�
 
 ```bash
 cd go
-CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildmode=c-shared -buildvcs=false -o ../usage-dashboard-zduu.so .
+CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildmode=c-shared -buildvcs=false -trimpath -ldflags="-s -w" -o ../usage-dashboard-zduu.so .
 ```
 
 本地交叉构建 arm64 需要安装对应 C 交叉编译器，例如 `aarch64-linux-gnu-gcc`：
 
 ```bash
 cd go
-CC=aarch64-linux-gnu-gcc CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go build -buildmode=c-shared -buildvcs=false -o ../usage-dashboard-zduu-linux-arm64.so .
+CC=aarch64-linux-gnu-gcc CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go build -buildmode=c-shared -buildvcs=false -trimpath -ldflags="-s -w" -o ../usage-dashboard-zduu-linux-arm64.so .
 ```
 
 本地测试：
 
 ```bash
 cd go && go test -v -race ./...
-node --check go/dashboard/helpers.js go/dashboard/script.js
+node --check go/dashboard/helpers.js go/dashboard/i18n.js go/dashboard/script.js
 node --test go/dashboard/*.test.js
 ```
 

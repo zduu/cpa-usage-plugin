@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -41,7 +42,7 @@ func handleManagement(requestBody []byte) ([]byte, error) {
 	tail := pathTail(req.Path)
 	switch {
 	case req.Method == "GET" && tail == "dashboard":
-		return handleDashboardPage()
+		return handleDashboardPage(req.Headers)
 	case req.Method == "GET" && tail == "dashboard-summary":
 		return handleDashboardSummary(req.Query, req.Headers)
 	case req.Method == "GET" && tail == "dashboard-events":
@@ -61,7 +62,7 @@ func handleManagement(requestBody []byte) ([]byte, error) {
 	case req.Method == "GET" && tail == "dashboard-data":
 		return handleDashboardData()
 	case req.Method == "GET" && tail == "model-prices":
-		return handleGetModelPrices()
+		return handleGetModelPrices(req.Query, req.Headers)
 	case req.Method == "PUT" && tail == "model-prices":
 		return handlePutModelPrice(req.Body)
 	case req.Method == "DELETE" && tail == "model-prices":
@@ -254,16 +255,72 @@ func handleDashboardData() ([]byte, error) {
 	return okEnvelopeJSON(string(mustMarshal(resp)))
 }
 
-func handleDashboardPage() ([]byte, error) {
+func handleDashboardPage(requestHeaders map[string][]string) ([]byte, error) {
+	compressed := acceptsGzipEncoding(requestHeaders) && len(completeDashboardHTMLGzip) > 0
+	headers := map[string][]string{
+		"Content-Type":           {"text/html; charset=utf-8"},
+		"Cache-Control":          {"private, no-cache"},
+		"ETag":                   {dashboardPageETag},
+		"Vary":                   {"Accept-Encoding"},
+		"X-Content-Type-Options": {"nosniff"},
+	}
+	if compressed {
+		headers["Content-Encoding"] = []string{"gzip"}
+	}
+	if dashboardConditionalMatch("dashboard-page", requestHeaders, dashboardPageETag) {
+		return dashboardNotModifiedWithHeaders(headers)
+	}
+	body := []byte(completeDashboardHTML)
+	if compressed {
+		body = completeDashboardHTMLGzip
+	}
 	resp := ManagementResponse{
 		StatusCode: http.StatusOK,
-		Headers: map[string][]string{
-			"Content-Type":  {"text/html; charset=utf-8"},
-			"Cache-Control": {"no-store"},
-		},
-		Body: []byte(completeDashboardHTML),
+		Headers:    headers,
+		Body:       body,
 	}
 	return okEnvelopeJSON(string(mustMarshal(resp)))
+}
+
+func acceptsGzipEncoding(headers map[string][]string) bool {
+	gzipQuality := -1.0
+	wildcardQuality := -1.0
+	for key, values := range headers {
+		if !strings.EqualFold(key, "Accept-Encoding") {
+			continue
+		}
+		for _, value := range values {
+			for _, item := range strings.Split(value, ",") {
+				parts := strings.Split(strings.TrimSpace(item), ";")
+				encoding := strings.ToLower(strings.TrimSpace(parts[0]))
+				if encoding != "gzip" && encoding != "*" {
+					continue
+				}
+				quality := 1.0
+				for _, param := range parts[1:] {
+					param = strings.TrimSpace(param)
+					name, value, found := strings.Cut(param, "=")
+					if found && strings.EqualFold(strings.TrimSpace(name), "q") {
+						parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+						if err != nil || parsed < 0 || parsed > 1 {
+							quality = 0
+						} else {
+							quality = parsed
+						}
+					}
+				}
+				if encoding == "gzip" {
+					gzipQuality = quality
+				} else {
+					wildcardQuality = quality
+				}
+			}
+		}
+	}
+	if gzipQuality >= 0 {
+		return gzipQuality > 0
+	}
+	return wildcardQuality > 0
 }
 
 func handleGetUsage() ([]byte, error) {
@@ -290,8 +347,34 @@ func handleGetUsage() ([]byte, error) {
 	return okEnvelopeJSON(string(mustMarshal(resp)))
 }
 
-func handleGetModelPrices() ([]byte, error) {
-	return modelPricesManagementResponse(stats.ModelPrices())
+func handleGetModelPrices(query map[string][]string, headers map[string][]string) ([]byte, error) {
+	scope := strings.ToLower(queryRawValue(query, "scope"))
+	search := normalizeModelPriceKey(queryRawValue(query, "q"))
+	limit, _ := strconv.Atoi(queryRawValue(query, "limit"))
+	offset, _ := strconv.Atoi(queryRawValue(query, "offset"))
+	data := stats.QueryModelPrices(scope, search, limit, offset)
+	etagParts := []string{
+		"model-prices",
+		strconv.FormatUint(data.Version, 10),
+		data.UpdatedAt,
+		data.ModelsDev.UpdatedAt,
+		data.ModelsDev.LastAttemptAt,
+		data.ModelsDev.LastSuccessAt,
+		data.ModelsDev.LastError,
+		data.Storage.LastError,
+		scope,
+		search,
+		strconv.Itoa(data.Limit),
+		strconv.Itoa(data.Offset),
+	}
+	if scope == "used" {
+		etagParts = append(etagParts, strconv.FormatUint(data.dashboardVersion, 10))
+	}
+	etag := dashboardWeakETag(etagParts...)
+	if dashboardConditionalMatch("model-prices", headers, etag) {
+		return dashboardNotModified(etag)
+	}
+	return modelPricesManagementResponse(data, etag)
 }
 
 func handlePutModelPrice(body []byte) ([]byte, error) {
@@ -306,7 +389,7 @@ func handlePutModelPrice(body []byte) ([]byte, error) {
 	if err != nil {
 		return errorEnvelope("invalid_price", err.Error()), nil
 	}
-	return modelPricesManagementResponse(response)
+	return modelPricesManagementResponse(response, "")
 }
 
 func handleDeleteModelPrice(query map[string][]string) ([]byte, error) {
@@ -318,21 +401,25 @@ func handleDeleteModelPrice(query map[string][]string) ([]byte, error) {
 	if err != nil {
 		return errorEnvelope("invalid_price", err.Error()), nil
 	}
-	return modelPricesManagementResponse(response)
+	return modelPricesManagementResponse(response, "")
 }
 
-func modelPricesManagementResponse(data ModelPricesResponse) ([]byte, error) {
+func modelPricesManagementResponse(data ModelPricesResponse, etag string) ([]byte, error) {
 	responseJSON, err := json.Marshal(data)
 	if err != nil {
 		return nil, err
 	}
+	headers := map[string][]string{
+		"Content-Type":  {"application/json; charset=utf-8"},
+		"Cache-Control": {"no-store"},
+	}
+	if etag != "" {
+		headers = dashboardJSONHeaders(etag)
+	}
 	resp := ManagementResponse{
 		StatusCode: http.StatusOK,
-		Headers: map[string][]string{
-			"Content-Type":  {"application/json; charset=utf-8"},
-			"Cache-Control": {"no-store"},
-		},
-		Body: responseJSON,
+		Headers:    headers,
+		Body:       responseJSON,
 	}
 	return okEnvelopeJSON(string(mustMarshal(resp)))
 }

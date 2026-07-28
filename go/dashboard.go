@@ -30,7 +30,11 @@ var dashboardHelpersJS string
 //go:embed dashboard/script.js
 var dashboardPageJS string
 
-var completeDashboardHTML string
+var (
+	completeDashboardHTML     string
+	completeDashboardHTMLGzip []byte
+	dashboardPageETag         string
+)
 
 type HealthAlert struct {
 	Severity string `json:"severity"`
@@ -57,6 +61,8 @@ func init() {
 	h = strings.Replace(h, "</body>",
 		"<script>\n"+dashboardI18nJS+"\n"+dashboardHelpersJS+"\n"+dashboardPageJS+"\n</script></body>", 1)
 	completeDashboardHTML = h
+	completeDashboardHTMLGzip, _ = gzipBytes([]byte(h))
+	dashboardPageETag = dashboardWeakETag("dashboard-page", h)
 }
 
 // handleDashboardSummary returns lightweight dashboard data without detail arrays.
@@ -68,13 +74,17 @@ func handleDashboardSummary(query map[string][]string, headers map[string][]stri
 		rangeKey = v[0]
 	}
 	clientAPI := queryRawValue(query, "client_api")
+	compactHealth := queryBool(query, "compact_health")
 	now := time.Now()
-	etag := dashboardSummaryETagForClientAPI(now, rangeKey, clientAPI)
+	etag := dashboardSummaryETagForClientAPIRepresentation(now, rangeKey, clientAPI, stats.DashboardVersion(), compactHealth)
 	if dashboardConditionalMatch("dashboard-summary", headers, etag) {
 		return dashboardNotModified(etag)
 	}
 	summary := stats.SummaryWithoutDetailsForRangeAndClientAPIAt(rangeKey, clientAPI, now)
-	etag = dashboardSummaryETagForClientAPIVersion(now, rangeKey, clientAPI, summary.Meta.SummaryVersion)
+	if compactHealth {
+		compactDashboardHealthGrid(&summary)
+	}
+	etag = dashboardSummaryETagForClientAPIRepresentation(now, rangeKey, clientAPI, summary.Meta.SummaryVersion, compactHealth)
 	responseJSON, err := json.Marshal(summary)
 	if err != nil {
 		return nil, err
@@ -100,6 +110,10 @@ func dashboardSummaryETagForClientAPI(now time.Time, rangeKey string, clientAPI 
 }
 
 func dashboardSummaryETagForClientAPIVersion(now time.Time, rangeKey string, clientAPI string, version uint64) string {
+	return dashboardSummaryETagForClientAPIRepresentation(now, rangeKey, clientAPI, version, false)
+}
+
+func dashboardSummaryETagForClientAPIRepresentation(now time.Time, rangeKey string, clientAPI string, version uint64, compactHealth bool) string {
 	window := summaryHealthWindow(now).UTC().Format(time.RFC3339)
 	parts := []string{"summary", strconv.FormatUint(version, 10), window}
 	if rangeKey != "" {
@@ -111,7 +125,30 @@ func dashboardSummaryETagForClientAPIVersion(now time.Time, rangeKey string, cli
 	if clientAPI != "" {
 		parts = append(parts, clientAPI)
 	}
+	if compactHealth {
+		parts = append(parts, "compact-health-v2")
+	}
 	return dashboardWeakETag(parts...)
+}
+
+func compactDashboardHealthGrid(summary *DashboardSummary) {
+	if summary == nil || len(summary.HealthGrid) == 0 {
+		return
+	}
+	compact := &CompactHealthGrid{
+		Start:       summary.HealthGrid[0].Start,
+		StepSeconds: int64(dashboardHealthStep / time.Second),
+		Count:       len(summary.HealthGrid),
+		Slots:       make([][3]int64, 0),
+	}
+	for i, slot := range summary.HealthGrid {
+		if slot.Success == 0 && slot.Failure == 0 {
+			continue
+		}
+		compact.Slots = append(compact.Slots, [3]int64{int64(i), slot.Success, slot.Failure})
+	}
+	summary.HealthGrid = nil
+	summary.HealthGridV2 = compact
 }
 
 func dashboardEventsQuery(query map[string][]string) EventsQuery {

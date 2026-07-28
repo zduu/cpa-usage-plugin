@@ -638,6 +638,12 @@ type ModelPricesResponse struct {
 	UpdatedAt    string                  `json:"updated_at,omitempty"`
 	Storage      ModelPriceStorageStatus `json:"storage"`
 	ModelsDev    ModelsDevPriceStatus    `json:"models_dev,omitempty"`
+	Version      uint64                  `json:"version,omitempty"`
+	Total        int                     `json:"total"`
+	Limit        int                     `json:"limit"`
+	Offset       int                     `json:"offset"`
+
+	dashboardVersion uint64
 }
 
 type ModelPriceStorageStatus struct {
@@ -845,6 +851,7 @@ type StatisticsSnapshotWithoutDetails struct {
 	CacheWriteTokens int64                                `json:"cache_write_tokens"`
 	ReasoningTokens  int64                                `json:"reasoning_tokens"`
 	AvgLatencyMs     float64                              `json:"avg_latency_ms"`
+	TotalCost        float64                              `json:"total_cost"`
 	APIs             map[string]APISnapshotWithoutDetails `json:"apis"`
 	RequestsByDay    map[string]int64                     `json:"requests_by_day"`
 	RequestsByHour   map[string]int64                     `json:"requests_by_hour"`
@@ -865,6 +872,7 @@ type APISnapshotWithoutDetails struct {
 	CacheWriteTokens int64                                  `json:"cache_write_tokens"`
 	ReasoningTokens  int64                                  `json:"reasoning_tokens"`
 	AvgLatencyMs     float64                                `json:"avg_latency_ms"`
+	EstimatedCost    float64                                `json:"estimated_cost"`
 	Models           map[string]ModelSnapshotWithoutDetails `json:"models"`
 }
 
@@ -879,6 +887,7 @@ type ModelSnapshotWithoutDetails struct {
 	CacheWriteTokens int64               `json:"cache_write_tokens"`
 	ReasoningTokens  int64               `json:"reasoning_tokens"`
 	AvgLatencyMs     float64             `json:"avg_latency_ms"`
+	EstimatedCost    float64             `json:"estimated_cost"`
 	Providers        []ModelProviderStat `json:"providers,omitempty"`
 }
 
@@ -890,6 +899,15 @@ type HealthGridSlot struct {
 	Failure int64  `json:"failure"`
 	Start   string `json:"start"`
 	End     string `json:"end"`
+}
+
+// CompactHealthGrid avoids repeating timestamps and empty slots in every
+// dashboard summary. Slots contain [index, success, failure].
+type CompactHealthGrid struct {
+	Start       string     `json:"start"`
+	StepSeconds int64      `json:"step_seconds"`
+	Count       int        `json:"count"`
+	Slots       [][3]int64 `json:"slots"`
 }
 
 // SourceStat aggregates request stats by source label.
@@ -926,6 +944,7 @@ type ClientAPIStat struct {
 	CachedTokens     int64                `json:"cached_tokens"`
 	CacheWriteTokens int64                `json:"cache_write_tokens"`
 	ReasoningTokens  int64                `json:"reasoning_tokens"`
+	EstimatedCost    float64              `json:"estimated_cost"`
 	Models           []ClientAPIModelStat `json:"models,omitempty"`
 }
 
@@ -940,6 +959,7 @@ type ClientAPIModelStat struct {
 	CachedTokens     int64               `json:"cached_tokens"`
 	CacheWriteTokens int64               `json:"cache_write_tokens"`
 	ReasoningTokens  int64               `json:"reasoning_tokens"`
+	EstimatedCost    float64             `json:"estimated_cost"`
 	Providers        []ModelProviderStat `json:"providers,omitempty"`
 
 	providerStats map[string]*ModelProviderStat `json:"-"`
@@ -971,6 +991,7 @@ type ModelStat struct {
 	CachedTokens     int64               `json:"cached_tokens"`
 	CacheWriteTokens int64               `json:"cache_write_tokens"`
 	ReasoningTokens  int64               `json:"reasoning_tokens"`
+	EstimatedCost    float64             `json:"estimated_cost"`
 	Providers        []ModelProviderStat `json:"providers,omitempty"`
 
 	// Internal accumulators for computing AvgLatencyMs; not serialized.
@@ -982,7 +1003,8 @@ type ModelStat struct {
 // DashboardSummary is the full lightweight dashboard response with metadata.
 type DashboardSummary struct {
 	Usage           StatisticsSnapshotWithoutDetails `json:"usage"`
-	HealthGrid      []HealthGridSlot                 `json:"health_grid"`
+	HealthGrid      []HealthGridSlot                 `json:"health_grid,omitempty"`
+	HealthGridV2    *CompactHealthGrid               `json:"health_grid_v2,omitempty"`
 	SourceStats     []SourceStat                     `json:"source_stats"`
 	CredentialStats []CredentialStat                 `json:"credential_stats"`
 	ClientAPIStats  []ClientAPIStat                  `json:"client_api_stats"`
@@ -1000,6 +1022,7 @@ type DashboardMeta struct {
 	CurrentHour        int            `json:"current_hour"`
 	LastRecordedAt     string         `json:"last_recorded_at,omitempty"`
 	SummaryVersion     uint64         `json:"summary_version,omitempty"`
+	PriceVersion       uint64         `json:"price_version,omitempty"`
 	Storage            StorageStatus  `json:"storage"`
 	LastImport         *ImportSummary `json:"last_import,omitempty"`
 	EvictedTotal       int64          `json:"evicted_total"`
@@ -1048,6 +1071,7 @@ type APIDetailSummary struct {
 	CacheWriteTokens int64   `json:"cache_write_tokens"`
 	ReasoningTokens  int64   `json:"reasoning_tokens"`
 	AvgLatencyMs     float64 `json:"avg_latency_ms"`
+	EstimatedCost    float64 `json:"estimated_cost"`
 }
 
 // APIDetailErrorStat aggregates failures by status code and redacted body.

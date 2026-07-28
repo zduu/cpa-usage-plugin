@@ -7,9 +7,15 @@ let eventsData = null;          // EventsResult from /dashboard-events
 let eventsDataUrl = '';
 let modelPrices = {};
 let manualModelPrices = {};
+let modelPricesLoaded = false;
+let modelPricesLoading = null;
+let modelPricesTotal = 0;
+let modelPricesQuery = '';
+let priceSearchTimer = null;
 let selectedPriceReferenceModel = '';
 let priceReferenceVisibleOptions = [];
 let priceReferenceActiveIndex = -1;
+let priceSearchSeq = 0;
 let selectedApi = '';
 let clientApiSort = 'requests';
 let clientApiSelectMode = false;
@@ -20,16 +26,30 @@ let filteredSummaryError = null;
 let trendMetric = 'cost'; // 'cost' | 'requests' | 'tokens' | 'rpm'
 let pollTimer = null, pollFailures = 0;
 let currentRange = '';
-const eventsLimit = 500;
+const eventsLimit = 50;
+let eventsOffset = 0;
 const apiDetailRecentLimit = 120;
 const priceReferenceResultLimit = 100;
 const visiblePollDelayMs = 30000;
 const hiddenPollDelayMs = 300000;
 let apiDetailSeq = 0;
+let eventsSeq = 0;
+let summaryLoadSeq = 0;
 const apiDetailCache = new Map();
 const conditionalPayloadCache = new Map();
+const conditionalPayloadCacheMax = 64;
 let apiDetailLastRender = null;
 let updatedState = { type: 'loading', generatedAt: null, message: '' };
+let healthCells = [];
+let healthCellKeys = [];
+let healthGridData = [];
+let healthEventsBound = false;
+
+function performanceMark(name) {
+  if (typeof performance !== 'undefined' && performance && typeof performance.mark === 'function') performance.mark(name);
+}
+
+performanceMark('dashboard-script-start');
 
 function dashboardPanelData() {
   return selectedClientApi ? filteredSummaryData : summaryData;
@@ -282,7 +302,15 @@ async function fetchTextPayloadWithMeta(url, options) {
   return meta;
 }
 
-async function fetchConditionalJsonPayload(cacheKey, url, options) {
+function cacheConditionalPayload(cacheKey, value) {
+  if (conditionalPayloadCache.has(cacheKey)) conditionalPayloadCache.delete(cacheKey);
+  conditionalPayloadCache.set(cacheKey, value);
+  while (conditionalPayloadCache.size > conditionalPayloadCacheMax) {
+    conditionalPayloadCache.delete(conditionalPayloadCache.keys().next().value);
+  }
+}
+
+async function fetchConditionalJsonPayloadWithMeta(cacheKey, url, options) {
   const cached = conditionalPayloadCache.get(cacheKey);
   const merged = Object.assign({}, options || {});
   const headers = cloneHeaders(merged.headers);
@@ -290,7 +318,7 @@ async function fetchConditionalJsonPayload(cacheKey, url, options) {
   merged.headers = headers;
   let meta = await fetchJsonPayloadWithMeta(url, merged);
   if (meta.statusCode === 304) {
-    if (cached && Object.prototype.hasOwnProperty.call(cached, 'data')) return cached.data;
+    if (cached && Object.prototype.hasOwnProperty.call(cached, 'data')) return { data: cached.data, etag: cached.etag, notModified: true };
     const retryOptions = Object.assign({}, options || {});
     const retryHeaders = cloneHeaders(retryOptions.headers);
     delete retryHeaders['If-None-Match'];
@@ -300,9 +328,14 @@ async function fetchConditionalJsonPayload(cacheKey, url, options) {
     if (meta.statusCode === 304) throw new Error(t('no_304_cache'));
   }
   const etag = headerValue(meta.headers, 'ETag');
-  if (etag) conditionalPayloadCache.set(cacheKey, { etag, data: meta.data });
+  if (etag) cacheConditionalPayload(cacheKey, { etag, data: meta.data });
   else conditionalPayloadCache.delete(cacheKey);
-  return meta.data;
+  return { data: meta.data, etag: etag, notModified: false };
+}
+
+async function fetchConditionalJsonPayload(cacheKey, url, options) {
+  const result = await fetchConditionalJsonPayloadWithMeta(cacheKey, url, options);
+  return result.data;
 }
 
 function requireObjectPayload(data, label) {
@@ -332,11 +365,57 @@ function pluginFetchOptions(options) {
   return managementFetchOptions(options);
 }
 
-async function loadModelPrices() {
-  const data = await fetchJsonPayload(pluginEndpoint('model-prices'), pluginFetchOptions({ cache: 'no-store' }));
+async function loadModelPrices(search) {
+	const data = await fetchModelPrices(search);
+	applyModelPrices(data, search);
+	return modelPrices;
+}
+
+async function fetchModelPrices(search) {
+  const params = new URLSearchParams();
+  params.set('scope', 'catalogue');
+  params.set('limit', String(priceReferenceResultLimit));
+  if (search) params.set('q', search);
+  const url = pluginEndpoint('model-prices') + '?' + params.toString();
+  return fetchConditionalJsonPayload('model-prices:' + url, url, pluginFetchOptions({ cache: 'no-store' }));
+}
+
+function applyModelPrices(data, search) {
   modelPrices = (data && data.prices) || {};
   manualModelPrices = manualPricesFromResponse(data);
+  modelPricesTotal = num(data && data.total) || Object.keys(modelPrices).length;
+  modelPricesQuery = normalizedPriceKey(search);
+  modelPricesLoaded = true;
+}
+
+async function ensureModelPricesLoaded(search) {
+  if (modelPricesLoading) return modelPricesLoading;
+  if (modelPricesLoaded && !search) return modelPrices;
+  modelPricesLoading = loadModelPrices(search).finally(() => { modelPricesLoading = null });
+  return modelPricesLoading;
+}
+
+async function loadUsedModelPrices() {
+  const params = new URLSearchParams();
+  params.set('scope', 'used');
+  const url = pluginEndpoint('model-prices') + '?' + params.toString();
+  const data = await fetchConditionalJsonPayload('model-prices:' + url, url, pluginFetchOptions({ cache: 'no-store' }));
+  modelPrices = Object.assign({}, modelPrices, (data && data.prices) || {});
+  manualModelPrices = manualPricesFromResponse(data);
   return modelPrices;
+}
+
+function summaryHasServerCosts(summary) {
+  return !!(summary && summary.usage && Object.prototype.hasOwnProperty.call(summary.usage, 'total_cost'));
+}
+
+function refreshCostPanels() {
+  renderStats();
+  renderClientApiStats();
+  renderApiStats();
+  renderModelStats();
+  renderTrendChart();
+  renderApiDetailFromCache();
 }
 
 async function saveModelPrice(model, price) {
@@ -347,6 +426,7 @@ async function saveModelPrice(model, price) {
   });
   modelPrices = (data && data.prices) || {};
   manualModelPrices = manualPricesFromResponse(data);
+  modelPricesLoaded = true;
   return modelPrices;
 }
 
@@ -356,6 +436,7 @@ async function deleteModelPrice(model) {
   const data = await fetchManagementJsonPayload('model-prices?' + params.toString(), { method: 'DELETE' });
   modelPrices = (data && data.prices) || {};
   manualModelPrices = manualPricesFromResponse(data);
+  modelPricesLoaded = true;
   return modelPrices;
 }
 
@@ -385,7 +466,7 @@ function renderStats() {
   const recentReq = recentHours.length ? recentHours[0] : 0;
   setText('rpm', (recentReq / 60).toFixed(2));
   setText('rpmMeta', withLabel('recent_requests_label', formatInteger(recentReq)));
-  const cost = (summaryData.model_stats || []).reduce((s, m) => s + aggregateCost(m, modelPrices, manualModelPrices), 0);
+  const cost = Object.prototype.hasOwnProperty.call(u, 'total_cost') ? num(u.total_cost) : (summaryData.model_stats || []).reduce((s, m) => s + aggregateCost(m, modelPrices, manualModelPrices), 0);
   setText('totalCost', formatUsd(cost));
   setText('costMeta', withLabel('total_tokens_label', compact(u.total_tokens)));
   // Sparklines from hourly data
@@ -491,43 +572,92 @@ function renderStorageStatus() {
 
 function renderHealth() {
   if (!summaryData) return;
-  const grid = normalizeHealthGrid(summaryData.health_grid, summaryData.generated_at);
-  const count = 672, rows = 7, cols = Math.ceil(count / rows);
+  const grid = dashboardHealthGrid(summaryData);
+  const count = grid.length;
   let totalS = 0, totalF = 0;
-  const cells = [], tooltips = [];
+  const container = $('healthGrid');
+  if (healthCells.length !== count) {
+    container.innerHTML = '';
+    healthCells = Array.from({ length: count }, (_, i) => {
+      const cell = document.createElement('div');
+      cell.dataset.healthIdx = String(i);
+      container.appendChild(cell);
+      return cell;
+    });
+    healthCellKeys = Array(count).fill('');
+  }
+  healthGridData = grid;
   grid.forEach((slot, i) => {
     totalS += slot.success; totalF += slot.failure;
     const total = slot.total;
     const rate = total ? slot.success / total : -1;
-    const timeRange = formatDateTime(slot.start) + ' - ' + formatDateTime(slot.end);
-    const tip = '<span>' + timeRange + '</span><br>' + (total ? '<span class="ok">' + t('success_label') + ' ' + formatInteger(slot.success) + '</span> <span class="bad">' + t('failure_label') + ' ' + formatInteger(slot.failure) + '</span> <span>' + t('success_rate') + ' ' + pct(rate * 100) + '</span>' : '<span>' + t('no_requests') + '</span>');
-    tooltips.push(tip);
-    cells.push('<div class="healthCell ' + (total ? 'active' : '') + '" data-health-idx="' + i + '" style="' + healthCellStyle(i, count, total, rate) + '"></div>');
+    const cell = healthCells[i];
+    const renderKey = [slot.success, slot.failure, total].join('|');
+    if (healthCellKeys[i] !== renderKey) {
+      cell.className = 'healthCell ' + (total ? 'active' : '');
+      cell.style.cssText = healthCellStyle(i, count, total, rate);
+      healthCellKeys[i] = renderKey;
+    }
   });
-  $('healthGrid').innerHTML = cells.join('');
   const tip = $('tooltip');
   const showTip = function (cell) {
     if (!cell) return;
-    const idx = parseInt(cell.dataset.healthIdx); if (isNaN(idx) || idx < 0 || idx >= count) { tip.classList.add('hidden'); return }
-    tip.innerHTML = tooltips[idx]; tip.classList.remove('hidden');
+    const idx = parseInt(cell.dataset.healthIdx); if (isNaN(idx) || idx < 0 || idx >= healthGridData.length) { tip.classList.add('hidden'); return }
+    const slot = healthGridData[idx];
+    const total = slot.total;
+    const rate = total ? slot.success / total : -1;
+    const timeRange = formatDateTime(slot.start) + ' - ' + formatDateTime(slot.end);
+    tip.innerHTML = '<span>' + timeRange + '</span><br>' + (total ? '<span class="ok">' + t('success_label') + ' ' + formatInteger(slot.success) + '</span> <span class="bad">' + t('failure_label') + ' ' + formatInteger(slot.failure) + '</span> <span>' + t('success_rate') + ' ' + pct(rate * 100) + '</span>' : '<span>' + t('no_requests') + '</span>');
+    tip.classList.remove('hidden');
     const r = cell.getBoundingClientRect(); let left = r.right + 8, top = r.top - 6;
     if (left + 260 > window.innerWidth) left = r.left - 268; if (top + 64 > window.innerHeight) top = window.innerHeight - 74; if (top < 6) top = 6;
     tip.style.left = left + 'px'; tip.style.top = top + 'px';
   };
-  $('healthGrid').onmouseover = function (e) {
-    const cell = e.target.closest('.healthCell');
-    if (!cell) { tip.classList.add('hidden'); return }
-    showTip(cell);
-  };
-  $('healthGrid').onmouseleave = function (e) {
-    if (!e.relatedTarget || !e.relatedTarget.closest('.healthCell')) tip.classList.add('hidden');
-  };
-  $('healthGrid').onmouseout = function (e) { const t = e.relatedTarget; if (!t || !t.closest('.healthCell')) tip.classList.add('hidden') };
+  if (!healthEventsBound) {
+    container.onmouseover = function (e) {
+      const cell = e.target.closest('.healthCell');
+      if (!cell) { tip.classList.add('hidden'); return }
+      showTip(cell);
+    };
+    container.onmouseleave = function (e) {
+      if (!e.relatedTarget || !e.relatedTarget.closest('.healthCell')) tip.classList.add('hidden');
+    };
+    container.onmouseout = function (e) { const target = e.relatedTarget; if (!target || !target.closest('.healthCell')) tip.classList.add('hidden') };
+    healthEventsBound = true;
+  }
   const total = totalS + totalF; setText('healthRate', total ? pct(totalS / total * 100) : '-'); setText('healthSuccess', t('success_label') + ' ' + formatInteger(totalS)); setText('healthFailure', t('failure_label') + ' ' + formatInteger(totalF));
 }
 
 const healthGridCount = 672;
 const healthGridStepMs = 15 * 60 * 1000;
+
+function dashboardHealthGrid(summary) {
+  const compact = summary && summary.health_grid_v2;
+  if (!compact || !Array.isArray(compact.slots)) return normalizeHealthGrid(summary && summary.health_grid, summary && summary.generated_at);
+  const count = Math.max(0, num(compact.count)) || healthGridCount;
+  const step = Math.max(1, num(compact.step_seconds)) * 1000 || healthGridStepMs;
+  const start = timestampMs(compact.start);
+  if (!start) return normalizeHealthGrid(summary && summary.health_grid, summary && summary.generated_at);
+  const grid = Array.from({ length: count }, (_, i) => ({
+    slot: i,
+    total: 0,
+    success: 0,
+    failure: 0,
+    start: new Date(start + i * step).toISOString(),
+    end: new Date(start + (i + 1) * step).toISOString(),
+  }));
+  compact.slots.forEach((row) => {
+    if (!Array.isArray(row) || row.length < 3) return;
+    const index = Math.floor(num(row[0]));
+    if (index < 0 || index >= grid.length) return;
+    const success = Math.max(0, num(row[1]));
+    const failure = Math.max(0, num(row[2]));
+    grid[index].success = success;
+    grid[index].failure = failure;
+    grid[index].total = success + failure;
+  });
+  return grid;
+}
 
 function healthGridWindowEnd(value) {
   const ms = timestampMs(value) || Date.now();
@@ -706,7 +836,8 @@ function renderPriceReferenceOptions(query, open) {
     return '<button type="button" id="priceReferenceOption' + index + '" class="searchComboOption' + (active ? ' active' : '') + '" role="option" aria-selected="' + (active ? 'true' : 'false') + '" data-price-reference-option="' + esc(model) + '">' + esc(model) + '</button>';
   }).join('');
   const emptyHtml = optionHtml ? '' : '<div class="searchComboEmpty">' + esc(t(options.length ? 'price_reference_no_match' : 'price_reference_none')) + '</div>';
-  const limitHtml = matches.length > priceReferenceResultLimit ? '<div class="searchComboStatus">' + esc(t('price_reference_result_limit', priceReferenceResultLimit, matches.length)) + '</div>' : '';
+  const matchTotal = normalizedPriceKey(query) === modelPricesQuery ? Math.max(matches.length, modelPricesTotal) : matches.length;
+  const limitHtml = matchTotal > priceReferenceResultLimit ? '<div class="searchComboStatus">' + esc(t('price_reference_result_limit', priceReferenceResultLimit, matchTotal)) + '</div>' : '';
   list.innerHTML = optionHtml + emptyHtml + limitHtml;
   list.hidden = !open;
   input.setAttribute('aria-expanded', open ? 'true' : 'false');
@@ -833,7 +964,7 @@ function renderPrices() {
     try {
       await deleteModelPrice(btn.dataset.delPrice);
       if (normalizedPriceKey($('priceModel').value) === normalizedPriceKey(btn.dataset.delPrice)) fillPriceForm('');
-      await rerender({ refreshEvents: false, refreshApiDetail: true });
+      await load({ forceDetails: true });
     } catch (e) {
       alert(t('price_delete_failed') + (e && e.message ? e.message : t('unknown_error')));
     }
@@ -890,6 +1021,7 @@ function renderClientApiStats() {
 
 async function selectClientApiCard(selector, rows) {
   if (!selector) return;
+  eventsOffset = 0;
   if (selectedClientApi && selectedClientApi.selector === selector) {
     selectedClientApi = null;
     filteredSummaryData = null;
@@ -912,14 +1044,16 @@ async function refreshFilteredSummary() {
   const params = new URLSearchParams();
   params.set('range', $('range').value);
   params.set('client_api', selectedClientApi.selector);
+  params.set('compact_health', '1');
   const url = pluginEndpoint('dashboard-summary') + '?' + params.toString();
   try {
-    const data = requireObjectPayload(await fetchConditionalJsonPayload('dashboard-summary:' + url, url, pluginFetchOptions({ cache: 'no-store' })), 'dashboard-summary');
+    const result = await fetchConditionalJsonPayloadWithMeta('dashboard-summary:' + url, url, pluginFetchOptions({ cache: 'no-store' }));
+    const data = requireObjectPayload(result.data, 'dashboard-summary');
     if (context !== clientApiFilterContext()) return null;
     filteredSummaryData = data;
     filteredSummaryContext = context;
     filteredSummaryError = null;
-    return data;
+    return { data, notModified: result.notModified };
   } catch (error) {
     if (context === clientApiFilterContext()) {
       if (filteredSummaryContext !== context) filteredSummaryData = null;
@@ -1317,6 +1451,15 @@ function renderEventsContent() {
   const rows = data.events;
   const total = data.total;
   setText('eventsCount', t('events_count', formatInteger(total), formatInteger(Math.min(rows.length, eventsLimit))));
+  const pageCount = Math.max(1, Math.ceil(total / eventsLimit));
+  const page = Math.min(pageCount, Math.floor(data.offset / eventsLimit) + 1);
+  setText('eventsPage', t('events_page', formatInteger(page), formatInteger(pageCount)));
+  $('eventsPrev').disabled = data.offset <= 0;
+  $('eventsNext').disabled = data.offset + rows.length >= total;
+  $('eventsPrev').title = t('events_previous_page');
+  $('eventsPrev').setAttribute('aria-label', t('events_previous_page'));
+  $('eventsNext').title = t('events_next_page');
+  $('eventsNext').setAttribute('aria-label', t('events_next_page'));
   $('events').innerHTML = rows.length ? '<table><thead><tr><th>' + t('col_time') + '</th><th>' + t('col_model') + '</th><th>' + t('col_source') + '</th><th>' + t('col_credential') + '</th><th>' + t('col_result') + '</th><th>' + t('col_latency') + '</th><th>' + t('col_input') + '</th><th>' + t('col_output') + '</th><th>' + t('col_thinking') + '</th><th>' + t('col_cache') + '</th><th>' + t('col_cache_write') + '</th><th>' + t('col_total') + '</th></tr></thead><tbody>' + rows.map((d) => '<tr><td>' + formatDateTime(timestampMs(d.timestamp)) + '</td><td class="nameCell">' + esc(d.model) + '</td><td class="nameCell">' + esc(sourceLabel(d)) + '</td><td>' + esc(d.auth_index || '-') + '</td><td class="' + (d.failed ? 'bad' : 'ok') + '">' + statusText(d.failed) + '</td><td>' + formatDurationAndTTFT(d.latency_ms, d.ttft_ms) + '</td><td>' + formatInteger(uncachedInputTokens(d)) + '</td><td>' + formatInteger(num(d.tokens && d.tokens.output_tokens)) + '</td><td>' + formatInteger(num(d.tokens && d.tokens.reasoning_tokens)) + '</td><td>' + formatInteger(cacheReadTokens(d.tokens)) + '</td><td>' + formatInteger(num(d.tokens && d.tokens.cache_write_tokens)) + '</td><td>' + formatInteger(totalTokens(d)) + '</td></tr>').join('') + '</tbody></table>' : '<div class="empty">' + t('no_events') + '</div>';
   renderFilters();
 }
@@ -1325,24 +1468,28 @@ async function renderEvents() {
   // Fetch paginated events from server
   const params = new URLSearchParams();
   params.set('limit', String(eventsLimit));
-  params.set('offset', '0');
+  params.set('offset', String(eventsOffset));
   params.set('range', $('range').value);
   const fm = $('filterModel').value; if (fm) params.set('model', fm);
   const fs = $('filterSource').value; if (fs) params.set('source', fs);
   const fa = $('filterAuth').value; if (fa) params.set('auth', fa);
   if (selectedClientApiSelector()) params.set('client_api', selectedClientApiSelector());
+  const requestSeq = ++eventsSeq;
+  const url = pluginEndpoint('dashboard-events') + '?' + params.toString();
   try {
-    const url = pluginEndpoint('dashboard-events') + '?' + params.toString();
-    eventsData = normalizeEventsPayload(await fetchConditionalJsonPayload('dashboard-events:' + url, url, pluginFetchOptions({ cache: 'no-store' })));
+    const data = normalizeEventsPayload(await fetchConditionalJsonPayload('dashboard-events:' + url, url, pluginFetchOptions({ cache: 'no-store' })));
+    if (requestSeq !== eventsSeq) return;
+    eventsData = data;
     eventsDataUrl = url;
   } catch (e) {
-    const url = pluginEndpoint('dashboard-events') + '?' + params.toString();
+    if (requestSeq !== eventsSeq) return;
     if (!eventsData || eventsDataUrl !== url) {
       eventsData = { events: [], total: 0, limit: eventsLimit, offset: 0 };
       eventsDataUrl = url;
     }
   }
   renderEventsContent();
+  performanceMark('events-render-end');
 }
 
 const downloadBlobRevokeDelayMs = 60000;
@@ -1888,12 +2035,13 @@ async function rerender(options) {
   renderStats();
   renderStorageStatus();
   renderHealth();
-  renderPrices();
+  if ($('priceSettings').open && modelPricesLoaded) renderPrices();
   renderClientApiStats();
   renderApiStats();
   renderModelStats();
   initTrendChart();
   renderTrendChart();
+  performanceMark('summary-render-end');
   if (opts.refreshEvents) await renderEvents();
   else renderEventsContent();
   if (opts.refreshApiDetail || previousApi !== selectedApi) await renderApiDetail();
@@ -1907,20 +2055,30 @@ function nextFailureDelay() { return Math.min(300000, [5000, 15000, 45000, 90000
 
 async function load(options) {
   const forceDetails = options && options.forceDetails;
+  const requestSeq = ++summaryLoadSeq;
   try {
+    performanceMark('summary-request-start');
     const previousSummary = summaryData;
     const selectedRange = $('range').value;
     // Try new summary endpoint first with current range
-    const summaryUrl = pluginEndpoint('dashboard-summary') + '?range=' + encodeURIComponent(selectedRange);
-    // A transient model-prices error must not send the page through the
-    // compatibility data path; stale prices are better than replacing
-    // range-scoped stats with reconstructed fallback data.
-    const [data] = await Promise.all([
-      fetchConditionalJsonPayload('dashboard-summary:' + summaryUrl, summaryUrl, pluginFetchOptions({ cache: 'no-store' })),
-      loadModelPrices().catch(function() { /* prices failure tolerated; stale prices beat wrong stats */ }),
-    ]);
+    const summaryUrl = pluginEndpoint('dashboard-summary') + '?range=' + encodeURIComponent(selectedRange) + '&compact_health=1';
+    const summaryResult = await fetchConditionalJsonPayloadWithMeta('dashboard-summary:' + summaryUrl, summaryUrl, pluginFetchOptions({ cache: 'no-store' }));
+    if (requestSeq !== summaryLoadSeq) return;
+    performanceMark('summary-request-end');
+    const data = summaryResult.data;
     summaryData = requireObjectPayload(data, 'dashboard-summary');
-    if (selectedClientApi) await refreshFilteredSummary();
+    let filteredResult = null;
+    if (selectedClientApi) filteredResult = await refreshFilteredSummary();
+    if (requestSeq !== summaryLoadSeq) return;
+    if (summaryResult.notModified && !forceDetails && (!selectedClientApi || (filteredResult && filteredResult.notModified))) {
+      currentRange = selectedRange;
+      pollFailures = 0;
+      schedulePoll(pollDelay());
+      return;
+    }
+    if (!summaryHasServerCosts(summaryData)) {
+      loadUsedModelPrices().then(refreshCostPanels).catch(function() { /* compatibility pricing is optional */ });
+    }
     updatedState = { type: 'success', generatedAt: data.generated_at || Date.now(), message: '' };
     renderUpdated();
     const refreshDetails = !!selectedClientApi || shouldRefreshDetails(previousSummary, summaryData, forceDetails);
@@ -1928,15 +2086,15 @@ async function load(options) {
     currentRange = selectedRange;
     pollFailures = 0; schedulePoll(pollDelay());
   } catch (error) {
+    if (requestSeq !== summaryLoadSeq) return;
     // Fallback: try old dashboard-data endpoint
     try {
       const previousSummary = summaryData;
       const selectedRange = $('range').value;
-      const [data] = await Promise.all([
-        fetchJsonPayload(pluginEndpoint('dashboard-data'), pluginFetchOptions({ cache: 'no-store' })),
-        loadModelPrices().catch(function() { /* prices failure tolerated */ }),
-      ]);
+      const data = await fetchJsonPayload(pluginEndpoint('dashboard-data'), pluginFetchOptions({ cache: 'no-store' }));
+      if (requestSeq !== summaryLoadSeq) return;
       summaryData = buildSummaryFromFullUsage(data, selectedRange);
+      loadUsedModelPrices().then(refreshCostPanels).catch(function() { /* compatibility pricing is optional */ });
       if (selectedClientApi) {
         filteredSummaryData = null;
         filteredSummaryContext = '';
@@ -1949,6 +2107,7 @@ async function load(options) {
       currentRange = selectedRange;
       pollFailures = 0; schedulePoll(pollDelay());
     } catch (fallbackError) {
+      if (requestSeq !== summaryLoadSeq) return;
       updatedState = { type: 'error', generatedAt: null, message: (fallbackError && fallbackError.message) || (error && error.message) || '' };
       renderUpdated();
       pollFailures++; schedulePoll(nextFailureDelay());
@@ -1966,15 +2125,23 @@ function handleVisibilityChange() {
 
 // Event bindings
 $('range').value = localStorage.getItem(rangeKey) || '24h';
-$('range').onchange = () => { localStorage.setItem(rangeKey, $('range').value); load({ forceDetails: true }) };
+$('range').onchange = () => { eventsOffset = 0; localStorage.setItem(rangeKey, $('range').value); load({ forceDetails: true }) };
 $('refreshBtn').onclick = () => load({ forceDetails: true });
+$('priceSettings').ontoggle = async () => {
+  if (!$('priceSettings').open) return;
+  try {
+    await ensureModelPricesLoaded('');
+    renderPrices();
+    if (typeof applyI18N === 'function') applyI18N();
+  } catch (_) { /* the price panel keeps its existing empty/error-safe state */ }
+};
 $('savePrice').onclick = async () => {
   const m = $('priceModel').value.trim(); if (!m) return;
   const prompt = num($('pricePrompt').value), completion = num($('priceCompletion').value), cache = $('priceCache').value === '' ? prompt : num($('priceCache').value), cacheWrite = $('priceCacheWrite').value === '' ? 0 : num($('priceCacheWrite').value);
   try {
     await saveModelPrice(m, { prompt, completion, cache, cache_write: cacheWrite });
     fillPriceForm('');
-    await rerender({ refreshEvents: false, refreshApiDetail: true });
+    await load({ forceDetails: true });
   } catch (e) {
     alert(t('price_save_failed') + (e && e.message ? e.message : t('unknown_error')));
   }
@@ -1988,8 +2155,20 @@ $('priceReferenceModel').onfocus = () => {
 $('priceReferenceModel').oninput = () => {
   selectedPriceReferenceModel = '';
   priceReferenceActiveIndex = -1;
+  const query = $('priceReferenceModel').value;
   renderPriceReferenceInfo(priceReferenceOptions());
-  renderPriceReferenceOptions($('priceReferenceModel').value, true);
+  renderPriceReferenceOptions(query, true);
+  if (priceSearchTimer) clearTimeout(priceSearchTimer);
+  const seq = ++priceSearchSeq;
+  priceSearchTimer = setTimeout(async () => {
+    try {
+      const data = await fetchModelPrices(query);
+      if (seq !== priceSearchSeq) return;
+      applyModelPrices(data, query);
+      renderPriceReferenceInfo(priceReferenceOptions());
+      renderPriceReferenceOptions(query, true);
+    } catch (_) { /* keep the last successful catalogue page */ }
+  }, 180);
 };
 $('priceReferenceModel').onchange = () => {
   const value = $('priceReferenceModel').value;
@@ -2011,6 +2190,7 @@ if (document.addEventListener) document.addEventListener('click', (event) => {
   if (!elementContains($('priceReferenceCombo'), event && event.target)) closePriceReferenceOptions();
 });
 document.querySelectorAll('[data-api-sort]').forEach((btn) => btn.onclick = async () => {
+  eventsOffset = 0;
   clientApiSort = btn.dataset.apiSort || 'requests';
   clientApiSelectMode = false;
   selectedClientApi = null;
@@ -2021,8 +2201,10 @@ document.querySelectorAll('[data-api-sort]').forEach((btn) => btn.onclick = asyn
 });
 const clientApiSelectButton = document.querySelectorAll('[data-client-api-select]')[0];
 if (clientApiSelectButton) clientApiSelectButton.onclick = () => { clientApiSelectMode = true; renderClientApiStats() };
-['filterModel', 'filterSource', 'filterAuth'].forEach((id) => $(id).onchange = renderEvents);
-$('clearFilters').onclick = () => { ['filterModel', 'filterSource', 'filterAuth'].forEach((id) => $(id).value = ''); renderEvents() };
+['filterModel', 'filterSource', 'filterAuth'].forEach((id) => $(id).onchange = () => { eventsOffset = 0; renderEvents() });
+$('clearFilters').onclick = () => { eventsOffset = 0; ['filterModel', 'filterSource', 'filterAuth'].forEach((id) => $(id).value = ''); renderEvents() };
+$('eventsPrev').onclick = async () => { eventsOffset = Math.max(0, eventsOffset - eventsLimit); $('eventsPrev').disabled = true; $('eventsNext').disabled = true; await renderEvents() };
+$('eventsNext').onclick = async () => { const data = normalizeEventsPayload(eventsData); if (eventsOffset + data.events.length < data.total) { eventsOffset += eventsLimit; $('eventsPrev').disabled = true; $('eventsNext').disabled = true; await renderEvents() } };
 $('exportRowsCsv').onclick = () => exportRows('csv'); $('exportRowsJson').onclick = () => exportRows('json');
 $('exportApiCsv').onclick = () => exportApiRows('csv'); $('exportApiJson').onclick = () => exportApiRows('json');
 $('exportBtn').onclick = async () => {
