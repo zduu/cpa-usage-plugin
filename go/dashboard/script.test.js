@@ -1424,6 +1424,38 @@ test('dashboard api detail labels every model with its token usage and cost', ()
   assert.doesNotMatch(html, /openai<span class="barCost">/);
 });
 
+test('dashboard api detail uses server costs without loading model prices', () => {
+  const { context, document } = createDashboardHarness();
+  vm.runInContext(`
+    modelPrices = {};
+    manualModelPrices = {};
+  `, context);
+  context.renderApiDetailContent({ failure_count: 0, models: {} }, {
+    loading: false,
+    detail: {
+      api: 'openai',
+      summary: { total_requests: 2, success_count: 2, failure_count: 0, total_tokens: 1500000, estimated_cost: 6 },
+      model_stats: [{
+        model: 'gpt-4.1',
+        total_requests: 2,
+        success_count: 2,
+        failure_count: 0,
+        total_tokens: 1500000,
+        input_tokens: 1000000,
+        output_tokens: 500000,
+        estimated_cost: 6,
+      }],
+      source_stats: [{ source: 'openai', provider: 'openai', total_requests: 2 }],
+      error_stats: [],
+      recent_events: [],
+    },
+  });
+
+  const html = document.getElementById('apiDetail').innerHTML;
+  assert.match(html, /gpt-4\.1<span class="barTokens">1\.5M<\/span><span class="barCost">US\$6\.00<\/span>/);
+  assert.match(html, /总花费<\/div><div class="metricValue">US\$6\.00<\/div>/);
+});
+
 test('dashboard event rows show the full upstream interface as source', () => {
   const { context, document } = createDashboardHarness();
   vm.runInContext(`
