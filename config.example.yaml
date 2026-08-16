@@ -101,6 +101,8 @@ plugins:
       models_dev_prices_enabled: false
       models_dev_prices_url: "https://models.dev/api.json"
       models_dev_prices_refresh_interval_seconds: 43200
+      # 修复旧版本 Claude 缓存创建双计的历史数据；确认确属双计后再启用
+      claude_cache_repair_enabled: false
       update_enabled: false
       update_version: "latest"
 

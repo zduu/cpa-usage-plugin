@@ -335,3 +335,45 @@ func TestRepairToggleOffAfterHealNoDoubleCount(t *testing.T) {
 		t.Fatalf("toggle-off restart total requests = %d, want canonical dedup to prevent duplicates", snapshot.TotalRequests)
 	}
 }
+
+// TestHotReloadEnableRepairsExistingRecords 复现审查发现的热重载缺口:
+// 通过 ConfigurePatch(/reconfigure 路径)把修复开关由关转开时,内存中已有的
+// 污染明细必须立即修复,而不是等到完整重启的冷恢复。
+func TestHotReloadEnableRepairsExistingRecords(t *testing.T) {
+	polluted := pollutedClaudeCacheDetail()
+	imported := StatisticsSnapshot{
+		TotalRequests: 1,
+		SuccessCount:  1,
+		TotalTokens:   polluted.Tokens.TotalTokens,
+		APIs: map[string]APISnapshot{
+			"claude · 上游 e462f816a955deb1": {
+				TotalRequests: 1, SuccessCount: 1,
+				TotalTokens: polluted.Tokens.TotalTokens,
+				Models: map[string]ModelSnapshot{
+					"claude-fable-5": {
+						TotalRequests: 1, SuccessCount: 1,
+						TotalTokens: polluted.Tokens.TotalTokens,
+						Details:     []RequestDetail{polluted},
+					},
+				},
+			},
+		},
+	}
+
+	stats := NewRequestStatistics()
+	defer stats.Close()
+	stats.MergeSnapshot(imported)
+	before := stats.Snapshot()
+	if before.CachedTokens != polluted.Tokens.CachedTokens {
+		t.Fatalf("precondition: cached = %d, want polluted state kept while disabled", before.CachedTokens)
+	}
+
+	stats.ConfigurePatch(runtimeConfigPatch{ClaudeCacheRepairEnabled: boolPtr(true)})
+
+	after := stats.Snapshot()
+	wantTotal := int64(52000 + 1400 + 26800)
+	if after.TotalRequests != 1 || after.CachedTokens != 0 || after.TotalTokens != wantTotal {
+		t.Fatalf("hot reload aggregates = req %d cached %d total %d, want repaired without restart",
+			after.TotalRequests, after.CachedTokens, after.TotalTokens)
+	}
+}

@@ -302,6 +302,10 @@ plugins:
       models_dev_prices_url: https://models.dev/api.json
       # 可选：models.dev 价格刷新间隔秒数。默认 43200（12小时）。
       models_dev_prices_refresh_interval_seconds: 43200
+      # 可选：修复 v2.5.7 及之前版本 Claude 缓存创建被双计的历史明细。默认 false。
+      # 该修复按 token 形态签名识别旧污染记录，与「真实命中恰好等于创建量」的合法
+      # 记录在旧数据中无法百分之百区分；请先用上游账单核对确属双计后再启用。
+      claude_cache_repair_enabled: false
       # 可选：允许外部脚本更新插件文件。默认 false。
       update_enabled: false
       # 可选：latest 或指定版本号，例如 v2.5.7。

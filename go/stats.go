@@ -682,6 +682,10 @@ func (s *RequestStatistics) ConfigurePatch(cfg runtimeConfigPatch) {
 	}
 	s.configureModelsDevPriceWorkerLocked()
 	s.configureStorageLocked()
+	// 修复开关可能刚由热重载打开:存储装载(冷恢复或合并)完成后统一对当前
+	// 内存明细执行一次历史缓存修复,置于价格加载与成本序列重建之前,保证
+	// 货币序列从修复后的 token 序列重建。开关关闭时该调用为空操作。
+	s.repairClaudeCacheFallbackDetailsLocked(time.Now())
 	s.loadModelPricesLocked()
 	s.rebuildCostSeriesLocked()
 	s.pruneLocked(time.Now(), true)
@@ -1533,7 +1537,6 @@ func (s *RequestStatistics) loadStorageSnapshotLocked(dir string, now time.Time)
 	} else {
 		s.restoreStorageSnapshotLocked(persisted.Usage, now)
 		s.repairMigratedAttributionDetailsLocked(now)
-		s.repairClaudeCacheFallbackDetailsLocked(now)
 	}
 	generatedAt, err := time.Parse(time.RFC3339, persisted.GeneratedAt)
 	if err != nil {
