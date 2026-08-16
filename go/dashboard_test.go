@@ -1864,7 +1864,7 @@ func TestMissingTotalTokensIncludesExclusiveClaudeCache(t *testing.T) {
 		t.Fatalf("inclusive usage total = %d, want 120", got)
 	}
 	aliasUsage := UsageDetail{InputTokens: 100, OutputTokens: 20, CachedTokens: 40, CacheCreationTokens: 30}
-	cacheRead, cacheWrite, cacheTotal := usageDetailCacheTokenParts(aliasUsage)
+	cacheRead, cacheWrite, cacheTotal := usageDetailCacheTokenParts(aliasUsage, "claude")
 	if cacheRead != 40 || cacheWrite != 30 || cacheTotal != 70 || usageDetailTotalTokens(aliasUsage, "claude") != 190 {
 		t.Fatalf("aliased cache parts = read %d write %d total %d, want 40/30/70", cacheRead, cacheWrite, cacheTotal)
 	}

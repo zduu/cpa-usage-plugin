@@ -69,18 +69,14 @@ func withProtocolFallbackTestGlobals(t *testing.T, delay time.Duration) *usageFa
 	previousStats := stats
 	previousFallbacks := usageFallbacks
 	previousDelay := usageFallbackRecordDelay
-	previousAttributions := upstreamAttributions
 	stats = NewRequestStatistics()
 	usageFallbacks = newUsageFallbackCoordinator()
 	usageFallbackRecordDelay = delay
-	upstreamAttributions = newUpstreamAttributionCoordinator()
 	t.Cleanup(func() {
 		usageFallbacks.Flush()
-		upstreamAttributions.Flush()
 		stats = previousStats
 		usageFallbacks = previousFallbacks
 		usageFallbackRecordDelay = previousDelay
-		upstreamAttributions = previousAttributions
 	})
 	return usageFallbacks
 }

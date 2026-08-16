@@ -620,17 +620,13 @@ func (c *usageFallbackCoordinator) Schedule(record UsageRecord) {
 	c.cleanupLocked(now)
 	if nativeRecord, ok := c.consumeNativeRecentLocked(key, requestAt, now); ok {
 		c.mu.Unlock()
-		if !stats.EnrichRecordedUsage(nativeRecord, record) && upstreamAttributions != nil {
-			upstreamAttributions.EnrichPending(nativeRecord, record)
-		}
+		stats.EnrichRecordedUsage(nativeRecord, record)
 		return
 	}
 	if correlationKey != "" {
 		if nativeRecord, ok := c.consumeCorrelatedNativeRecentLocked(correlationKey, record, now); ok {
 			c.mu.Unlock()
-			if !stats.EnrichRecordedUsage(nativeRecord, record) && upstreamAttributions != nil {
-				upstreamAttributions.EnrichPending(nativeRecord, record)
-			}
+			stats.EnrichRecordedUsage(nativeRecord, record)
 			return
 		}
 	}
@@ -771,7 +767,7 @@ func (c *usageFallbackCoordinator) Flush() {
 	c.pendingCorrelated = make(map[string][]*pendingUsageFallback)
 	c.mu.Unlock()
 	for _, record := range records {
-		recordUsageWithAttribution(record)
+		stats.Record(record)
 	}
 }
 
@@ -809,7 +805,7 @@ func (c *usageFallbackCoordinator) commit(pending *pendingUsageFallback) {
 			record.AuthIndex = learned
 		}
 	}
-	recordUsageWithAttribution(record)
+	stats.Record(record)
 }
 
 func (c *usageFallbackCoordinator) popPendingLocked(key string) *pendingUsageFallback {

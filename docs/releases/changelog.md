@@ -6,6 +6,18 @@
 
 ## Unreleased
 
+### 修复 Claude 家族缓存创建双计(token 总量虚高)
+- CPA `parseClaudeUsageNode` 在 `cache_read` 为 0 时把 `cache_creation` 回填进 `CachedTokens`,插件将其当作缓存命中入账,导致"只创建缓存"的请求(会话首轮)创建量同时计入命中与创建、总量多算一份
+- `usageDetailCacheTokenParts` 限定 Claude provider 家族识别回填形态(`CacheReadTokens == 0 && CachedTokens == CacheCreationTokens > 0`)并剔除;有真实命中的 Claude 记录 `CacheReadTokens` 非零,不受影响,其余 provider 不做推断
+- 存量污染明细按签名(命中 == 创建 == X、缓存合计 == 2X、总量 == input+output+2X、时间早于修复版发布)自动还原:快照冷恢复后修复内存态,JSONL 重放与导入合并在入库口先还原再计算去重键——旧快照与当日分片的两份形态归一到同一个键,不会双计,重复重启不累加;导入明细以修复后形态写入持久化
+- 修复版发布后真实"命中 == 创建"的合法记录由时间窗保护,一律保留原样
+
+### 移除 DeepSeek 上游归因改写(修复真实 Claude 上游被错改为 openai-compatible 的问题)
+- 删除 v2.5.5 引入的「DeepSeek 上游归因兼容」:该机制假设 `claude:apikey` 身份的成功 DeepSeek 原生记录必为 CPA 误标,但 CPA 原生 usage 身份始终取自实际执行请求的 auth(`NewUsageReporter` 直接读取 `auth.ID`/`auth.EnsureIndex`/`executor.Identifier`),不存在误标路径
+- 修复由此导致的实际问题:当 Claude 协议中转上游与某个 openai-compatible 渠道提供同族 DeepSeek 模型时,真实 Claude 上游的记录会在实时提交、重启重放、快照恢复或导入合并时被整体改写为对方身份(即使对方渠道已从配置中删除,历史明细仍会触发改写)
+- 新增孪生副本修复通道:旧版本改写产物完整保留了原始明细的纳秒时间戳、延迟、TTFT、客户端与输出 token,当原始 Claude 明细与改写副本同时在场(旧快照 vs 原始 JSONL、损坏现场 vs 导入的导出备份)时,自动丢弃副本、保留原始记录,不产生双计
+- 已损坏的数据可通过「上传导入损坏前导出的备份 JSON」一键还原;基于真实导出数据验证:134 条被改写明细全部还原身份,真实 openai-compatible 记录与总数保持不变
+
 ## v2.5.7 - 2026-07-29
 
 本版本修复上游接口详情在服务端费用模式下错误显示零费用的问题。

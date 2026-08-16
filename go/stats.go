@@ -749,7 +749,7 @@ func (s *RequestStatistics) Record(record UsageRecord) {
 }
 
 func requestDetailFromUsageRecord(record UsageRecord, timestamp time.Time, whitelist headerWhitelist) RequestDetail {
-	cacheReadTokens, cacheWriteTokens, cacheTokens := usageDetailCacheTokenParts(record.Detail)
+	cacheReadTokens, cacheWriteTokens, cacheTokens := usageDetailCacheTokenParts(record.Detail, record.Provider)
 	totalTokens := usageDetailTotalTokens(record.Detail, record.Provider)
 	return RequestDetail{
 		Model:      firstNonEmpty(record.Model, "unknown"),
@@ -1524,6 +1524,8 @@ func (s *RequestStatistics) loadStorageSnapshotLocked(dir string, now time.Time)
 		_, _ = s.mergeSnapshotLocked(persisted.Usage, false, now)
 	} else {
 		s.restoreStorageSnapshotLocked(persisted.Usage, now)
+		s.repairMigratedAttributionDetailsLocked(now)
+		s.repairClaudeCacheFallbackDetailsLocked(now)
 	}
 	generatedAt, err := time.Parse(time.RFC3339, persisted.GeneratedAt)
 	if err != nil {
@@ -1541,7 +1543,6 @@ func (s *RequestStatistics) restoreStorageSnapshotLocked(snapshot StatisticsSnap
 		return
 	}
 	snapshot, _ = reconcileProtocolFallbackSnapshot(snapshot)
-	snapshot, _ = reconcileUpstreamAttributionSnapshot(snapshot, newUpstreamRouteResolver(maxHistoricalAttributionRoutes))
 	s.totalRequests = nonNegativeInt64(snapshot.TotalRequests)
 	s.successCount = nonNegativeInt64(snapshot.SuccessCount)
 	s.failureCount = nonNegativeInt64(snapshot.FailureCount)
@@ -2755,10 +2756,7 @@ func (s *RequestStatistics) replayStorageLocked(path string) error {
 	}
 
 	now := time.Now()
-	resolver := s.upstreamRouteResolverLocked()
-	records = reconcilePersistedUpstreamAttributions(records, resolver)
 	records, _ = reconcilePersistedProtocolFallbacks(records)
-	s.reconcileRecordedUpstreamAttributionsWithResolverLocked(now, resolver)
 	s.reconcileRecordedProtocolFallbacksLocked(now)
 	existing := s.detailKeysLocked()
 	pendingMetadata := make(map[requestDedupKey]RequestDetail)
@@ -2774,6 +2772,7 @@ func (s *RequestStatistics) replayStorageLocked(path string) error {
 		detail.Source = cleanImportedDetailSource(detail)
 		apiName = usageGroupKeyFromDetail(apiName, detail)
 		detail = normalizeStoredClientAPIIdentity(detail)
+		detail = normalizeClaudeCacheFallbackDetail(detail)
 		key := dedupKey(apiName, modelName, detail)
 		if persisted.MetadataOnly {
 			if !s.enrichPersistedDetailMetadataLocked(apiName, modelName, key, detail) {
@@ -2801,7 +2800,7 @@ func (s *RequestStatistics) replayStorageLocked(path string) error {
 			}
 		}
 	}
-	s.reconcileRecordedUpstreamAttributionsLocked(now)
+	s.repairMigratedAttributionDetailsLocked(now)
 	s.reconcileRecordedProtocolFallbacksLocked(now)
 	if invalidLines > 0 {
 		return fmt.Errorf("replay storage skipped %d invalid line(s)", invalidLines)
@@ -4379,9 +4378,6 @@ func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, per
 	snapshot, reconciledProtocolFallbacks = reconcileProtocolFallbackSnapshot(snapshot)
 	result.Skipped += int64(reconciledProtocolFallbacks)
 	s.reconcileRecordedProtocolFallbacksLocked(now)
-	resolver := s.upstreamRouteResolverLocked()
-	snapshot, _ = reconcileUpstreamAttributionSnapshot(snapshot, resolver)
-	s.reconcileRecordedUpstreamAttributionsWithResolverLocked(now, resolver)
 	var cutoff time.Time
 	if s.retention > 0 {
 		cutoff = now.Add(-s.retention)
@@ -4430,6 +4426,7 @@ func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, per
 				} else {
 					detail = normalizeStoredClientAPIIdentity(detail)
 				}
+				detail = normalizeClaudeCacheFallbackDetail(detail)
 
 				if !cutoff.IsZero() && !detail.Timestamp.IsZero() && detail.Timestamp.Before(cutoff) {
 					result.IgnoredByRetention++
@@ -4458,6 +4455,24 @@ func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, per
 	if reconciledRecorded > 0 {
 		result.Skipped += int64(reconciledRecorded)
 		result.Added = maxInt64(result.Added-int64(reconciledRecorded), 0)
+	}
+	if repaired := s.repairMigratedAttributionDetailsLocked(now); len(repaired) > 0 {
+		removed := make(map[requestDedupKey]struct{}, len(repaired))
+		for _, key := range repaired {
+			removed[key] = struct{}{}
+		}
+		keptPersisted := persisted[:0]
+		var droppedAdded int64
+		for _, item := range persisted {
+			if _, ok := removed[dedupKey(item.API, item.Model, item.Detail)]; ok {
+				droppedAdded++
+				continue
+			}
+			keptPersisted = append(keptPersisted, item)
+		}
+		persisted = keptPersisted
+		result.Skipped += int64(len(repaired))
+		result.Added = maxInt64(result.Added-droppedAdded, 0)
 	}
 	s.rebuildSeenLocked(now)
 	return result, persisted
@@ -4493,7 +4508,7 @@ func snapshotImportDetailCapacity(snapshot StatisticsSnapshot, cutoff time.Time,
 }
 
 func usageDetailTotalTokens(detail UsageDetail, provider string) int64 {
-	_, _, cacheTokens := usageDetailCacheTokenParts(detail)
+	_, _, cacheTokens := usageDetailCacheTokenParts(detail, provider)
 	inputTokens := nonNegativeInt64(detail.InputTokens)
 	outputTokens := nonNegativeInt64(detail.OutputTokens)
 	computedTokens := inputTokens + outputTokens
@@ -4503,9 +4518,18 @@ func usageDetailTotalTokens(detail UsageDetail, provider string) int64 {
 	return maxInt64(nonNegativeInt64(detail.TotalTokens), computedTokens)
 }
 
-func usageDetailCacheTokenParts(detail UsageDetail) (int64, int64, int64) {
+func usageDetailCacheTokenParts(detail UsageDetail, provider string) (int64, int64, int64) {
 	cacheReadTokens := maxInt64(nonNegativeInt64(detail.CachedTokens), nonNegativeInt64(detail.CacheReadTokens))
 	cacheWriteTokens := nonNegativeInt64(detail.CacheCreationTokens)
+	// CPA 的 parseClaudeUsageNode(仅 Claude 家族)在 cache_read 为 0 时把
+	// cache_creation 回填进 CachedTokens。若不剔除,同一笔缓存创建会再计入一次
+	// 缓存命中,并把总量多算一份。Claude 家族带真实命中的记录 CacheReadTokens
+	// 一定非零,不受影响;其余 provider 不做该推断。
+	if providerUsesExclusiveCacheInput(provider) &&
+		nonNegativeInt64(detail.CacheReadTokens) == 0 && cacheWriteTokens > 0 &&
+		nonNegativeInt64(detail.CachedTokens) == cacheWriteTokens {
+		cacheReadTokens = 0
+	}
 	return cacheReadTokens, cacheWriteTokens, cacheReadTokens + cacheWriteTokens
 }
 
