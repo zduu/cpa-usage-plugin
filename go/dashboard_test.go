@@ -1821,7 +1821,11 @@ func TestCacheWriteCostSeparatesReadWriteAndProviderAccounting(t *testing.T) {
 		})
 	}
 
-	when := time.Date(2026, 7, 11, 10, 30, 0, 0, time.UTC)
+	// 请求时间取相对当前的近期值:Record 按保留期以真实当前时间剪枝,固定
+	// 历史日期的记录超过 30 天后会在入账时被直接剪掉。
+	when := time.Now().Add(-2 * time.Hour)
+	dayKey := when.Format("2006-01-02")
+	hourKey := hourKeys[when.Hour()]
 	recorded := NewRequestStatistics()
 	recorded.modelPrices = map[string]ModelPrice{
 		"model": {Prompt: 1, Cache: 0.1, CacheWrite: 1.25},
@@ -1839,15 +1843,15 @@ func TestCacheWriteCostSeparatesReadWriteAndProviderAccounting(t *testing.T) {
 	})
 
 	snapshot := recorded.Snapshot()
-	assertFloatNear(t, "recorded daily cache cost", snapshot.CostByDay["2026-07-11"], 0.895)
-	assertFloatNear(t, "recorded hourly cache cost", snapshot.CostByHour["10"], 0.895)
+	assertFloatNear(t, "recorded daily cache cost", snapshot.CostByDay[dayKey], 0.895)
+	assertFloatNear(t, "recorded hourly cache cost", snapshot.CostByHour[hourKey], 0.895)
 
 	recorded.mu.RLock()
 	rebuiltDay := recorded.costByDayFromTokenSeriesLocked()
 	rebuiltHour := recorded.costByHourFromTokenSeriesLocked()
 	recorded.mu.RUnlock()
-	assertFloatNear(t, "rebuilt daily cache cost", rebuiltDay["2026-07-11"], 0.895)
-	assertFloatNear(t, "rebuilt hourly cache cost", rebuiltHour[10], 0.895)
+	assertFloatNear(t, "rebuilt daily cache cost", rebuiltDay[dayKey], 0.895)
+	assertFloatNear(t, "rebuilt hourly cache cost", rebuiltHour[when.Hour()], 0.895)
 }
 
 func TestMissingTotalTokensIncludesExclusiveClaudeCache(t *testing.T) {

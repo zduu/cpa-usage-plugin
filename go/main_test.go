@@ -223,7 +223,10 @@ func TestHandleUsageAcceptsOpenAICompatibleLoosePayload(t *testing.T) {
 	stats = NewRequestStatistics()
 	t.Cleanup(func() { stats = previousStats })
 
-	raw := []byte(`{
+	// 请求时间取相对当前的近期值:Record 会按保留期以真实当前时间剪枝,
+	// 固定历史日期的测试数据超过 30 天后会在入账时被直接剪掉。
+	now := time.Now()
+	raw := []byte(fmt.Sprintf(`{
 		"provider":"openai-compatible",
 		"executor_type":"OpenAICompatExecutor",
 		"model":"deepseek-v3.1",
@@ -231,7 +234,7 @@ func TestHandleUsageAcceptsOpenAICompatibleLoosePayload(t *testing.T) {
 		"auth_index":"public",
 		"baseUrl":"https://compat.example/v1",
 		"source":"compat-example",
-		"requested_at":1783526400123,
+		"requested_at":%d,
 		"latency_ms":1200,
 		"ttft_ms":230,
 		"detail":{
@@ -240,12 +243,11 @@ func TestHandleUsageAcceptsOpenAICompatibleLoosePayload(t *testing.T) {
 			"prompt_tokens_details":{"cached_tokens":3},
 			"completion_tokens_details":{"reasoning_tokens":4}
 		}
-	}`)
+	}`, now.Add(-time.Hour).UnixMilli()))
 
 	if _, err := handleUsage(raw); err != nil {
 		t.Fatalf("handleUsage() error = %v", err)
 	}
-	now := time.Date(2026, 7, 8, 17, 0, 0, 0, time.UTC)
 	summary := stats.SummaryWithoutDetailsForRangeAt("24h", now)
 	if summary.Usage.TotalRequests != 1 || summary.Usage.TotalTokens != 23 {
 		t.Fatalf("summary usage = %#v, want one OpenAI-compatible record", summary.Usage)

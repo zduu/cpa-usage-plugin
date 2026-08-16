@@ -11,23 +11,20 @@ import (
 // 缓存合计 == 2X,总量 == input+output+2X,全部由回填构造保证),按不变量还原:
 // 命中归零、缓存合计与总量各减去一份创建量。
 //
-// 持久化明细不保留 CacheReadTokens,该签名与「真实命中恰好等于创建量」的合法
-// 记录无法区分,因此修复限定在修复版本发布前写入的明细(时间窗之外的记录一律
-// 保留原样)。归一化在重放与导入的入库口执行,保证同一请求在旧快照与 JSONL
-// 分片中的两份形态归一到相同的去重键,不会双计。
-
-// claudeCacheRepairCutoff 之后的明细由修复后的插件写入,不再出现回填污染;
-// 真实「命中 == 创建」的合法记录从此不会被误改。
-var claudeCacheRepairCutoff = time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC)
+// 与「真实命中恰好等于创建量」合法记录的区分依据 Tokens.CacheReadTokens:修复后
+// 的入口把权威命中值一并持久化,带该字段的明细一律免除修复;旧版本写入的明细
+// 没有该字段,按签名修复。归一化在重放与导入的入库口执行,保证同一请求在旧快照
+// 与 JSONL 分片中的两份形态归一到相同的去重键,不会双计。
 
 func isPollutedClaudeCacheFallbackDetail(detail RequestDetail) bool {
 	if detail.Failed || usageProviderFamily(detail.Provider) != "claude" {
 		return false
 	}
-	if !detail.Timestamp.Before(claudeCacheRepairCutoff) {
+	t := detail.Tokens
+	// 修复后的入口写入的明细带权威命中字段,不参与历史修复。
+	if nonNegativeInt64(t.CacheReadTokens) > 0 {
 		return false
 	}
-	t := detail.Tokens
 	write := nonNegativeInt64(t.CacheWriteTokens)
 	if write == 0 || nonNegativeInt64(t.CachedTokens) != write {
 		return false

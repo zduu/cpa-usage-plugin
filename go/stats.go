@@ -772,6 +772,7 @@ func requestDetailFromUsageRecord(record UsageRecord, timestamp time.Time, white
 			OutputTokens:     record.Detail.OutputTokens,
 			ReasoningTokens:  record.Detail.ReasoningTokens,
 			CachedTokens:     cacheReadTokens,
+			CacheReadTokens:  cacheReadTokens,
 			CacheTokens:      cacheTokens,
 			CacheWriteTokens: cacheWriteTokens,
 			TotalTokens:      totalTokens,

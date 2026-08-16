@@ -9,8 +9,11 @@
 ### 修复 Claude 家族缓存创建双计(token 总量虚高)
 - CPA `parseClaudeUsageNode` 在 `cache_read` 为 0 时把 `cache_creation` 回填进 `CachedTokens`,插件将其当作缓存命中入账,导致"只创建缓存"的请求(会话首轮)创建量同时计入命中与创建、总量多算一份
 - `usageDetailCacheTokenParts` 限定 Claude provider 家族识别回填形态(`CacheReadTokens == 0 && CachedTokens == CacheCreationTokens > 0`)并剔除;有真实命中的 Claude 记录 `CacheReadTokens` 非零,不受影响,其余 provider 不做推断
-- 存量污染明细按签名(命中 == 创建 == X、缓存合计 == 2X、总量 == input+output+2X、时间早于修复版发布)自动还原:快照冷恢复后修复内存态,JSONL 重放与导入合并在入库口先还原再计算去重键——旧快照与当日分片的两份形态归一到同一个键,不会双计,重复重启不累加;导入明细以修复后形态写入持久化
-- 修复版发布后真实"命中 == 创建"的合法记录由时间窗保护,一律保留原样
+- 存量污染明细按签名(命中 == 创建 == X、缓存合计 == 2X、总量 == input+output+2X)自动还原:快照冷恢复后修复内存态,JSONL 重放与导入合并在入库口先还原再计算去重键——旧快照与当日分片的两份形态归一到同一个键,不会双计,重复重启不累加;导入明细以修复后形态写入持久化
+- 持久化明细新增 `cache_read_tokens` 权威命中字段:修复版写入的记录携带该字段,历史修复据此免除误判——真实"命中 == 创建"的合法记录(新旧任何时间)不会被改写,旧版明细(无该字段)按签名修复
+
+### 测试基准修复
+- 修复两个因固定 2026 年 7 月时间戳随日期推移被保留期剪枝的测试(`TestHandleUsageAcceptsOpenAICompatibleLoosePayload`、`TestCacheWriteCostSeparatesReadWriteAndProviderAccounting`),改用相对当前时间;Go 全量测试恢复全绿
 
 ### 移除 DeepSeek 上游归因改写(修复真实 Claude 上游被错改为 openai-compatible 的问题)
 - 删除 v2.5.5 引入的「DeepSeek 上游归因兼容」:该机制假设 `claude:apikey` 身份的成功 DeepSeek 原生记录必为 CPA 误标,但 CPA 原生 usage 身份始终取自实际执行请求的 auth(`NewUsageReporter` 直接读取 `auth.ID`/`auth.EnsureIndex`/`executor.Identifier`),不存在误标路径

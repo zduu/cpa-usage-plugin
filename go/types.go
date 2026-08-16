@@ -748,10 +748,14 @@ type RequestDetail struct {
 }
 
 type TokenStats struct {
-	InputTokens      int64 `json:"input_tokens"`
-	OutputTokens     int64 `json:"output_tokens"`
-	ReasoningTokens  int64 `json:"reasoning_tokens"`
-	CachedTokens     int64 `json:"cached_tokens"`
+	InputTokens     int64 `json:"input_tokens"`
+	OutputTokens    int64 `json:"output_tokens"`
+	ReasoningTokens int64 `json:"reasoning_tokens"`
+	CachedTokens    int64 `json:"cached_tokens"`
+	// CacheReadTokens 保留原生记录的权威缓存命中值。旧版本不写该字段;它的存在
+	// 证明明细由修复后的入口(已剔除 CPA CachedTokens 回填)写入,历史缓存修复
+	// 据此免除误判(见 claude_cache_repair.go)。
+	CacheReadTokens  int64 `json:"cache_read_tokens,omitempty"`
 	CacheTokens      int64 `json:"cache_tokens"`
 	CacheWriteTokens int64 `json:"cache_write_tokens"`
 	TotalTokens      int64 `json:"total_tokens"`

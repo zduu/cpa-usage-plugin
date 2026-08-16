@@ -74,12 +74,12 @@ func TestColdRestoreSnapshotAndSameDayShardNoDoubleCount(t *testing.T) {
 	}
 }
 
-// TestGenuineEqualCacheReadWriteAfterCutoffUntouched 覆盖审查提出的反例:
-// 修复版本上线后,真实「命中 == 创建」的合法 Claude 记录形态与污染签名相同,
-// 必须依靠时间窗保持原样。
-func TestGenuineEqualCacheReadWriteAfterCutoffUntouched(t *testing.T) {
+// TestGenuineEqualCacheReadWriteWithMarkerUntouched 覆盖审查提出的反例:
+// 修复版写入的真实「命中 == 创建」合法记录形态与污染签名相同,依靠持久化的
+// CacheReadTokens 权威命中字段免除误判,与时间无关。
+func TestGenuineEqualCacheReadWriteWithMarkerUntouched(t *testing.T) {
 	genuine := pollutedClaudeCacheDetail()
-	genuine.Timestamp = claudeCacheRepairCutoff.Add(time.Hour)
+	genuine.Tokens.CacheReadTokens = genuine.Tokens.CachedTokens
 	imported := StatisticsSnapshot{
 		TotalRequests: 1,
 		SuccessCount:  1,
@@ -104,8 +104,57 @@ func TestGenuineEqualCacheReadWriteAfterCutoffUntouched(t *testing.T) {
 	snapshot := stats.Snapshot()
 	if snapshot.CachedTokens != genuine.Tokens.CachedTokens ||
 		snapshot.TotalTokens != genuine.Tokens.TotalTokens {
-		t.Fatalf("aggregates = cached %d total %d, want post-cutoff record untouched",
+		t.Fatalf("aggregates = cached %d total %d, want marked record untouched",
 			snapshot.CachedTokens, snapshot.TotalTokens)
+	}
+}
+
+// TestFixedVersionEqualCacheRecordSurvivesRestart 端到端锁定审查 P1 场景:
+// 修复版原生记录真实「命中 == 创建」的 Claude 请求,重启冷恢复后不得被
+// 历史修复篡改。
+func TestFixedVersionEqualCacheRecordSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	record := UsageRecord{
+		Provider:     "claude",
+		ExecutorType: "ClaudeExecutor",
+		Model:        "claude-fable-5",
+		APIKey:       "sk-client-alpha-0000zy",
+		AuthID:       "claude:apikey:98632dcc86bd",
+		AuthIndex:    "e462f816a955deb1",
+		AuthType:     "apikey",
+		RequestedAt:  time.Now().Add(-time.Hour),
+		Latency:      5 * time.Second,
+		Detail: UsageDetail{
+			InputTokens:         52000,
+			OutputTokens:        1400,
+			CachedTokens:        26800,
+			CacheReadTokens:     26800,
+			CacheCreationTokens: 26800,
+			TotalTokens:         52000 + 1400 + 26800 + 26800,
+		},
+	}
+
+	first := NewRequestStatistics()
+	first.Configure(runtimeConfig{
+		MaxDetailsPerModel: 100, RetentionDays: 0, DedupWindowMinutes: 0,
+		StorageEnabled: true, StoragePath: dir, StorageFlushSeconds: 1,
+		PriceStoragePath: filepath.Join(dir, "prices.json"),
+	})
+	first.Record(record)
+	first.Close()
+
+	second := NewRequestStatistics()
+	second.Configure(runtimeConfig{
+		MaxDetailsPerModel: 100, RetentionDays: 0, DedupWindowMinutes: 0,
+		StorageEnabled: true, StoragePath: dir, StorageFlushSeconds: 1,
+		PriceStoragePath: filepath.Join(dir, "prices.json"),
+	})
+	defer second.Close()
+
+	snapshot := second.Snapshot()
+	if snapshot.TotalRequests != 1 || snapshot.CachedTokens != 26800 || snapshot.CacheWriteTokens != 26800 {
+		t.Fatalf("restored aggregates = req %d cached %d write %d, want genuine equal read/write preserved",
+			snapshot.TotalRequests, snapshot.CachedTokens, snapshot.CacheWriteTokens)
 	}
 }
 
