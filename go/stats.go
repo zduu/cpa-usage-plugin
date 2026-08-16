@@ -111,6 +111,9 @@ type RequestStatistics struct {
 	exportMaxRecords int
 
 	priceStoragePath       string
+	// claudeCacheRepairEnabled 控制历史缓存双计修复(claude_cache_repair.go)。
+	// 默认关闭:旧数据签名不可判定,须用户确认后启用。
+	claudeCacheRepairEnabled bool
 	priceStorageLoadedPath string
 	priceStorageLastError  string
 	modelPrices            map[string]ModelPrice
@@ -579,6 +582,7 @@ func (s *RequestStatistics) Configure(cfg runtimeConfig) {
 		ModelsDevPricesEnabled:        boolPtr(cfg.ModelsDevPricesEnabled),
 		ModelsDevPricesURL:            stringPtr(cfg.ModelsDevPricesURL),
 		ModelsDevRefreshSeconds:       positiveIntPtr(cfg.ModelsDevRefreshSeconds),
+		ClaudeCacheRepairEnabled:      boolPtr(cfg.ClaudeCacheRepairEnabled),
 		UpdateEnabled:                 boolPtr(cfg.UpdateEnabled),
 		UpdateVersion:                 stringPtr(cfg.UpdateVersion),
 	})
@@ -656,6 +660,9 @@ func (s *RequestStatistics) ConfigurePatch(cfg runtimeConfigPatch) {
 	}
 	if cfg.ModelsDevRefreshSeconds != nil && *cfg.ModelsDevRefreshSeconds > 0 {
 		s.modelsDevRefresh = time.Duration(*cfg.ModelsDevRefreshSeconds) * time.Second
+	}
+	if cfg.ClaudeCacheRepairEnabled != nil {
+		s.claudeCacheRepairEnabled = *cfg.ClaudeCacheRepairEnabled
 	}
 	if cfg.ModelsDevPricesEnabled != nil {
 		s.modelsDevPricesEnabled = *cfg.ModelsDevPricesEnabled
@@ -2773,8 +2780,11 @@ func (s *RequestStatistics) replayStorageLocked(path string) error {
 		detail.Source = cleanImportedDetailSource(detail)
 		apiName = usageGroupKeyFromDetail(apiName, detail)
 		detail = normalizeStoredClientAPIIdentity(detail)
-		detail = normalizeClaudeCacheFallbackDetail(detail)
+		if s.claudeCacheRepairEnabled {
+			detail = normalizeClaudeCacheFallbackDetail(detail)
+		}
 		key := dedupKey(apiName, modelName, detail)
+		canonicalKey := claudeCacheCanonicalDedupKey(apiName, modelName, detail)
 		if persisted.MetadataOnly {
 			if !s.enrichPersistedDetailMetadataLocked(apiName, modelName, key, detail) {
 				if pending, ok := pendingMetadata[key]; ok {
@@ -2786,7 +2796,7 @@ func (s *RequestStatistics) replayStorageLocked(path string) error {
 			}
 			continue
 		}
-		if _, ok := existing[key]; ok {
+		if _, ok := existing[canonicalKey]; ok {
 			if pending, ok := pendingMetadata[key]; ok {
 				s.enrichPersistedDetailMetadataLocked(apiName, modelName, key, pending)
 				delete(pendingMetadata, key)
@@ -2794,7 +2804,7 @@ func (s *RequestStatistics) replayStorageLocked(path string) error {
 			continue
 		}
 		if s.recordDetailLocked(apiName, modelName, detail, key, now, false) {
-			existing[key] = struct{}{}
+			existing[canonicalKey] = struct{}{}
 			if pending, ok := pendingMetadata[key]; ok {
 				s.enrichPersistedDetailMetadataLocked(apiName, modelName, key, pending)
 				delete(pendingMetadata, key)
@@ -2843,11 +2853,18 @@ func (s *RequestStatistics) detailKeysLocked() map[requestDedupKey]struct{} {
 				continue
 			}
 			for _, detail := range modelSt.Details {
-				keys[dedupKey(apiName, modelName, detail)] = struct{}{}
+				keys[claudeCacheCanonicalDedupKey(apiName, modelName, detail)] = struct{}{}
 			}
 		}
 	}
 	return keys
+}
+
+// claudeCacheCanonicalDedupKey 在污染形态与修复形态之间取同一个去重键:无论
+// claude_cache_repair_enabled 处于何种状态、磁盘上留存的是哪种形态,同一请求
+// 在快照与 JSONL 分片间都不会因形态差异被重复入账。
+func claudeCacheCanonicalDedupKey(apiName, modelName string, detail RequestDetail) requestDedupKey {
+	return dedupKey(apiName, modelName, normalizeClaudeCacheFallbackDetail(detail))
 }
 
 func (s *RequestStatistics) closeStorageLocked() {
@@ -4394,7 +4411,7 @@ func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, per
 				continue
 			}
 			for _, detail := range modelSt.Details {
-				seen[dedupKey(apiName, modelName, detail)] = struct{}{}
+				seen[claudeCacheCanonicalDedupKey(apiName, modelName, detail)] = struct{}{}
 			}
 		}
 	}
@@ -4427,14 +4444,16 @@ func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, per
 				} else {
 					detail = normalizeStoredClientAPIIdentity(detail)
 				}
-				detail = normalizeClaudeCacheFallbackDetail(detail)
+				if s.claudeCacheRepairEnabled {
+					detail = normalizeClaudeCacheFallbackDetail(detail)
+				}
 
 				if !cutoff.IsZero() && !detail.Timestamp.IsZero() && detail.Timestamp.Before(cutoff) {
 					result.IgnoredByRetention++
 					continue
 				}
 
-				key := dedupKey(importAPIName, importModelName, detail)
+				key := claudeCacheCanonicalDedupKey(importAPIName, importModelName, detail)
 				if _, exists := seen[key]; exists {
 					result.Skipped++
 					continue

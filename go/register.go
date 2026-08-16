@@ -222,6 +222,9 @@ func parseRuntimeConfig(requestBody []byte) runtimeConfig {
 	if patch.ModelsDevRefreshSeconds != nil {
 		cfg.ModelsDevRefreshSeconds = *patch.ModelsDevRefreshSeconds
 	}
+	if patch.ClaudeCacheRepairEnabled != nil {
+		cfg.ClaudeCacheRepairEnabled = *patch.ClaudeCacheRepairEnabled
+	}
 	if patch.UpdateEnabled != nil {
 		cfg.UpdateEnabled = *patch.UpdateEnabled
 	}
@@ -251,6 +254,7 @@ func parseRuntimeConfigPatch(requestBody []byte) runtimeConfigPatch {
 		ModelsDevPricesEnabled:        boolPtr(defaults.ModelsDevPricesEnabled),
 		ModelsDevPricesURL:            stringPtr(defaults.ModelsDevPricesURL),
 		ModelsDevRefreshSeconds:       intPtr(defaults.ModelsDevRefreshSeconds),
+		ClaudeCacheRepairEnabled:      boolPtr(defaults.ClaudeCacheRepairEnabled),
 		UpdateEnabled:                 boolPtr(defaults.UpdateEnabled),
 		UpdateVersion:                 stringPtr(defaults.UpdateVersion),
 	}
@@ -311,6 +315,9 @@ func parseRuntimeConfigPatch(requestBody []byte) runtimeConfigPatch {
 	}
 	if v, ok := intConfig(values, "models_dev_prices_refresh_interval_seconds"); ok {
 		patch.ModelsDevRefreshSeconds = intPtr(v)
+	}
+	if v, ok := boolConfig(values, "claude_cache_repair_enabled"); ok {
+		patch.ClaudeCacheRepairEnabled = boolPtr(v)
 	}
 	if v, ok := boolConfig(values, "update_enabled"); ok {
 		patch.UpdateEnabled = boolPtr(v)

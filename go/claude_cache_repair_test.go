@@ -162,7 +162,8 @@ func TestColdRestoreRepairsPollutedClaudeCacheDetails(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{
 		MaxDetailsPerModel: 100, RetentionDays: 0, DedupWindowMinutes: 0,
-		StorageEnabled: true, StoragePath: dir, StorageFlushSeconds: 1,
+		ClaudeCacheRepairEnabled: true,
+		StorageEnabled:           true, StoragePath: dir, StorageFlushSeconds: 1,
 		PriceStoragePath: filepath.Join(dir, "prices.json"),
 	})
 	defer stats.Close()
@@ -207,6 +208,7 @@ func TestMergeRepairsPollutedClaudeCacheDetails(t *testing.T) {
 	}
 
 	stats := NewRequestStatistics()
+	stats.claudeCacheRepairEnabled = true
 	if result := stats.MergeSnapshot(imported); result.Added != 1 {
 		t.Fatalf("merge result = %#v", result)
 	}
@@ -244,6 +246,7 @@ func TestRepairLeavesGenuineClaudeCacheDetailsUntouched(t *testing.T) {
 	}
 
 	stats := NewRequestStatistics()
+	stats.claudeCacheRepairEnabled = true
 	stats.MergeSnapshot(imported)
 	snapshot := stats.Snapshot()
 	if snapshot.CachedTokens != 40000 || snapshot.CacheWriteTokens != 26800 ||

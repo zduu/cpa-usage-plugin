@@ -12,9 +12,14 @@ import (
 // 命中归零、缓存合计与总量各减去一份创建量。
 //
 // 与「真实命中恰好等于创建量」合法记录的区分依据 Tokens.CacheReadTokens:修复后
-// 的入口把权威命中值一并持久化,带该字段的明细一律免除修复;旧版本写入的明细
-// 没有该字段,按签名修复。归一化在重放与导入的入库口执行,保证同一请求在旧快照
-// 与 JSONL 分片中的两份形态归一到相同的去重键,不会双计。
+// 的入口把权威命中值一并持久化,带该字段的明细一律免除修复。旧版本写入的明细
+// 没有该字段,签名匹配时无法从数据本身百分之百排除"真实等值"的可能(包括系统
+// 性镜像上报 read == creation 的上游),因此历史修复默认关闭,由确认过自身数据
+// 确属污染的用户通过配置 `claude_cache_repair_enabled: true` 显式启用。
+//
+// 无论开关状态,重放与导入的去重键一律按归一化形态计算(见 stats.go 的
+// claudeCacheCanonicalDedupKey):同一请求的污染形态与修复形态收敛到同一个键,
+// 开关先开后关也不会让旧快照与 JSONL 分片的两份形态双计。
 
 func isPollutedClaudeCacheFallbackDetail(detail RequestDetail) bool {
 	if detail.Failed || usageProviderFamily(detail.Provider) != "claude" {
@@ -61,9 +66,10 @@ type claudeCacheFallbackRepair struct {
 }
 
 // repairClaudeCacheFallbackDetailsLocked 还原被双计的历史明细:摘除污染明细并
-// 回退其计入的全部计数,再以修复后的 token 重新入账。返回修复条数。
+// 回退其计入的全部计数,再以修复后的 token 重新入账。返回修复条数。仅在用户
+// 显式启用 claude_cache_repair_enabled 后执行。
 func (s *RequestStatistics) repairClaudeCacheFallbackDetailsLocked(now time.Time) int {
-	if s == nil {
+	if s == nil || !s.claudeCacheRepairEnabled {
 		return 0
 	}
 	var repairs []claudeCacheFallbackRepair

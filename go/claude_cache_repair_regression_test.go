@@ -62,7 +62,8 @@ func TestColdRestoreSnapshotAndSameDayShardNoDoubleCount(t *testing.T) {
 		stats := NewRequestStatistics()
 		stats.Configure(runtimeConfig{
 			MaxDetailsPerModel: 100, RetentionDays: 0, DedupWindowMinutes: 0,
-			StorageEnabled: true, StoragePath: dir, StorageFlushSeconds: 1,
+			ClaudeCacheRepairEnabled: true,
+			StorageEnabled:           true, StoragePath: dir, StorageFlushSeconds: 1,
 			PriceStoragePath: filepath.Join(dir, "prices.json"),
 		})
 		snapshot := stats.Snapshot()
@@ -100,6 +101,7 @@ func TestGenuineEqualCacheReadWriteWithMarkerUntouched(t *testing.T) {
 	}
 
 	stats := NewRequestStatistics()
+	stats.claudeCacheRepairEnabled = true
 	stats.MergeSnapshot(imported)
 	snapshot := stats.Snapshot()
 	if snapshot.CachedTokens != genuine.Tokens.CachedTokens ||
@@ -137,7 +139,8 @@ func TestFixedVersionEqualCacheRecordSurvivesRestart(t *testing.T) {
 	first := NewRequestStatistics()
 	first.Configure(runtimeConfig{
 		MaxDetailsPerModel: 100, RetentionDays: 0, DedupWindowMinutes: 0,
-		StorageEnabled: true, StoragePath: dir, StorageFlushSeconds: 1,
+		ClaudeCacheRepairEnabled: true,
+		StorageEnabled:           true, StoragePath: dir, StorageFlushSeconds: 1,
 		PriceStoragePath: filepath.Join(dir, "prices.json"),
 	})
 	first.Record(record)
@@ -146,7 +149,8 @@ func TestFixedVersionEqualCacheRecordSurvivesRestart(t *testing.T) {
 	second := NewRequestStatistics()
 	second.Configure(runtimeConfig{
 		MaxDetailsPerModel: 100, RetentionDays: 0, DedupWindowMinutes: 0,
-		StorageEnabled: true, StoragePath: dir, StorageFlushSeconds: 1,
+		ClaudeCacheRepairEnabled: true,
+		StorageEnabled:           true, StoragePath: dir, StorageFlushSeconds: 1,
 		PriceStoragePath: filepath.Join(dir, "prices.json"),
 	})
 	defer second.Close()
@@ -165,7 +169,8 @@ func TestMergePersistsRepairedClaudeCacheDetail(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{
 		MaxDetailsPerModel: 100, RetentionDays: 0, DedupWindowMinutes: 0,
-		StorageEnabled: true, StoragePath: dir, StorageFlushSeconds: 1,
+		ClaudeCacheRepairEnabled: true,
+		StorageEnabled:           true, StoragePath: dir, StorageFlushSeconds: 1,
 		PriceStoragePath: filepath.Join(dir, "prices.json"),
 	})
 
@@ -201,5 +206,132 @@ func TestMergePersistsRepairedClaudeCacheDetail(t *testing.T) {
 	if !strings.Contains(content, `"cached_tokens":0`) || !strings.Contains(content, `"cache_tokens":26800`) ||
 		!strings.Contains(content, `"total_tokens":80200`) {
 		t.Fatalf("persisted shard keeps polluted shape: %s", content)
+	}
+}
+
+// TestRepairDisabledPreservesPollutedDataWithoutDuplicates 锁定默认关闭语义:
+// 未启用 claude_cache_repair_enabled 时,不可判定的历史明细保持原样,
+// 快照与当日分片也不得因此双计。
+func TestRepairDisabledPreservesPollutedDataWithoutDuplicates(t *testing.T) {
+	dir := t.TempDir()
+	polluted := pollutedClaudeCacheDetail()
+	usage := StatisticsSnapshot{
+		TotalRequests: 1,
+		SuccessCount:  1,
+		TotalTokens:   polluted.Tokens.TotalTokens,
+		CachedTokens:  polluted.Tokens.CachedTokens,
+		APIs: map[string]APISnapshot{
+			"claude · 上游 e462f816a955deb1": {
+				TotalRequests: 1, SuccessCount: 1,
+				TotalTokens:  polluted.Tokens.TotalTokens,
+				CachedTokens: polluted.Tokens.CachedTokens,
+				Models: map[string]ModelSnapshot{
+					"claude-fable-5": {
+						TotalRequests: 1, SuccessCount: 1,
+						TotalTokens:  polluted.Tokens.TotalTokens,
+						CachedTokens: polluted.Tokens.CachedTokens,
+						Details:      []RequestDetail{polluted},
+					},
+				},
+			},
+		},
+	}
+	payload := persistedStorageSnapshot{
+		Version:     currentStorageSnapshotVersion,
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		Usage:       usage,
+	}
+	if err := os.WriteFile(storageSnapshotPath(dir), mustMarshal(payload), 0o600); err != nil {
+		t.Fatalf("write snapshot: %v", err)
+	}
+	line := append(mustMarshal(persistedDetail{
+		API: "claude · 上游 e462f816a955deb1", Model: "claude-fable-5", Detail: polluted,
+	}), '\n')
+	if err := os.WriteFile(filepath.Join(dir, storageFileName(storageDate(time.Now()))), line, 0o600); err != nil {
+		t.Fatalf("write shard: %v", err)
+	}
+
+	stats := NewRequestStatistics()
+	stats.Configure(runtimeConfig{
+		MaxDetailsPerModel: 100, RetentionDays: 0, DedupWindowMinutes: 0,
+		StorageEnabled: true, StoragePath: dir, StorageFlushSeconds: 1,
+		PriceStoragePath: filepath.Join(dir, "prices.json"),
+	})
+	defer stats.Close()
+
+	snapshot := stats.Snapshot()
+	if snapshot.TotalRequests != 1 || snapshot.CachedTokens != polluted.Tokens.CachedTokens ||
+		snapshot.TotalTokens != polluted.Tokens.TotalTokens {
+		t.Fatalf("aggregates = req %d cached %d total %d, want undecidable data untouched without duplicates",
+			snapshot.TotalRequests, snapshot.CachedTokens, snapshot.TotalTokens)
+	}
+}
+
+// TestRepairToggleOffAfterHealNoDoubleCount 锁定开关先开后关的边角:启用修复
+// 治愈快照后再关闭开关,当日分片中的原始污染行必须经规范化去重键与治愈形态
+// 对上,不得二次入账。
+func TestRepairToggleOffAfterHealNoDoubleCount(t *testing.T) {
+	dir := t.TempDir()
+	polluted := pollutedClaudeCacheDetail()
+	usage := StatisticsSnapshot{
+		TotalRequests: 1,
+		SuccessCount:  1,
+		TotalTokens:   polluted.Tokens.TotalTokens,
+		CachedTokens:  polluted.Tokens.CachedTokens,
+		APIs: map[string]APISnapshot{
+			"claude · 上游 e462f816a955deb1": {
+				TotalRequests: 1, SuccessCount: 1,
+				TotalTokens:  polluted.Tokens.TotalTokens,
+				CachedTokens: polluted.Tokens.CachedTokens,
+				Models: map[string]ModelSnapshot{
+					"claude-fable-5": {
+						TotalRequests: 1, SuccessCount: 1,
+						TotalTokens:  polluted.Tokens.TotalTokens,
+						CachedTokens: polluted.Tokens.CachedTokens,
+						Details:      []RequestDetail{polluted},
+					},
+				},
+			},
+		},
+	}
+	payload := persistedStorageSnapshot{
+		Version:     currentStorageSnapshotVersion,
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		Usage:       usage,
+	}
+	if err := os.WriteFile(storageSnapshotPath(dir), mustMarshal(payload), 0o600); err != nil {
+		t.Fatalf("write snapshot: %v", err)
+	}
+	line := append(mustMarshal(persistedDetail{
+		API: "claude · 上游 e462f816a955deb1", Model: "claude-fable-5", Detail: polluted,
+	}), '\n')
+	if err := os.WriteFile(filepath.Join(dir, storageFileName(storageDate(time.Now()))), line, 0o600); err != nil {
+		t.Fatalf("write shard: %v", err)
+	}
+
+	wantTotal := int64(52000 + 1400 + 26800)
+	healer := NewRequestStatistics()
+	healer.Configure(runtimeConfig{
+		MaxDetailsPerModel: 100, RetentionDays: 0, DedupWindowMinutes: 0,
+		ClaudeCacheRepairEnabled: true,
+		StorageEnabled:           true, StoragePath: dir, StorageFlushSeconds: 1,
+		PriceStoragePath: filepath.Join(dir, "prices.json"),
+	})
+	healed := healer.Snapshot()
+	healer.Close()
+	if healed.TotalRequests != 1 || healed.CachedTokens != 0 || healed.TotalTokens != wantTotal {
+		t.Fatalf("healed aggregates = req %d cached %d total %d", healed.TotalRequests, healed.CachedTokens, healed.TotalTokens)
+	}
+
+	reopened := NewRequestStatistics()
+	reopened.Configure(runtimeConfig{
+		MaxDetailsPerModel: 100, RetentionDays: 0, DedupWindowMinutes: 0,
+		StorageEnabled: true, StoragePath: dir, StorageFlushSeconds: 1,
+		PriceStoragePath: filepath.Join(dir, "prices.json"),
+	})
+	defer reopened.Close()
+	snapshot := reopened.Snapshot()
+	if snapshot.TotalRequests != 1 {
+		t.Fatalf("toggle-off restart total requests = %d, want canonical dedup to prevent duplicates", snapshot.TotalRequests)
 	}
 }

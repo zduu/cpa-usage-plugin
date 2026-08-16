@@ -55,6 +55,7 @@ type runtimeConfig struct {
 	ModelsDevPricesEnabled        bool
 	ModelsDevPricesURL            string
 	ModelsDevRefreshSeconds       int
+	ClaudeCacheRepairEnabled      bool
 	UpdateEnabled                 bool
 	UpdateVersion                 string
 }
@@ -77,6 +78,7 @@ type runtimeConfigPatch struct {
 	ModelsDevPricesEnabled        *bool
 	ModelsDevPricesURL            *string
 	ModelsDevRefreshSeconds       *int
+	ClaudeCacheRepairEnabled      *bool
 	UpdateEnabled                 *bool
 	UpdateVersion                 *string
 }
@@ -100,8 +102,11 @@ func defaultRuntimeConfig() runtimeConfig {
 		ModelsDevPricesEnabled:        false,
 		ModelsDevPricesURL:            defaultModelsDevPricesURL,
 		ModelsDevRefreshSeconds:       defaultModelsDevRefreshSeconds,
-		UpdateEnabled:                 false,
-		UpdateVersion:                 "latest",
+		// 历史缓存双计修复默认关闭:旧数据中「真实命中恰好等于创建」的合法
+		// 记录与污染签名不可判定,须由用户确认后显式启用(见 claude_cache_repair.go)。
+		ClaudeCacheRepairEnabled: false,
+		UpdateEnabled:            false,
+		UpdateVersion:            "latest",
 	}
 }
 
