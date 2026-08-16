@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+## v2.5.8 - 2026-08-16
+
 ### 修复 Claude 家族缓存创建双计(token 总量虚高)
 - CPA `parseClaudeUsageNode` 在 `cache_read` 为 0 时把 `cache_creation` 回填进 `CachedTokens`,插件将其当作缓存命中入账,导致"只创建缓存"的请求(会话首轮)创建量同时计入命中与创建、总量多算一份
 - `usageDetailCacheTokenParts` 限定 Claude provider 家族识别回填形态(`CacheReadTokens == 0 && CachedTokens == CacheCreationTokens > 0`)并剔除;有真实命中的 Claude 记录 `CacheReadTokens` 非零,不受影响,其余 provider 不做推断
