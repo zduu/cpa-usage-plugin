@@ -4186,6 +4186,7 @@ configs:
     models_dev_prices_enabled: true
     models_dev_prices_url: "https://example.test/models-dev.json"
     models_dev_prices_refresh_interval_seconds: 19
+    claude_cache_repair_enabled: true
 `)
 	raw := []byte(`{"config_yaml":"` + base64.StdEncoding.EncodeToString(yaml) + `"}`)
 
@@ -4222,6 +4223,9 @@ configs:
 	}
 	if cfg.ModelsDevRefreshSeconds != 19 {
 		t.Fatalf("models_dev_prices_refresh_interval_seconds = %d, want 19", cfg.ModelsDevRefreshSeconds)
+	}
+	if !cfg.ClaudeCacheRepairEnabled {
+		t.Fatal("claude_cache_repair_enabled should be true")
 	}
 }
 
@@ -4268,6 +4272,9 @@ func TestRegisterResponseExposesUpdateConfigFields(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"Name":"price_storage_path"`) {
 		t.Fatalf("register response missing price_storage_path: %s", raw)
+	}
+	if !strings.Contains(string(raw), `"Name":"claude_cache_repair_enabled"`) {
+		t.Fatalf("register response missing claude_cache_repair_enabled: %s", raw)
 	}
 	if !strings.Contains(string(raw), `"Name":"update_enabled"`) {
 		t.Fatalf("register response missing update_enabled: %s", raw)

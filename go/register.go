@@ -128,6 +128,12 @@ func handleRegister(requestBody []byte) ([]byte, error) {
 					Description: "models.dev 价格表刷新间隔秒数。",
 				},
 				{
+					Name:        "claude_cache_repair_enabled",
+					Type:        "boolean",
+					Default:     false,
+					Description: "是否修复旧版 Claude 缓存创建被双计的历史明细。默认关闭；请先核对上游账单后再启用。",
+				},
+				{
 					Name:        "update_enabled",
 					Type:        "boolean",
 					Default:     false,
