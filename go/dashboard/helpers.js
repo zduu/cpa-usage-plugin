@@ -24,23 +24,40 @@ const formatMs = (value) => {
   return (value / 1000).toFixed(2) + 's';
 };
 const formatDurationAndTTFT = (durationMs, ttftMs) => formatMs(num(durationMs)) + ' / ' + formatMs(num(ttftMs));
-var money2 = new Intl.NumberFormat(typeof getFormatLocale === 'function' ? getFormatLocale() : 'zh-CN', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
-var money6 = new Intl.NumberFormat(typeof getFormatLocale === 'function' ? getFormatLocale() : 'zh-CN', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 6 });
-var money6Fixed = new Intl.NumberFormat(typeof getFormatLocale === 'function' ? getFormatLocale() : 'zh-CN', { style: 'currency', currency: 'USD', minimumFractionDigits: 6, maximumFractionDigits: 6 });
-// Called by script.js when locale changes
+// Intl.NumberFormat 的构造相当贵,而事件表一次渲染就有上百个金额单元格,所以按
+// (currency, 小数位) 缓存实例。切换语言时 script.js 会调用 refreshMoneyFormatters()
+// 丢弃整个缓存。
+var moneyFormatterCache = new Map();
 function refreshMoneyFormatters() {
-  var loc = typeof getFormatLocale === 'function' ? getFormatLocale() : 'zh-CN';
-  money2 = new Intl.NumberFormat(loc, { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  money6 = new Intl.NumberFormat(loc, { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 6 });
-  money6Fixed = new Intl.NumberFormat(loc, { style: 'currency', currency: 'USD', minimumFractionDigits: 6, maximumFractionDigits: 6 });
+  moneyFormatterCache = new Map();
+}
+function moneyFormatter(currency, minDigits, maxDigits) {
+  var key = currency + ':' + minDigits + ':' + maxDigits;
+  var cached = moneyFormatterCache.get(key);
+  if (!cached) {
+    cached = new Intl.NumberFormat(typeof getFormatLocale === 'function' ? getFormatLocale() : 'zh-CN', { style: 'currency', currency: currency, minimumFractionDigits: minDigits, maximumFractionDigits: maxDigits });
+    moneyFormatterCache.set(key, cached);
+  }
+  return cached;
 }
 function formatUsd(value) {
+  return formatMoney(value, typeof dashboardCurrencyState !== 'undefined' ? dashboardCurrencyState : null);
+}
+function formatMoney(usdAmount, currencyState) {
+  var value = Number(usdAmount);
   if (!Number.isFinite(value)) return '-';
-  const abs = Math.abs(value);
-  if (abs === 0) return money2.format(0);
-  if (abs < 0.000001) return '<' + money6Fixed.format(0.000001);
-  if (abs < 0.01) return money6.format(value);
-  return money2.format(value);
+  var state = currencyState || {};
+  var currency = state.currency === 'CNY' && Number(state.rate) > 0 ? 'CNY' : 'USD';
+  if (currency === 'CNY') value *= Number(state.rate);
+  var abs = Math.abs(value);
+  // 用 Intl 的 currency 样式而不是手拼前缀,货币符号位置和分隔符才会跟随 locale
+  // (ru-RU 是 "1,50 $" 而不是 "$1.50")。负数保持原样显示,不夹到 0。
+  if (abs === 0) return moneyFormatter(currency, 2, 2).format(0);
+  // 极小值只显示阈值,不显示无意义的一长串 0。负号由 Intl 自己按 locale 排版,这里
+  // 只加「小于/大于」前缀 —— 手工再拼一个 '-' 会出现 '>--US$0.000001'。
+  if (abs < 0.000001) return (value < 0 ? '>' : '<') + moneyFormatter(currency, 6, 6).format(value < 0 ? -0.000001 : 0.000001);
+  if (abs < 0.01) return moneyFormatter(currency, 2, 6).format(value);
+  return moneyFormatter(currency, 2, 2).format(value);
 }
 function providerUsesExclusiveCache(provider) { return /^(anthropic|claude)(?:-|$)/i.test(String(provider || '').trim()) }
 function usesExclusiveCacheInput(provider, inputTokens, outputTokens, cacheTokens, totalTokensValue) { const providerKey = String(provider || '').trim(); const input = Math.max(num(inputTokens), 0); const output = Math.max(num(outputTokens), 0); const cache = Math.max(num(cacheTokens), 0); const total = Math.max(num(totalTokensValue), 0); return providerUsesExclusiveCache(providerKey) || (!providerKey && total > 0 && total >= input + output + cache) }
@@ -54,7 +71,7 @@ function priceForModel(model, prices, provider, manualPrices) { const keys = pri
 function cacheTokenTotal(tokens) { const t = tokens || {}; const cacheWrite = Math.max(num(t.cache_write_tokens), 0); const explicitCacheTotal = Math.max(num(t.cache_tokens), 0); return explicitCacheTotal > 0 ? Math.max(explicitCacheTotal, num(t.cached_tokens), cacheWrite) : Math.max(num(t.cached_tokens), 0) + cacheWrite }
 function cacheReadTokens(tokens) { const t = tokens || {}; const explicitCacheTotal = Math.max(num(t.cache_tokens), 0); return explicitCacheTotal > 0 ? Math.max(explicitCacheTotal - Math.max(num(t.cache_write_tokens), 0), 0) : Math.max(num(t.cached_tokens), 0) }
 function tokenCost(model, inputTokens, outputTokens, totalTokensValue, cachedTokens, cacheWriteTokens, reasoningTokens, prices, provider, manualPrices) { const p = priceForModel(model, prices, provider, manualPrices); if (!p) return 0; const output = Math.max(num(outputTokens), 0); const cacheWrite = Math.max(num(cacheWriteTokens), 0); const cacheTotal = Math.max(num(cachedTokens), cacheWrite, 0); const cacheRead = Math.max(cacheTotal - cacheWrite, 0); const inputValue = Math.max(num(inputTokens), 0); const input = usesExclusiveCacheInput(provider, inputValue, output, cacheTotal, totalTokensValue) ? inputValue : Math.max(inputValue - cacheTotal, 0); return input / 1e6 * num(p.prompt) + output / 1e6 * num(p.completion) + cacheRead / 1e6 * num(p.cache) + cacheWrite / 1e6 * num(p.cache_write) }
-function detailCost(detail, prices, manualPrices) { const t = detail.tokens || {}; const cacheWrite = Math.max(num(t.cache_write_tokens), 0); return tokenCost(detail.model, t.input_tokens, t.output_tokens, totalTokens(detail), cacheTokenTotal(t), cacheWrite, t.reasoning_tokens, prices, detail.provider, manualPrices) }
+function detailCost(detail, prices, manualPrices) { if (detail && Object.prototype.hasOwnProperty.call(detail, 'cost_usd')) return Math.max(num(detail.cost_usd), 0); const t = detail.tokens || {}; const cacheWrite = Math.max(num(t.cache_write_tokens), 0); return tokenCost(detail.model, t.input_tokens, t.output_tokens, totalTokens(detail), cacheTokenTotal(t), cacheWrite, t.reasoning_tokens, prices, detail.provider, manualPrices) }
 function aggregateCost(row, prices, manualPrices) { if (row && Object.prototype.hasOwnProperty.call(row, 'estimated_cost')) return Math.max(num(row.estimated_cost), 0); const providers = Array.isArray(row && row.providers) ? row.providers : []; if (providers.length) return providers.reduce((sum, p) => sum + tokenCost(row.model, p.input_tokens, p.output_tokens, p.total_tokens, p.cached_tokens, p.cache_write_tokens, p.reasoning_tokens, prices, p.provider, manualPrices), 0); return tokenCost(row && row.model, row && row.input_tokens, row && row.output_tokens, row && row.total_tokens, row && row.cached_tokens, row && row.cache_write_tokens, row && row.reasoning_tokens, prices, row && row.provider, manualPrices) }
 function looksLikeKey(v) { return typeof v === 'string' && (v.startsWith('sk-') || v.startsWith('AIza') || v.startsWith('hf_') || v.startsWith('pk_') || v.startsWith('rk_') || v.length >= 80) }
 function looksLikeCredentialId(v) { const s = String(v || '').trim(); return /^[a-f0-9]{8,}$/i.test(s) || (s.length >= 32 && !/[ ./_-]/.test(s)) }
@@ -272,5 +289,5 @@ function hourBucketValue(values, hour) {
 
 // Export for Node.js test environment
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { esc, num, compact, pct, formatMs, formatDurationAndTTFT, formatUsd, providerUsesExclusiveCache, usesExclusiveCacheInput, totalTokens, uncachedInputTokens, priceForModel, cacheTokenTotal, cacheReadTokens, tokenCost, detailCost, aggregateCost, looksLikeKey, looksLikeCredentialId, isCredentialMarker, isCredentialLabel, trimCredentialSuffix, sourceLabel, sourceKey, friendlyApiName, clientApiLabel, clientApiGroupKey, avg, bucketSeries, hourFromTimestamp, dashboardCurrentHour, orderedRecentHours, healthColor, healthCellStyle, timestampMs, pluginEndpoint, managementEndpoint, decodeManagementStorage, parseManagementStorage, currentManagementKey, groupedRows, decodeManagementBody, unwrapPluginPayloadWithMeta, unwrapPluginPayload, fetchAllEventPages, cacheRate, costPerMillion, hourBucketValue };
+  module.exports = { esc, num, compact, pct, formatMs, formatDurationAndTTFT, formatUsd, formatMoney, providerUsesExclusiveCache, usesExclusiveCacheInput, totalTokens, uncachedInputTokens, priceForModel, cacheTokenTotal, cacheReadTokens, tokenCost, detailCost, aggregateCost, looksLikeKey, looksLikeCredentialId, isCredentialMarker, isCredentialLabel, trimCredentialSuffix, sourceLabel, sourceKey, friendlyApiName, clientApiLabel, clientApiGroupKey, avg, bucketSeries, hourFromTimestamp, dashboardCurrentHour, orderedRecentHours, healthColor, healthCellStyle, timestampMs, pluginEndpoint, managementEndpoint, decodeManagementStorage, parseManagementStorage, currentManagementKey, groupedRows, decodeManagementBody, unwrapPluginPayloadWithMeta, unwrapPluginPayload, fetchAllEventPages, cacheRate, costPerMillion, hourBucketValue };
 }

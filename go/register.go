@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -145,6 +146,12 @@ func handleRegister(requestBody []byte) ([]byte, error) {
 					Default:     "latest",
 					Description: "更新目标版本。latest 表示最新 Release；也可填写 v1.1.0 这类固定版本。",
 				},
+				{Name: "pricing_timezone", Type: "string", Default: defaultPricingTimezone, Description: "按请求时间计费时使用的 IANA 时区。"},
+				{Name: "exchange_rate_enabled", Type: "boolean", Default: true, Description: "是否由后端获取 USD/CNY 汇率并提供人民币显示。"},
+				{Name: "exchange_rate_usd_cny_url", Type: "string", Default: defaultExchangeRateURL, Description: "USD/CNY 汇率 JSON 地址，仅接受 HTTPS。"},
+				{Name: "exchange_rate_refresh_interval_seconds", Type: "integer", Default: defaultExchangeRateRefreshSeconds, Description: "汇率刷新间隔，范围 300 至 86400 秒。"},
+				{Name: "exchange_rate_timeout_seconds", Type: "integer", Default: defaultExchangeRateTimeoutSeconds, Description: "汇率请求超时时间，范围 1 至 30 秒。"},
+				{Name: "exchange_rate_fallback_usd_cny", Type: "number", Default: defaultExchangeRateFallbackUSDCNY, Description: "首次获取失败且没有缓存时使用的 USD/CNY 回退汇率。"},
 			},
 		},
 		Capabilities: PluginCapabilities{
@@ -237,6 +244,24 @@ func parseRuntimeConfig(requestBody []byte) runtimeConfig {
 	if patch.UpdateVersion != nil {
 		cfg.UpdateVersion = *patch.UpdateVersion
 	}
+	if patch.PricingTimezone != nil {
+		cfg.PricingTimezone = *patch.PricingTimezone
+	}
+	if patch.ExchangeRateEnabled != nil {
+		cfg.ExchangeRateEnabled = *patch.ExchangeRateEnabled
+	}
+	if patch.ExchangeRateUSD != nil {
+		cfg.ExchangeRateUSD = *patch.ExchangeRateUSD
+	}
+	if patch.ExchangeRateRefreshSeconds != nil {
+		cfg.ExchangeRateRefreshSeconds = *patch.ExchangeRateRefreshSeconds
+	}
+	if patch.ExchangeRateTimeoutSeconds != nil {
+		cfg.ExchangeRateTimeoutSeconds = *patch.ExchangeRateTimeoutSeconds
+	}
+	if patch.ExchangeRateFallbackUSDCNY != nil {
+		cfg.ExchangeRateFallbackUSDCNY = *patch.ExchangeRateFallbackUSDCNY
+	}
 	return cfg
 }
 
@@ -263,6 +288,12 @@ func parseRuntimeConfigPatch(requestBody []byte) runtimeConfigPatch {
 		ClaudeCacheRepairEnabled:      boolPtr(defaults.ClaudeCacheRepairEnabled),
 		UpdateEnabled:                 boolPtr(defaults.UpdateEnabled),
 		UpdateVersion:                 stringPtr(defaults.UpdateVersion),
+		PricingTimezone:               stringPtr(defaults.PricingTimezone),
+		ExchangeRateEnabled:           boolPtr(defaults.ExchangeRateEnabled),
+		ExchangeRateUSD:               stringPtr(defaults.ExchangeRateUSD),
+		ExchangeRateRefreshSeconds:    intPtr(defaults.ExchangeRateRefreshSeconds),
+		ExchangeRateTimeoutSeconds:    intPtr(defaults.ExchangeRateTimeoutSeconds),
+		ExchangeRateFallbackUSDCNY:    float64Ptr(defaults.ExchangeRateFallbackUSDCNY),
 	}
 	var req struct {
 		ConfigYAML []byte `json:"config_yaml"`
@@ -330,6 +361,24 @@ func parseRuntimeConfigPatch(requestBody []byte) runtimeConfigPatch {
 	}
 	if s, ok := stringConfig(values, "update_version"); ok && s != "" {
 		patch.UpdateVersion = stringPtr(s)
+	}
+	if s, ok := stringConfig(values, "pricing_timezone"); ok && s != "" {
+		patch.PricingTimezone = stringPtr(s)
+	}
+	if v, ok := boolConfig(values, "exchange_rate_enabled"); ok {
+		patch.ExchangeRateEnabled = boolPtr(v)
+	}
+	if s, ok := stringConfig(values, "exchange_rate_usd_cny_url"); ok && s != "" {
+		patch.ExchangeRateUSD = stringPtr(s)
+	}
+	if v, ok := intConfig(values, "exchange_rate_refresh_interval_seconds"); ok {
+		patch.ExchangeRateRefreshSeconds = intPtr(v)
+	}
+	if v, ok := intConfig(values, "exchange_rate_timeout_seconds"); ok {
+		patch.ExchangeRateTimeoutSeconds = intPtr(v)
+	}
+	if v, ok := floatConfig(values, "exchange_rate_fallback_usd_cny"); ok {
+		patch.ExchangeRateFallbackUSDCNY = float64Ptr(v)
 	}
 	return patch
 }
@@ -428,4 +477,36 @@ func boolConfig(values map[string]interface{}, key string) (bool, bool) {
 		}
 	}
 	return false, false
+}
+
+func float64Ptr(value float64) *float64 { return &value }
+
+func floatConfig(values map[string]interface{}, key string) (float64, bool) {
+	value, ok := values[key]
+	if !ok {
+		return 0, false
+	}
+	var parsed float64
+	switch v := value.(type) {
+	case float64:
+		parsed = v
+	case float32:
+		parsed = float64(v)
+	case int:
+		parsed = float64(v)
+	case int64:
+		parsed = float64(v)
+	case string:
+		var err error
+		parsed, err = strconv.ParseFloat(strings.TrimSpace(v), 64)
+		if err != nil {
+			return 0, false
+		}
+	default:
+		return 0, false
+	}
+	if math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+		return 0, false
+	}
+	return parsed, true
 }

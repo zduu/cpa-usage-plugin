@@ -18,6 +18,11 @@
         <option value="7d" data-i18n="range_7d">最近7天</option>
         <option value="all" data-i18n="range_all">全部</option>
       </select>
+      <div class="currencySwitch" role="group" aria-label="Currency">
+        <button id="currencyUSD" class="btn active" type="button" aria-pressed="true">USD</button>
+        <button id="currencyCNY" class="btn" type="button" aria-pressed="false" hidden>CNY</button>
+      </div>
+      <span class="currencyStatus" id="currencyStatus" aria-live="polite"></span>
       <button id="exportBtn" class="btn" data-i18n="export_data">导出数据</button>
       <button id="importBtn" class="btn" data-i18n="import_data">导入数据</button>
       <button id="refreshBtn" class="btn primary" data-i18n="refresh_btn">刷新</button>
@@ -79,6 +84,8 @@
           <div><label class="subtle" data-i18n="cache_write_price">缓存创建价格</label><input id="priceCacheWrite" class="input" type="number" min="0" step="0.0001" data-i18n-placeholder="cache_write_placeholder" placeholder="未知时默认 0"></div>
           <button id="savePrice" class="btn primary" data-i18n="save">保存</button>
         </div>
+        <div class="timeRulesHead"><span class="subtle" data-i18n="time_rules_title">时段价格（可选）</span><button id="addTimeRule" class="btn" type="button" data-i18n="add_time_rule">+ 添加时段</button></div>
+        <div id="timeRulesEditor" class="timeRulesEditor"></div>
         <div class="priceListHead subtle" data-i18n="manual_price_list_title">已设置的手动价格</div>
         <div class="priceList" id="priceList"></div>
       </div>

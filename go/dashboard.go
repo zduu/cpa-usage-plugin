@@ -115,7 +115,7 @@ func dashboardSummaryETagForClientAPIVersion(now time.Time, rangeKey string, cli
 
 func dashboardSummaryETagForClientAPIRepresentation(now time.Time, rangeKey string, clientAPI string, version uint64, compactHealth bool) string {
 	window := summaryHealthWindow(now).UTC().Format(time.RFC3339)
-	parts := []string{"summary", strconv.FormatUint(version, 10), window}
+	parts := []string{"summary", strconv.FormatUint(version, 10), strconv.FormatUint(stats.CurrencyVersion(), 10), window}
 	if rangeKey != "" {
 		parts = append(parts, rangeKey)
 	}
@@ -448,7 +448,15 @@ func dashboardEventsCSV(events []RequestDetail) ([]byte, error) {
 }
 
 func dashboardEventsCSVHeader() []string {
-	return []string{"时间", "模型", "来源", "凭证", "结果", "延迟毫秒", "TTFT毫秒", "非缓存输入 token", "输出 token", "思考 token", "缓存 token", "缓存写入 token", "总 token", "状态码", "错误"}
+	// cost_usd 追加在末尾:插到中间会让按列序解析既有导出的下游脚本整体错位。
+	return []string{"时间", "模型", "来源", "凭证", "结果", "延迟毫秒", "TTFT毫秒", "非缓存输入 token", "输出 token", "思考 token", "缓存 token", "缓存写入 token", "总 token", "状态码", "错误", "cost_usd"}
+}
+
+func dashboardEventCSVCost(event RequestDetail) string {
+	if event.CostUSD == nil {
+		return ""
+	}
+	return strconv.FormatFloat(*event.CostUSD, 'f', -1, 64)
 }
 
 func dashboardEventCSVRecord(event RequestDetail) []string {
@@ -473,6 +481,7 @@ func dashboardEventCSVRecord(event RequestDetail) []string {
 		strconv.FormatInt(detailTotalTokensForRequest(event), 10),
 		dashboardExportStatusCode(event),
 		event.Failure,
+		dashboardEventCSVCost(event),
 	}
 }
 
@@ -708,8 +717,37 @@ func healthStatus(alerts []HealthAlert) string {
 	return status
 }
 
+// exchangeRateHealthAlert 按图纸 5.2 判定汇率告警:stale(已过期)、fallback(还没拉到
+// 汇率,CNY 是按配置的固定值换算的)或持续拉取失败,都要给出明确原因。汇率未启用时
+// (status=disabled)不告警。
+func exchangeRateHealthAlert(state CurrencyState) *HealthAlert {
+	var message string
+	switch {
+	case state.Status == "stale":
+		message = "汇率已过期,页面上的 CNY 金额可能不准"
+	case state.Status == "fallback":
+		message = "尚未获取到汇率,CNY 金额按配置的回退汇率换算"
+	case state.ConsecutiveFails > 0 || state.Error != "":
+		message = "汇率拉取失败,正在使用上次获取到的汇率"
+	default:
+		return nil
+	}
+	if state.Error != "" {
+		message += ": " + state.Error
+	}
+	return &HealthAlert{Severity: "warn", Code: "exchange_rate_degraded", Message: message}
+}
+
 func healthAlerts(storage StorageStatus, runtime RuntimeStatus) []HealthAlert {
 	var alerts []HealthAlert
+	// 图纸 5.2:stale、fallback 或持续拉取失败都要给出明确告警。fallback 意味着页面
+	// 上的 CNY 是按配置的固定汇率换算的,金额并不反映真实汇率,这一点必须让用户看见。
+	if alert := exchangeRateHealthAlert(runtime.ExchangeRate); alert != nil {
+		alerts = append(alerts, *alert)
+	}
+	if runtime.PricingTimezoneError != "" {
+		alerts = append(alerts, HealthAlert{Severity: "warn", Code: "pricing_timezone_invalid", Message: runtime.PricingTimezoneError})
+	}
 	if storage.LastError != "" {
 		alerts = append(alerts, HealthAlert{
 			Severity: "error",

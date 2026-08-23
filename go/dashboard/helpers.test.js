@@ -67,6 +67,50 @@ test('formatUsd preserves small non-zero costs', () => {
   assert.strictEqual(helpers.formatUsd(0), 'US$0.00');
 });
 
+test('formatMoney converts USD amounts to CNY only when a valid rate is selected', () => {
+  assert.strictEqual(helpers.formatMoney(1.5, { currency: 'CNY', rate: 7.2 }), '¥10.80');
+  assert.strictEqual(helpers.formatMoney(0.000001, { currency: 'CNY', rate: 7.2 }), '¥0.000007');
+  assert.strictEqual(helpers.formatMoney(1.5, { currency: 'CNY', rate: 0 }), 'US$1.50');
+});
+
+test('formatMoney keeps negative amounts visible instead of clamping them to zero', () => {
+  assert.strictEqual(helpers.formatMoney(-1.5, null), '-US$1.50');
+  assert.strictEqual(helpers.formatMoney(-1.5, { currency: 'CNY', rate: 7.2 }), '-¥10.80');
+});
+
+// 负号由 Intl 排版,阈值前缀只负责「小于/大于」。手工再拼一个 '-' 会输出
+// '>--US$0.000001' 这种双负号。
+test('formatMoney renders tiny negative amounts with a single minus sign', () => {
+  assert.strictEqual(helpers.formatMoney(-0.0000004, null), '>-US$0.000001');
+  assert.strictEqual(helpers.formatMoney(0.0000004, null), '<US$0.000001');
+  assert.strictEqual(helpers.formatMoney(-0.0000001, { currency: 'CNY', rate: 7.2 }), '>-¥0.000001');
+  [helpers.formatMoney(-0.0000004, null), helpers.formatMoney(-0.0000001, { currency: 'CNY', rate: 7.2 })]
+    .forEach((rendered) => assert.doesNotMatch(rendered, /--/, 'double minus sign: ' + rendered));
+});
+
+// 之前 time_rule_max / time_rule_invalid / time_rule_overlap / currency_* 四语言
+// 都定义了却没有任何一处引用,报错文案仍是硬编码中文,而测试只断言「key 存在」,
+// 于是给出了虚假的本地化覆盖信号。这里改为从 script.js 真实的 t('...') 调用反推
+// key,漏翻和「加了 key 但没接上」都会被抓到。
+const scriptSource = require('node:fs').readFileSync(require('node:path').join(__dirname, 'script.js'), 'utf8');
+const pricingKeysUsedInScript = [...new Set(
+  [...scriptSource.matchAll(/\bt\('((?:time_rule|time_rules|currency)_[a-z0-9_]+)'\)/g)].map((m) => m[1])
+)];
+
+test('pricing and currency labels used by script.js are translated in every language', () => {
+  assert.ok(pricingKeysUsedInScript.length >= 15, 'expected script.js to reference pricing/currency keys');
+  Object.entries(i18n.I18N_MAP).forEach(([language, values]) => {
+    pricingKeysUsedInScript.forEach((key) => assert.ok(values[key], language + ' missing ' + key));
+  });
+});
+
+test('time pricing error messages are not hard-coded Chinese in script.js', () => {
+  const validator = scriptSource.slice(scriptSource.indexOf('function validateTimeRulesClient'));
+  const body = validator.slice(0, validator.indexOf('\n}\n'));
+  assert.ok(!/[一-龥]/.test(body), 'validateTimeRulesClient must build messages through t()');
+  assert.ok(!/return '/.test(body), 'validateTimeRulesClient must throw on every failure, never return a message');
+});
+
 test('totalTokens computes token sum', () => {
   const detail = { tokens: { total_tokens: 100, input_tokens: 50, output_tokens: 50 } };
   assert.strictEqual(helpers.totalTokens(detail), 100);

@@ -1,0 +1,20 @@
+{
+  "updated_at": "2026-08-23T03:06:22Z",
+  "prices": {
+    "deepseek-chat": {
+      "prompt": 6,
+      "completion": 0,
+      "cache": 0,
+      "cache_write": 0,
+      "time_rules": [
+        {
+          "id": "a60826ca-9a39-45bf-8c43-1cb5cb322b87",
+          "name": "now-peak",
+          "start": "11:00",
+          "end": "12:00",
+          "prompt": 60
+        }
+      ]
+    }
+  }
+}

@@ -188,6 +188,7 @@ function createDashboardHarness(options = {}) {
   summary.model_stats[0].success_count = summary.model_stats[0].total_requests - apiFailureCount;
   if (options.summaryModelProviders) summary.model_stats[0].providers = options.summaryModelProviders;
   if (options.storage) summary._meta.storage = options.storage;
+  if (options.summaryCurrency) summary._meta.currency = options.summaryCurrency;
   if (options.clientApiStats) summary.client_api_stats = options.clientApiStats;
   if (options.credentialStats) summary.credential_stats = options.credentialStats;
   if (options.summaryUsage) Object.assign(summary.usage, options.summaryUsage);
@@ -2129,4 +2130,113 @@ test('dashboard trend shows the client API filter error when filtered summary fa
 
   assert.match(document.getElementById('trendChart').innerHTML, /API Key 筛选数据加载失败/);
   assert.doesNotMatch(document.getElementById('trendChart').innerHTML, /暂无趋势数据/);
+});
+
+// 汇率来源和更新时间后端一直在返回、前端也读进了 state,却从未渲染;状态文案还是
+// 硬编码中文,英文/俄文界面照样显示中文。
+test('currency status shows the rate, its source and update time in the active language', async () => {
+  const { document, setLanguage } = createDashboardHarness({
+    summaryCurrency: {
+      base: 'USD',
+      supported_display: ['USD', 'CNY'],
+      usd_cny_rate: 7.1234,
+      source: 'open.er-api.com',
+      fetched_at: '2026-08-22T03:00:00Z',
+      status: 'cached',
+      error: 'timeout',
+    },
+  });
+
+  await waitFor(() => document.getElementById('currencyCNY').hidden === false);
+  document.getElementById('currencyCNY').onclick();
+
+  await waitFor(() => document.getElementById('currencyStatus').textContent.includes('7.1234'));
+  const zh = document.getElementById('currencyStatus').textContent;
+  assert.match(zh, /1 USD = 7\.1234 CNY/);
+  assert.match(zh, /缓存汇率/);
+  assert.match(zh, /open\.er-api\.com/);
+  assert.match(zh, /更新于/);
+  assert.match(document.getElementById('currencyStatus').title, /timeout/);
+
+  setLanguage('en', { persisted: true });
+  await waitFor(() => document.getElementById('currencyStatus').textContent.includes('cached rate'));
+  const en = document.getElementById('currencyStatus').textContent;
+  assert.match(en, /source · open\.er-api\.com|source open\.er-api\.com/);
+  assert.doesNotMatch(en, /[一-龥]/);
+});
+
+// 金额格式化器是按 (currency, 小数位) 缓存的,切换语言必须把缓存整体丢弃,否则
+// 金额会一直停留在旧 locale 的货币排版上。
+test('money formatting follows the language switch', async () => {
+  const { document, setLanguage } = createDashboardHarness({ summaryUsage: { total_cost: 0.05 } });
+
+  await waitFor(() => document.getElementById('totalCost').textContent === 'US$0.05');
+  setLanguage('en', { persisted: true });
+  await waitFor(() => document.getElementById('totalCost').textContent === '$0.05');
+
+  setLanguage('zh', { persisted: true });
+  await waitFor(() => document.getElementById('totalCost').textContent === 'US$0.05');
+});
+
+test('currency switch stays hidden and USD-only when the backend reports no usable rate', async () => {
+  const { document } = createDashboardHarness({
+    summaryCurrency: { base: 'USD', supported_display: ['USD'], status: 'disabled' },
+  });
+
+  await waitFor(() => document.getElementById('totalCost').textContent.length > 0);
+  assert.strictEqual(document.getElementById('currencyCNY').hidden, true);
+  assert.strictEqual(document.getElementById('currencyStatus').textContent, '');
+});
+
+// 查询面板只渲染四项基础价格时,带分时价格的模型看起来和全天单价没有区别。
+test('price lookup renders the time rules of the selected model', async () => {
+  const { document } = createDashboardHarness({
+    prices: {
+      'openai/gpt-4.1': {
+        prompt: 3,
+        completion: 11,
+        cache: 0.3,
+        cache_write: 1,
+        time_rules: [
+          { id: 'night', name: '夜间半价', start: '22:00', end: '06:00', prompt: 1.5 },
+        ],
+      },
+    },
+  });
+
+  await openPriceSettings(document);
+  document.getElementById('priceReferenceModel').value = 'openai/gpt-4.1';
+  document.getElementById('priceReferenceModel').onchange();
+
+  const info = document.getElementById('priceReferenceInfo').innerHTML;
+  assert.match(info, /夜间半价/);
+  assert.match(info, /22:00–06:00/);
+  // 覆盖了输入价,其余三项回落到基础价格,与后端 effectivePrice 的语义一致。
+  assert.match(info, /1\.5000/);
+  assert.match(info, /11\.0000/);
+});
+
+// 删除时段按钮的 aria-label 必须带上模型名:价格设置区可在多个模型间切换,只念
+// 「删除时段 夜间半价」读屏用户无从判断删的是哪个模型的规则。
+test('time rule remove buttons name the model they belong to', async () => {
+  const { document } = createDashboardHarness({
+    manualPrices: {
+      'openai/gpt-4.1': {
+        prompt: 3, completion: 11, cache: 0.3, cache_write: 1,
+        time_rules: [
+          { id: 'night', name: '夜间半价', start: '22:00', end: '06:00', prompt: 1.5 },
+          { id: 'noon', name: '', start: '12:00', end: '13:00', prompt: 2 },
+        ],
+      },
+    },
+  });
+
+  await openPriceSettings(document);
+  document.getElementById('priceModel').value = 'openai/gpt-4.1';
+  document.getElementById('priceModel').onchange();
+
+  const html = document.getElementById('timeRulesEditor').innerHTML;
+  assert.match(html, /aria-label="删除时段 openai\/gpt-4\.1 夜间半价"/);
+  // 未命名的规则回落到「时段 N」,同样带模型名。
+  assert.match(html, /aria-label="删除时段 openai\/gpt-4\.1 时段 2"/);
 });

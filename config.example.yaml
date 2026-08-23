@@ -105,6 +105,14 @@ plugins:
       claude_cache_repair_enabled: false
       update_enabled: false
       update_version: "latest"
+      # 按请求时间选取时段价格的 IANA 时区
+      pricing_timezone: "Asia/Shanghai"
+      # 后端获取 USD/CNY 汇率；页面只在此接口成功或有回退值时显示 CNY
+      exchange_rate_enabled: true
+      exchange_rate_usd_cny_url: "https://open.er-api.com/v6/latest/USD"
+      exchange_rate_refresh_interval_seconds: 21600
+      exchange_rate_timeout_seconds: 5
+      exchange_rate_fallback_usd_cny: 7.20
 
 # 为 true 时，关闭高开销请求日志和部分 HTTP 中间件能力，以降低高并发下的单请求内存占用。
 commercial-mode: false

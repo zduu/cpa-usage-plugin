@@ -294,7 +294,10 @@ func encodeDashboardEventsExportFile(params EventsQuery, opts dashboardEventsExp
 
 func encodeDashboardEventsExportPaged(writer io.Writer, params EventsQuery, opts dashboardEventsExportOptions, snapshotAt time.Time) (dashboardExportFileResult, error) {
 	contentType := dashboardExportContentType(opts.Format)
-	firstPage := stats.QueryExportEventsPage(params, 0, dashboardExportJobPageSize, opts.Limit, snapshotAt)
+	// 与 snapshotAt 冻结时间上界同理:分页之间会释放锁,期间的改价或 models.dev
+	// 刷新会让同一个文件前后页用上不同的价格,所以价格也要在开始时冻结一次。
+	pricing := stats.PricingSnapshot()
+	firstPage := stats.QueryExportEventsPage(params, 0, dashboardExportJobPageSize, opts.Limit, snapshotAt, pricing)
 	result := dashboardExportFileResult{
 		Total:       firstPage.Total,
 		Truncated:   firstPage.Truncated,
@@ -303,26 +306,26 @@ func encodeDashboardEventsExportPaged(writer io.Writer, params EventsQuery, opts
 	}
 	switch opts.Format {
 	case dashboardExportJSONL:
-		exported, err := encodeDashboardEventsJSONLPaged(writer, params, opts, snapshotAt, firstPage)
+		exported, err := encodeDashboardEventsJSONLPaged(writer, params, opts, snapshotAt, firstPage, pricing)
 		result.Exported = exported
 		return result, err
 	case dashboardExportCSV:
-		exported, err := encodeDashboardEventsCSVPaged(writer, params, opts, snapshotAt, firstPage)
+		exported, err := encodeDashboardEventsCSVPaged(writer, params, opts, snapshotAt, firstPage, pricing)
 		result.Exported = exported
 		return result, err
 	default:
-		exported, err := encodeDashboardEventsJSONPaged(writer, params, opts, snapshotAt, firstPage)
+		exported, err := encodeDashboardEventsJSONPaged(writer, params, opts, snapshotAt, firstPage, pricing)
 		result.Exported = exported
 		return result, err
 	}
 }
 
-func encodeDashboardEventsJSONPaged(writer io.Writer, params EventsQuery, opts dashboardEventsExportOptions, snapshotAt time.Time, firstPage EventsResult) (int, error) {
+func encodeDashboardEventsJSONPaged(writer io.Writer, params EventsQuery, opts dashboardEventsExportOptions, snapshotAt time.Time, firstPage EventsResult, pricing *pricingSnapshot) (int, error) {
 	if _, err := io.WriteString(writer, `{"events":[`); err != nil {
 		return 0, err
 	}
 	first := true
-	exported, err := encodeDashboardEventsPaged(params, opts, snapshotAt, firstPage, func(event RequestDetail) error {
+	exported, err := encodeDashboardEventsPaged(params, opts, snapshotAt, firstPage, pricing, func(event RequestDetail) error {
 		if !first {
 			if _, err := io.WriteString(writer, ","); err != nil {
 				return err
@@ -357,19 +360,19 @@ func encodeDashboardEventsJSONPaged(writer io.Writer, params EventsQuery, opts d
 	return exported, nil
 }
 
-func encodeDashboardEventsJSONLPaged(writer io.Writer, params EventsQuery, opts dashboardEventsExportOptions, snapshotAt time.Time, firstPage EventsResult) (int, error) {
+func encodeDashboardEventsJSONLPaged(writer io.Writer, params EventsQuery, opts dashboardEventsExportOptions, snapshotAt time.Time, firstPage EventsResult, pricing *pricingSnapshot) (int, error) {
 	encoder := json.NewEncoder(writer)
-	return encodeDashboardEventsPaged(params, opts, snapshotAt, firstPage, func(event RequestDetail) error {
+	return encodeDashboardEventsPaged(params, opts, snapshotAt, firstPage, pricing, func(event RequestDetail) error {
 		return encoder.Encode(event)
 	})
 }
 
-func encodeDashboardEventsCSVPaged(writer io.Writer, params EventsQuery, opts dashboardEventsExportOptions, snapshotAt time.Time, firstPage EventsResult) (int, error) {
+func encodeDashboardEventsCSVPaged(writer io.Writer, params EventsQuery, opts dashboardEventsExportOptions, snapshotAt time.Time, firstPage EventsResult, pricing *pricingSnapshot) (int, error) {
 	csvWriter := csv.NewWriter(writer)
 	if err := csvWriter.Write(dashboardEventsCSVHeader()); err != nil {
 		return 0, err
 	}
-	exported, err := encodeDashboardEventsPaged(params, opts, snapshotAt, firstPage, func(event RequestDetail) error {
+	exported, err := encodeDashboardEventsPaged(params, opts, snapshotAt, firstPage, pricing, func(event RequestDetail) error {
 		return csvWriter.Write(dashboardEventCSVRecord(event))
 	})
 	csvWriter.Flush()
@@ -379,7 +382,7 @@ func encodeDashboardEventsCSVPaged(writer io.Writer, params EventsQuery, opts da
 	return exported, err
 }
 
-func encodeDashboardEventsPaged(params EventsQuery, opts dashboardEventsExportOptions, snapshotAt time.Time, firstPage EventsResult, consume func(RequestDetail) error) (int, error) {
+func encodeDashboardEventsPaged(params EventsQuery, opts dashboardEventsExportOptions, snapshotAt time.Time, firstPage EventsResult, pricing *pricingSnapshot, consume func(RequestDetail) error) (int, error) {
 	page := firstPage
 	exported := 0
 	for {
@@ -392,7 +395,7 @@ func encodeDashboardEventsPaged(params EventsQuery, opts dashboardEventsExportOp
 		if exported >= page.Limit || len(page.Events) == 0 {
 			return exported, nil
 		}
-		page = stats.QueryExportEventsPage(params, exported, dashboardExportJobPageSize, opts.Limit, snapshotAt)
+		page = stats.QueryExportEventsPage(params, exported, dashboardExportJobPageSize, opts.Limit, snapshotAt, pricing)
 	}
 }
 

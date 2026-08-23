@@ -44,6 +44,60 @@ let healthCells = [];
 let healthCellKeys = [];
 let healthGridData = [];
 let healthEventsBound = false;
+let timeRules = [];
+var dashboardCurrencyState = { currency: 'USD', rate: 0, status: 'disabled', source: '' };
+const currencyStorageKey = 'usage-dashboard.currency';
+
+function readCurrencyPreference() { try { return localStorage.getItem(currencyStorageKey) === 'CNY' ? 'CNY' : 'USD'; } catch (_) { return 'USD'; } }
+function currencyFromSummary(summary) {
+  const raw = summary && summary._meta && summary._meta.currency;
+  if (!raw || !Array.isArray(raw.supported_display)) return { currency: 'USD', rate: 0, status: 'disabled' };
+  const rate = num(raw.usd_cny_rate);
+  const preferred = readCurrencyPreference();
+  return { currency: preferred === 'CNY' && rate > 0 && raw.supported_display.includes('CNY') ? 'CNY' : 'USD', rate, status: raw.status || 'fresh', source: raw.source || '', fetchedAt: raw.fetched_at || '', expiresAt: raw.expires_at || '', supported: raw.supported_display, error: raw.error || '' };
+}
+function currencyStatusText() {
+  const state = dashboardCurrencyState;
+  const parts = [t('currency_rate_prefix') + ' ' + state.rate.toFixed(4) + ' ' + t('currency_cny')];
+  const statusKey = { fresh: 'currency_status_fresh', cached: 'currency_status_cached', stale: 'currency_status_stale', fallback: 'currency_status_fallback' }[state.status];
+  if (statusKey) parts.push(t(statusKey));
+  if (state.source) parts.push(t('currency_source') + ' ' + state.source);
+  if (state.fetchedAt) parts.push(t('currency_updated_at') + ' ' + formatCurrencyTimestamp(state.fetchedAt));
+  return parts.join(' · ');
+}
+function formatCurrencyTimestamp(value) {
+  const ms = timestampMs(value);
+  if (!Number.isFinite(ms) || ms <= 0) return String(value || '');
+  try { return new Date(ms).toLocaleString(getFormatLocale()); } catch (_) { return String(value || ''); }
+}
+function renderCurrencyControls() {
+  const usd = $('currencyUSD'), cny = $('currencyCNY'), status = $('currencyStatus');
+  if (!usd || !cny) return;
+  const supported = dashboardCurrencyState.supported && dashboardCurrencyState.supported.includes('CNY') && dashboardCurrencyState.rate > 0;
+  cny.hidden = !supported;
+  usd.textContent = t('currency_usd');
+  cny.textContent = t('currency_cny');
+  usd.classList.toggle('active', dashboardCurrencyState.currency === 'USD');
+  cny.classList.toggle('active', dashboardCurrencyState.currency === 'CNY');
+  usd.setAttribute('aria-pressed', dashboardCurrencyState.currency === 'USD' ? 'true' : 'false');
+  cny.setAttribute('aria-pressed', dashboardCurrencyState.currency === 'CNY' ? 'true' : 'false');
+  if (status) {
+    if (!supported || dashboardCurrencyState.currency !== 'CNY') { status.textContent = ''; status.title = ''; }
+    else {
+      status.textContent = currencyStatusText();
+      status.title = dashboardCurrencyState.error ? t('currency_error') + ' ' + dashboardCurrencyState.error : '';
+    }
+  }
+}
+function applyCurrencySummary(summary) { dashboardCurrencyState = currencyFromSummary(summary); renderCurrencyControls(); }
+function formatUnitPrice(value) { return dashboardCurrencyState.currency === 'CNY' ? formatMoney(num(value), dashboardCurrencyState) : num(value).toFixed(4); }
+function chooseCurrency(currency) {
+  if (currency === 'CNY' && !(dashboardCurrencyState.supported || []).includes('CNY')) return;
+  try { localStorage.setItem(currencyStorageKey, currency); } catch (_) {}
+  dashboardCurrencyState.currency = currency;
+  renderCurrencyControls();
+  rerender({ refreshEvents: false, refreshApiDetail: false });
+}
 
 function performanceMark(name) {
   if (typeof performance !== 'undefined' && performance && typeof performance.mark === 'function') performance.mark(name);
@@ -865,7 +919,22 @@ function renderPriceReferenceInfo(options) {
     ['cache_price', 'cache'],
     ['cache_write_price', 'cache_write'],
   ];
-  info.innerHTML = '<div class="priceReferenceCard"><div class="priceReferenceHead"><span class="priceReferenceModel">' + esc(selectedPriceReferenceModel) + '</span><span class="priceReferenceSource">' + esc(source) + '</span></div><div class="priceReferenceGrid">' + fields.map(([label, key]) => '<div class="priceReferenceValue"><span class="priceReferenceValueLabel">' + esc(t(label)) + '</span><span class="priceReferenceValueNumber">' + num(match.price[key]).toFixed(4) + '</span></div>').join('') + '</div></div>';
+  info.innerHTML = '<div class="priceReferenceCard"><div class="priceReferenceHead"><span class="priceReferenceModel">' + esc(selectedPriceReferenceModel) + '</span><span class="priceReferenceSource">' + esc(source) + '</span></div><div class="priceReferenceGrid">' + fields.map(([label, key]) => '<div class="priceReferenceValue"><span class="priceReferenceValueLabel">' + esc(t(label)) + '</span><span class="priceReferenceValueNumber">' + formatUnitPrice(match.price[key]) + '</span></div>').join('') + '</div>' + timeRulesReferenceHtml(match.price, fields) + '</div>';
+}
+
+// 查询面板必须显示生效时段:只看四项基础价格时,一个带分时价格的模型看起来跟全天
+// 单价没有区别。规则值缺省时回落到基础价格,与后端 effectivePrice 的语义一致。
+function timeRulesReferenceHtml(price, fields) {
+  const rules = Array.isArray(price && price.time_rules) ? price.time_rules : [];
+  if (!rules.length) return '';
+  const rows = rules.map((rule) => '<div class="priceReferenceRule">' +
+    '<span class="priceReferenceRuleName">' + esc(rule.name || t('time_rule_unnamed')) + '</span>' +
+    '<span class="priceReferenceRuleRange">' + esc(rule.start || '') + '–' + esc(rule.end || '') + '</span>' +
+    '<span class="priceReferenceRuleGrid">' + fields.map(([label, key]) => {
+      const overridden = rule[key] != null;
+      return '<span class="priceReferenceRuleValue' + (overridden ? ' overridden' : '') + '"><span class="priceReferenceValueLabel">' + esc(t(label)) + '</span>' + formatUnitPrice(overridden ? rule[key] : price[key]) + '</span>';
+    }).join('') + '</span></div>').join('');
+  return '<div class="priceReferenceRules"><div class="priceReferenceRulesHead subtle">' + esc(t('time_rules_title')) + ' · ' + esc(t('time_rules_timezone_hint')) + '</div>' + rows + '</div>';
 }
 
 function selectPriceReferenceModel(model) {
@@ -946,10 +1015,56 @@ function fillPriceForm(model) {
   $('priceCompletion').value = p ? (p.completion ?? '') : '';
   $('priceCache').value = p ? (p.cache ?? '') : '';
   $('priceCacheWrite').value = p ? (p.cache_write ?? '') : '';
+  timeRules = p && Array.isArray(p.time_rules) ? JSON.parse(JSON.stringify(p.time_rules)) : [];
+  renderTimeRules();
 }
 
 function syncPriceFormForModel(model) {
   fillPriceForm(model);
+}
+
+function newTimeRule() { return { id: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : 'rule-' + Date.now() + '-' + Math.random().toString(16).slice(2), name: '', start: '00:00', end: '01:00' }; }
+function timeRuleRemoveLabel(model, rule, index) {
+  const name = String(rule && rule.name || '').trim() || t('time_rule_unnamed') + ' ' + (index + 1);
+  return [t('time_rule_remove'), model, name].filter(Boolean).join(' ');
+}
+function renderTimeRules() {
+  const editor = $('timeRulesEditor'); if (!editor) return;
+  // aria-label 里必须带上模型名:价格设置区可以在多个模型之间切换,只念「删除时段
+  // 夜间半价」的话,读屏用户无从判断删的是哪个模型的规则。
+  const model = ($('priceModel') && $('priceModel').value || '').trim();
+  editor.innerHTML = timeRules.map((r, i) => '<div class="timeRuleRow" data-rule-index="' + i + '">' +
+    '<label>' + t('time_rule_name') + '<input class="input" data-rule-field="name" value="' + esc(r.name || '') + '"></label>' +
+    '<label>' + t('time_rule_start') + '<input class="input" type="time" data-rule-field="start" value="' + esc(r.start || '') + '"></label>' +
+    '<label>' + t('time_rule_end') + '<input class="input" type="time" data-rule-field="end" value="' + esc(r.end || '') + '"></label>' +
+    ['prompt', 'completion', 'cache', 'cache_write'].map((field) => '<label>' + ({prompt:t('time_rule_input'),completion:t('time_rule_output'),cache:t('time_rule_cache'),cache_write:t('time_rule_cache_write')}[field]) + '<input class="input" type="number" min="0" step="0.0001" data-rule-field="' + field + '" value="' + (r[field] == null ? '' : esc(r[field])) + '"></label>').join('') +
+    '<button class="btn danger timeRuleRemove" type="button" data-rule-remove="' + i + '" aria-label="' + esc(timeRuleRemoveLabel(model, r, i)) + '">×</button></div>').join('');
+  if (typeof editor.querySelectorAll !== 'function') return;
+  editor.querySelectorAll('[data-rule-field]').forEach((input) => input.oninput = () => { const row = input.closest('[data-rule-index]'); const rule = timeRules[Number(row.dataset.ruleIndex)]; const field = input.dataset.ruleField; rule[field] = input.value; });
+  editor.querySelectorAll('[data-rule-remove]').forEach((button) => button.onclick = () => { timeRules.splice(Number(button.dataset.ruleRemove), 1); renderTimeRules(); });
+}
+function serializedTimeRules() {
+  return timeRules.map((r) => { const out = { id: r.id || newTimeRule().id, name: String(r.name || '').trim(), start: r.start || '', end: r.end || '' }; ['prompt','completion','cache','cache_write'].forEach((key) => { if (r[key] !== '' && r[key] != null) out[key] = num(r[key]); }); return out; });
+}
+const TIME_RULE_PRICE_FIELDS = ['prompt', 'completion', 'cache', 'cache_write'];
+// 全部失败都用 throw:曾经的 `return '最多只能添加 16 个时段'` 与其余分支的 throw
+// 混用,而调用方不看返回值,导致超限检查形同虚设。
+function timeRuleError(index, key) { return new Error(t('time_rule_invalid') + '[' + (index + 1) + '] ' + t(key)); }
+function validateTimeRulesClient(rules) {
+  if (rules.length > 16) throw new Error(t('time_rule_max'));
+  const intervals = [];
+  const minute = (value) => { if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) return -1; const p = value.split(':'); return Number(p[0]) * 60 + Number(p[1]); };
+  rules.forEach((r, i) => {
+    const start = minute(r.start), end = minute(r.end);
+    if (!r.name) throw timeRuleError(i, 'time_rule_err_name');
+    if (start < 0) throw timeRuleError(i, 'time_rule_err_start');
+    if (end < 0) throw timeRuleError(i, 'time_rule_err_end');
+    if (start === end) throw timeRuleError(i, 'time_rule_err_same');
+    if (!TIME_RULE_PRICE_FIELDS.some((k) => Object.prototype.hasOwnProperty.call(r, k))) throw timeRuleError(i, 'time_rule_err_empty');
+    TIME_RULE_PRICE_FIELDS.forEach((k) => { if (r[k] != null && (!Number.isFinite(Number(r[k])) || Number(r[k]) < 0)) throw timeRuleError(i, 'time_rule_err_price'); });
+    if (start < end) intervals.push([start, end, i]); else { intervals.push([start, 1440, i], [0, end, i]); }
+  });
+  for (let i = 0; i < intervals.length; i++) for (let j = i + 1; j < intervals.length; j++) if (intervals[i][0] < intervals[j][1] && intervals[j][0] < intervals[i][1]) throw new Error(t('time_rule_overlap'));
 }
 
 function renderPrices() {
@@ -957,8 +1072,9 @@ function renderPrices() {
   $('priceModelOptions').innerHTML = priceModelOptions().map((m) => '<option value="' + esc(m) + '"></option>').join('');
   $('priceModel').value = selected;
   renderPriceReference();
+  renderTimeRules();
   const entries = Object.entries(manualModelPrices).sort(([a], [b]) => a.localeCompare(b));
-  $('priceList').innerHTML = entries.length ? entries.map(([m, p]) => '<div class="priceItem"><div><strong>' + esc(m) + '</strong><div class="priceMeta"><span>' + t('input_price') + ' ' + num(p.prompt).toFixed(4) + '</span><span>' + t('output_price') + ' ' + num(p.completion).toFixed(4) + '</span><span>' + t('cache_price') + ' ' + num(p.cache).toFixed(4) + '</span><span>' + t('cache_write_price') + ' ' + num(p.cache_write).toFixed(4) + '</span></div></div><div class="priceActions"><button class="btn" data-edit-price="' + esc(m) + '">' + t('edit') + '</button><button class="btn danger" data-del-price="' + esc(m) + '">' + t('delete') + '</button></div></div>').join('') : '<div class="empty">' + t('no_prices') + '</div>';
+  $('priceList').innerHTML = entries.length ? entries.map(([m, p]) => '<div class="priceItem"><div><strong>' + esc(m) + '</strong><div class="priceMeta"><span>' + t('input_price') + ' ' + formatMoney(num(p.prompt), dashboardCurrencyState) + '/M</span><span>' + t('output_price') + ' ' + formatMoney(num(p.completion), dashboardCurrencyState) + '/M</span><span>' + t('cache_price') + ' ' + formatMoney(num(p.cache), dashboardCurrencyState) + '/M</span><span>' + t('cache_write_price') + ' ' + formatMoney(num(p.cache_write), dashboardCurrencyState) + '/M</span></div>' + (Array.isArray(p.time_rules) && p.time_rules.length ? '<div class="priceMeta timeRuleSummary">' + p.time_rules.map((r) => esc(r.name || t('time_rule_unnamed')) + ' ' + esc(r.start) + '–' + esc(r.end) + '：' + formatMoney(num(r.prompt ?? p.prompt), dashboardCurrencyState) + '/M → ' + formatMoney(num(r.completion ?? p.completion), dashboardCurrencyState) + '/M').join('；') + '</div>' : '') + '</div><div class="priceActions"><button class="btn" data-edit-price="' + esc(m) + '">' + t('edit') + '</button><button class="btn danger" data-del-price="' + esc(m) + '">' + t('delete') + '</button></div></div>').join('') : '<div class="empty">' + t('no_prices') + '</div>';
   document.querySelectorAll('[data-edit-price]').forEach((btn) => btn.onclick = () => fillPriceForm(btn.dataset.editPrice));
   document.querySelectorAll('[data-del-price]').forEach((btn) => btn.onclick = async () => {
     try {
@@ -2033,6 +2149,7 @@ async function rerender(options) {
   }
 
   renderUpdated();
+  renderCurrencyControls();
   renderStats();
   renderStorageStatus();
   renderHealth();
@@ -2068,6 +2185,7 @@ async function load(options) {
     performanceMark('summary-request-end');
     const data = summaryResult.data;
     summaryData = requireObjectPayload(data, 'dashboard-summary');
+    applyCurrencySummary(summaryData);
     let filteredResult = null;
     if (selectedClientApi) filteredResult = await refreshFilteredSummary();
     if (requestSeq !== summaryLoadSeq) return;
@@ -2095,6 +2213,7 @@ async function load(options) {
       const data = await fetchJsonPayload(pluginEndpoint('dashboard-data'), pluginFetchOptions({ cache: 'no-store' }));
       if (requestSeq !== summaryLoadSeq) return;
       summaryData = buildSummaryFromFullUsage(data, selectedRange);
+      applyCurrencySummary(summaryData);
       loadUsedModelPrices().then(refreshCostPanels).catch(function() { /* compatibility pricing is optional */ });
       if (selectedClientApi) {
         filteredSummaryData = null;
@@ -2127,6 +2246,8 @@ function handleVisibilityChange() {
 // Event bindings
 $('range').value = localStorage.getItem(rangeKey) || '24h';
 $('range').onchange = () => { eventsOffset = 0; localStorage.setItem(rangeKey, $('range').value); load({ forceDetails: true }) };
+if ($('currencyUSD')) $('currencyUSD').onclick = () => chooseCurrency('USD');
+if ($('currencyCNY')) $('currencyCNY').onclick = () => chooseCurrency('CNY');
 $('refreshBtn').onclick = () => load({ forceDetails: true });
 $('priceSettings').ontoggle = async () => {
   if (!$('priceSettings').open) return;
@@ -2140,13 +2261,18 @@ $('savePrice').onclick = async () => {
   const m = $('priceModel').value.trim(); if (!m) return;
   const prompt = num($('pricePrompt').value), completion = num($('priceCompletion').value), cache = $('priceCache').value === '' ? prompt : num($('priceCache').value), cacheWrite = $('priceCacheWrite').value === '' ? 0 : num($('priceCacheWrite').value);
   try {
-    await saveModelPrice(m, { prompt, completion, cache, cache_write: cacheWrite });
+    const rules = serializedTimeRules();
+    validateTimeRulesClient(rules);
+    const price = { prompt, completion, cache, cache_write: cacheWrite };
+    if (rules.length) price.time_rules = rules;
+    await saveModelPrice(m, price);
     fillPriceForm('');
     await load({ forceDetails: true });
   } catch (e) {
     alert(t('price_save_failed') + (e && e.message ? e.message : t('unknown_error')));
   }
 };
+if ($('addTimeRule')) $('addTimeRule').onclick = () => { if (timeRules.length >= 16) return; timeRules.push(newTimeRule()); renderTimeRules(); };
 $('priceModel').onchange = () => syncPriceFormForModel($('priceModel').value);
 $('priceReferenceModel').onfocus = () => {
   if ($('priceReferenceModel').disabled) return;

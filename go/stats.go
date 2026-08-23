@@ -13,6 +13,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -110,28 +111,49 @@ type RequestStatistics struct {
 
 	exportMaxRecords int
 
-	priceStoragePath       string
+	priceStoragePath string
 	// claudeCacheRepairEnabled 控制历史缓存双计修复(claude_cache_repair.go)。
 	// 默认关闭:旧数据签名不可判定,须用户确认后启用。
 	claudeCacheRepairEnabled bool
-	priceStorageLoadedPath string
-	priceStorageLastError  string
-	modelPrices            map[string]ModelPrice
-	modelPriceIndex        map[string]ModelPrice
-	modelPricesUpdatedAt   time.Time
-	priceVersion           uint64
-	modelsDevPricesEnabled bool
-	modelsDevPricesURL     string
-	modelsDevRefresh       time.Duration
-	modelsDevPrices        map[string]ModelPrice
-	modelsDevPriceIndex    map[string]ModelPrice
-	modelsDevUpdatedAt     time.Time
-	modelsDevLastAttempt   time.Time
-	modelsDevLastSuccess   time.Time
-	modelsDevLastError     string
-	modelsDevETag          string
-	modelsDevStop          chan struct{}
-	modelsDevDone          chan struct{}
+	priceStorageLoadedPath   string
+	priceStorageLastError    string
+	modelPrices              map[string]ModelPrice
+	modelPriceIndex          map[string]ModelPrice
+	modelPricesUpdatedAt     time.Time
+	priceVersion             uint64
+	modelsDevPricesEnabled   bool
+	modelsDevPricesURL       string
+	modelsDevRefresh         time.Duration
+	modelsDevPrices          map[string]ModelPrice
+	modelsDevPriceIndex      map[string]ModelPrice
+	modelsDevUpdatedAt       time.Time
+	modelsDevLastAttempt     time.Time
+	modelsDevLastSuccess     time.Time
+	modelsDevLastError       string
+	modelsDevETag            string
+	modelsDevStop            chan struct{}
+	modelsDevDone            chan struct{}
+	// timeBasedPrices 缓存「当前价格表里是否存在时段规则」,按 priceVersion 派生。
+	timeBasedPrices        bool
+	timeBasedPricesValid   bool
+	timeBasedPricesVersion uint64
+
+	pricingLocation       *time.Location
+	pricingTimezone       string
+	pricingTimezoneError  string
+	exchangeRateEnabled   bool
+	exchangeRateURL       string
+	exchangeRateRefresh   time.Duration
+	exchangeRateTimeout   time.Duration
+	exchangeRateFallback  float64
+	exchangeRate          float64
+	exchangeRateSource    string
+	exchangeRateFetchedAt time.Time
+	exchangeRateLastError string
+	exchangeRateFailures  int
+	exchangeRateStop      chan struct{}
+	exchangeRateDone      chan struct{}
+	currencyVersion       uint64
 
 	lastImportResult *ImportResponse
 	evictedTotal     int64
@@ -188,6 +210,7 @@ type apiStats struct {
 	CachedTokens     int64
 	CacheWriteTokens int64
 	ReasoningTokens  int64
+	estimatedCost    float64
 	latencySum       int64
 	latencyN         int64
 	Models           map[string]*modelStats
@@ -204,6 +227,7 @@ type modelStats struct {
 	CachedTokens     int64
 	CacheWriteTokens int64
 	ReasoningTokens  int64
+	estimatedCost    float64
 	latencySum       int64
 	latencyN         int64
 	Details          []RequestDetail
@@ -560,7 +584,21 @@ func NewRequestStatistics() *RequestStatistics {
 		modelsDevPriceIndex:           make(map[string]ModelPrice),
 		conditionalRequests:           make(map[string]conditionalRequestCounter),
 		startedAt:                     time.Now(),
+		pricingTimezone:               defaultPricingTimezone,
+		pricingLocation:               mustLoadLocation(defaultPricingTimezone),
+		exchangeRateURL:               defaultExchangeRateURL,
+		exchangeRateRefresh:           time.Duration(defaultExchangeRateRefreshSeconds) * time.Second,
+		exchangeRateTimeout:           time.Duration(defaultExchangeRateTimeoutSeconds) * time.Second,
+		exchangeRateFallback:          defaultExchangeRateFallbackUSDCNY,
 	}
+}
+
+func mustLoadLocation(name string) *time.Location {
+	location, err := time.LoadLocation(name)
+	if err != nil {
+		return time.UTC
+	}
+	return location
 }
 
 func (s *RequestStatistics) Configure(cfg runtimeConfig) {
@@ -585,6 +623,12 @@ func (s *RequestStatistics) Configure(cfg runtimeConfig) {
 		ClaudeCacheRepairEnabled:      boolPtr(cfg.ClaudeCacheRepairEnabled),
 		UpdateEnabled:                 boolPtr(cfg.UpdateEnabled),
 		UpdateVersion:                 stringPtr(cfg.UpdateVersion),
+		PricingTimezone:               stringPtr(cfg.PricingTimezone),
+		ExchangeRateEnabled:           boolPtr(cfg.ExchangeRateEnabled),
+		ExchangeRateUSD:               stringPtr(cfg.ExchangeRateUSD),
+		ExchangeRateRefreshSeconds:    positiveIntPtr(cfg.ExchangeRateRefreshSeconds),
+		ExchangeRateTimeoutSeconds:    positiveIntPtr(cfg.ExchangeRateTimeoutSeconds),
+		ExchangeRateFallbackUSDCNY:    float64Ptr(cfg.ExchangeRateFallbackUSDCNY),
 	})
 }
 
@@ -607,6 +651,10 @@ func (s *RequestStatistics) ConfigurePatch(cfg runtimeConfigPatch) {
 		cfg.ModelsDevRefreshSeconds != nil
 	if modelsDevConfigTouched {
 		s.stopModelsDevPriceWorker()
+	}
+	exchangeConfigTouched := cfg.ExchangeRateEnabled != nil || cfg.ExchangeRateUSD != nil || cfg.ExchangeRateRefreshSeconds != nil || cfg.ExchangeRateTimeoutSeconds != nil || cfg.ExchangeRateFallbackUSDCNY != nil
+	if exchangeConfigTouched {
+		s.stopExchangeRateWorker()
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -667,6 +715,41 @@ func (s *RequestStatistics) ConfigurePatch(cfg runtimeConfigPatch) {
 	if cfg.ModelsDevPricesEnabled != nil {
 		s.modelsDevPricesEnabled = *cfg.ModelsDevPricesEnabled
 	}
+	if cfg.PricingTimezone != nil {
+		name := strings.TrimSpace(*cfg.PricingTimezone)
+		if name == "" {
+			name = defaultPricingTimezone
+		}
+		if location, err := time.LoadLocation(name); err != nil {
+			// 保留旧时区,但必须把拒绝原因带到运行状态和健康告警里,否则用户改错
+			// 时区后看不出计费仍在按旧时区走。
+			s.pricingTimezoneError = fmt.Sprintf("pricing_timezone %q 无效(%v),继续使用 %s", name, err, s.pricingTimezone)
+		} else {
+			s.pricingTimezone = name
+			s.pricingLocation = location
+			s.pricingTimezoneError = ""
+		}
+	}
+	if cfg.ExchangeRateUSD != nil && strings.TrimSpace(*cfg.ExchangeRateUSD) != "" {
+		candidate := strings.TrimSpace(*cfg.ExchangeRateUSD)
+		if _, err := configureHTTPSURL(candidate); err != nil {
+			s.exchangeRateLastError = err.Error()
+		} else {
+			s.exchangeRateURL = candidate
+		}
+	}
+	if cfg.ExchangeRateRefreshSeconds != nil && *cfg.ExchangeRateRefreshSeconds > 0 {
+		s.exchangeRateRefresh = time.Duration(clampInt(*cfg.ExchangeRateRefreshSeconds, 300, 86400)) * time.Second
+	}
+	if cfg.ExchangeRateTimeoutSeconds != nil && *cfg.ExchangeRateTimeoutSeconds > 0 {
+		s.exchangeRateTimeout = time.Duration(clampInt(*cfg.ExchangeRateTimeoutSeconds, 1, 30)) * time.Second
+	}
+	if cfg.ExchangeRateFallbackUSDCNY != nil && validFallbackExchangeRate(*cfg.ExchangeRateFallbackUSDCNY) {
+		s.exchangeRateFallback = *cfg.ExchangeRateFallbackUSDCNY
+	}
+	if cfg.ExchangeRateEnabled != nil {
+		s.exchangeRateEnabled = *cfg.ExchangeRateEnabled
+	}
 	if oldModelsDevEnabled != s.modelsDevPricesEnabled || oldModelsDevURL != s.modelsDevPricesURL {
 		s.modelsDevPrices = make(map[string]ModelPrice)
 		s.modelsDevPriceIndex = make(map[string]ModelPrice)
@@ -681,6 +764,7 @@ func (s *RequestStatistics) ConfigurePatch(cfg runtimeConfigPatch) {
 		s.storageEnabled = *cfg.StorageEnabled
 	}
 	s.configureModelsDevPriceWorkerLocked()
+	s.configureExchangeRateWorkerLocked()
 	s.configureStorageLocked()
 	// 修复开关可能刚由热重载打开:存储装载(冷恢复或合并)完成后统一对当前
 	// 内存明细执行一次历史缓存修复,置于价格加载与成本序列重建之前,保证
@@ -1372,6 +1456,9 @@ func (s *RequestStatistics) recordDetailLocked(apiName, modelName string, detail
 	if strings.TrimSpace(apiName) == "" {
 		apiName = "未知接口"
 	}
+	// cost_usd 只在查询期附加。导入的导出文件里带着当时的成本,留着会被原样写进
+	// JSONL 并且永远不会被读取,反而让存储记录与「后端没算过成本」的语义冲突。
+	detail.CostUSD = nil
 	if dedup == (requestDedupKey{}) {
 		dedup = dedupKey(apiName, modelName, detail)
 	}
@@ -2105,8 +2192,10 @@ func (s *RequestStatistics) addStorageSnapshotResidualModelLocked(apiName, model
 
 func normalizeStorageSnapshotDetail(modelName string, detail RequestDetail, now time.Time) RequestDetail {
 	detail.Model = normalizeDetailModelName(modelName, detail.Model)
+	detail.CostUSD = nil
 	if detail.Timestamp.IsZero() {
 		detail.Timestamp = now
+		detail.TimestampSynthetic = true
 	}
 	if detail.LatencyMs < 0 {
 		detail.LatencyMs = 0
@@ -2778,6 +2867,7 @@ func (s *RequestStatistics) replayStorageLocked(path string) error {
 		detail.Model = modelName
 		if detail.Timestamp.IsZero() {
 			detail.Timestamp = now
+			detail.TimestampSynthetic = true
 		}
 		detail.Tokens.TotalTokens = detailTotalTokensForRequest(detail)
 		detail.Source = cleanImportedDetailSource(detail)
@@ -2909,6 +2999,236 @@ type modelsDevProviderPayload struct {
 	Models map[string]modelsDevModelPayload `json:"models"`
 }
 
+func validExchangeRate(value float64) bool {
+	return value >= 5 && value <= 12 && !math.IsNaN(value) && !math.IsInf(value, 0)
+}
+
+func validFallbackExchangeRate(value float64) bool {
+	return value > 0 && !math.IsNaN(value) && !math.IsInf(value, 0)
+}
+
+func configureHTTPSURL(raw string) (*url.URL, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+		return nil, errors.New("exchange rate URL must be HTTPS")
+	}
+	return parsed, nil
+}
+
+// exchangeRateCheckRedirect 阻止汇率接口经由重定向降级到明文 HTTP。配置项允许用户
+// 自定义 URL,只在请求发起前校验 scheme 是不够的。
+func exchangeRateCheckRedirect(req *http.Request, via []*http.Request) error {
+	if req == nil || req.URL == nil || req.URL.Scheme != "https" {
+		return errors.New("exchange rate redirect must remain HTTPS")
+	}
+	if len(via) >= 10 {
+		return errors.New("exchange rate redirect chain is too long")
+	}
+	return nil
+}
+
+func (s *RequestStatistics) configureExchangeRateWorkerLocked() {
+	if s == nil || !s.exchangeRateEnabled {
+		return
+	}
+	if s.exchangeRateRefresh <= 0 {
+		s.exchangeRateRefresh = time.Duration(defaultExchangeRateRefreshSeconds) * time.Second
+	}
+	if s.exchangeRateTimeout <= 0 {
+		s.exchangeRateTimeout = time.Duration(defaultExchangeRateTimeoutSeconds) * time.Second
+	}
+	if _, err := configureHTTPSURL(s.exchangeRateURL); err != nil {
+		s.exchangeRateLastError = err.Error()
+		return
+	}
+	if s.exchangeRateStop != nil {
+		return
+	}
+	stop, done := make(chan struct{}), make(chan struct{})
+	s.exchangeRateStop, s.exchangeRateDone = stop, done
+	go s.exchangeRateWorker(stop, done)
+}
+
+func (s *RequestStatistics) stopExchangeRateWorker() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	stop, done := s.exchangeRateStop, s.exchangeRateDone
+	s.exchangeRateStop, s.exchangeRateDone = nil, nil
+	s.mu.Unlock()
+	if stop != nil {
+		close(stop)
+	}
+	if done != nil {
+		<-done
+	}
+}
+
+func (s *RequestStatistics) exchangeRateWorker(stop <-chan struct{}, done chan<- struct{}) {
+	defer close(done)
+	s.refreshExchangeRateOnce(stop)
+	for {
+		s.mu.RLock()
+		interval := s.exchangeRateRefresh
+		s.mu.RUnlock()
+		if interval <= 0 {
+			interval = time.Duration(defaultExchangeRateRefreshSeconds) * time.Second
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-stop:
+			timer.Stop()
+			return
+		case <-timer.C:
+			s.refreshExchangeRateOnce(stop)
+		}
+	}
+}
+
+func (s *RequestStatistics) refreshExchangeRateOnce(stop <-chan struct{}) {
+	if s == nil {
+		return
+	}
+	s.mu.RLock()
+	enabled, rawURL, timeout := s.exchangeRateEnabled, s.exchangeRateURL, s.exchangeRateTimeout
+	s.mu.RUnlock()
+	if !enabled {
+		return
+	}
+	parsed, err := configureHTTPSURL(rawURL)
+	if err != nil {
+		s.recordExchangeRateFailure(err)
+		return
+	}
+	ctx := context.Background()
+	var cancel context.CancelFunc
+	if stop != nil {
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		go func() {
+			select {
+			case <-stop:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+	if err != nil {
+		s.recordExchangeRateFailure(err)
+		return
+	}
+	client := &http.Client{Timeout: timeout, CheckRedirect: exchangeRateCheckRedirect}
+	resp, err := client.Do(req)
+	if err != nil {
+		s.recordExchangeRateFailure(err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		s.recordExchangeRateFailure(fmt.Errorf("exchange rate returned HTTP %d", resp.StatusCode))
+		return
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		s.recordExchangeRateFailure(err)
+		return
+	}
+	rate, err := parseExchangeRate(raw)
+	if err != nil {
+		s.recordExchangeRateFailure(err)
+		return
+	}
+	now := time.Now().UTC()
+	s.mu.Lock()
+	if !s.exchangeRateEnabled || s.exchangeRateURL != rawURL {
+		s.mu.Unlock()
+		return
+	}
+	s.exchangeRate = rate
+	s.exchangeRateSource = parsed.Host
+	s.exchangeRateFetchedAt = now
+	s.exchangeRateLastError = ""
+	s.exchangeRateFailures = 0
+	s.currencyVersion++
+	s.invalidateSummaryLocked()
+	s.mu.Unlock()
+}
+
+func parseExchangeRate(raw []byte) (float64, error) {
+	var payload struct {
+		Rates           map[string]float64 `json:"rates"`
+		ConversionRates map[string]float64 `json:"conversion_rates"`
+		Data            map[string]float64 `json:"data"`
+		USDCNY          float64            `json:"usd_cny"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return 0, err
+	}
+	rate := payload.USDCNY
+	if rate == 0 {
+		rate = payload.Rates["CNY"]
+	}
+	if rate == 0 {
+		rate = payload.ConversionRates["CNY"]
+	}
+	if rate == 0 {
+		rate = payload.Data["CNY"]
+	}
+	if !validExchangeRate(rate) {
+		return 0, errors.New("exchange rate response contains an invalid USD/CNY rate")
+	}
+	return rate, nil
+}
+
+func (s *RequestStatistics) recordExchangeRateFailure(err error) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.exchangeRateFailures++
+	if err != nil {
+		s.exchangeRateLastError = err.Error()
+	}
+	s.currencyVersion++
+	s.invalidateSummaryLocked()
+}
+
+func (s *RequestStatistics) currencyStateLocked(now time.Time) CurrencyState {
+	state := CurrencyState{Base: "USD", SupportedDisplay: []string{"USD"}, Status: "disabled"}
+	if !s.exchangeRateEnabled {
+		return state
+	}
+	state.SupportedDisplay = []string{"USD", "CNY"}
+	state.USDCNYRate = s.exchangeRate
+	state.Source = s.exchangeRateSource
+	state.Error = s.exchangeRateLastError
+	state.ConsecutiveFails = s.exchangeRateFailures
+	if !s.exchangeRateFetchedAt.IsZero() {
+		state.FetchedAt = s.exchangeRateFetchedAt.Format(time.RFC3339)
+		expires := s.exchangeRateFetchedAt.Add(2 * s.exchangeRateRefresh)
+		state.ExpiresAt = expires.Format(time.RFC3339)
+		// 过了有效期就是 stale,无论有没有记录到拉取错误:系统休眠、定时器被推迟
+		// 或 worker 没被及时调度时都不会留下 error,但汇率确实已经过期。
+		switch {
+		case !now.Before(expires):
+			state.Status = "stale"
+		case s.exchangeRateLastError == "":
+			state.Status = "fresh"
+		default:
+			state.Status = "cached"
+		}
+	} else if validFallbackExchangeRate(s.exchangeRateFallback) {
+		state.USDCNYRate = s.exchangeRateFallback
+		state.Status = "fallback"
+	} else {
+		state.Status = "stale"
+	}
+	return state
+}
+
 type modelsDevModelPayload struct {
 	ID          string                `json:"id"`
 	Name        string                `json:"name"`
@@ -2933,6 +3253,10 @@ func (s *RequestStatistics) configureModelsDevPriceWorkerLocked() {
 		s.modelsDevStop = nil
 		s.modelsDevDone = nil
 		s.modelsDevPrices = make(map[string]ModelPrice)
+		s.modelsDevPriceIndex = make(map[string]ModelPrice)
+		// 默认价格表被清空也是一次价格变动:不自增版本号,派生缓存(时段价格标志、
+		// summary ETag)会继续沿用清空前的结论。
+		s.priceVersion++
 		s.modelsDevUpdatedAt = time.Time{}
 		s.modelsDevLastAttempt = time.Time{}
 		s.modelsDevLastSuccess = time.Time{}
@@ -3254,7 +3578,9 @@ func (s *RequestStatistics) loadModelPricesLocked() {
 		if name == "" || !validModelPrice(price) {
 			continue
 		}
-		setModelPriceCaseInsensitive(prices, name, price)
+		// 旧价格文件里的规则可能没有 ID(校验不再代劳补齐),这里统一补上,
+		// 否则重叠报错和前端的规则行都会拿到空标识。
+		setModelPriceCaseInsensitive(prices, name, normalizeModelPriceRules(price))
 	}
 	s.priceStoragePath = path
 	s.priceStorageLoadedPath = abs
@@ -3321,18 +3647,193 @@ func parseRFC3339OrZero(value string) time.Time {
 }
 
 func validModelPrice(price ModelPrice) bool {
-	return validPriceNumber(price.Prompt) && validPriceNumber(price.Completion) &&
-		validPriceNumber(price.Cache) && validPriceNumber(price.CacheWrite)
+	if !validPriceNumber(price.Prompt) || !validPriceNumber(price.Completion) || !validPriceNumber(price.Cache) || !validPriceNumber(price.CacheWrite) {
+		return false
+	}
+	return validateModelPriceRules(price.TimeRules) == nil
 }
 
 func validPriceNumber(value float64) bool {
 	return value >= 0 && !math.IsNaN(value) && !math.IsInf(value, 0)
 }
 
+// validateModelPriceRules 必须是纯校验:它曾经在这里给缺失的 rule.ID 赋值,而
+// UpsertModelPrice 是在加锁之前调用它的,等于在锁外写调用方(乃至已入库)的切片。
+// 补 ID 的动作移到了 normalizeModelPriceRules,在锁内对副本执行。
+func validateModelPriceRules(rules []ModelPriceRule) error {
+	if len(rules) > 16 {
+		return errors.New("time_rules must contain at most 16 rules")
+	}
+	seenIDs := make(map[string]struct{}, len(rules))
+	intervals := make([][3]int, 0, len(rules)*2)
+	for i := range rules {
+		rule := rules[i]
+		prefix := fmt.Sprintf("time_rules[%d]", i)
+		if strings.TrimSpace(rule.Name) == "" {
+			return fmt.Errorf("%s.name is required", prefix)
+		}
+		// 空 ID 由 normalizeModelPriceRules 补,只在显式给出的 ID 之间查重。
+		if id := strings.TrimSpace(rule.ID); id != "" {
+			if _, ok := seenIDs[id]; ok {
+				return fmt.Errorf("%s.id must be unique", prefix)
+			}
+			seenIDs[id] = struct{}{}
+		}
+		start, err := parsePricingMinute(rule.Start)
+		if err != nil {
+			return fmt.Errorf("%s.start must use HH:mm", prefix)
+		}
+		end, err := parsePricingMinute(rule.End)
+		if err != nil {
+			return fmt.Errorf("%s.end must use HH:mm", prefix)
+		}
+		if start == end {
+			return fmt.Errorf("%s.start and end must differ", prefix)
+		}
+		if rule.Prompt != nil && !validPriceNumber(*rule.Prompt) {
+			return fmt.Errorf("%s.prompt must be a non-negative finite number", prefix)
+		}
+		if rule.Completion != nil && !validPriceNumber(*rule.Completion) {
+			return fmt.Errorf("%s.completion must be a non-negative finite number", prefix)
+		}
+		if rule.Cache != nil && !validPriceNumber(*rule.Cache) {
+			return fmt.Errorf("%s.cache must be a non-negative finite number", prefix)
+		}
+		if rule.CacheWrite != nil && !validPriceNumber(*rule.CacheWrite) {
+			return fmt.Errorf("%s.cache_write must be a non-negative finite number", prefix)
+		}
+		if rule.Prompt == nil && rule.Completion == nil && rule.Cache == nil && rule.CacheWrite == nil {
+			return fmt.Errorf("%s must override at least one price", prefix)
+		}
+		if start < end {
+			intervals = append(intervals, [3]int{start, end, i})
+		} else {
+			intervals = append(intervals, [3]int{start, 1440, i}, [3]int{0, end, i})
+		}
+	}
+	for i := range intervals {
+		for j := i + 1; j < len(intervals); j++ {
+			if intervals[i][0] < intervals[j][1] && intervals[j][0] < intervals[i][1] {
+				return fmt.Errorf("time_rules overlap: %s and %s", modelPriceRuleLabel(rules[intervals[i][2]]), modelPriceRuleLabel(rules[intervals[j][2]]))
+			}
+		}
+	}
+	return nil
+}
+
+// modelPriceRuleLabel 用于错误信息:ID 是可选的(新建规则时由后端补),没有 ID 时用
+// 名称,避免报出 "time_rules overlap:  and " 这种无从定位的空串。
+func modelPriceRuleLabel(rule ModelPriceRule) string {
+	if id := strings.TrimSpace(rule.ID); id != "" {
+		return id
+	}
+	if name := strings.TrimSpace(rule.Name); name != "" {
+		return name
+	}
+	return "?"
+}
+
+// normalizeModelPriceRules 返回价格的深拷贝:补齐缺失的规则 ID,并复制 TimeRules 切片
+// 和其中的 *float64。浅拷贝会让入库的价格与调用方(以及返回给 HTTP 层的响应)共享同
+// 一份底层数组和指针,任何一方在锁外改动都会直接改到存储里。
+func normalizeModelPriceRules(price ModelPrice) ModelPrice {
+	if len(price.TimeRules) == 0 {
+		price.TimeRules = nil
+		return price
+	}
+	rules := make([]ModelPriceRule, len(price.TimeRules))
+	for i, rule := range price.TimeRules {
+		rule.Prompt = copyFloatPtr(rule.Prompt)
+		rule.Completion = copyFloatPtr(rule.Completion)
+		rule.Cache = copyFloatPtr(rule.Cache)
+		rule.CacheWrite = copyFloatPtr(rule.CacheWrite)
+		if strings.TrimSpace(rule.ID) == "" {
+			rule.ID = newModelPriceRuleID()
+		}
+		rules[i] = rule
+	}
+	price.TimeRules = rules
+	return price
+}
+
+func copyFloatPtr(value *float64) *float64 {
+	if value == nil {
+		return nil
+	}
+	copied := *value
+	return &copied
+}
+
+func parsePricingMinute(value string) (int, error) {
+	if len(value) != 5 || value[2] != ':' || value[0] < '0' || value[0] > '9' || value[1] < '0' || value[1] > '9' || value[3] < '0' || value[3] > '9' || value[4] < '0' || value[4] > '9' {
+		return 0, errors.New("invalid HH:mm")
+	}
+	hour := int(value[0]-'0')*10 + int(value[1]-'0')
+	minute := int(value[3]-'0')*10 + int(value[4]-'0')
+	if hour > 23 || minute > 59 {
+		return 0, errors.New("invalid HH:mm")
+	}
+	return hour*60 + minute, nil
+}
+
+func ruleContainsMinute(rule ModelPriceRule, minute int) bool {
+	start, err1 := parsePricingMinute(rule.Start)
+	end, err2 := parsePricingMinute(rule.End)
+	if err1 != nil || err2 != nil || start == end {
+		return false
+	}
+	if start < end {
+		return minute >= start && minute < end
+	}
+	return minute >= start || minute < end
+}
+
+func effectivePrice(base ModelPrice, at time.Time, location *time.Location) ModelPrice {
+	if at.IsZero() || len(base.TimeRules) == 0 {
+		return base
+	}
+	if location == nil {
+		location = time.UTC
+	}
+	minute := at.In(location).Hour()*60 + at.In(location).Minute()
+	for _, rule := range base.TimeRules {
+		if !ruleContainsMinute(rule, minute) {
+			continue
+		}
+		result := base
+		if rule.Prompt != nil {
+			result.Prompt = *rule.Prompt
+		}
+		if rule.Completion != nil {
+			result.Completion = *rule.Completion
+		}
+		if rule.Cache != nil {
+			result.Cache = *rule.Cache
+		}
+		if rule.CacheWrite != nil {
+			result.CacheWrite = *rule.CacheWrite
+		}
+		return result
+	}
+	return base
+}
+
+func clampInt(value, minValue, maxValue int) int {
+	if value < minValue {
+		return minValue
+	}
+	if value > maxValue {
+		return maxValue
+	}
+	return value
+}
+
 func copyModelPrices(source map[string]ModelPrice) map[string]ModelPrice {
 	copy := make(map[string]ModelPrice, len(source))
 	for model, price := range source {
-		copy[model] = price
+		// 深拷贝 TimeRules:浅拷贝会把入库价格的切片和 *float64 交给 HTTP 响应,
+		// 调用方在锁外改动就会直接改到存储里。
+		copy[model] = normalizeModelPriceRules(price)
 	}
 	return copy
 }
@@ -3375,7 +3876,9 @@ func deleteModelPriceCaseInsensitive(prices map[string]ModelPrice, model string)
 func effectiveModelPrices(modelsDevPrices, manualPrices map[string]ModelPrice) map[string]ModelPrice {
 	result := copyModelPrices(modelsDevPrices)
 	for model, price := range manualPrices {
-		setModelPriceCaseInsensitive(result, model, price)
+		// 必须深拷贝:这份 map 会直接进 HTTP 响应,浅拷贝会把存储里的 TimeRules
+		// 切片和 *float64 一并交出去。
+		setModelPriceCaseInsensitive(result, model, normalizeModelPriceRules(price))
 	}
 	return result
 }
@@ -3521,8 +4024,11 @@ func (s *RequestStatistics) UpsertModelPrice(model string, price ModelPrice) (Mo
 	if model == "" {
 		return ModelPricesResponse{}, errors.New("model is required")
 	}
-	if !validModelPrice(price) {
+	if !validPriceNumber(price.Prompt) || !validPriceNumber(price.Completion) || !validPriceNumber(price.Cache) || !validPriceNumber(price.CacheWrite) {
 		return ModelPricesResponse{}, errors.New("price values must be non-negative finite numbers")
+	}
+	if err := validateModelPriceRules(price.TimeRules); err != nil {
+		return ModelPricesResponse{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -3530,13 +4036,18 @@ func (s *RequestStatistics) UpsertModelPrice(model string, price ModelPrice) (Mo
 	if s.modelPrices == nil {
 		s.modelPrices = make(map[string]ModelPrice)
 	}
-	setModelPriceCaseInsensitive(s.modelPrices, model, price)
+	// 在锁内对副本补 ID 并深拷贝,入库的价格从此不与调用方共享任何底层数据。
+	setModelPriceCaseInsensitive(s.modelPrices, model, normalizeModelPriceRules(price))
 	s.modelPriceIndex = normalizedModelPriceIndex(s.modelPrices)
+	// 内存价格表已经改了,版本号必须在这里自增:落盘失败会提前返回,若把自增留到
+	// 后面,失败路径会留下「表变了但版本没变」的状态,派生缓存(时段价格标志、
+	// summary ETag)就会继续用旧结论。
+	s.priceVersion++
 	if err := s.saveModelPricesLocked(); err != nil {
+		s.invalidateSummaryLocked()
 		return ModelPricesResponse{}, err
 	}
 	s.rebuildCostSeriesLocked()
-	s.priceVersion++
 	s.invalidateSummaryLocked()
 	return s.modelPricesResponseLocked(), nil
 }
@@ -3557,11 +4068,12 @@ func (s *RequestStatistics) DeleteModelPrice(model string) (ModelPricesResponse,
 	}
 	deleteModelPriceCaseInsensitive(s.modelPrices, model)
 	s.modelPriceIndex = normalizedModelPriceIndex(s.modelPrices)
+	s.priceVersion++
 	if err := s.saveModelPricesLocked(); err != nil {
+		s.invalidateSummaryLocked()
 		return ModelPricesResponse{}, err
 	}
 	s.rebuildCostSeriesLocked()
-	s.priceVersion++
 	s.invalidateSummaryLocked()
 	return s.modelPricesResponseLocked(), nil
 }
@@ -3586,6 +4098,7 @@ func (s *RequestStatistics) modelPricesResponseLocked() ModelPricesResponse {
 
 func (s *RequestStatistics) updateAPIStats(apiSt *apiStats, model string, detail RequestDetail) detailTotals {
 	totals := detailTotalsFromRequest(detail)
+	cost := s.detailCostLocked(model, detail, totals)
 	apiSt.TotalRequests++
 	if detail.Failed {
 		apiSt.FailureCount++
@@ -3600,6 +4113,7 @@ func (s *RequestStatistics) updateAPIStats(apiSt *apiStats, model string, detail
 	apiSt.ReasoningTokens += totals.reasoningTokens
 	apiSt.latencySum += totals.latencySum
 	apiSt.latencyN += totals.latencyN
+	apiSt.estimatedCost += cost
 
 	modelSt, ok := apiSt.Models[model]
 	if !ok {
@@ -3620,6 +4134,7 @@ func (s *RequestStatistics) updateAPIStats(apiSt *apiStats, model string, detail
 	modelSt.ReasoningTokens += totals.reasoningTokens
 	modelSt.latencySum += totals.latencySum
 	modelSt.latencyN += totals.latencyN
+	modelSt.estimatedCost += cost
 	modelSt.providerStats = incrementModelProviderStats(modelSt.providerStats, detail.Provider, detail.Failed, totals)
 	modelSt.Details = append(modelSt.Details, detail)
 	return totals
@@ -3712,6 +4227,7 @@ func (s *RequestStatistics) incrementModelSummaryStatsLocked(modelName string, d
 	modelStat.latencySum += totals.latencySum
 	modelStat.latencyN += totals.latencyN
 	modelStat.providerStats = incrementModelProviderStats(modelStat.providerStats, detail.Provider, detail.Failed, totals)
+	modelStat.EstimatedCost += s.detailCostLocked(modelName, detail, totals)
 }
 
 func (s *RequestStatistics) decrementModelSummaryStatsLocked(modelName string, detail RequestDetail, totals detailTotals) {
@@ -3734,6 +4250,7 @@ func (s *RequestStatistics) decrementModelSummaryStatsLocked(modelName string, d
 	modelStat.latencySum -= totals.latencySum
 	modelStat.latencyN -= totals.latencyN
 	decrementModelProviderStats(modelStat.providerStats, detail.Provider, detail.Failed, totals)
+	modelStat.EstimatedCost -= s.detailCostLocked(modelName, detail, totals)
 	if modelStat.TotalRequests <= 0 {
 		delete(s.modelSummaryStats, modelName)
 	}
@@ -3809,6 +4326,7 @@ func (s *RequestStatistics) incrementSummaryDimensionStatsLocked(modelName strin
 	clientAgg.stat.CachedTokens += totals.cachedTokens
 	clientAgg.stat.CacheWriteTokens += totals.cacheWriteTokens
 	clientAgg.stat.ReasoningTokens += totals.reasoningTokens
+	clientAgg.stat.EstimatedCost += s.detailCostLocked(modelName, detail, totals)
 
 	clientModel, ok := clientAgg.models[modelName]
 	if !ok {
@@ -3828,6 +4346,7 @@ func (s *RequestStatistics) incrementSummaryDimensionStatsLocked(modelName strin
 	clientModel.CacheWriteTokens += totals.cacheWriteTokens
 	clientModel.ReasoningTokens += totals.reasoningTokens
 	clientModel.providerStats = incrementModelProviderStats(clientModel.providerStats, detail.Provider, detail.Failed, totals)
+	clientModel.EstimatedCost += s.detailCostLocked(modelName, detail, totals)
 }
 
 func (s *RequestStatistics) decrementSummaryDimensionStatsLocked(modelName string, detail RequestDetail, totals detailTotals) {
@@ -3884,6 +4403,7 @@ func (s *RequestStatistics) decrementSummaryDimensionStatsLocked(modelName strin
 		clientAgg.stat.CachedTokens -= totals.cachedTokens
 		clientAgg.stat.CacheWriteTokens -= totals.cacheWriteTokens
 		clientAgg.stat.ReasoningTokens -= totals.reasoningTokens
+		clientAgg.stat.EstimatedCost -= s.detailCostLocked(modelName, detail, totals)
 
 		if clientModel, ok := clientAgg.models[modelName]; ok {
 			clientModel.TotalRequests--
@@ -3898,6 +4418,7 @@ func (s *RequestStatistics) decrementSummaryDimensionStatsLocked(modelName strin
 			clientModel.CachedTokens -= totals.cachedTokens
 			clientModel.CacheWriteTokens -= totals.cacheWriteTokens
 			clientModel.ReasoningTokens -= totals.reasoningTokens
+			clientModel.EstimatedCost -= s.detailCostLocked(modelName, detail, totals)
 			decrementModelProviderStats(clientModel.providerStats, detail.Provider, detail.Failed, totals)
 			if clientModel.TotalRequests <= 0 {
 				delete(clientAgg.models, modelName)
@@ -4058,6 +4579,11 @@ func (s *RequestStatistics) decrementCounters(d RequestDetail, apiSt *apiStats, 
 	dayKey := d.Timestamp.Format("2006-01-02")
 	hourKey := d.Timestamp.Hour()
 	cost := s.detailCostLocked(modelName, d, totals)
+	// 与 updateAPIStats 的累加保持对称。存在时段价格时
+	// applySummaryEstimatedCostsLocked 不再从聚合 token 重算 API 成本,漏减会让
+	// 已被 retention 淘汰的请求永久留在 API/API 模型成本里。
+	apiSt.estimatedCost -= cost
+	modelSt.estimatedCost -= cost
 	s.requestsByDay[dayKey]--
 	s.requestsByHour[hourKey]--
 	s.tokensByDay[dayKey] -= totals.totalTokens
@@ -4119,6 +4645,7 @@ func (s *RequestStatistics) rebuildAggregatesLocked() {
 		apiSt.ReasoningTokens = 0
 		apiSt.latencySum = 0
 		apiSt.latencyN = 0
+		apiSt.estimatedCost = 0
 		apiSt.Sources = make(map[string]*sourceStatAccumulator)
 		for modelName, modelSt := range apiSt.Models {
 			modelSt.TotalRequests = 0
@@ -4132,6 +4659,7 @@ func (s *RequestStatistics) rebuildAggregatesLocked() {
 			modelSt.ReasoningTokens = 0
 			modelSt.latencySum = 0
 			modelSt.latencyN = 0
+			modelSt.estimatedCost = 0
 			modelSt.providerStats = nil
 			for _, detail := range modelSt.Details {
 				totals := detailTotalsFromRequest(detail)
@@ -4176,6 +4704,8 @@ func (s *RequestStatistics) rebuildAggregatesLocked() {
 				dayKey := detail.Timestamp.Format("2006-01-02")
 				hourKey := detail.Timestamp.Hour()
 				cost := s.detailCostLocked(modelName, detail, totals)
+				apiSt.estimatedCost += cost
+				modelSt.estimatedCost += cost
 				s.requestsByDay[dayKey]++
 				s.requestsByHour[hourKey]++
 				s.tokensByDay[dayKey] += totals.totalTokens
@@ -4196,15 +4726,39 @@ func (s *RequestStatistics) rebuildCostSeriesLocked() {
 	if s == nil {
 		return
 	}
-	if len(s.costTokensByDay) == 0 && len(s.costTokensByHour) == 0 {
-		return
-	}
-	if len(s.costTokensByDay) > 0 {
+	// 时段差额只能叠加在「本次真正从 token 序列重建过」的序列上。若某条序列没有
+	// token 基准可重建,它保留的是上一轮已经含 delta 的旧值,再加一次就会每保存一
+	// 次价格膨胀一次(day/hour 两条守卫不对称时尤其明显)。
+	rebuiltDay := len(s.costTokensByDay) > 0
+	rebuiltHour := len(s.costTokensByHour) > 0
+	if rebuiltDay {
 		s.costByDay = s.costByDayFromTokenSeriesLocked()
 	}
-	if len(s.costTokensByHour) > 0 {
+	if rebuiltHour {
 		s.costByHour = s.costByHourFromTokenSeriesLocked()
 	}
+	if (rebuiltDay || rebuiltHour) && s.hasTimeBasedPricesLocked() {
+		// TimeSeriesTokenStat deliberately aggregates records after their details
+		// have been trimmed. It cannot retain each request's local time, so first
+		// price the complete aggregate with the base price and then apply the
+		// time-rule delta to the still-retained details. This preserves the cost
+		// of evicted records instead of silently dropping it during a reprice.
+		for _, api := range s.apis {
+			for modelName, model := range api.Models {
+				for _, detail := range model.Details {
+					totals := detailTotalsFromRequest(detail)
+					delta := s.detailTimePriceDeltaLocked(modelName, detail, totals)
+					if rebuiltDay {
+						s.costByDay[detail.Timestamp.Format("2006-01-02")] += delta
+					}
+					if rebuiltHour {
+						s.costByHour[detail.Timestamp.Hour()] += delta
+					}
+				}
+			}
+		}
+	}
+	s.rebuildEstimatedCostsLocked()
 }
 
 func (s *RequestStatistics) rebuildCostTokenSeriesFromDetailsLocked(rebuildDay, rebuildHour bool) {
@@ -4433,6 +4987,7 @@ func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, per
 				detail.Tokens.TotalTokens = detailTotalTokensForRequest(detail)
 				if detail.Timestamp.IsZero() {
 					detail.Timestamp = now
+					detail.TimestampSynthetic = true
 				}
 				if detail.LatencyMs < 0 {
 					detail.LatencyMs = 0
@@ -4616,7 +5171,96 @@ func (s *RequestStatistics) detailCostLocked(modelName string, detail RequestDet
 	if s == nil {
 		return 0
 	}
-	return s.timeSeriesTokenCostLocked(TimeSeriesTokenStat{
+	price, ok := s.basePriceForDetailLocked(modelName, detail)
+	if !ok {
+		return 0
+	}
+	price = effectiveDetailPrice(price, detail, s.pricingLocation)
+	return tokenCostForPrice(detailTimeSeriesTokenStat(modelName, detail, totals), price)
+}
+
+// effectiveDetailPrice 在 effectivePrice 之上加一道回落:导入/恢复时被补出时间戳的
+// 记录不得套用时段规则(图纸「无时间戳记录维持基础价」)。effectivePrice 自己的
+// IsZero 守卫对这些记录已经失效——时间戳在它看到之前就被填上了。
+func effectiveDetailPrice(base ModelPrice, detail RequestDetail, location *time.Location) ModelPrice {
+	if detail.TimestampSynthetic {
+		return base
+	}
+	return effectivePrice(base, detail.Timestamp, location)
+}
+
+// pricingSnapshot 冻结一次后台导出期间使用的价格表与计费时区。分页导出会在页与页
+// 之间释放锁,期间用户改价或 models.dev 自动刷新都会让同一个文件前后页用上不同的
+// 价格;快照让整份导出保持一致。
+type pricingSnapshot struct {
+	manualIndex map[string]ModelPrice
+	devIndex    map[string]ModelPrice
+	location    *time.Location
+}
+
+func (s *RequestStatistics) pricingSnapshotLocked() *pricingSnapshot {
+	if s == nil {
+		return &pricingSnapshot{location: time.UTC}
+	}
+	if len(s.modelPriceIndex) != len(s.modelPrices) {
+		s.modelPriceIndex = normalizedModelPriceIndex(s.modelPrices)
+	}
+	if len(s.modelsDevPriceIndex) != len(s.modelsDevPrices) {
+		s.modelsDevPriceIndex = normalizedModelPriceIndex(s.modelsDevPrices)
+	}
+	location := s.pricingLocation
+	if location == nil {
+		location = time.UTC
+	}
+	// 深拷贝:快照必须免疫后续改价。
+	return &pricingSnapshot{
+		manualIndex: copyModelPrices(s.modelPriceIndex),
+		devIndex:    copyModelPrices(s.modelsDevPriceIndex),
+		location:    location,
+	}
+}
+
+// PricingLocation 返回当前计费时区。pricingLocation 由 s.mu 保护,直接读字段是一次
+// 无同步访问(ConfigurePatch 会写它),调用方一律走这个访问器。
+func (s *RequestStatistics) PricingLocation() *time.Location {
+	if s == nil {
+		return time.UTC
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.pricingLocation == nil {
+		return time.UTC
+	}
+	return s.pricingLocation
+}
+
+// PricingSnapshot 供后台导出在开始时冻结价格。
+func (s *RequestStatistics) PricingSnapshot() *pricingSnapshot {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pricingSnapshotLocked()
+}
+
+func (p *pricingSnapshot) detailCost(modelName string, detail RequestDetail, totals detailTotals) float64 {
+	if p == nil {
+		return 0
+	}
+	model := detailModel(modelName, detail)
+	price, ok := priceForDetailFromIndex(p.manualIndex, model, detail.Provider)
+	if !ok {
+		if price, ok = priceForDetailFromIndex(p.devIndex, model, detail.Provider); !ok {
+			return 0
+		}
+	}
+	price = effectiveDetailPrice(price, detail, p.location)
+	return tokenCostForPrice(detailTimeSeriesTokenStat(modelName, detail, totals), price)
+}
+
+func detailTimeSeriesTokenStat(modelName string, detail RequestDetail, totals detailTotals) TimeSeriesTokenStat {
+	return TimeSeriesTokenStat{
 		Model:            detailModel(modelName, detail),
 		Provider:         detail.Provider,
 		TotalTokens:      totals.totalTokens,
@@ -4624,7 +5268,26 @@ func (s *RequestStatistics) detailCostLocked(modelName string, detail RequestDet
 		OutputTokens:     totals.outputTokens,
 		CachedTokens:     totals.cachedTokens,
 		CacheWriteTokens: totals.cacheWriteTokens,
-	})
+	}
+}
+
+func (s *RequestStatistics) basePriceForDetailLocked(modelName string, detail RequestDetail) (ModelPrice, bool) {
+	return s.priceForDetailLocked(detailModel(modelName, detail), detail.Provider)
+}
+
+func (s *RequestStatistics) detailBaseCostLocked(modelName string, detail RequestDetail, totals detailTotals) float64 {
+	if s == nil {
+		return 0
+	}
+	price, ok := s.basePriceForDetailLocked(modelName, detail)
+	if !ok {
+		return 0
+	}
+	return tokenCostForPrice(detailTimeSeriesTokenStat(modelName, detail, totals), price)
+}
+
+func (s *RequestStatistics) detailTimePriceDeltaLocked(modelName string, detail RequestDetail, totals detailTotals) float64 {
+	return s.detailCostLocked(modelName, detail, totals) - s.detailBaseCostLocked(modelName, detail, totals)
 }
 
 func (s *RequestStatistics) timeSeriesTokenCostLocked(stat TimeSeriesTokenStat) float64 {
@@ -4635,6 +5298,10 @@ func (s *RequestStatistics) timeSeriesTokenCostLocked(stat TimeSeriesTokenStat) 
 	if !ok {
 		return 0
 	}
+	return tokenCostForPrice(stat, price)
+}
+
+func tokenCostForPrice(stat TimeSeriesTokenStat, price ModelPrice) float64 {
 	inputTokens := nonNegativeInt64(stat.InputTokens)
 	outputTokens := nonNegativeInt64(stat.OutputTokens)
 	totalTokens := nonNegativeInt64(stat.TotalTokens)
@@ -4681,6 +5348,13 @@ func (s *RequestStatistics) applySummaryEstimatedCostsLocked(summary *DashboardS
 	if s == nil || summary == nil {
 		return
 	}
+	if s.hasTimeBasedPricesLocked() {
+		summary.Usage.TotalCost = 0
+		for _, model := range summary.ModelStats {
+			summary.Usage.TotalCost += model.EstimatedCost
+		}
+		return
+	}
 	summary.Usage.TotalCost = 0
 	for i := range summary.ModelStats {
 		model := &summary.ModelStats[i]
@@ -4707,7 +5381,86 @@ func (s *RequestStatistics) applySummaryEstimatedCostsLocked(summary *DashboardS
 	}
 }
 
+// hasTimeBasedPricesLocked 每次 summary / API 详情请求都会被问到,而 modelsDevPrices
+// 有上千条,直接全表扫描等于每请求 O(价格表)。这里按 priceVersion 派生:价格表每次
+// 变动都会自增该版本号,所以缓存不可能读到过期结论,也不需要在每个改价点手工同步
+// 一个布尔标志(那种写法漏一个点就会让时段价格静默失效)。
+//
+// 注意:本方法会写缓存字段,必须在 s.mu 的**写锁**下调用,不能在 RLock 路径里用。
+// TestTimeBasedPriceCacheIsRaceFreeUnderConcurrentPricing 会在 -race 下守住这一点。
+func (s *RequestStatistics) hasTimeBasedPricesLocked() bool {
+	if s == nil {
+		return false
+	}
+	if !s.timeBasedPricesValid || s.timeBasedPricesVersion != s.priceVersion {
+		s.timeBasedPricesVersion = s.priceVersion
+		s.timeBasedPricesValid = true
+		s.timeBasedPrices = mapHasTimeRules(s.modelPrices) || mapHasTimeRules(s.modelsDevPrices)
+	}
+	return s.timeBasedPrices
+}
+
+func mapHasTimeRules(prices map[string]ModelPrice) bool {
+	for _, price := range prices {
+		if len(price.TimeRules) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *RequestStatistics) rebuildEstimatedCostsLocked() {
+	if s == nil {
+		return
+	}
+	for _, api := range s.apis {
+		api.estimatedCost = 0
+		for modelName, model := range api.Models {
+			model.estimatedCost = s.aggregateEstimatedCostLocked(modelName, model.TotalTokens, model.InputTokens, model.OutputTokens, model.CachedTokens, model.CacheWriteTokens, finalizedModelProviderStats(model.providerStats, model.TotalRequests, model.SuccessCount, model.FailureCount, model.TotalTokens, model.InputTokens, model.OutputTokens, model.CachedTokens, model.CacheWriteTokens, model.ReasoningTokens))
+			api.estimatedCost += model.estimatedCost
+		}
+	}
+	for modelName, model := range s.modelSummaryStats {
+		model.EstimatedCost = s.aggregateEstimatedCostLocked(modelName, model.TotalTokens, model.InputTokens, model.OutputTokens, model.CachedTokens, model.CacheWriteTokens, finalizedModelProviderStats(model.providerStats, model.TotalRequests, model.SuccessCount, model.FailureCount, model.TotalTokens, model.InputTokens, model.OutputTokens, model.CachedTokens, model.CacheWriteTokens, model.ReasoningTokens))
+	}
+	for _, client := range s.clientAPIStats {
+		client.stat.EstimatedCost = 0
+		for modelName, model := range client.models {
+			model.EstimatedCost = s.aggregateEstimatedCostLocked(modelName, model.TotalTokens, model.InputTokens, model.OutputTokens, model.CachedTokens, model.CacheWriteTokens, finalizedModelProviderStats(model.providerStats, model.TotalRequests, model.SuccessCount, model.FailureCount, model.TotalTokens, model.InputTokens, model.OutputTokens, model.CachedTokens, model.CacheWriteTokens, model.ReasoningTokens))
+			client.stat.EstimatedCost += model.EstimatedCost
+		}
+	}
+	if !s.hasTimeBasedPricesLocked() {
+		return
+	}
+	for _, api := range s.apis {
+		for modelName, model := range api.Models {
+			for _, detail := range model.Details {
+				delta := s.detailTimePriceDeltaLocked(modelName, detail, detailTotalsFromRequest(detail))
+				api.estimatedCost += delta
+				model.estimatedCost += delta
+				if summaryModel := s.modelSummaryStats[modelName]; summaryModel != nil {
+					summaryModel.EstimatedCost += delta
+				}
+				if client := s.clientAPIStats[clientAPIGroupKey(detail)]; client != nil {
+					client.stat.EstimatedCost += delta
+					if clientModel := client.models[modelName]; clientModel != nil {
+						clientModel.EstimatedCost += delta
+					}
+				}
+			}
+		}
+	}
+}
+
 func (s *RequestStatistics) applyModelEstimatedCostsLocked(models []ModelStat) float64 {
+	if s.hasTimeBasedPricesLocked() {
+		var total float64
+		for i := range models {
+			total += models[i].EstimatedCost
+		}
+		return total
+	}
 	var total float64
 	for i := range models {
 		model := &models[i]
@@ -5238,6 +5991,7 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsLocked(now time.Time, heal
 			CachedTokens:     apiSt.CachedTokens,
 			CacheWriteTokens: apiSt.CacheWriteTokens,
 			ReasoningTokens:  apiSt.ReasoningTokens,
+			EstimatedCost:    apiSt.estimatedCost,
 			Models:           make(map[string]ModelSnapshotWithoutDetails, len(apiSt.Models)),
 		}
 		if apiSt.latencyN > 0 {
@@ -5255,6 +6009,7 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsLocked(now time.Time, heal
 				CachedTokens:     modelSt.CachedTokens,
 				CacheWriteTokens: modelSt.CacheWriteTokens,
 				ReasoningTokens:  modelSt.ReasoningTokens,
+				EstimatedCost:    modelSt.estimatedCost,
 				Providers:        finalizedModelProviderStats(modelSt.providerStats, modelSt.TotalRequests, modelSt.SuccessCount, modelSt.FailureCount, modelSt.TotalTokens, modelSt.InputTokens, modelSt.OutputTokens, modelSt.CachedTokens, modelSt.CacheWriteTokens, modelSt.ReasoningTokens),
 			}
 			if modelSt.latencyN > 0 {
@@ -5351,6 +6106,7 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsLocked(now time.Time, heal
 	summary.Meta.SummaryVersion = s.summaryVersion
 	summary.Meta.PriceVersion = s.priceVersion
 	summary.Meta.Storage = s.storageStatusLocked()
+	summary.Meta.Currency = s.currencyStateLocked(now)
 	if !s.lastRecordedAt.IsZero() {
 		summary.Meta.LastRecordedAt = s.lastRecordedAt.UTC().Format(time.RFC3339)
 	}
@@ -5440,6 +6196,7 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Ti
 
 				// Per-API aggregation
 				api := getOrCreateAPIRangeAgg(apiAgg, apiName)
+				api.estimatedCost += cost
 				api.TotalRequests++
 				if detail.Failed {
 					api.FailureCount++
@@ -5457,6 +6214,7 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Ti
 					api.latencyN++
 				}
 				rangeIncrementAPIModel(api, dModel, detail, totals)
+				api.models[dModel].estimatedCost += cost
 
 				// Model summary stats
 				ms, ok := modelAgg[dModel]
@@ -5471,6 +6229,7 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Ti
 					ms.SuccessCount++
 				}
 				ms.TotalTokens += totals.totalTokens
+				ms.EstimatedCost += cost
 				ms.InputTokens += totals.inputTokens
 				ms.OutputTokens += totals.outputTokens
 				ms.CachedTokens += totals.cachedTokens
@@ -5543,7 +6302,9 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Ti
 				client.stat.CachedTokens += totals.cachedTokens
 				client.stat.CacheWriteTokens += totals.cacheWriteTokens
 				client.stat.ReasoningTokens += totals.reasoningTokens
+				client.stat.EstimatedCost += cost
 				rangeIncrementClientModel(client, dModel, detail, totals)
+				client.models[dModel].EstimatedCost += cost
 			}
 		}
 	}
@@ -5575,6 +6336,7 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Ti
 			CachedTokens:     api.CachedTokens,
 			CacheWriteTokens: api.CacheWriteTokens,
 			ReasoningTokens:  api.ReasoningTokens,
+			EstimatedCost:    api.estimatedCost,
 			Models:           make(map[string]ModelSnapshotWithoutDetails, len(api.models)),
 		}
 		if api.latencyN > 0 {
@@ -5591,6 +6353,7 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Ti
 				CachedTokens:     m.CachedTokens,
 				CacheWriteTokens: m.CacheWriteTokens,
 				ReasoningTokens:  m.ReasoningTokens,
+				EstimatedCost:    m.estimatedCost,
 				Providers:        finalizedModelProviderStats(m.providerStats, m.TotalRequests, m.SuccessCount, m.FailureCount, m.TotalTokens, m.InputTokens, m.OutputTokens, m.CachedTokens, m.CacheWriteTokens, m.ReasoningTokens),
 			}
 			if m.latencyN > 0 {
@@ -5688,6 +6451,7 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Ti
 	summary.Meta.SummaryVersion = s.summaryVersion
 	summary.Meta.PriceVersion = s.priceVersion
 	summary.Meta.Storage = s.storageStatusLocked()
+	summary.Meta.Currency = s.currencyStateLocked(now)
 	if !s.lastRecordedAt.IsZero() {
 		summary.Meta.LastRecordedAt = s.lastRecordedAt.UTC().Format(time.RFC3339)
 	}
@@ -5716,6 +6480,7 @@ type apiRangeAgg struct {
 	CachedTokens     int64
 	CacheWriteTokens int64
 	ReasoningTokens  int64
+	estimatedCost    float64
 	latencySum       int64
 	latencyN         int64
 	models           map[string]*modelRangeAgg
@@ -5731,6 +6496,7 @@ type modelRangeAgg struct {
 	CachedTokens     int64
 	CacheWriteTokens int64
 	ReasoningTokens  int64
+	estimatedCost    float64
 	latencySum       int64
 	latencyN         int64
 	providerStats    map[string]*ModelProviderStat
@@ -6701,7 +7467,8 @@ func (s *RequestStatistics) QueryExportEventsAt(params EventsQuery, maxRecords i
 // QueryExportEventsPage returns one page of exportable events while still
 // counting the full match total. snapshotAt freezes the upper time bound so
 // background exports do not shift when new requests arrive while paging.
-func (s *RequestStatistics) QueryExportEventsPage(params EventsQuery, offset int, pageLimit int, maxRecords int, snapshotAt time.Time) EventsResult {
+// pricing 冻结该次导出使用的价格表;传 nil 表示按当前价格计价。
+func (s *RequestStatistics) QueryExportEventsPage(params EventsQuery, offset int, pageLimit int, maxRecords int, snapshotAt time.Time, pricing *pricingSnapshot) EventsResult {
 	if s == nil {
 		return EventsResult{}
 	}
@@ -6755,6 +7522,17 @@ func (s *RequestStatistics) QueryExportEventsPage(params EventsQuery, offset int
 
 		dashboardVersion: s.summaryVersion,
 	}
+	// 后台分页导出不走 queryEventsAt 的 finish(),必须在这里自己附加成本,否则
+	// JSON/JSONL 完全没有 cost_usd、CSV 的该列整列为空。pricing 非 nil 时按导出
+	// 开始时冻结的价格计价,保证整份文件前后页口径一致。
+	if pricing != nil {
+		for i := range result.Events {
+			cost := pricing.detailCost(result.Events[i].Model, result.Events[i], detailTotalsFromRequest(result.Events[i]))
+			result.Events[i].CostUSD = &cost
+		}
+	} else {
+		s.attachEventCostsLocked(result.Events)
+	}
 	s.lastEventsQueryDuration = time.Since(startedAt)
 	s.lastEventsQueryTotal = total
 	return result
@@ -6806,6 +7584,7 @@ func (s *RequestStatistics) queryEventsAt(params EventsQuery, paginate bool, exp
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	finish := func(result EventsResult) EventsResult {
+		s.attachEventCostsLocked(result.Events)
 		result.dashboardVersion = s.summaryVersion
 		s.lastEventsQueryDuration = time.Since(startedAt)
 		s.lastEventsQueryTotal = result.Total
@@ -6932,6 +7711,14 @@ func (s *RequestStatistics) queryEventsAt(params EventsQuery, paginate bool, exp
 	return finish(result)
 }
 
+func (s *RequestStatistics) attachEventCostsLocked(events []RequestDetail) {
+	for i := range events {
+		detail := &events[i]
+		cost := s.detailCostLocked(detail.Model, *detail, detailTotalsFromRequest(*detail))
+		detail.CostUSD = &cost
+	}
+}
+
 func exportResultLimit(total int, exportLimit int) int {
 	if exportLimit > 0 && total > exportLimit {
 		return exportLimit
@@ -6980,6 +7767,7 @@ func (s *RequestStatistics) QueryAPIDetailForClientAPIAt(api string, rangeKey st
 	generatedAt := s.dashboardQueryGeneratedAtLocked(rangeKey, now).UTC().Format(time.RFC3339)
 	result.GeneratedAt = generatedAt
 	finish := func(result APIDetailResponse) APIDetailResponse {
+		s.attachEventCostsLocked(result.RecentEvents)
 		result.Summary.EstimatedCost = s.applyModelEstimatedCostsLocked(result.ModelStats)
 		result.dashboardVersion = s.summaryVersion
 		s.apiDetailQueries++
@@ -7061,6 +7849,7 @@ func (s *RequestStatistics) QueryAPIDetailForClientAPIAt(api string, rangeKey st
 				ms.SuccessCount++
 			}
 			ms.TotalTokens += totalTokens
+			ms.EstimatedCost += s.detailCostLocked(modelLabel, d, detailTotals{totalTokens: totalTokens, inputTokens: inputTokens, outputTokens: outputTokens, cachedTokens: cachedTokens, cacheWriteTokens: cacheWriteTokens, reasoningTokens: reasoningTokens})
 			ms.InputTokens += inputTokens
 			ms.OutputTokens += outputTokens
 			ms.CachedTokens += cachedTokens
@@ -7172,6 +7961,7 @@ func apiDetailSummaryFromAPIStats(apiSt *apiStats) APIDetailSummary {
 		CachedTokens:     apiSt.CachedTokens,
 		CacheWriteTokens: apiSt.CacheWriteTokens,
 		ReasoningTokens:  apiSt.ReasoningTokens,
+		EstimatedCost:    apiSt.estimatedCost,
 	}
 	if apiSt.latencyN > 0 {
 		summary.AvgLatencyMs = float64(apiSt.latencySum) / float64(apiSt.latencyN)
@@ -7199,6 +7989,7 @@ func apiDetailModelStatsFromAPIStats(apiSt *apiStats) []ModelStat {
 			CachedTokens:     modelSt.CachedTokens,
 			CacheWriteTokens: modelSt.CacheWriteTokens,
 			ReasoningTokens:  modelSt.ReasoningTokens,
+			EstimatedCost:    modelSt.estimatedCost,
 			Providers:        finalizedModelProviderStats(modelSt.providerStats, modelSt.TotalRequests, modelSt.SuccessCount, modelSt.FailureCount, modelSt.TotalTokens, modelSt.InputTokens, modelSt.OutputTokens, modelSt.CachedTokens, modelSt.CacheWriteTokens, modelSt.ReasoningTokens),
 		}
 		if modelSt.latencyN > 0 {
@@ -7266,12 +8057,22 @@ func (s *RequestStatistics) DashboardVersion() uint64 {
 	return s.summaryVersion
 }
 
+func (s *RequestStatistics) CurrencyVersion() uint64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.currencyVersion
+}
+
 func (s *RequestStatistics) Close() {
 	if s == nil {
 		return
 	}
 	s.stopStorageWorker()
 	s.stopModelsDevPriceWorker()
+	s.stopExchangeRateWorker()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closeStorageLocked()
@@ -7300,6 +8101,12 @@ func (s *RequestStatistics) ConfigSnapshot() ExportConfig {
 		ModelsDevPricesEnabled:        s.modelsDevPricesEnabled,
 		ModelsDevPricesURL:            s.modelsDevPricesURL,
 		ModelsDevRefreshSeconds:       int(s.modelsDevRefresh.Seconds()),
+		PricingTimezone:               s.pricingTimezone,
+		ExchangeRateEnabled:           s.exchangeRateEnabled,
+		ExchangeRateUSD:               s.exchangeRateURL,
+		ExchangeRateRefreshSeconds:    int(s.exchangeRateRefresh.Seconds()),
+		ExchangeRateTimeoutSeconds:    int(s.exchangeRateTimeout.Seconds()),
+		ExchangeRateFallbackUSDCNY:    s.exchangeRateFallback,
 	}
 }
 
@@ -7517,6 +8324,9 @@ func (s *RequestStatistics) RuntimeStatus() RuntimeStatus {
 		LastEventsExportRawBytes:   s.lastEventsExportRawBytes,
 		LastEventsExportBodyBytes:  s.lastEventsExportBodyBytes,
 		ConditionalRequests:        conditionalRequestStatusMap(s.conditionalRequests),
+		ExchangeRate:               s.currencyStateLocked(time.Now()),
+		PricingTimezone:            s.pricingTimezone,
+		PricingTimezoneError:       s.pricingTimezoneError,
 	}
 	if !s.startedAt.IsZero() {
 		status.StartedAt = s.startedAt.UTC().Format(time.RFC3339)

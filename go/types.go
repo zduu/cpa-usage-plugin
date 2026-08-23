@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"math"
 	"strconv"
@@ -9,21 +10,26 @@ import (
 )
 
 const (
-	abiVersion                     uint32 = 1
-	defaultMaxDetailsPerModel             = 5000
-	defaultRetentionDays                  = 30
-	defaultDedupWindowMinutes             = 24 * 60
-	defaultStorageFlushSeconds            = 30
-	defaultStorageSnapshotSeconds         = 300
-	defaultStorageSnapshotRecords         = 1000
-	defaultStorageSyncSeconds             = 0
-	defaultStorageSyncRecords             = 0
-	defaultStorageWriteQueueSize          = 4096
-	defaultStorageWriteBatchSize          = 128
-	defaultExportMaxRecords               = 100000
-	defaultPriceStoragePath               = "usage-statistics-prices.json"
-	defaultModelsDevPricesURL             = "https://models.dev/api.json"
-	defaultModelsDevRefreshSeconds        = 12 * 60 * 60
+	abiVersion                        uint32 = 1
+	defaultMaxDetailsPerModel                = 5000
+	defaultRetentionDays                     = 30
+	defaultDedupWindowMinutes                = 24 * 60
+	defaultStorageFlushSeconds               = 30
+	defaultStorageSnapshotSeconds            = 300
+	defaultStorageSnapshotRecords            = 1000
+	defaultStorageSyncSeconds                = 0
+	defaultStorageSyncRecords                = 0
+	defaultStorageWriteQueueSize             = 4096
+	defaultStorageWriteBatchSize             = 128
+	defaultExportMaxRecords                  = 100000
+	defaultPriceStoragePath                  = "usage-statistics-prices.json"
+	defaultModelsDevPricesURL                = "https://models.dev/api.json"
+	defaultModelsDevRefreshSeconds           = 12 * 60 * 60
+	defaultPricingTimezone                   = "Asia/Shanghai"
+	defaultExchangeRateURL                   = "https://open.er-api.com/v6/latest/USD"
+	defaultExchangeRateRefreshSeconds        = 6 * 60 * 60
+	defaultExchangeRateTimeoutSeconds        = 5
+	defaultExchangeRateFallbackUSDCNY        = 7.20
 )
 
 type envelope struct {
@@ -58,6 +64,12 @@ type runtimeConfig struct {
 	ClaudeCacheRepairEnabled      bool
 	UpdateEnabled                 bool
 	UpdateVersion                 string
+	PricingTimezone               string
+	ExchangeRateEnabled           bool
+	ExchangeRateUSD               string
+	ExchangeRateRefreshSeconds    int
+	ExchangeRateTimeoutSeconds    int
+	ExchangeRateFallbackUSDCNY    float64
 }
 
 type runtimeConfigPatch struct {
@@ -81,6 +93,12 @@ type runtimeConfigPatch struct {
 	ClaudeCacheRepairEnabled      *bool
 	UpdateEnabled                 *bool
 	UpdateVersion                 *string
+	PricingTimezone               *string
+	ExchangeRateEnabled           *bool
+	ExchangeRateUSD               *string
+	ExchangeRateRefreshSeconds    *int
+	ExchangeRateTimeoutSeconds    *int
+	ExchangeRateFallbackUSDCNY    *float64
 }
 
 func defaultRuntimeConfig() runtimeConfig {
@@ -104,9 +122,15 @@ func defaultRuntimeConfig() runtimeConfig {
 		ModelsDevRefreshSeconds:       defaultModelsDevRefreshSeconds,
 		// 历史缓存双计修复默认关闭:旧数据中「真实命中恰好等于创建」的合法
 		// 记录与污染签名不可判定,须由用户确认后显式启用(见 claude_cache_repair.go)。
-		ClaudeCacheRepairEnabled: false,
-		UpdateEnabled:            false,
-		UpdateVersion:            "latest",
+		ClaudeCacheRepairEnabled:   false,
+		UpdateEnabled:              false,
+		UpdateVersion:              "latest",
+		PricingTimezone:            defaultPricingTimezone,
+		ExchangeRateEnabled:        true,
+		ExchangeRateUSD:            defaultExchangeRateURL,
+		ExchangeRateRefreshSeconds: defaultExchangeRateRefreshSeconds,
+		ExchangeRateTimeoutSeconds: defaultExchangeRateTimeoutSeconds,
+		ExchangeRateFallbackUSDCNY: defaultExchangeRateFallbackUSDCNY,
 	}
 }
 
@@ -555,22 +579,28 @@ type ExportPayload struct {
 }
 
 type ExportConfig struct {
-	RetentionDays                 int    `json:"retention_days"`
-	MaxDetailsPerModel            int    `json:"max_details_per_model"`
-	DedupWindowMinutes            int    `json:"dedup_window_minutes"`
-	LogResponseHeaders            string `json:"log_response_headers,omitempty"`
-	StorageEnabled                bool   `json:"storage_enabled"`
-	StoragePath                   string `json:"storage_path,omitempty"`
-	StorageFlushSeconds           int    `json:"storage_flush_interval_seconds,omitempty"`
-	StorageSnapshotSeconds        int    `json:"storage_snapshot_interval_seconds,omitempty"`
-	StorageSnapshotRecordInterval int    `json:"storage_snapshot_record_interval,omitempty"`
-	StorageSyncSeconds            int    `json:"storage_sync_interval_seconds,omitempty"`
-	StorageSyncRecordInterval     int    `json:"storage_sync_record_interval,omitempty"`
-	ExportMaxRecords              int    `json:"export_max_records,omitempty"`
-	PriceStoragePath              string `json:"price_storage_path,omitempty"`
-	ModelsDevPricesEnabled        bool   `json:"models_dev_prices_enabled,omitempty"`
-	ModelsDevPricesURL            string `json:"models_dev_prices_url,omitempty"`
-	ModelsDevRefreshSeconds       int    `json:"models_dev_prices_refresh_interval_seconds,omitempty"`
+	RetentionDays                 int     `json:"retention_days"`
+	MaxDetailsPerModel            int     `json:"max_details_per_model"`
+	DedupWindowMinutes            int     `json:"dedup_window_minutes"`
+	LogResponseHeaders            string  `json:"log_response_headers,omitempty"`
+	StorageEnabled                bool    `json:"storage_enabled"`
+	StoragePath                   string  `json:"storage_path,omitempty"`
+	StorageFlushSeconds           int     `json:"storage_flush_interval_seconds,omitempty"`
+	StorageSnapshotSeconds        int     `json:"storage_snapshot_interval_seconds,omitempty"`
+	StorageSnapshotRecordInterval int     `json:"storage_snapshot_record_interval,omitempty"`
+	StorageSyncSeconds            int     `json:"storage_sync_interval_seconds,omitempty"`
+	StorageSyncRecordInterval     int     `json:"storage_sync_record_interval,omitempty"`
+	ExportMaxRecords              int     `json:"export_max_records,omitempty"`
+	PriceStoragePath              string  `json:"price_storage_path,omitempty"`
+	ModelsDevPricesEnabled        bool    `json:"models_dev_prices_enabled,omitempty"`
+	ModelsDevPricesURL            string  `json:"models_dev_prices_url,omitempty"`
+	ModelsDevRefreshSeconds       int     `json:"models_dev_prices_refresh_interval_seconds,omitempty"`
+	PricingTimezone               string  `json:"pricing_timezone,omitempty"`
+	ExchangeRateEnabled           bool    `json:"exchange_rate_enabled,omitempty"`
+	ExchangeRateUSD               string  `json:"exchange_rate_usd_cny_url,omitempty"`
+	ExchangeRateRefreshSeconds    int     `json:"exchange_rate_refresh_interval_seconds,omitempty"`
+	ExchangeRateTimeoutSeconds    int     `json:"exchange_rate_timeout_seconds,omitempty"`
+	ExchangeRateFallbackUSDCNY    float64 `json:"exchange_rate_fallback_usd_cny,omitempty"`
 }
 
 type StorageStatus struct {
@@ -609,18 +639,31 @@ type StorageStatus struct {
 }
 
 type ModelPrice struct {
-	Prompt     float64 `json:"prompt"`
-	Completion float64 `json:"completion"`
-	Cache      float64 `json:"cache"`
-	CacheWrite float64 `json:"cache_write"`
+	Prompt     float64          `json:"prompt"`
+	Completion float64          `json:"completion"`
+	Cache      float64          `json:"cache"`
+	CacheWrite float64          `json:"cache_write"`
+	TimeRules  []ModelPriceRule `json:"time_rules,omitempty"`
+}
+
+type ModelPriceRule struct {
+	ID         string   `json:"id,omitempty"`
+	Name       string   `json:"name"`
+	Start      string   `json:"start"`
+	End        string   `json:"end"`
+	Prompt     *float64 `json:"prompt,omitempty"`
+	Completion *float64 `json:"completion,omitempty"`
+	Cache      *float64 `json:"cache,omitempty"`
+	CacheWrite *float64 `json:"cache_write,omitempty"`
 }
 
 func (p *ModelPrice) UnmarshalJSON(data []byte) error {
 	var raw struct {
-		Prompt     float64  `json:"prompt"`
-		Completion float64  `json:"completion"`
-		Cache      float64  `json:"cache"`
-		CacheWrite *float64 `json:"cache_write"`
+		Prompt     float64          `json:"prompt"`
+		Completion float64          `json:"completion"`
+		Cache      float64          `json:"cache"`
+		CacheWrite *float64         `json:"cache_write"`
+		TimeRules  []ModelPriceRule `json:"time_rules"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -634,7 +677,25 @@ func (p *ModelPrice) UnmarshalJSON(data []byte) error {
 	if raw.CacheWrite != nil {
 		p.CacheWrite = *raw.CacheWrite
 	}
+	p.TimeRules = raw.TimeRules
 	return nil
+}
+
+func newModelPriceRuleID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "rule-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return "" + hexByte(b[0]) + hexByte(b[1]) + hexByte(b[2]) + hexByte(b[3]) + "-" +
+		hexByte(b[4]) + hexByte(b[5]) + "-" + hexByte(b[6]) + hexByte(b[7]) + "-" +
+		hexByte(b[8]) + hexByte(b[9]) + "-" + hexByte(b[10]) + hexByte(b[11]) + hexByte(b[12]) + hexByte(b[13]) + hexByte(b[14]) + hexByte(b[15])
+}
+
+func hexByte(value byte) string {
+	const digits = "0123456789abcdef"
+	return string([]byte{digits[value>>4], digits[value&0x0f]})
 }
 
 type ModelPricesResponse struct {
@@ -701,6 +762,21 @@ type RuntimeStatus struct {
 	LastEventsExportBodyBytes  int                                 `json:"last_events_export_body_bytes,omitempty"`
 	ConditionalRequests        map[string]ConditionalRequestStatus `json:"conditional_requests,omitempty"`
 	LastImport                 *ImportSummary                      `json:"last_import,omitempty"`
+	ExchangeRate               CurrencyState                       `json:"exchange_rate"`
+	PricingTimezone            string                              `json:"pricing_timezone,omitempty"`
+	PricingTimezoneError       string                              `json:"pricing_timezone_error,omitempty"`
+}
+
+type CurrencyState struct {
+	Base             string   `json:"base"`
+	SupportedDisplay []string `json:"supported_display"`
+	USDCNYRate       float64  `json:"usd_cny_rate,omitempty"`
+	Source           string   `json:"source,omitempty"`
+	FetchedAt        string   `json:"fetched_at,omitempty"`
+	ExpiresAt        string   `json:"expires_at,omitempty"`
+	Status           string   `json:"status"`
+	Error            string   `json:"error,omitempty"`
+	ConsecutiveFails int      `json:"consecutive_failures,omitempty"`
 }
 
 type ConditionalRequestStatus struct {
@@ -750,6 +826,16 @@ type RequestDetail struct {
 	StatusCode  int                 `json:"status_code,omitempty"`
 	Failure     string              `json:"failure,omitempty"`
 	Headers     map[string][]string `json:"headers,omitempty"`
+	// TimestampSynthetic 标记 Timestamp 是导入/恢复时补出来的,不是真实请求时间。
+	// 分桶、排序、retention 仍需要一个可用的时间,所以时间戳照样填,但时段价格必须
+	// 按图纸「无时间戳记录维持基础价」回落,不能拿服务器当时的钟点去套峰谷规则。
+	// 需要持久化:否则重启后这条记录看起来就是一条普通的带时间戳记录。
+	TimestampSynthetic bool `json:"timestamp_synthetic,omitempty"`
+	// CostUSD 是查询期附加的后端估算成本,存储记录里为 nil。用指针而不是
+	// float64+omitempty:合法的零价时段成本必须以 "cost_usd":0 出现在事件接口和
+	// 导出里,否则看板会当作「后端没给成本」而按基础价格重算,把免费时段显示成
+	// 收费。nil(未计算)与 0(确为零价)必须可区分。
+	CostUSD *float64 `json:"cost_usd,omitempty"`
 }
 
 type TokenStats struct {
@@ -1035,6 +1121,7 @@ type DashboardMeta struct {
 	Storage            StorageStatus  `json:"storage"`
 	LastImport         *ImportSummary `json:"last_import,omitempty"`
 	EvictedTotal       int64          `json:"evicted_total"`
+	Currency           CurrencyState  `json:"currency"`
 }
 
 // ImportSummary is a lightweight snapshot of the last import result.

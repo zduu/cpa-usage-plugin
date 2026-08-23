@@ -1448,7 +1448,7 @@ func TestDashboardEventsExportPageUsesSnapshotAndLimit(t *testing.T) {
 		Detail:      UsageDetail{TotalTokens: 999},
 	})
 
-	first := stats.QueryExportEventsPage(EventsQuery{}, 0, 2, 3, snapshotAt)
+	first := stats.QueryExportEventsPage(EventsQuery{}, 0, 2, 3, snapshotAt, nil)
 	if first.Total != 6 || len(first.Events) != 2 || first.Limit != 3 || !first.Truncated {
 		t.Fatalf("first export page = total %d len %d limit %d truncated %v, want 6/2/3/true", first.Total, len(first.Events), first.Limit, first.Truncated)
 	}
@@ -1456,7 +1456,7 @@ func TestDashboardEventsExportPageUsesSnapshotAndLimit(t *testing.T) {
 		t.Fatalf("first export page should start with newest snapshot rows: %#v", first.Events)
 	}
 
-	second := stats.QueryExportEventsPage(EventsQuery{}, 2, 2, 3, snapshotAt)
+	second := stats.QueryExportEventsPage(EventsQuery{}, 2, 2, 3, snapshotAt, nil)
 	if second.Total != 6 || len(second.Events) != 1 || second.Limit != 3 || !second.Truncated {
 		t.Fatalf("second export page = total %d len %d limit %d truncated %v, want 6/1/3/true", second.Total, len(second.Events), second.Limit, second.Truncated)
 	}
@@ -1464,7 +1464,7 @@ func TestDashboardEventsExportPageUsesSnapshotAndLimit(t *testing.T) {
 		t.Fatalf("second export page should continue after offset: %#v", second.Events)
 	}
 
-	afterLimit := stats.QueryExportEventsPage(EventsQuery{}, 3, 2, 3, snapshotAt)
+	afterLimit := stats.QueryExportEventsPage(EventsQuery{}, 3, 2, 3, snapshotAt, nil)
 	if afterLimit.Total != 6 || len(afterLimit.Events) != 0 || afterLimit.Limit != 3 || !afterLimit.Truncated {
 		t.Fatalf("after-limit export page = total %d len %d limit %d truncated %v, want 6/0/3/true", afterLimit.Total, len(afterLimit.Events), afterLimit.Limit, afterLimit.Truncated)
 	}
