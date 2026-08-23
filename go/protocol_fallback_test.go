@@ -480,3 +480,75 @@ func TestProtocolFallbackPairingPrefersLaterNativeWithWiderWindow(t *testing.T) 
 		t.Fatal("兜底记录应被合并掉")
 	}
 }
+
+// 关联键只比 (总量−输出, 输出, 推理),两笔缓存拆分不同但总量相同的请求会撞键。
+// 缓存命中作为判别项(而非键的一部分)把它们分开:CPA 的 Claude→OpenAI 翻译把
+// cache_read_input_tokens 原样写进 cached_tokens,两侧口径一致,可以比。
+func TestProtocolFallbackRejectsMismatchedCacheReads(t *testing.T) {
+	fallback, native := protocolFallbackTestRecords()
+	// 两侧 (总量−输出) 均为 1000、输出均为 11,键相同;命中量 300 vs 400。
+	fallback.Detail = UsageDetail{InputTokens: 1000, OutputTokens: 11, CachedTokens: 300, TotalTokens: 1011}
+	native.Detail = UsageDetail{InputTokens: 1000, OutputTokens: 11, CachedTokens: 400, CacheReadTokens: 400, TotalTokens: 1011}
+	if usageProtocolCorrelationKey(fallback) != usageProtocolCorrelationKey(native) {
+		t.Fatal("前提不成立:两条记录的关联键应当相同,否则测不到判别项")
+	}
+
+	oldStats := NewRequestStatistics()
+	oldStats.Record(fallback)
+	oldStats.Record(native)
+	reconciled, count := reconcileProtocolFallbackSnapshot(oldStats.Snapshot())
+	if count != 0 || reconciled.TotalRequests != 2 {
+		t.Fatalf("命中量不同的两笔请求被合并了: count/requests = %d/%d, want 0/2", count, reconciled.TotalRequests)
+	}
+
+	// 兜底侧没报缓存时必须保持宽松,否则又会退回「配不上」。
+	fallback.Detail.CachedTokens = 0
+	fallback.Detail.InputTokens = 1000
+	permissive := NewRequestStatistics()
+	permissive.Record(fallback)
+	permissive.Record(native)
+	if _, count := reconcileProtocolFallbackSnapshot(permissive.Snapshot()); count != 1 {
+		t.Fatalf("兜底侧缺缓存字段时应照常配对, count = %d, want 1", count)
+	}
+}
+
+// 贪心「各挑最近的」不保证最大匹配。构造:F1@100、F2@103;N1 完成于 101、
+// N2 完成于 98,两者 latency 均 200s(窗口 2s)。贪心让 F1 抢走 N1(距离 1 < 2),
+// F2 就够不着 N2(距离 5 > 2),留下一条本该消掉的重复记录;最大匹配取
+// F1→N2 / F2→N1,两条都配上。
+func TestProtocolFallbackPairingFindsMaximumMatching(t *testing.T) {
+	base, native := protocolFallbackTestRecords()
+	latency := 200 * time.Second
+	origin := native.RequestedAt
+
+	makeFallback := func(offset time.Duration) UsageRecord {
+		record := base
+		record.RequestedAt = origin.Add(offset)
+		return record
+	}
+	makeNative := func(completion time.Duration, authIndex string) UsageRecord {
+		record := native
+		record.Latency = latency
+		record.AuthIndex = authIndex
+		record.AuthID = "codex-" + authIndex + ".json"
+		record.RequestedAt = origin.Add(completion).Add(-latency)
+		return record
+	}
+
+	oldStats := NewRequestStatistics()
+	oldStats.Record(makeFallback(100 * time.Second))
+	oldStats.Record(makeFallback(103 * time.Second))
+	oldStats.Record(makeNative(101*time.Second, "auth-n1"))
+	oldStats.Record(makeNative(98*time.Second, "auth-n2"))
+
+	reconciled, count := reconcileProtocolFallbackSnapshot(oldStats.Snapshot())
+	if count != 2 {
+		t.Fatalf("配对数 = %d, want 2(贪心只能配到 1)", count)
+	}
+	if reconciled.TotalRequests != 2 {
+		t.Fatalf("配对后请求数 = %d, want 2", reconciled.TotalRequests)
+	}
+	if _, ok := reconciled.APIs["openai-compatible"]; ok {
+		t.Fatal("两条兜底记录都应被合并掉")
+	}
+}

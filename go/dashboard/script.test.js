@@ -2415,3 +2415,30 @@ test('currency detail collapses when the status is cleared', async () => {
   assert.strictEqual(document.getElementById('currencyStatusDetail').textContent, '');
   assert.strictEqual(document.getElementById('currencyStatusInfo').getAttribute('aria-expanded'), 'false');
 });
+
+// 坏 days(手改或导入的价格文件)必须被前端拒绝,而不是被 serializedTimeRules
+// 悄悄清洗后照常保存——后端 validateModelPriceRules 是拒绝的,两边必须一致。
+test('invalid weekday values reach the validator instead of being sanitized', async () => {
+  const { context, document } = createDashboardHarness({
+    manualPrices: {
+      'openai/gpt-4.1': {
+        prompt: 3, completion: 11, cache: 0.3, cache_write: 1,
+        time_rules: [{ id: 'bad', name: '坏规则', days: [7, 1], start: '08:00', end: '09:00', prompt: 1.5 }],
+      },
+    },
+  });
+
+  await openPriceSettings(document);
+  document.getElementById('priceModel').value = 'openai/gpt-4.1';
+  document.getElementById('priceModel').onchange();
+
+  const serialized = context.serializedTimeRules();
+  assert.deepStrictEqual(Array.from(serialized[0].days), [7, 1], '非法 days 必须原样带到校验');
+  assert.throws(() => context.validateTimeRulesClient(serialized), /时段规则无效|Invalid time rule/);
+
+  // 合法值仍然照常排序去重,整周收敛成「每天」(空列表)。
+  [[[5, 1, 5], [1, 5]], [[0, 1, 2, 3, 4, 5, 6], []]].forEach(([input, expected]) => {
+    const normalized = context.normalizedRuleDays(context.ruleDaySet({ days: input }));
+    assert.deepStrictEqual(Array.from(normalized), expected);
+  });
+});

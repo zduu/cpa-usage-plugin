@@ -153,6 +153,11 @@ func protocolUsageCompletionDistance(fallback, native UsageRecord) (time.Duratio
 	if !protocolEndpointsCompatible(fallback.Endpoint, native.Endpoint) {
 		return 0, false
 	}
+	fallbackCacheRead, _, _ := usageDetailCacheTokenParts(fallback.Detail, fallback.Provider)
+	nativeCacheRead, _, _ := usageDetailCacheTokenParts(native.Detail, native.Provider)
+	if !protocolCacheReadsCompatible(fallbackCacheRead, nativeCacheRead) {
+		return 0, false
+	}
 	fallbackAt := fallback.RequestedAt
 	nativeCompletedAt := native.RequestedAt.Add(native.Latency)
 	if fallbackAt.IsZero() || native.RequestedAt.IsZero() {
@@ -237,31 +242,22 @@ func pairProtocolFallbackDetails(refs []protocolFallbackDetailRef) []protocolFal
 		}
 		sort.SliceStable(fallbacks, func(i, j int) bool { return refLess(fallbacks[i], fallbacks[j], false) })
 		sort.SliceStable(natives, func(i, j int) bool { return refLess(natives[i], natives[j], true) })
-		// 每条 fallback 在未被占用的 native 里挑完成时刻最近、且落在**该 native
-		// 自己**窗口内的那一条,与实时路径 protocolUsageCompletionDistance 的
-		// 口径一致。这里不能用双指针归并:窗口随 latency 变化后,"当前 native
-		// 配不上就推进某一侧"的规则会丢掉本该配上后一条 native 的记录——两条
-		// native 完成时刻只差一点,但后一条是长请求、窗口宽得多。一个 key 组内
-		// 的记录 token 向量完全相同,组通常只有一两条,O(F×N) 无所谓。
-		used := make([]bool, len(natives))
-		for _, fallbackIdx := range fallbacks {
+
+		// 每条 fallback 的可配 native,按完成时刻距离升序。窗口取**该 native 自己**
+		// 的(随 latency 变化),与实时路径 protocolUsageCompletionDistance 同口径。
+		candidates := make([][]protocolFallbackCandidate, len(fallbacks))
+		for fallbackPos, fallbackIdx := range fallbacks {
 			fallbackRef := refs[fallbackIdx]
-			fallbackAt := fallbackRef.detail.Timestamp
-			if fallbackAt.IsZero() {
+			if fallbackRef.detail.Timestamp.IsZero() {
 				continue
 			}
-			best := -1
-			var bestDistance time.Duration
 			for nativePos, nativeIdx := range natives {
-				if used[nativePos] {
-					continue
-				}
 				nativeRef := refs[nativeIdx]
 				if nativeRef.detail.Timestamp.IsZero() {
 					continue
 				}
 				latency := time.Duration(nativeRef.detail.LatencyMs) * time.Millisecond
-				distance := fallbackAt.Sub(nativeRef.detail.Timestamp.Add(latency))
+				distance := fallbackRef.detail.Timestamp.Sub(nativeRef.detail.Timestamp.Add(latency))
 				if distance < 0 {
 					distance = -distance
 				}
@@ -271,22 +267,90 @@ func pairProtocolFallbackDetails(refs []protocolFallbackDetailRef) []protocolFal
 				if !protocolEndpointsCompatible(fallbackRef.detail.Endpoint, nativeRef.detail.Endpoint) {
 					continue
 				}
-				// 距离相同时保留排序在前的那条,让结果不依赖 map 遍历顺序。
-				if best >= 0 && distance >= bestDistance {
+				if !protocolCacheReadsCompatible(normalizedCacheReadTokens(fallbackRef.detail.Tokens), normalizedCacheReadTokens(nativeRef.detail.Tokens)) {
 					continue
 				}
-				best, bestDistance = nativePos, distance
+				candidates[fallbackPos] = append(candidates[fallbackPos], protocolFallbackCandidate{nativePos: nativePos, distance: distance})
 			}
-			if best < 0 {
+			sort.SliceStable(candidates[fallbackPos], func(i, j int) bool {
+				if candidates[fallbackPos][i].distance != candidates[fallbackPos][j].distance {
+					return candidates[fallbackPos][i].distance < candidates[fallbackPos][j].distance
+				}
+				return candidates[fallbackPos][i].nativePos < candidates[fallbackPos][j].nativePos
+			})
+		}
+
+		// 增广路匹配(Kuhn)。贪心「各挑最近的」不保证最大匹配:F1 抢走 N1 之后
+		// F2 可能谁都够不着,而 F1→N2 / F2→N1 本来成立——结果就是一条本该被消掉的
+		// 重复记录留在看板上。候选按距离升序,所以在最大匹配的前提下仍优先配最近的。
+		matchedBy := make([]int, len(natives))
+		for i := range matchedBy {
+			matchedBy[i] = -1
+		}
+		var augment func(fallbackPos int, visited []bool) bool
+		augment = func(fallbackPos int, visited []bool) bool {
+			for _, candidate := range candidates[fallbackPos] {
+				if visited[candidate.nativePos] {
+					continue
+				}
+				visited[candidate.nativePos] = true
+				if matchedBy[candidate.nativePos] == -1 || augment(matchedBy[candidate.nativePos], visited) {
+					matchedBy[candidate.nativePos] = fallbackPos
+					return true
+				}
+			}
+			return false
+		}
+		for fallbackPos := range fallbacks {
+			augment(fallbackPos, make([]bool, len(natives)))
+		}
+
+		matchedNative := make([]int, len(fallbacks))
+		for i := range matchedNative {
+			matchedNative[i] = -1
+		}
+		for nativePos, fallbackPos := range matchedBy {
+			if fallbackPos >= 0 {
+				matchedNative[fallbackPos] = nativePos
+			}
+		}
+		// 按 fallback 排序顺序输出,结果不依赖 map 遍历顺序。
+		for fallbackPos, nativePos := range matchedNative {
+			if nativePos < 0 {
 				continue
 			}
-			used[best] = true
+			distance := time.Duration(0)
+			for _, candidate := range candidates[fallbackPos] {
+				if candidate.nativePos == nativePos {
+					distance = candidate.distance
+					break
+				}
+			}
 			pairs = append(pairs, protocolFallbackDetailPair{
-				fallback: fallbackRef, native: refs[natives[best]], distance: bestDistance,
+				fallback: refs[fallbacks[fallbackPos]], native: refs[natives[nativePos]], distance: distance,
 			})
 		}
 	}
 	return pairs
+}
+
+type protocolFallbackCandidate struct {
+	nativePos int
+	distance  time.Duration
+}
+
+// protocolCacheReadsCompatible 在两侧都报了非零缓存命中时要求相等。这是判别项而
+// 不是关联键的一部分:兜底记录解析的是翻译后的响应体,缺这项时必须保持宽松,否则
+// 又会退回「配不上」。两侧口径确实一致——CPA 的 Claude→OpenAI 翻译把
+// cache_read_input_tokens 原样写进 prompt_tokens_details.cached_tokens(创建量另走
+// cached_creation_tokens),Codex 原生与响应体也相同(真实数据 2432/2432、
+// 33920/33920)。命中量可以比,创建量不行:插件不解析 cached_creation_tokens 这个
+// 拼写,兜底侧恒为 0。
+func protocolCacheReadsCompatible(fallbackCacheRead, nativeCacheRead int64) bool {
+	if fallbackCacheRead <= 0 || nativeCacheRead <= 0 {
+		return true
+	}
+	return fallbackCacheRead == nativeCacheRead
 }
 
 func reconcilePersistedProtocolFallbacks(records []persistedDetail) ([]persistedDetail, int) {

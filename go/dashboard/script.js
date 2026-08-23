@@ -1158,11 +1158,24 @@ function renderTimeRules() {
     focusTimeRuleControl('[data-day-toggle="' + day + '"][data-rule-index="' + index + '"]');
   });
 }
+// days 非法时原样带出,交给 validateTimeRulesClient 拒绝。若在这里顺手清洗,
+// 校验永远看不到坏值——越界项被悄悄丢掉、全非法的集合塌成「每天」,前端会把
+// 改动过的价格照常存下去,而后端 validateModelPriceRules 是拒绝的,两边就不对称了。
+// 坏值只可能来自手改或导入的价格文件(UI 只产出 0–6)。
+function invalidRuleDays(days) {
+  return !Array.isArray(days) ? false : days.length > 7 ||
+    days.some((d) => !Number.isInteger(d) || d < 0 || d > 6) ||
+    new Set(days).size !== days.length;
+}
 function serializedTimeRules() {
   return timeRules.map((r) => {
     const out = { id: r.id || newTimeRule().id, name: String(r.name || '').trim(), start: r.start || '', end: r.end || '' };
-    const days = normalizedRuleDays(ruleDaySet(r));
-    if (days.length) out.days = days;
+    if (invalidRuleDays(r.days)) {
+      out.days = r.days.slice();
+    } else {
+      const days = normalizedRuleDays(ruleDaySet(r));
+      if (days.length) out.days = days;
+    }
     ['prompt','completion','cache','cache_write'].forEach((key) => { if (r[key] !== '' && r[key] != null) out[key] = num(r[key]); });
     return out;
   });
@@ -1192,7 +1205,7 @@ function validateTimeRulesClient(rules) {
     if (start < 0) throw timeRuleError(i, 'time_rule_err_start');
     if (end < 0) throw timeRuleError(i, 'time_rule_err_end');
     if (start === end) throw timeRuleError(i, 'time_rule_err_same');
-    if (Array.isArray(r.days) && (r.days.length > 7 || r.days.some((d) => !Number.isInteger(d) || d < 0 || d > 6) || new Set(r.days).size !== r.days.length)) throw timeRuleError(i, 'time_rule_err_days');
+    if (invalidRuleDays(r.days)) throw timeRuleError(i, 'time_rule_err_days');
     if (!TIME_RULE_PRICE_FIELDS.some((k) => Object.prototype.hasOwnProperty.call(r, k))) throw timeRuleError(i, 'time_rule_err_empty');
     TIME_RULE_PRICE_FIELDS.forEach((k) => { if (r[k] != null && (!Number.isFinite(Number(r[k])) || Number(r[k]) < 0)) throw timeRuleError(i, 'time_rule_err_price'); });
     const days = ruleDayMask(r);
