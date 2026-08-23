@@ -6,6 +6,10 @@
 
 ## Unreleased
 
+## v2.6.0 - 2026-08-23
+
+本版本修复兜底用量记录被误归为 `openai-compatible` 并重复计数的问题，并为时段价格规则加入工作日/休息日维度。
+
 ### 修复兜底记录被误记为 openai-compatible 来源并重复计数
 
 - 现象:`claude · 上游 42cfbd4d51456110` 等上游的请求会额外出现一条 `openai-compatible` 记录,请求数与 token 双计。基于真实导出数据(1212 条明细)确认 4 条 `openai-compatible` 记录全部是重复,配对后总数 1212 → 1208
