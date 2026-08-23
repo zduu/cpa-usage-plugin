@@ -568,3 +568,48 @@ test('fetchAllEventPages stops when a short page is returned without total', asy
   assert.deepStrictEqual(calls, [0]);
   assert.deepStrictEqual(result, { events: [{ id: 1 }, { id: 2 }], total: 2 });
 });
+
+// 星期 chip 是 .timeRuleRow 里的 <label>,会被同一块的 `.timeRuleRow label{display:grid}`
+// 命中。裸类名 .timeRuleDayChip 特异度 (0,1,0) 低于 (0,1,1),chip 会被强制成 grid,
+// 复选框和星期文字上下堆叠。前端测试只断言 HTML,查不出这类问题,这里按特异度守。
+function cssSpecificity(selector) {
+  let ids = 0, classes = 0, types = 0;
+  String(selector).trim().split(/\s+|>|\+|~/).filter(Boolean).forEach((part) => {
+    ids += (part.match(/#[\w-]+/g) || []).length;
+    classes += (part.match(/\.[\w-]+/g) || []).length;
+    classes += (part.match(/\[[^\]]*\]/g) || []).length;
+    classes += (part.match(/:(?!:)[\w-]+/g) || []).length;
+    const bare = part.replace(/[#.:][\w-]+|\[[^\]]*\]/g, '');
+    if (/^[a-z][\w-]*$/i.test(bare)) types += 1;
+  });
+  return ids * 10000 + classes * 100 + types;
+}
+
+function cssRulesDeclaring(source, property) {
+  const rules = [];
+  String(source).replace(/@media[^{]*\{/g, '').split('}').forEach((chunk) => {
+    const at = chunk.indexOf('{');
+    if (at < 0) return;
+    const selector = chunk.slice(0, at).replace(/\/\*[\s\S]*?\*\//g, '').trim();
+    const body = chunk.slice(at + 1);
+    if (!selector || !new RegExp('(^|;)\\s*' + property + '\\s*:').test(body)) return;
+    rules.push({ selector, body });
+  });
+  return rules;
+}
+
+test('weekday chips out-specify the generic time rule label style', () => {
+  const css = require('node:fs').readFileSync(require('node:path').join(__dirname, 'style.css'), 'utf8');
+  const displayRules = cssRulesDeclaring(css, 'display');
+  const generic = displayRules.filter((r) => r.selector.split(',').some((s) => s.trim() === '.timeRuleRow label'));
+  assert.ok(generic.length, 'expected a .timeRuleRow label display rule to guard against');
+  const chip = displayRules.filter((r) => /\.timeRuleDayChip(\s|$|\.|:)/.test(r.selector));
+  assert.ok(chip.length, 'expected a .timeRuleDayChip display rule');
+  const genericMax = Math.max(...generic.map((r) => cssSpecificity(r.selector)));
+  chip.forEach((rule) => {
+    assert.ok(
+      cssSpecificity(rule.selector) > genericMax,
+      'selector "' + rule.selector + '" must out-specify .timeRuleRow label, otherwise the chip renders as a grid',
+    );
+  });
+});

@@ -2154,14 +2154,16 @@ test('currency status shows the rate, its source and update time in the active l
   const zh = document.getElementById('currencyStatus').textContent;
   assert.match(zh, /1 USD = 7\.1234 CNY/);
   assert.match(zh, /缓存汇率/);
-  assert.match(zh, /open\.er-api\.com/);
-  assert.match(zh, /更新于/);
+  assert.doesNotMatch(zh, /open\.er-api\.com/);
+  assert.doesNotMatch(zh, /更新于/);
+  assert.match(document.getElementById('currencyStatus').title, /open\.er-api\.com/);
+  assert.match(document.getElementById('currencyStatus').title, /更新于/);
   assert.match(document.getElementById('currencyStatus').title, /timeout/);
 
   setLanguage('en', { persisted: true });
   await waitFor(() => document.getElementById('currencyStatus').textContent.includes('cached rate'));
   const en = document.getElementById('currencyStatus').textContent;
-  assert.match(en, /source · open\.er-api\.com|source open\.er-api\.com/);
+  assert.match(document.getElementById('currencyStatus').title, /source · open\.er-api\.com|source open\.er-api\.com/);
   assert.doesNotMatch(en, /[一-龥]/);
 });
 
@@ -2239,4 +2241,177 @@ test('time rule remove buttons name the model they belong to', async () => {
   assert.match(html, /aria-label="删除时段 openai\/gpt-4\.1 夜间半价"/);
   // 未命名的规则回落到「时段 N」,同样带模型名。
   assert.match(html, /aria-label="删除时段 openai\/gpt-4\.1 时段 2"/);
+});
+
+// 时段规则的星期维度:编辑器要渲染出 7 个星期开关和三个预设,并把当前范围标成
+// 选中态。测试桩没有 querySelector,断言直接打在渲染出的 HTML 上。
+test('time rule editor renders weekday chips and marks the active preset', async () => {
+  const { document } = createDashboardHarness({
+    manualPrices: {
+      'openai/gpt-4.1': {
+        prompt: 3, completion: 11, cache: 0.3, cache_write: 1,
+        time_rules: [
+          { id: 'night', name: '夜间半价', days: [1, 2, 3, 4, 5], start: '22:00', end: '06:00', prompt: 1.5 },
+        ],
+      },
+    },
+  });
+
+  await openPriceSettings(document);
+  document.getElementById('priceModel').value = 'openai/gpt-4.1';
+  document.getElementById('priceModel').onchange();
+
+  const html = document.getElementById('timeRulesEditor').innerHTML;
+  assert.strictEqual((html.match(/data-day-toggle="/g) || []).length, 7);
+  assert.match(html, /class="timeRuleDayPreset active" data-day-preset="workday"/);
+  assert.doesNotMatch(html, /class="timeRuleDayPreset active" data-day-preset="weekend"/);
+  // 周一到周五勾选,周六、周日不勾选。
+  [1, 2, 3, 4, 5].forEach((day) => {
+    assert.match(html, new RegExp('data-day-toggle="' + day + '"[^>]*checked'));
+  });
+  [0, 6].forEach((day) => {
+    assert.doesNotMatch(html, new RegExp('data-day-toggle="' + day + '"[^>]*checked'));
+  });
+});
+
+// 「每天」在存储里就是不带 days 的形态,与旧价格文件同形;限定了星期的规则才写
+// days,并且排序去重。
+test('serialized time rules omit days for every-day rules', async () => {
+  const { context, document } = createDashboardHarness({
+    manualPrices: {
+      'openai/gpt-4.1': {
+        prompt: 3, completion: 11, cache: 0.3, cache_write: 1,
+        time_rules: [
+          { id: 'all', name: '全天', start: '08:00', end: '09:00', prompt: 1 },
+          { id: 'weekend', name: '周末', days: [6, 0], start: '10:00', end: '11:00', prompt: 2 },
+          { id: 'full', name: '整周', days: [0, 1, 2, 3, 4, 5, 6], start: '12:00', end: '13:00', prompt: 3 },
+        ],
+      },
+    },
+  });
+
+  await openPriceSettings(document);
+  document.getElementById('priceModel').value = 'openai/gpt-4.1';
+  document.getElementById('priceModel').onchange();
+
+  const serialized = context.serializedTimeRules();
+  assert.strictEqual(serialized.length, 3);
+  assert.ok(!Object.prototype.hasOwnProperty.call(serialized[0], 'days'), '缺省 days 的规则不应写出 days');
+  assert.deepStrictEqual(serialized[1].days, [0, 6], 'days 应排序');
+  assert.ok(!Object.prototype.hasOwnProperty.call(serialized[2], 'days'), '覆盖整周应收敛成「每天」');
+});
+
+// 一条规则至少要落在一天上,否则 days 变空就等于「每天」,勾选状态会整排跳回全选。
+test('weekday toggle refuses to clear the last remaining day', () => {
+  const { context } = createDashboardHarness({});
+  // vm context 返回的数组来自另一个 realm,deepStrictEqual 会比对原型,先转回本 realm。
+  const days = (value) => (value === null ? null : Array.from(value));
+  assert.deepStrictEqual(days(context.nextRuleDays([1, 5], 5, false)), [1]);
+  assert.deepStrictEqual(days(context.nextRuleDays([1], 5, true)), [1, 5]);
+  assert.strictEqual(context.nextRuleDays([1], 1, false), null, '取消最后一天必须被拒绝');
+  // 勾满七天等于「每天」,归一化成空列表。
+  assert.deepStrictEqual(days(context.nextRuleDays([0, 1, 2, 3, 4, 5], 6, true)), []);
+});
+
+// 星期不相交的两条规则永远不会同时命中,时间段重叠也不算冲突——这正是「工作日
+// 夜间半价 / 周末夜间原价」能共存的前提。
+test('client validation treats disjoint weekdays as non-overlapping', () => {
+  const { context } = createDashboardHarness({});
+  const validate = context.validateTimeRulesClient;
+  const workday = { id: 'a', name: 'a', days: [1, 2, 3, 4, 5], start: '22:00', end: '06:00', prompt: 1 };
+  const weekend = { id: 'b', name: 'b', days: [0, 6], start: '22:00', end: '06:00', prompt: 2 };
+  assert.doesNotThrow(() => validate([workday, weekend]));
+  assert.throws(() => validate([workday, Object.assign({}, weekend, { days: [5, 6] })]), /重叠|overlap/i);
+  // 缺省 days 表示每天,与任何规则都相交。
+  assert.throws(() => validate([workday, Object.assign({}, weekend, { days: undefined })]), /重叠|overlap/i);
+  assert.throws(() => validate([Object.assign({}, workday, { days: [1, 1] })]), /./);
+  assert.throws(() => validate([Object.assign({}, workday, { days: [7] })]), /./);
+});
+
+// 可见文字是缩写,读屏念「一」近乎无意义;每个星期开关必须带本地化全名的
+// aria-label,并且随语言切换。
+test('weekday toggles carry a localized full-name aria-label', async () => {
+  const { document, setLanguage } = createDashboardHarness({
+    manualPrices: {
+      'openai/gpt-4.1': {
+        prompt: 3, completion: 11, cache: 0.3, cache_write: 1,
+        time_rules: [{ id: 'mon', name: '周一', days: [1], start: '08:00', end: '09:00', prompt: 1.5 }],
+      },
+    },
+  });
+
+  await openPriceSettings(document);
+  document.getElementById('priceModel').value = 'openai/gpt-4.1';
+  document.getElementById('priceModel').onchange();
+  assert.match(document.getElementById('timeRulesEditor').innerHTML, /data-day-toggle="1"[^>]*aria-label="星期一"/);
+
+  setLanguage('en', { persisted: true });
+  document.getElementById('priceModel').onchange();
+  const en = document.getElementById('timeRulesEditor').innerHTML;
+  assert.match(en, /data-day-toggle="1"[^>]*aria-label="Monday"/);
+  assert.match(en, /data-day-toggle="0"[^>]*aria-label="Sunday"/);
+  assert.match(en, /data-day-toggle="6"[^>]*aria-label="Saturday"/);
+});
+
+// 来源/更新时间/错误原本只在原生 title 里,而 currencyStatus 是不可聚焦的 span:
+// 触屏和键盘用户拿不到,aria-live 也只播报压缩后的正文。改为可聚焦的详情开关。
+test('currency detail is reachable without hovering the status text', async () => {
+  const { document } = createDashboardHarness({
+    summaryCurrency: {
+      base: 'USD',
+      supported_display: ['USD', 'CNY'],
+      usd_cny_rate: 7.1234,
+      source: 'open.er-api.com',
+      fetched_at: '2026-08-22T03:00:00Z',
+      status: 'cached',
+      error: 'timeout',
+    },
+  });
+
+  await waitFor(() => document.getElementById('currencyCNY').hidden === false);
+  document.getElementById('currencyCNY').onclick();
+  await waitFor(() => document.getElementById('currencyStatus').textContent.includes('7.1234'));
+
+  const info = document.getElementById('currencyStatusInfo');
+  const detail = document.getElementById('currencyStatusDetail');
+  assert.strictEqual(info.hidden, false, '有详情时开关必须可见');
+  assert.strictEqual(info.getAttribute('aria-expanded'), 'false');
+  assert.strictEqual(info.getAttribute('aria-controls'), 'currencyStatusDetail');
+  assert.ok(info.getAttribute('aria-label'), '开关必须有可读名称');
+
+  // 详情只放正文没有的那几项,不与紧凑正文重复。
+  assert.match(detail.textContent, /open\.er-api\.com/);
+  assert.match(detail.textContent, /更新于/);
+  assert.match(detail.textContent, /timeout/);
+  assert.doesNotMatch(detail.textContent, /7\.1234/);
+
+  info.onclick();
+  assert.strictEqual(info.getAttribute('aria-expanded'), 'true');
+  assert.strictEqual(detail.hidden, false);
+  info.onclick();
+  assert.strictEqual(info.getAttribute('aria-expanded'), 'false');
+  assert.strictEqual(detail.hidden, true);
+});
+
+// 切回 USD 后详情必须清空并收起,不能留下一个空的展开区。
+test('currency detail collapses when the status is cleared', async () => {
+  const { document } = createDashboardHarness({
+    summaryCurrency: {
+      base: 'USD', supported_display: ['USD', 'CNY'], usd_cny_rate: 7.1234,
+      source: 'open.er-api.com', fetched_at: '2026-08-22T03:00:00Z', status: 'cached',
+    },
+  });
+
+  await waitFor(() => document.getElementById('currencyCNY').hidden === false);
+  document.getElementById('currencyCNY').onclick();
+  await waitFor(() => document.getElementById('currencyStatus').textContent.includes('7.1234'));
+  document.getElementById('currencyStatusInfo').onclick();
+  assert.strictEqual(document.getElementById('currencyStatusDetail').hidden, false);
+
+  document.getElementById('currencyUSD').onclick();
+  await waitFor(() => document.getElementById('currencyStatus').textContent === '');
+  assert.strictEqual(document.getElementById('currencyStatusInfo').hidden, true);
+  assert.strictEqual(document.getElementById('currencyStatusDetail').hidden, true);
+  assert.strictEqual(document.getElementById('currencyStatusDetail').textContent, '');
+  assert.strictEqual(document.getElementById('currencyStatusInfo').getAttribute('aria-expanded'), 'false');
 });

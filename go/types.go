@@ -647,8 +647,19 @@ type ModelPrice struct {
 }
 
 type ModelPriceRule struct {
-	ID         string   `json:"id,omitempty"`
-	Name       string   `json:"name"`
+	ID   string `json:"id,omitempty"`
+	Name string `json:"name"`
+	// Days limits the rule to specific weekdays, 0 = Sunday through 6 = Saturday
+	// (matching time.Weekday and JavaScript's Date#getDay). Empty or absent
+	// means every day, which is what every rule written before this field
+	// existed meant — legacy price files keep their all-week semantics.
+	//
+	// A rule is matched against the CALENDAR weekday of the request instant in
+	// the pricing timezone. For a rule that crosses midnight (22:00–06:00) that
+	// means the 00:00–06:00 half is governed by the weekday it falls on, not by
+	// the weekday the interval started on: with days = Mon–Fri, Saturday 02:00
+	// is NOT covered even though the interval began Friday 22:00.
+	Days       []int    `json:"days,omitempty"`
 	Start      string   `json:"start"`
 	End        string   `json:"end"`
 	Prompt     *float64 `json:"prompt,omitempty"`

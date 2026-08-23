@@ -73,7 +73,9 @@ var I18N_MAP = {
     currency_usd: 'USD', currency_cny: 'CNY', time_rules_title: '时段价格（可选）', add_time_rule: '添加时段', time_rule_name: '名称', time_rule_start: '开始', time_rule_end: '结束', time_rule_remove: '删除时段', time_rule_input: '输入价', time_rule_output: '输出价', time_rule_cache: '缓存命中价', time_rule_cache_write: '缓存创建价', time_rule_max: '最多只能添加 16 个时段', time_rule_invalid: '时段规则无效：', time_rule_overlap: '时段规则存在重叠',
     time_rule_unnamed: '时段', time_rule_err_name: '名称不能为空', time_rule_err_start: '开始时间格式错误', time_rule_err_end: '结束时间格式错误', time_rule_err_same: '开始和结束不能相同', time_rule_err_empty: '至少覆盖一项价格', time_rule_err_price: '价格必须是非负数字',
     time_rules_timezone_hint: '按服务端计费时区判定',
-    currency_rate_prefix: '1 USD =', currency_status_fresh: '实时汇率', currency_status_cached: '缓存汇率', currency_status_stale: '汇率已过期', currency_status_fallback: '回退汇率', currency_source: '来源', currency_updated_at: '更新于', currency_error: '汇率错误：',
+    time_rule_days: '适用日', time_rule_days_all: '每天', time_rule_days_workday: '工作日', time_rule_days_weekend: '休息日', time_rule_err_days: '星期取值无效或重复',
+    weekday_short_0: '日', weekday_short_1: '一', weekday_short_2: '二', weekday_short_3: '三', weekday_short_4: '四', weekday_short_5: '五', weekday_short_6: '六',
+    currency_rate_prefix: '1 USD =', currency_status_fresh: '实时汇率', currency_status_cached: '缓存汇率', currency_status_stale: '汇率已过期', currency_status_fallback: '回退汇率', currency_detail_toggle: '汇率详情', currency_source: '来源', currency_updated_at: '更新于', currency_error: '汇率错误：',
 
     // ---- API stats ----
     api_stats_title: 'API 详细统计',
@@ -321,7 +323,9 @@ var I18N_MAP = {
     currency_usd: 'USD', currency_cny: 'CNY', time_rules_title: '時段價格（選填）', add_time_rule: '新增時段', time_rule_name: '名稱', time_rule_start: '開始', time_rule_end: '結束', time_rule_remove: '刪除時段', time_rule_input: '輸入價格', time_rule_output: '輸出價格', time_rule_cache: '快取命中價格', time_rule_cache_write: '快取建立價格', time_rule_max: '最多只能新增 16 個時段', time_rule_invalid: '時段規則無效：', time_rule_overlap: '時段規則重疊',
     time_rule_unnamed: '時段', time_rule_err_name: '名稱不能為空', time_rule_err_start: '開始時間格式錯誤', time_rule_err_end: '結束時間格式錯誤', time_rule_err_same: '開始和結束不能相同', time_rule_err_empty: '至少覆蓋一項價格', time_rule_err_price: '價格必須是非負數字',
     time_rules_timezone_hint: '依伺服器計費時區判定',
-    currency_rate_prefix: '1 USD =', currency_status_fresh: '即時匯率', currency_status_cached: '快取匯率', currency_status_stale: '匯率已過期', currency_status_fallback: '備援匯率', currency_source: '來源', currency_updated_at: '更新於', currency_error: '匯率錯誤：',
+    time_rule_days: '適用日', time_rule_days_all: '每天', time_rule_days_workday: '工作日', time_rule_days_weekend: '休息日', time_rule_err_days: '星期取值無效或重複',
+    weekday_short_0: '日', weekday_short_1: '一', weekday_short_2: '二', weekday_short_3: '三', weekday_short_4: '四', weekday_short_5: '五', weekday_short_6: '六',
+    currency_rate_prefix: '1 USD =', currency_status_fresh: '即時匯率', currency_status_cached: '快取匯率', currency_status_stale: '匯率已過期', currency_status_fallback: '備援匯率', currency_detail_toggle: '匯率詳情', currency_source: '來源', currency_updated_at: '更新於', currency_error: '匯率錯誤：',
 
     api_stats_title: 'API 詳細統計',
     api_stats_subtle: '按呼叫 CPA 服務的 API key 聚合。',
@@ -551,7 +555,9 @@ var I18N_MAP = {
     currency_usd: 'USD', currency_cny: 'CNY', time_rules_title: 'Time-based prices (optional)', add_time_rule: 'Add time slot', time_rule_name: 'Name', time_rule_start: 'Start', time_rule_end: 'End', time_rule_remove: 'Remove time slot', time_rule_input: 'Input price', time_rule_output: 'Output price', time_rule_cache: 'Cache hit price', time_rule_cache_write: 'Cache creation price', time_rule_max: 'At most 16 time slots', time_rule_invalid: 'Invalid time rule: ', time_rule_overlap: 'Time rules overlap',
     time_rule_unnamed: 'Time slot', time_rule_err_name: 'name is required', time_rule_err_start: 'invalid start time', time_rule_err_end: 'invalid end time', time_rule_err_same: 'start and end must differ', time_rule_err_empty: 'must override at least one price', time_rule_err_price: 'prices must be non-negative numbers',
     time_rules_timezone_hint: 'evaluated in the server pricing timezone',
-    currency_rate_prefix: '1 USD =', currency_status_fresh: 'live rate', currency_status_cached: 'cached rate', currency_status_stale: 'rate expired', currency_status_fallback: 'fallback rate', currency_source: 'source', currency_updated_at: 'updated', currency_error: 'Rate error: ',
+    time_rule_days: 'Days', time_rule_days_all: 'Every day', time_rule_days_workday: 'Weekdays', time_rule_days_weekend: 'Weekend', time_rule_err_days: 'invalid or duplicated weekday',
+    weekday_short_0: 'Sun', weekday_short_1: 'Mon', weekday_short_2: 'Tue', weekday_short_3: 'Wed', weekday_short_4: 'Thu', weekday_short_5: 'Fri', weekday_short_6: 'Sat',
+    currency_rate_prefix: '1 USD =', currency_status_fresh: 'live rate', currency_status_cached: 'cached rate', currency_status_stale: 'rate expired', currency_status_fallback: 'fallback rate', currency_detail_toggle: 'Rate details', currency_source: 'source', currency_updated_at: 'updated', currency_error: 'Rate error: ',
 
     api_stats_title: 'API Stats',
     api_stats_subtle: 'Grouped by the API key used to call CPA.',
@@ -781,7 +787,9 @@ var I18N_MAP = {
     currency_usd: 'USD', currency_cny: 'CNY', time_rules_title: 'Цены по времени (необязательно)', add_time_rule: 'Добавить период', time_rule_name: 'Название', time_rule_start: 'Начало', time_rule_end: 'Окончание', time_rule_remove: 'Удалить период', time_rule_input: 'Цена ввода', time_rule_output: 'Цена вывода', time_rule_cache: 'Цена cache hit', time_rule_cache_write: 'Цена создания cache', time_rule_max: 'Можно добавить не более 16 периодов', time_rule_invalid: 'Неверное правило периода: ', time_rule_overlap: 'Периоды пересекаются',
     time_rule_unnamed: 'Период', time_rule_err_name: 'название обязательно', time_rule_err_start: 'неверное время начала', time_rule_err_end: 'неверное время окончания', time_rule_err_same: 'начало и окончание должны отличаться', time_rule_err_empty: 'нужно задать хотя бы одну цену', time_rule_err_price: 'цены должны быть неотрицательными числами',
     time_rules_timezone_hint: 'вычисляется в часовом поясе тарификации сервера',
-    currency_rate_prefix: '1 USD =', currency_status_fresh: 'актуальный курс', currency_status_cached: 'кэшированный курс', currency_status_stale: 'курс устарел', currency_status_fallback: 'резервный курс', currency_source: 'источник', currency_updated_at: 'обновлено', currency_error: 'Ошибка курса: ',
+    time_rule_days: 'Дни', time_rule_days_all: 'Каждый день', time_rule_days_workday: 'Будни', time_rule_days_weekend: 'Выходные', time_rule_err_days: 'неверный или повторяющийся день недели',
+    weekday_short_0: 'Вс', weekday_short_1: 'Пн', weekday_short_2: 'Вт', weekday_short_3: 'Ср', weekday_short_4: 'Чт', weekday_short_5: 'Пт', weekday_short_6: 'Сб',
+    currency_rate_prefix: '1 USD =', currency_status_fresh: 'актуальный курс', currency_status_cached: 'кэшированный курс', currency_status_stale: 'курс устарел', currency_status_fallback: 'резервный курс', currency_detail_toggle: 'Детали курса', currency_source: 'источник', currency_updated_at: 'обновлено', currency_error: 'Ошибка курса: ',
 
     api_stats_title: 'Статистика API',
     api_stats_subtle: 'Сгруппировано по API-ключу для вызова CPA.',

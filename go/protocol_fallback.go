@@ -10,10 +10,32 @@ import (
 // A response-interceptor fallback is timestamped when the response usage is
 // observed, while native CPA usage is timestamped at request start and carries
 // the request latency. In practice the two completion timestamps differ only
-// by callback scheduling time. Keep the window tight so an anonymous protocol
-// fallback cannot consume an unrelated native request merely because its token
-// counts happen to match.
-const protocolFallbackCompletionTolerance = time.Second
+// by callback scheduling time, so the base window stays tight: an anonymous
+// protocol fallback must not consume an unrelated native request merely
+// because its token counts happen to match.
+//
+// The drift does grow with the request though — it accumulates over streaming
+// delivery and the post-response callback hop. Real data: a 730.3s Codex
+// request completed 1.028s before its fallback was observed, which a flat 1s
+// window rejected, leaving both records on the dashboard. The window therefore
+// scales with the native latency and is capped so it cannot widen without
+// bound.
+const (
+	protocolFallbackCompletionTolerance      = time.Second
+	protocolFallbackCompletionToleranceMax   = 5 * time.Second
+	protocolFallbackCompletionToleranceRatio = 200 // +0.5% of the native latency
+)
+
+func protocolFallbackTolerance(latency time.Duration) time.Duration {
+	if latency <= 0 {
+		return protocolFallbackCompletionTolerance
+	}
+	tolerance := protocolFallbackCompletionTolerance + latency/protocolFallbackCompletionToleranceRatio
+	if tolerance > protocolFallbackCompletionToleranceMax {
+		return protocolFallbackCompletionToleranceMax
+	}
+	return tolerance
+}
 
 func isAnonymousOpenAIProtocolFallback(record UsageRecord) bool {
 	return strings.EqualFold(strings.TrimSpace(record.Provider), "openai-compatible") &&
@@ -24,9 +46,18 @@ func isAnonymousOpenAIProtocolFallback(record UsageRecord) bool {
 		isOpenAIProtocolFallbackEndpoint(record.Endpoint)
 }
 
+// isNativeProtocolCorrelationRecord accepts a native record of ANY upstream
+// family as a correlation candidate. It used to require the codex family, on
+// the assumption that an OpenAI-protocol client request could only have been
+// served by Codex — but CPA routes /v1/chat/completions and /v1/responses to
+// whichever upstream serves the model, Claude-protocol upstreams included.
+// The anonymous fallback carries no upstream identity at all (CPA's conductor
+// publishes selected_auth_id into a *cloned* metadata map, so the response
+// interceptor never sees it), so its provider is guessed from the client
+// protocol as "openai-compatible". Restricting the rescue to codex left every
+// Claude-upstream fallback both misattributed and double counted.
 func isNativeProtocolCorrelationRecord(record UsageRecord) bool {
 	return !isAnonymousOpenAIProtocolFallback(record) &&
-		usageProviderFamily(record.Provider) == "codex" &&
 		(strings.TrimSpace(record.AuthID) != "" || strings.TrimSpace(record.AuthIndex) != "") &&
 		record.Latency > 0
 }
@@ -42,7 +73,6 @@ func isAnonymousOpenAIProtocolFallbackDetail(detail RequestDetail) bool {
 
 func isNativeProtocolCorrelationDetail(detail RequestDetail) bool {
 	return !isAnonymousOpenAIProtocolFallbackDetail(detail) &&
-		usageProviderFamily(detail.Provider) == "codex" &&
 		(strings.TrimSpace(detail.AuthID) != "" || strings.TrimSpace(detail.AuthIndex) != "") &&
 		detail.LatencyMs > 0
 }
@@ -52,24 +82,30 @@ func isOpenAIProtocolFallbackEndpoint(endpoint string) bool {
 	return endpoint == "/v1/chat/completions" || endpoint == "/v1/responses"
 }
 
+// usageProtocolCorrelationKey keys an anonymous fallback against the native
+// record of the same request. The two sides count cache differently — a
+// Claude-family native keeps input exclusive of cache reads/creations, while
+// the fallback parses an OpenAI-shaped body whose prompt tokens already
+// include cache — so the raw token fields cannot be compared directly. Both
+// sides do agree on the request's true total and on output, so the key uses
+// the convention-neutral pair (total - output, output): cache is folded in
+// wherever it was reported. The individual cache fields are deliberately
+// excluded; a translated response body may drop prompt_tokens_details
+// entirely, and requiring them to match would reject legitimate pairs.
 func usageProtocolCorrelationKey(record UsageRecord) string {
 	if !isAnonymousOpenAIProtocolFallback(record) && !isNativeProtocolCorrelationRecord(record) {
 		return ""
 	}
-	cacheRead := maxInt64(nonNegativeInt64(record.Detail.CachedTokens), nonNegativeInt64(record.Detail.CacheReadTokens))
-	cacheWrite := nonNegativeInt64(record.Detail.CacheCreationTokens)
+	totalTokens := usageDetailTotalTokens(record.Detail, record.Provider)
+	outputTokens := nonNegativeInt64(record.Detail.OutputTokens)
 	return protocolCorrelationKey(
 		firstNonEmpty(record.Alias, record.Model),
 		canonicalClientAPIKey(record.APIKey),
 		record.Failed,
 		record.Failure.StatusCode,
-		nonNegativeInt64(record.Detail.InputTokens),
-		nonNegativeInt64(record.Detail.OutputTokens),
+		maxInt64(totalTokens-outputTokens, 0),
+		outputTokens,
 		nonNegativeInt64(record.Detail.ReasoningTokens),
-		cacheRead,
-		cacheRead+cacheWrite,
-		cacheWrite,
-		usageDetailTotalTokens(record.Detail, record.Provider),
 	)
 }
 
@@ -81,18 +117,16 @@ func detailProtocolCorrelationKey(modelName string, detail RequestDetail) string
 	if clientIdentity == "" {
 		clientIdentity = strings.TrimSpace(detail.APIKey)
 	}
+	totalTokens := detailTotalTokensForRequest(detail)
+	outputTokens := nonNegativeInt64(detail.Tokens.OutputTokens)
 	return protocolCorrelationKey(
 		detailModel(modelName, detail),
 		clientIdentity,
 		detail.Failed,
 		detail.StatusCode,
-		nonNegativeInt64(detail.Tokens.InputTokens),
-		nonNegativeInt64(detail.Tokens.OutputTokens),
+		maxInt64(totalTokens-outputTokens, 0),
+		outputTokens,
 		nonNegativeInt64(detail.Tokens.ReasoningTokens),
-		nonNegativeInt64(detail.Tokens.CachedTokens),
-		nonNegativeInt64(detail.Tokens.CacheTokens),
-		nonNegativeInt64(detail.Tokens.CacheWriteTokens),
-		detailTotalTokensForRequest(detail),
 	)
 }
 
@@ -128,12 +162,24 @@ func protocolUsageCompletionDistance(fallback, native UsageRecord) (time.Duratio
 	if distance < 0 {
 		distance = -distance
 	}
-	return distance, distance <= protocolFallbackCompletionTolerance
+	return distance, distance <= protocolFallbackTolerance(native.Latency)
 }
 
+// protocolEndpointsCompatible guards against pairing a /v1/chat/completions
+// fallback with a /v1/responses native record. The two fields are only
+// comparable when both describe the same protocol: the fallback endpoint is
+// derived from the CLIENT protocol, while a native record carries the UPSTREAM
+// path. They coincide for Codex (both /v1/responses) but not for a Claude
+// upstream serving an OpenAI-protocol client, where the native side reports
+// /v1/messages. Vetoing on that difference would reject exactly the pairs this
+// correlation exists to find, so the check only applies when the native
+// endpoint is itself an OpenAI-protocol path.
 func protocolEndpointsCompatible(fallbackEndpoint, nativeEndpoint string) bool {
 	nativeEndpoint = strings.TrimRight(strings.ToLower(strings.TrimSpace(nativeEndpoint)), "/")
-	return nativeEndpoint == "" || nativeEndpoint == strings.TrimRight(strings.ToLower(strings.TrimSpace(fallbackEndpoint)), "/")
+	if nativeEndpoint == "" || !isOpenAIProtocolFallbackEndpoint(nativeEndpoint) {
+		return true
+	}
+	return nativeEndpoint == strings.TrimRight(strings.ToLower(strings.TrimSpace(fallbackEndpoint)), "/")
 }
 
 type protocolFallbackDetailRef struct {
@@ -191,46 +237,53 @@ func pairProtocolFallbackDetails(refs []protocolFallbackDetailRef) []protocolFal
 		}
 		sort.SliceStable(fallbacks, func(i, j int) bool { return refLess(fallbacks[i], fallbacks[j], false) })
 		sort.SliceStable(natives, func(i, j int) bool { return refLess(natives[i], natives[j], true) })
-		fallbackIndex, nativeIndex := 0, 0
-		for fallbackIndex < len(fallbacks) && nativeIndex < len(natives) {
-			fallbackRef := refs[fallbacks[fallbackIndex]]
-			nativeRef := refs[natives[nativeIndex]]
+		// 每条 fallback 在未被占用的 native 里挑完成时刻最近、且落在**该 native
+		// 自己**窗口内的那一条,与实时路径 protocolUsageCompletionDistance 的
+		// 口径一致。这里不能用双指针归并:窗口随 latency 变化后,"当前 native
+		// 配不上就推进某一侧"的规则会丢掉本该配上后一条 native 的记录——两条
+		// native 完成时刻只差一点,但后一条是长请求、窗口宽得多。一个 key 组内
+		// 的记录 token 向量完全相同,组通常只有一两条,O(F×N) 无所谓。
+		used := make([]bool, len(natives))
+		for _, fallbackIdx := range fallbacks {
+			fallbackRef := refs[fallbackIdx]
 			fallbackAt := fallbackRef.detail.Timestamp
-			nativeAt := nativeRef.detail.Timestamp.Add(time.Duration(nativeRef.detail.LatencyMs) * time.Millisecond)
 			if fallbackAt.IsZero() {
-				fallbackIndex++
 				continue
 			}
-			if nativeRef.detail.Timestamp.IsZero() {
-				nativeIndex++
-				continue
-			}
-			delta := fallbackAt.Sub(nativeAt)
-			if delta < -protocolFallbackCompletionTolerance {
-				fallbackIndex++
-				continue
-			}
-			if delta > protocolFallbackCompletionTolerance {
-				nativeIndex++
-				continue
-			}
-			if !protocolEndpointsCompatible(fallbackRef.detail.Endpoint, nativeRef.detail.Endpoint) {
-				if delta <= 0 {
-					fallbackIndex++
-				} else {
-					nativeIndex++
+			best := -1
+			var bestDistance time.Duration
+			for nativePos, nativeIdx := range natives {
+				if used[nativePos] {
+					continue
 				}
+				nativeRef := refs[nativeIdx]
+				if nativeRef.detail.Timestamp.IsZero() {
+					continue
+				}
+				latency := time.Duration(nativeRef.detail.LatencyMs) * time.Millisecond
+				distance := fallbackAt.Sub(nativeRef.detail.Timestamp.Add(latency))
+				if distance < 0 {
+					distance = -distance
+				}
+				if distance > protocolFallbackTolerance(latency) {
+					continue
+				}
+				if !protocolEndpointsCompatible(fallbackRef.detail.Endpoint, nativeRef.detail.Endpoint) {
+					continue
+				}
+				// 距离相同时保留排序在前的那条,让结果不依赖 map 遍历顺序。
+				if best >= 0 && distance >= bestDistance {
+					continue
+				}
+				best, bestDistance = nativePos, distance
+			}
+			if best < 0 {
 				continue
 			}
-			distance := delta
-			if distance < 0 {
-				distance = -distance
-			}
+			used[best] = true
 			pairs = append(pairs, protocolFallbackDetailPair{
-				fallback: fallbackRef, native: nativeRef, distance: distance,
+				fallback: fallbackRef, native: refs[natives[best]], distance: bestDistance,
 			})
-			fallbackIndex++
-			nativeIndex++
 		}
 	}
 	return pairs

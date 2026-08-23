@@ -3665,7 +3665,7 @@ func validateModelPriceRules(rules []ModelPriceRule) error {
 		return errors.New("time_rules must contain at most 16 rules")
 	}
 	seenIDs := make(map[string]struct{}, len(rules))
-	intervals := make([][3]int, 0, len(rules)*2)
+	intervals := make([]modelPriceRuleInterval, 0, len(rules)*2)
 	for i := range rules {
 		rule := rules[i]
 		prefix := fmt.Sprintf("time_rules[%d]", i)
@@ -3678,6 +3678,19 @@ func validateModelPriceRules(rules []ModelPriceRule) error {
 				return fmt.Errorf("%s.id must be unique", prefix)
 			}
 			seenIDs[id] = struct{}{}
+		}
+		if len(rule.Days) > 7 {
+			return fmt.Errorf("%s.days must contain at most 7 weekdays", prefix)
+		}
+		seenDays := make(map[int]struct{}, len(rule.Days))
+		for _, day := range rule.Days {
+			if day < 0 || day > 6 {
+				return fmt.Errorf("%s.days must be between 0 (Sunday) and 6 (Saturday)", prefix)
+			}
+			if _, dup := seenDays[day]; dup {
+				return fmt.Errorf("%s.days must not repeat a weekday", prefix)
+			}
+			seenDays[day] = struct{}{}
 		}
 		start, err := parsePricingMinute(rule.Start)
 		if err != nil {
@@ -3705,20 +3718,58 @@ func validateModelPriceRules(rules []ModelPriceRule) error {
 		if rule.Prompt == nil && rule.Completion == nil && rule.Cache == nil && rule.CacheWrite == nil {
 			return fmt.Errorf("%s must override at least one price", prefix)
 		}
+		days := modelPriceRuleDayMask(rule)
+		// 跨午夜的规则拆成两段,两段都带同一份星期掩码:00:00 之后的那半段按它
+		// 实际落在的那一天判定(见 ModelPriceRule.Days 的注释)。
 		if start < end {
-			intervals = append(intervals, [3]int{start, end, i})
+			intervals = append(intervals, modelPriceRuleInterval{start: start, end: end, rule: i, days: days})
 		} else {
-			intervals = append(intervals, [3]int{start, 1440, i}, [3]int{0, end, i})
+			intervals = append(intervals,
+				modelPriceRuleInterval{start: start, end: 1440, rule: i, days: days},
+				modelPriceRuleInterval{start: 0, end: end, rule: i, days: days})
 		}
 	}
 	for i := range intervals {
 		for j := i + 1; j < len(intervals); j++ {
-			if intervals[i][0] < intervals[j][1] && intervals[j][0] < intervals[i][1] {
-				return fmt.Errorf("time_rules overlap: %s and %s", modelPriceRuleLabel(rules[intervals[i][2]]), modelPriceRuleLabel(rules[intervals[j][2]]))
+			// 星期不相交的两条规则永远不会在同一时刻同时命中,时间段重叠也无妨:
+			// 「工作日 22:00-06:00 半价」和「周末 22:00-06:00 全价」必须能共存。
+			if intervals[i].days&intervals[j].days == 0 {
+				continue
+			}
+			if intervals[i].start < intervals[j].end && intervals[j].start < intervals[i].end {
+				return fmt.Errorf("time_rules overlap: %s and %s", modelPriceRuleLabel(rules[intervals[i].rule]), modelPriceRuleLabel(rules[intervals[j].rule]))
 			}
 		}
 	}
 	return nil
+}
+
+type modelPriceRuleInterval struct {
+	start int
+	end   int
+	rule  int
+	days  uint8
+}
+
+const allWeekdaysMask uint8 = 0x7F
+
+// modelPriceRuleDayMask 把 Days 映射成位掩码,bit0 = 周日 … bit6 = 周六。
+// 空列表表示每天,这既是历史价格文件的语义,也是无效值的安全回落——校验会先
+// 拒掉越界的 day,存量数据万一带上了也按「每天」处理,不会让规则静默失效。
+func modelPriceRuleDayMask(rule ModelPriceRule) uint8 {
+	if len(rule.Days) == 0 {
+		return allWeekdaysMask
+	}
+	var mask uint8
+	for _, day := range rule.Days {
+		if day >= 0 && day <= 6 {
+			mask |= 1 << uint(day)
+		}
+	}
+	if mask == 0 {
+		return allWeekdaysMask
+	}
+	return mask
 }
 
 // modelPriceRuleLabel 用于错误信息:ID 是可选的(新建规则时由后端补),没有 ID 时用
@@ -3747,6 +3798,9 @@ func normalizeModelPriceRules(price ModelPrice) ModelPrice {
 		rule.Completion = copyFloatPtr(rule.Completion)
 		rule.Cache = copyFloatPtr(rule.Cache)
 		rule.CacheWrite = copyFloatPtr(rule.CacheWrite)
+		// Days 同样要深拷贝:与 TimeRules 切片一样,浅拷贝会让入库价格和调用方
+		// 共享底层数组,任何一方在锁外改动都会直接改到存储里。
+		rule.Days = normalizedRuleDays(rule.Days)
 		if strings.TrimSpace(rule.ID) == "" {
 			rule.ID = newModelPriceRuleID()
 		}
@@ -3754,6 +3808,31 @@ func normalizeModelPriceRules(price ModelPrice) ModelPrice {
 	}
 	price.TimeRules = rules
 	return price
+}
+
+// normalizedRuleDays 去重并排序星期列表;覆盖整周时收敛成 nil,让「每天」在存储
+// 和导出里只有一种表示,也让旧价格文件与新写入的全周规则完全同形。
+func normalizedRuleDays(days []int) []int {
+	if len(days) == 0 {
+		return nil
+	}
+	seen := make(map[int]struct{}, len(days))
+	normalized := make([]int, 0, len(days))
+	for _, day := range days {
+		if day < 0 || day > 6 {
+			continue
+		}
+		if _, dup := seen[day]; dup {
+			continue
+		}
+		seen[day] = struct{}{}
+		normalized = append(normalized, day)
+	}
+	if len(normalized) == 0 || len(normalized) == 7 {
+		return nil
+	}
+	sort.Ints(normalized)
+	return normalized
 }
 
 func copyFloatPtr(value *float64) *float64 {
@@ -3788,6 +3867,15 @@ func ruleContainsMinute(rule ModelPriceRule, minute int) bool {
 	return minute >= start || minute < end
 }
 
+// ruleMatchesInstant 在时间段之上再判星期。跨午夜规则按请求实际落在的那一天
+// 判定,而不是按区间起始的那一天(见 ModelPriceRule.Days)。
+func ruleMatchesInstant(rule ModelPriceRule, weekday time.Weekday, minute int) bool {
+	if modelPriceRuleDayMask(rule)&(1<<uint(weekday)) == 0 {
+		return false
+	}
+	return ruleContainsMinute(rule, minute)
+}
+
 func effectivePrice(base ModelPrice, at time.Time, location *time.Location) ModelPrice {
 	if at.IsZero() || len(base.TimeRules) == 0 {
 		return base
@@ -3795,9 +3883,11 @@ func effectivePrice(base ModelPrice, at time.Time, location *time.Location) Mode
 	if location == nil {
 		location = time.UTC
 	}
-	minute := at.In(location).Hour()*60 + at.In(location).Minute()
+	local := at.In(location)
+	minute := local.Hour()*60 + local.Minute()
+	weekday := local.Weekday()
 	for _, rule := range base.TimeRules {
-		if !ruleContainsMinute(rule, minute) {
+		if !ruleMatchesInstant(rule, weekday, minute) {
 			continue
 		}
 		result := base

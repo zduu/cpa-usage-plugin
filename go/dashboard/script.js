@@ -61,9 +61,27 @@ function currencyStatusText() {
   const parts = [t('currency_rate_prefix') + ' ' + state.rate.toFixed(4) + ' ' + t('currency_cny')];
   const statusKey = { fresh: 'currency_status_fresh', cached: 'currency_status_cached', stale: 'currency_status_stale', fallback: 'currency_status_fallback' }[state.status];
   if (statusKey) parts.push(t(statusKey));
+  return parts.join(' · ');
+}
+// 来源/更新时间/错误单独成段:正文保持紧凑,这几项通过可聚焦的详情开关展开。
+// 原生 title 只有鼠标悬停能看到,触屏和键盘用户拿不到,aria-live 也只会播报正文。
+function currencyStatusDetails() {
+  const state = dashboardCurrencyState;
+  const parts = [];
   if (state.source) parts.push(t('currency_source') + ' ' + state.source);
   if (state.fetchedAt) parts.push(t('currency_updated_at') + ' ' + formatCurrencyTimestamp(state.fetchedAt));
+  if (state.error) parts.push(t('currency_error') + ' ' + state.error);
   return parts.join(' · ');
+}
+function currencyStatusTitle() {
+  return [currencyStatusText(), currencyStatusDetails()].filter(Boolean).join(' · ');
+}
+function toggleCurrencyStatusDetail() {
+  const info = $('currencyStatusInfo'), detail = $('currencyStatusDetail');
+  if (!info || !detail) return;
+  const expanded = info.getAttribute('aria-expanded') === 'true';
+  info.setAttribute('aria-expanded', expanded ? 'false' : 'true');
+  detail.hidden = expanded;
 }
 function formatCurrencyTimestamp(value) {
   const ms = timestampMs(value);
@@ -82,10 +100,23 @@ function renderCurrencyControls() {
   usd.setAttribute('aria-pressed', dashboardCurrencyState.currency === 'USD' ? 'true' : 'false');
   cny.setAttribute('aria-pressed', dashboardCurrencyState.currency === 'CNY' ? 'true' : 'false');
   if (status) {
-    if (!supported || dashboardCurrencyState.currency !== 'CNY') { status.textContent = ''; status.title = ''; }
-    else {
-      status.textContent = currencyStatusText();
-      status.title = dashboardCurrencyState.error ? t('currency_error') + ' ' + dashboardCurrencyState.error : '';
+    const active = supported && dashboardCurrencyState.currency === 'CNY';
+    status.textContent = active ? currencyStatusText() : '';
+    status.title = active ? currencyStatusTitle() : '';
+    const info = $('currencyStatusInfo'), detail = $('currencyStatusDetail');
+    const details = active ? currencyStatusDetails() : '';
+    // 展开状态以按钮的 aria-expanded 为唯一真相来源:index.html 里的初始属性只
+    // 负责无 JS 时的形态,展开与否一律由这里同步,免得标记和脚本各说各话。
+    if (info) {
+      info.hidden = !details;
+      info.setAttribute('aria-label', t('currency_detail_toggle'));
+      info.setAttribute('aria-controls', 'currencyStatusDetail');
+      // 详情为空时强制收起,否则会留下一个空的展开区;有详情时保留用户的展开状态。
+      if (!details || info.getAttribute('aria-expanded') !== 'true') info.setAttribute('aria-expanded', 'false');
+    }
+    if (detail) {
+      detail.textContent = details;
+      detail.hidden = !(details && info && info.getAttribute('aria-expanded') === 'true');
     }
   }
 }
@@ -929,7 +960,7 @@ function timeRulesReferenceHtml(price, fields) {
   if (!rules.length) return '';
   const rows = rules.map((rule) => '<div class="priceReferenceRule">' +
     '<span class="priceReferenceRuleName">' + esc(rule.name || t('time_rule_unnamed')) + '</span>' +
-    '<span class="priceReferenceRuleRange">' + esc(rule.start || '') + '–' + esc(rule.end || '') + '</span>' +
+    '<span class="priceReferenceRuleRange">' + esc(ruleDaysLabel(rule)) + ' ' + esc(rule.start || '') + '–' + esc(rule.end || '') + '</span>' +
     '<span class="priceReferenceRuleGrid">' + fields.map(([label, key]) => {
       const overridden = rule[key] != null;
       return '<span class="priceReferenceRuleValue' + (overridden ? ' overridden' : '') + '"><span class="priceReferenceValueLabel">' + esc(t(label)) + '</span>' + formatUnitPrice(overridden ? rule[key] : price[key]) + '</span>';
@@ -1023,10 +1054,75 @@ function syncPriceFormForModel(model) {
   fillPriceForm(model);
 }
 
-function newTimeRule() { return { id: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : 'rule-' + Date.now() + '-' + Math.random().toString(16).slice(2), name: '', start: '00:00', end: '01:00' }; }
+function newTimeRule() { return { id: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : 'rule-' + Date.now() + '-' + Math.random().toString(16).slice(2), name: '', start: '00:00', end: '01:00', days: [] }; }
+// 0 = 周日 … 6 = 周六,与后端 time.Weekday 和 JS Date#getDay 一致。展示顺序从
+// 周一开始,符合中文习惯;空列表表示每天,也是旧价格文件的语义。
+const TIME_RULE_DAY_ORDER = [1, 2, 3, 4, 5, 6, 0];
+const TIME_RULE_WORKDAYS = [1, 2, 3, 4, 5];
+const TIME_RULE_WEEKEND = [0, 6];
+function ruleDaySet(rule) {
+  const days = Array.isArray(rule && rule.days) ? rule.days.filter((d) => Number.isInteger(d) && d >= 0 && d <= 6) : [];
+  return days.length === 0 || days.length >= 7 ? TIME_RULE_DAY_ORDER.slice() : days;
+}
+function sameDaySet(days, other) {
+  if (days.length !== other.length) return false;
+  const sorted = days.slice().sort(), otherSorted = other.slice().sort();
+  return sorted.every((d, i) => d === otherSorted[i]);
+}
+// 每天用空列表表示,让存储和导出里「每天」只有一种形态,与旧价格文件同形。
+function normalizedRuleDays(days) {
+  const unique = Array.from(new Set(days.filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))).sort((a, b) => a - b);
+  return unique.length === 0 || unique.length === 7 ? [] : unique;
+}
+function ruleDaysLabel(rule) {
+  const days = ruleDaySet(rule);
+  if (days.length === 7) return t('time_rule_days_all');
+  if (sameDaySet(days, TIME_RULE_WORKDAYS)) return t('time_rule_days_workday');
+  if (sameDaySet(days, TIME_RULE_WEEKEND)) return t('time_rule_days_weekend');
+  return TIME_RULE_DAY_ORDER.filter((d) => days.indexOf(d) >= 0).map((d) => t('weekday_short_' + d)).join('');
+}
+// 可见文字是「一/二/…/日」这类缩写,读屏念出来近乎无意义。全名不另建 28 条
+// i18n,直接按当前格式化 locale 从 Intl 取:2026-08-23 是周日,加 day 天正好落到
+// 对应星期。Intl 不可用时回落到缩写。
+function weekdayFullLabel(day) {
+  try {
+    return new Date(Date.UTC(2026, 7, 23 + day)).toLocaleDateString(getFormatLocale(), { weekday: 'long', timeZone: 'UTC' });
+  } catch (e) {
+    return t('weekday_short_' + day);
+  }
+}
+function timeRuleDaysHtml(rule, index) {
+  const days = ruleDaySet(rule);
+  const presets = [['all', TIME_RULE_DAY_ORDER], ['workday', TIME_RULE_WORKDAYS], ['weekend', TIME_RULE_WEEKEND]];
+  return '<div class="timeRuleDays" role="group" aria-label="' + esc(t('time_rule_days')) + '">' +
+    '<span class="timeRuleDaysLabel">' + esc(t('time_rule_days')) + '</span>' +
+    presets.map(([key, preset]) => '<button type="button" class="timeRuleDayPreset' + (sameDaySet(days, preset) ? ' active' : '') +
+      '" data-day-preset="' + key + '" data-rule-index="' + index + '">' + esc(t('time_rule_days_' + key)) + '</button>').join('') +
+    TIME_RULE_DAY_ORDER.map((day) => '<label class="timeRuleDayChip' + (days.indexOf(day) >= 0 ? ' active' : '') + '">' +
+      '<input type="checkbox" data-day-toggle="' + day + '" data-rule-index="' + index + '" aria-label="' + esc(weekdayFullLabel(day)) + '"' + (days.indexOf(day) >= 0 ? ' checked' : '') + '>' +
+      esc(t('weekday_short_' + day)) + '</label>').join('') +
+    '</div>';
+}
+// nextRuleDays 决定一次勾选/取消之后的星期集合,返回 null 表示这次改动必须被
+// 拒绝:一条规则至少要落在一天上。取消最后一天会让 days 变空,而空在存储里表示
+// 「每天」,勾选状态会整排跳回全选——所见即所得就断了。
+function nextRuleDays(currentDays, day, checked) {
+  const days = currentDays.filter((d) => d !== day);
+  if (checked) days.push(day);
+  if (!days.length) return null;
+  return normalizedRuleDays(days);
+}
 function timeRuleRemoveLabel(model, rule, index) {
   const name = String(rule && rule.name || '').trim() || t('time_rule_unnamed') + ' ' + (index + 1);
   return [t('time_rule_remove'), model, name].filter(Boolean).join(' ');
+}
+// 勾选星期会整块重渲染,元素被替换后焦点会掉回 body:键盘用户按一次空格就得从
+// 头 Tab 回这一排。重渲染后把焦点放回等价的那个控件。
+function focusTimeRuleControl(selector) {
+  const editor = $('timeRulesEditor');
+  if (!editor || typeof editor.querySelector !== 'function') return;
+  const target = editor.querySelector(selector);
+  if (target && typeof target.focus === 'function') target.focus();
 }
 function renderTimeRules() {
   const editor = $('timeRulesEditor'); if (!editor) return;
@@ -1038,18 +1134,54 @@ function renderTimeRules() {
     '<label>' + t('time_rule_start') + '<input class="input" type="time" data-rule-field="start" value="' + esc(r.start || '') + '"></label>' +
     '<label>' + t('time_rule_end') + '<input class="input" type="time" data-rule-field="end" value="' + esc(r.end || '') + '"></label>' +
     ['prompt', 'completion', 'cache', 'cache_write'].map((field) => '<label>' + ({prompt:t('time_rule_input'),completion:t('time_rule_output'),cache:t('time_rule_cache'),cache_write:t('time_rule_cache_write')}[field]) + '<input class="input" type="number" min="0" step="0.0001" data-rule-field="' + field + '" value="' + (r[field] == null ? '' : esc(r[field])) + '"></label>').join('') +
-    '<button class="btn danger timeRuleRemove" type="button" data-rule-remove="' + i + '" aria-label="' + esc(timeRuleRemoveLabel(model, r, i)) + '">×</button></div>').join('');
+    '<button class="btn danger timeRuleRemove" type="button" data-rule-remove="' + i + '" aria-label="' + esc(timeRuleRemoveLabel(model, r, i)) + '">×</button>' +
+    timeRuleDaysHtml(r, i) + '</div>').join('');
   if (typeof editor.querySelectorAll !== 'function') return;
   editor.querySelectorAll('[data-rule-field]').forEach((input) => input.oninput = () => { const row = input.closest('[data-rule-index]'); const rule = timeRules[Number(row.dataset.ruleIndex)]; const field = input.dataset.ruleField; rule[field] = input.value; });
   editor.querySelectorAll('[data-rule-remove]').forEach((button) => button.onclick = () => { timeRules.splice(Number(button.dataset.ruleRemove), 1); renderTimeRules(); });
+  editor.querySelectorAll('[data-day-preset]').forEach((button) => button.onclick = () => {
+    const index = Number(button.dataset.ruleIndex);
+    const rule = timeRules[index]; if (!rule) return;
+    const preset = button.dataset.dayPreset;
+    rule.days = normalizedRuleDays(preset === 'workday' ? TIME_RULE_WORKDAYS : preset === 'weekend' ? TIME_RULE_WEEKEND : TIME_RULE_DAY_ORDER);
+    renderTimeRules();
+    focusTimeRuleControl('[data-day-preset="' + preset + '"][data-rule-index="' + index + '"]');
+  });
+  editor.querySelectorAll('[data-day-toggle]').forEach((input) => input.onchange = () => {
+    const index = Number(input.dataset.ruleIndex);
+    const rule = timeRules[index]; if (!rule) return;
+    const day = Number(input.dataset.dayToggle);
+    const days = nextRuleDays(ruleDaySet(rule), day, input.checked);
+    if (!days) { input.checked = true; return; }
+    rule.days = days;
+    renderTimeRules();
+    focusTimeRuleControl('[data-day-toggle="' + day + '"][data-rule-index="' + index + '"]');
+  });
 }
 function serializedTimeRules() {
-  return timeRules.map((r) => { const out = { id: r.id || newTimeRule().id, name: String(r.name || '').trim(), start: r.start || '', end: r.end || '' }; ['prompt','completion','cache','cache_write'].forEach((key) => { if (r[key] !== '' && r[key] != null) out[key] = num(r[key]); }); return out; });
+  return timeRules.map((r) => {
+    const out = { id: r.id || newTimeRule().id, name: String(r.name || '').trim(), start: r.start || '', end: r.end || '' };
+    const days = normalizedRuleDays(ruleDaySet(r));
+    if (days.length) out.days = days;
+    ['prompt','completion','cache','cache_write'].forEach((key) => { if (r[key] !== '' && r[key] != null) out[key] = num(r[key]); });
+    return out;
+  });
 }
 const TIME_RULE_PRICE_FIELDS = ['prompt', 'completion', 'cache', 'cache_write'];
 // 全部失败都用 throw:曾经的 `return '最多只能添加 16 个时段'` 与其余分支的 throw
 // 混用,而调用方不看返回值,导致超限检查形同虚设。
 function timeRuleError(index, key) { return new Error(t('time_rule_invalid') + '[' + (index + 1) + '] ' + t(key)); }
+// 空 days 表示每天,与后端 modelPriceRuleDayMask 一致。
+function ruleDayMask(rule) {
+  const days = Array.isArray(rule && rule.days) ? rule.days : [];
+  if (!days.length) return 0x7F;
+  let mask = 0;
+  days.forEach((d) => { if (Number.isInteger(d) && d >= 0 && d <= 6) mask |= 1 << d; });
+  return mask || 0x7F;
+}
+// 与后端 validateModelPriceRules 对称。重叠判定按「星期相交 ∩ 时间相交」:星期
+// 不相交的两条规则永远不会同时命中,时间段重叠也不算冲突——「工作日夜间半价」和
+// 「周末夜间原价」必须能共存。函数体内不要写中文,错误文案一律走 t()。
 function validateTimeRulesClient(rules) {
   if (rules.length > 16) throw new Error(t('time_rule_max'));
   const intervals = [];
@@ -1060,11 +1192,13 @@ function validateTimeRulesClient(rules) {
     if (start < 0) throw timeRuleError(i, 'time_rule_err_start');
     if (end < 0) throw timeRuleError(i, 'time_rule_err_end');
     if (start === end) throw timeRuleError(i, 'time_rule_err_same');
+    if (Array.isArray(r.days) && (r.days.length > 7 || r.days.some((d) => !Number.isInteger(d) || d < 0 || d > 6) || new Set(r.days).size !== r.days.length)) throw timeRuleError(i, 'time_rule_err_days');
     if (!TIME_RULE_PRICE_FIELDS.some((k) => Object.prototype.hasOwnProperty.call(r, k))) throw timeRuleError(i, 'time_rule_err_empty');
     TIME_RULE_PRICE_FIELDS.forEach((k) => { if (r[k] != null && (!Number.isFinite(Number(r[k])) || Number(r[k]) < 0)) throw timeRuleError(i, 'time_rule_err_price'); });
-    if (start < end) intervals.push([start, end, i]); else { intervals.push([start, 1440, i], [0, end, i]); }
+    const days = ruleDayMask(r);
+    if (start < end) intervals.push([start, end, i, days]); else { intervals.push([start, 1440, i, days], [0, end, i, days]); }
   });
-  for (let i = 0; i < intervals.length; i++) for (let j = i + 1; j < intervals.length; j++) if (intervals[i][0] < intervals[j][1] && intervals[j][0] < intervals[i][1]) throw new Error(t('time_rule_overlap'));
+  for (let i = 0; i < intervals.length; i++) for (let j = i + 1; j < intervals.length; j++) if ((intervals[i][3] & intervals[j][3]) !== 0 && intervals[i][0] < intervals[j][1] && intervals[j][0] < intervals[i][1]) throw new Error(t('time_rule_overlap'));
 }
 
 function renderPrices() {
@@ -1074,7 +1208,7 @@ function renderPrices() {
   renderPriceReference();
   renderTimeRules();
   const entries = Object.entries(manualModelPrices).sort(([a], [b]) => a.localeCompare(b));
-  $('priceList').innerHTML = entries.length ? entries.map(([m, p]) => '<div class="priceItem"><div><strong>' + esc(m) + '</strong><div class="priceMeta"><span>' + t('input_price') + ' ' + formatMoney(num(p.prompt), dashboardCurrencyState) + '/M</span><span>' + t('output_price') + ' ' + formatMoney(num(p.completion), dashboardCurrencyState) + '/M</span><span>' + t('cache_price') + ' ' + formatMoney(num(p.cache), dashboardCurrencyState) + '/M</span><span>' + t('cache_write_price') + ' ' + formatMoney(num(p.cache_write), dashboardCurrencyState) + '/M</span></div>' + (Array.isArray(p.time_rules) && p.time_rules.length ? '<div class="priceMeta timeRuleSummary">' + p.time_rules.map((r) => esc(r.name || t('time_rule_unnamed')) + ' ' + esc(r.start) + '–' + esc(r.end) + '：' + formatMoney(num(r.prompt ?? p.prompt), dashboardCurrencyState) + '/M → ' + formatMoney(num(r.completion ?? p.completion), dashboardCurrencyState) + '/M').join('；') + '</div>' : '') + '</div><div class="priceActions"><button class="btn" data-edit-price="' + esc(m) + '">' + t('edit') + '</button><button class="btn danger" data-del-price="' + esc(m) + '">' + t('delete') + '</button></div></div>').join('') : '<div class="empty">' + t('no_prices') + '</div>';
+  $('priceList').innerHTML = entries.length ? entries.map(([m, p]) => '<div class="priceItem"><div><strong>' + esc(m) + '</strong><div class="priceMeta"><span>' + t('input_price') + ' ' + formatMoney(num(p.prompt), dashboardCurrencyState) + '/M</span><span>' + t('output_price') + ' ' + formatMoney(num(p.completion), dashboardCurrencyState) + '/M</span><span>' + t('cache_price') + ' ' + formatMoney(num(p.cache), dashboardCurrencyState) + '/M</span><span>' + t('cache_write_price') + ' ' + formatMoney(num(p.cache_write), dashboardCurrencyState) + '/M</span></div>' + (Array.isArray(p.time_rules) && p.time_rules.length ? '<div class="priceMeta timeRuleSummary">' + p.time_rules.map((r) => esc(r.name || t('time_rule_unnamed')) + ' ' + esc(ruleDaysLabel(r)) + ' ' + esc(r.start) + '–' + esc(r.end) + '：' + formatMoney(num(r.prompt ?? p.prompt), dashboardCurrencyState) + '/M → ' + formatMoney(num(r.completion ?? p.completion), dashboardCurrencyState) + '/M').join('；') + '</div>' : '') + '</div><div class="priceActions"><button class="btn" data-edit-price="' + esc(m) + '">' + t('edit') + '</button><button class="btn danger" data-del-price="' + esc(m) + '">' + t('delete') + '</button></div></div>').join('') : '<div class="empty">' + t('no_prices') + '</div>';
   document.querySelectorAll('[data-edit-price]').forEach((btn) => btn.onclick = () => fillPriceForm(btn.dataset.editPrice));
   document.querySelectorAll('[data-del-price]').forEach((btn) => btn.onclick = async () => {
     try {
@@ -2273,6 +2407,7 @@ $('savePrice').onclick = async () => {
   }
 };
 if ($('addTimeRule')) $('addTimeRule').onclick = () => { if (timeRules.length >= 16) return; timeRules.push(newTimeRule()); renderTimeRules(); };
+if ($('currencyStatusInfo')) $('currencyStatusInfo').onclick = toggleCurrencyStatusDetail;
 $('priceModel').onchange = () => syncPriceFormForModel($('priceModel').value);
 $('priceReferenceModel').onfocus = () => {
   if ($('priceReferenceModel').disabled) return;

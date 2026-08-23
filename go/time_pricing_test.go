@@ -906,3 +906,110 @@ func TestJSONLReplayKeepsBasePriceForRecordsWithoutTimestamp(t *testing.T) {
 	assertFloatNear(t, "replayed record without timestamp keeps the base price", *synthetic.CostUSD, 0.006)
 	assertFloatNear(t, "replayed record with a real timestamp uses the peak price", *real.CostUSD, 0.06)
 }
+
+// 2026-08-22 是周六,08-24 是周一。用同一个 UTC 时刻配 Asia/Shanghai,验证星期
+// 判定发生在计费时区里,而不是 UTC 里。
+func TestPricingRuleDaysRestrictWeekdays(t *testing.T) {
+	shanghai, _ := time.LoadLocation("Asia/Shanghai")
+	workdays := ModelPrice{Prompt: 10, TimeRules: []ModelPriceRule{{
+		Name: "workday-peak", Days: []int{1, 2, 3, 4, 5}, Start: "08:00", End: "09:00", Prompt: floatPtrForTest(2),
+	}}}
+	if err := validateModelPriceRules(workdays.TimeRules); err != nil {
+		t.Fatalf("工作日规则应通过校验: %v", err)
+	}
+
+	// 周一 08:30(Shanghai)= 周一 00:30 UTC
+	monday := time.Date(2026, 8, 24, 0, 30, 0, 0, time.UTC)
+	if got := effectivePrice(workdays, monday, shanghai).Prompt; got != 2 {
+		t.Fatalf("周一峰值价 = %v, want 2", got)
+	}
+	// 周六 08:30(Shanghai)= 周六 00:30 UTC,同一个钟点但不在工作日内
+	saturday := time.Date(2026, 8, 22, 0, 30, 0, 0, time.UTC)
+	if got := effectivePrice(workdays, saturday, shanghai).Prompt; got != 10 {
+		t.Fatalf("周六应回落基础价, got %v, want 10", got)
+	}
+	// 同一个 UTC 时刻在 UTC 里是周五 17:30/周六,星期必须按计费时区判。
+	if got := effectivePrice(workdays, monday, time.UTC).Prompt; got != 10 {
+		t.Fatalf("UTC 下 00:30 不在 08:00-09:00 内, got %v, want 10", got)
+	}
+}
+
+// 星期不相交时,同一时间段必须允许存在两条不同价格的规则——「工作日夜间半价、
+// 周末夜间原价」是这个功能的主要用途,旧的纯时间重叠校验会把它判成冲突。
+func TestPricingRulesWithDisjointDaysMayShareTimeRange(t *testing.T) {
+	shanghai, _ := time.LoadLocation("Asia/Shanghai")
+	price := ModelPrice{Prompt: 10, TimeRules: []ModelPriceRule{
+		{Name: "workday-night", Days: []int{1, 2, 3, 4, 5}, Start: "22:00", End: "06:00", Prompt: floatPtrForTest(5)},
+		{Name: "weekend-night", Days: []int{0, 6}, Start: "22:00", End: "06:00", Prompt: floatPtrForTest(20)},
+	}}
+	if err := validateModelPriceRules(price.TimeRules); err != nil {
+		t.Fatalf("星期不相交的同时段规则不应判为重叠: %v", err)
+	}
+
+	// 周一 23:00 Shanghai = 周一 15:00 UTC
+	if got := effectivePrice(price, time.Date(2026, 8, 24, 15, 0, 0, 0, time.UTC), shanghai).Prompt; got != 5 {
+		t.Fatalf("工作日夜间价 = %v, want 5", got)
+	}
+	// 周六 23:00 Shanghai = 周六 15:00 UTC
+	if got := effectivePrice(price, time.Date(2026, 8, 22, 15, 0, 0, 0, time.UTC), shanghai).Prompt; got != 20 {
+		t.Fatalf("周末夜间价 = %v, want 20", got)
+	}
+	// 跨午夜规则按请求实际落在的那一天判:周六 02:00 归周末,即使区间起点是周五 22:00。
+	if got := effectivePrice(price, time.Date(2026, 8, 21, 18, 0, 0, 0, time.UTC), shanghai).Prompt; got != 20 {
+		t.Fatalf("周六凌晨应按周末价, got %v, want 20", got)
+	}
+	// 星期相交后仍必须报重叠。
+	conflicting := append([]ModelPriceRule(nil), price.TimeRules...)
+	conflicting[1].Days = []int{5, 6}
+	if err := validateModelPriceRules(conflicting); err == nil || !strings.Contains(err.Error(), "overlap") {
+		t.Fatalf("星期相交时应报重叠, got %v", err)
+	}
+}
+
+func TestPricingRuleDaysValidationAndNormalization(t *testing.T) {
+	for name, days := range map[string][]int{
+		"越界的星期":  {7},
+		"负数星期":   {-1},
+		"重复的星期":  {1, 1},
+		"超过七个元素": {0, 1, 2, 3, 4, 5, 6, 0},
+	} {
+		rules := []ModelPriceRule{{Name: "r", Days: days, Start: "08:00", End: "09:00", Prompt: floatPtrForTest(1)}}
+		if err := validateModelPriceRules(rules); err == nil {
+			t.Fatalf("%s 应被拒绝: %v", name, days)
+		}
+	}
+
+	// 缺省 days 保持「每天」语义,导出里不出现该字段。
+	legacy := normalizeModelPriceRules(ModelPrice{Prompt: 1, TimeRules: []ModelPriceRule{{Name: "all", Start: "08:00", End: "09:00", Prompt: floatPtrForTest(1)}}})
+	if legacy.TimeRules[0].Days != nil {
+		t.Fatalf("旧规则不应被补出 days: %#v", legacy.TimeRules[0].Days)
+	}
+	raw, err := json.Marshal(legacy.TimeRules[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "days") {
+		t.Fatalf("每天的规则不应序列化出 days 字段: %s", raw)
+	}
+
+	// 覆盖整周 == 每天,收敛成 nil;乱序/重复被排序去重。
+	normalized := normalizeModelPriceRules(ModelPrice{Prompt: 1, TimeRules: []ModelPriceRule{
+		{Name: "full", Days: []int{6, 5, 4, 3, 2, 1, 0}, Start: "08:00", End: "09:00", Prompt: floatPtrForTest(1)},
+		{Name: "messy", Days: []int{5, 1, 5}, Start: "10:00", End: "11:00", Prompt: floatPtrForTest(1)},
+	}})
+	if normalized.TimeRules[0].Days != nil {
+		t.Fatalf("整周应收敛成 nil: %#v", normalized.TimeRules[0].Days)
+	}
+	if got := normalized.TimeRules[1].Days; len(got) != 2 || got[0] != 1 || got[1] != 5 {
+		t.Fatalf("days 应排序去重, got %#v", got)
+	}
+
+	// 深拷贝:调用方改自己的切片不能影响归一化后的副本。
+	caller := []int{1, 2}
+	source := ModelPrice{Prompt: 1, TimeRules: []ModelPriceRule{{Name: "r", Days: caller, Start: "08:00", End: "09:00", Prompt: floatPtrForTest(1)}}}
+	copied := normalizeModelPriceRules(source)
+	caller[0] = 6
+	if copied.TimeRules[0].Days[0] != 1 {
+		t.Fatalf("days 未深拷贝: %#v", copied.TimeRules[0].Days)
+	}
+}
