@@ -29,7 +29,11 @@ func TestResponseFallbackRecoversEndpointAndReasoningFromRequest(t *testing.T) {
 
 func protocolFallbackTestRecords() (UsageRecord, UsageRecord) {
 	location := time.FixedZone("CST", 8*60*60)
-	completedAt := time.Date(2026, 7, 27, 15, 49, 23, 62_369_171, location)
+	// Keep the shared fixture inside the default retention window. A fixed
+	// production timestamp makes every test using stats.Record start returning
+	// an empty snapshot once that date becomes older than retention_days.
+	completedAt := time.Now().In(location).Add(-time.Minute)
+	nativeLatency := 1981 * time.Millisecond
 	detail := UsageDetail{
 		InputTokens: 1803, OutputTokens: 11, TotalTokens: 1814,
 	}
@@ -55,8 +59,8 @@ func protocolFallbackTestRecords() (UsageRecord, UsageRecord) {
 		AuthIndex:       "a2f9cd186fd7dee9",
 		AuthType:        "oauth",
 		Source:          "xpspwc9mfb@privaterelay.appleid.com",
-		RequestedAt:     time.Date(2026, 7, 27, 15, 49, 21, 72_754_693, location),
-		Latency:         1981 * time.Millisecond,
+		RequestedAt:     completedAt.Add(-nativeLatency - 9*time.Millisecond),
+		Latency:         nativeLatency,
 		TTFT:            1326 * time.Millisecond,
 		ReasoningEffort: "medium",
 		Detail:          detail,

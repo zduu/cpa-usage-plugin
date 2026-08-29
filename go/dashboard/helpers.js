@@ -70,8 +70,8 @@ function priceLookupKeys(model, provider) { const providerKey = String(provider 
 function priceForModel(model, prices, provider, manualPrices) { const keys = priceLookupKeys(model, provider); for (const key of keys) { const price = directPriceForModel(key, manualPrices); if (price) return price; } for (const key of keys) { const price = directPriceForModel(key, prices); if (price) return price; } return null }
 function cacheTokenTotal(tokens) { const t = tokens || {}; const cacheWrite = Math.max(num(t.cache_write_tokens), 0); const explicitCacheTotal = Math.max(num(t.cache_tokens), 0); return explicitCacheTotal > 0 ? Math.max(explicitCacheTotal, num(t.cached_tokens), cacheWrite) : Math.max(num(t.cached_tokens), 0) + cacheWrite }
 function cacheReadTokens(tokens) { const t = tokens || {}; const explicitCacheTotal = Math.max(num(t.cache_tokens), 0); return explicitCacheTotal > 0 ? Math.max(explicitCacheTotal - Math.max(num(t.cache_write_tokens), 0), 0) : Math.max(num(t.cached_tokens), 0) }
-function tokenCost(model, inputTokens, outputTokens, totalTokensValue, cachedTokens, cacheWriteTokens, reasoningTokens, prices, provider, manualPrices) { const p = priceForModel(model, prices, provider, manualPrices); if (!p) return 0; const output = Math.max(num(outputTokens), 0); const cacheWrite = Math.max(num(cacheWriteTokens), 0); const cacheTotal = Math.max(num(cachedTokens), cacheWrite, 0); const cacheRead = Math.max(cacheTotal - cacheWrite, 0); const inputValue = Math.max(num(inputTokens), 0); const input = usesExclusiveCacheInput(provider, inputValue, output, cacheTotal, totalTokensValue) ? inputValue : Math.max(inputValue - cacheTotal, 0); return input / 1e6 * num(p.prompt) + output / 1e6 * num(p.completion) + cacheRead / 1e6 * num(p.cache) + cacheWrite / 1e6 * num(p.cache_write) }
-function detailCost(detail, prices, manualPrices) { if (detail && Object.prototype.hasOwnProperty.call(detail, 'cost_usd')) return Math.max(num(detail.cost_usd), 0); const t = detail.tokens || {}; const cacheWrite = Math.max(num(t.cache_write_tokens), 0); return tokenCost(detail.model, t.input_tokens, t.output_tokens, totalTokens(detail), cacheTokenTotal(t), cacheWrite, t.reasoning_tokens, prices, detail.provider, manualPrices) }
+function tokenCost(model, inputTokens, outputTokens, totalTokensValue, cachedTokens, cacheWriteTokens, reasoningTokens, prices, provider, manualPrices) { const p = priceForModel(model, prices, provider, manualPrices); if (!p) return 0; const output = Math.max(num(outputTokens), 0); const cacheRead = Math.max(num(cachedTokens), 0); const cacheWrite = Math.max(num(cacheWriteTokens), 0); const cacheTotal = cacheRead + cacheWrite; const inputValue = Math.max(num(inputTokens), 0); const input = usesExclusiveCacheInput(provider, inputValue, output, cacheTotal, totalTokensValue) ? inputValue : Math.max(inputValue - cacheTotal, 0); return input / 1e6 * num(p.prompt) + output / 1e6 * num(p.completion) + cacheRead / 1e6 * num(p.cache) + cacheWrite / 1e6 * num(p.cache_write) }
+function detailCost(detail, prices, manualPrices) { if (detail && Object.prototype.hasOwnProperty.call(detail, 'cost_usd')) return Math.max(num(detail.cost_usd), 0); const t = detail.tokens || {}; const cacheWrite = Math.max(num(t.cache_write_tokens), 0); return tokenCost(detail.model, t.input_tokens, t.output_tokens, totalTokens(detail), cacheReadTokens(t), cacheWrite, t.reasoning_tokens, prices, detail.provider, manualPrices) }
 function aggregateCost(row, prices, manualPrices) { if (row && Object.prototype.hasOwnProperty.call(row, 'estimated_cost')) return Math.max(num(row.estimated_cost), 0); const providers = Array.isArray(row && row.providers) ? row.providers : []; if (providers.length) return providers.reduce((sum, p) => sum + tokenCost(row.model, p.input_tokens, p.output_tokens, p.total_tokens, p.cached_tokens, p.cache_write_tokens, p.reasoning_tokens, prices, p.provider, manualPrices), 0); return tokenCost(row && row.model, row && row.input_tokens, row && row.output_tokens, row && row.total_tokens, row && row.cached_tokens, row && row.cache_write_tokens, row && row.reasoning_tokens, prices, row && row.provider, manualPrices) }
 function looksLikeKey(v) { return typeof v === 'string' && (v.startsWith('sk-') || v.startsWith('AIza') || v.startsWith('hf_') || v.startsWith('pk_') || v.startsWith('rk_') || v.length >= 80) }
 function looksLikeCredentialId(v) { const s = String(v || '').trim(); return /^[a-f0-9]{8,}$/i.test(s) || (s.length >= 32 && !/[ ./_-]/.test(s)) }
@@ -254,21 +254,25 @@ async function fetchAllEventPages(fetchPage, baseParams, pageLimit) {
 // ---- cache rate & cost-per-million helpers ----
 function cacheRate(row) {
   var parts = Array.isArray(row.providers) && row.providers.length ? row.providers : [row];
-  var cacheRead = 0;
+  var cacheReads = 0;
   var inputWithCache = 0;
   parts.forEach(function(part) {
-    var cached = Math.max(0, num(part.cached_tokens));
+    // Aggregate cached_tokens follows snapshot v2 semantics: cache reads only.
+    // Cache creation is reported separately and still belongs in the prompt
+    // denominator for providers whose input_tokens excludes cache tokens.
+    var cacheRead = Math.max(0, num(part.cached_tokens));
     var cacheWrite = Math.max(0, num(part.cache_write_tokens));
+    var cacheTotal = cacheRead + cacheWrite;
     var input = Math.max(0, num(part.input_tokens));
     var output = Math.max(0, num(part.output_tokens));
     var total = Math.max(0, num(part.total_tokens));
     var provider = String(part.provider || '').trim();
-    var exclusive = usesExclusiveCacheInput(provider, input, output, cached, total);
-    cacheRead += Math.max(cached - cacheWrite, 0);
-    inputWithCache += exclusive ? input + cached : input;
+    var exclusive = usesExclusiveCacheInput(provider, input, output, cacheTotal, total);
+    cacheReads += cacheRead;
+    inputWithCache += exclusive ? input + cacheTotal : input;
   });
   if (inputWithCache <= 0) return 0;
-  return Math.min(100, cacheRead / inputWithCache * 100);
+  return Math.min(100, cacheReads / inputWithCache * 100);
 }
 function costPerMillion(row, prices, manualPrices) {
   var cost = aggregateCost(row, prices, manualPrices);

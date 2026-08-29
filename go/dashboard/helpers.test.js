@@ -297,12 +297,27 @@ test('cacheRate handles inclusive and Claude-style exclusive input totals', () =
   assert.strictEqual(helpers.cacheRate({ input_tokens: 100, output_tokens: 20, total_tokens: 120, cached_tokens: 40 }), 40);
   assert.ok(Math.abs(helpers.cacheRate({ input_tokens: 100, output_tokens: 20, total_tokens: 160, cached_tokens: 40 }) - 28.57142857142857) < 1e-9);
   assert.strictEqual(helpers.cacheRate({ input_tokens: 0, output_tokens: 20, total_tokens: 60, cached_tokens: 40 }), 100);
-  assert.strictEqual(helpers.cacheRate({ input_tokens: 100, output_tokens: 0, total_tokens: 100, cached_tokens: 50, cache_write_tokens: 30 }), 20);
-  assert.strictEqual(helpers.cacheRate({ input_tokens: 50, output_tokens: 0, total_tokens: 100, cached_tokens: 50, cache_write_tokens: 30 }), 20);
+  assert.strictEqual(helpers.cacheRate({ input_tokens: 100, output_tokens: 0, total_tokens: 100, cached_tokens: 50, cache_write_tokens: 30 }), 50);
+  assert.strictEqual(helpers.cacheRate({ input_tokens: 50, output_tokens: 0, total_tokens: 100, cached_tokens: 20, cache_write_tokens: 30 }), 20);
   assert.strictEqual(helpers.cacheRate({ providers: [
     { provider: 'openai', input_tokens: 100, total_tokens: 100, cached_tokens: 20 },
     { provider: 'anthropic', input_tokens: 80, total_tokens: 100, cached_tokens: 20 },
   ] }), 20);
+});
+
+test('cacheRate treats v2 cached_tokens as cache reads instead of subtracting writes again', () => {
+  const row = {
+    providers: [{
+      provider: 'claude',
+      input_tokens: 248,
+      output_tokens: 129366,
+      total_tokens: 30244430,
+      cached_tokens: 15010483,
+      cache_write_tokens: 15104333,
+    }],
+  };
+  const expected = 15010483 / (248 + 15010483 + 15104333) * 100;
+  assert.ok(Math.abs(helpers.cacheRate(row) - expected) < 1e-9);
 });
 
 test('hourBucketValue reads padded and plain hour keys', () => {

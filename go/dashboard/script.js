@@ -1376,7 +1376,7 @@ function normalizeApiDetailEvent(d) {
   return Object.assign({}, d, {
     timestamp_ms: timestampMs(d.timestamp),
     total_tokens: totalTokens(d),
-    cached_tokens: cacheTokenTotal(tokens),
+    cached_tokens: cacheReadTokens(tokens),
     cache_write_tokens: num(tokens.cache_write_tokens),
     reasoning_tokens: num(tokens.reasoning_tokens),
     cost: detailCost(d, modelPrices, manualModelPrices)
@@ -1847,7 +1847,7 @@ function addDetailProviderToCounter(row, d) {
     total_tokens: totalTokens(d),
     input_tokens: num(tokens.input_tokens),
     output_tokens: num(tokens.output_tokens),
-    cached_tokens: cacheTokenTotal(tokens),
+    cached_tokens: cacheReadTokens(tokens),
     cache_write_tokens: num(tokens.cache_write_tokens),
     reasoning_tokens: num(tokens.reasoning_tokens),
   });
@@ -1859,7 +1859,7 @@ function addDetailToCounter(row, d) {
   row.total_tokens += totalTokens(d);
   row.input_tokens += num(tokens.input_tokens);
   row.output_tokens += num(tokens.output_tokens);
-  row.cached_tokens += cacheTokenTotal(tokens);
+  row.cached_tokens += cacheReadTokens(tokens);
   row.cache_write_tokens += num(tokens.cache_write_tokens);
   row.reasoning_tokens += num(tokens.reasoning_tokens);
   if (num(d.latency_ms) > 0) row.latency.push(num(d.latency_ms));
@@ -2051,7 +2051,7 @@ function addDetailToUsageTotals(usage, d, latency) {
   usage.total_tokens += totalTokens(d);
   usage.input_tokens += num(tokens.input_tokens);
   usage.output_tokens += num(tokens.output_tokens);
-  usage.cached_tokens += cacheTokenTotal(tokens);
+  usage.cached_tokens += cacheReadTokens(tokens);
   usage.cache_write_tokens += num(tokens.cache_write_tokens);
   usage.reasoning_tokens += num(tokens.reasoning_tokens);
   if (latency && num(d.latency_ms) > 0) latency.push(num(d.latency_ms));
@@ -2105,7 +2105,7 @@ function buildSummaryFromFullUsage(data, rangeKey) {
         healthDetails.push(d);
         if (!detailMatchesRange(d, cutoffMs)) return;
         const tokens = d.tokens || {};
-        const cached = cacheTokenTotal(tokens);
+        const cached = cacheReadTokens(tokens);
         const detailModelRow = rangeScoped ? (apiModelRows.get(d.model) || makeCounterRow(d.model)) : modelRow;
         addDetailToCounter(detailModelRow, d);
         if (rangeScoped) apiModelRows.set(d.model, detailModelRow);

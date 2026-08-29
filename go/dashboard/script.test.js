@@ -712,7 +712,7 @@ test('dashboard loads summary and export button uses backend event export', asyn
   assert.doesNotMatch(apiDetail, /Token\/请求/);
   await waitFor(() => /ModelError/.test(document.getElementById('apiDetail').innerHTML));
   const loadedApiDetail = document.getElementById('apiDetail').innerHTML;
-  assert.match(loadedApiDetail, /US\$0\.000405/);
+  assert.match(loadedApiDetail, /US\$0\.000401/);
   assert.match(loadedApiDetail, /总 token 数：105/);
   assert.match(loadedApiDetail, /缓存命中 token：10/);
   assert.match(loadedApiDetail, /缓存创建 token：3/);
@@ -1832,6 +1832,48 @@ test('dashboard fallback keeps selected range instead of full aggregates', async
   assert.match(document.getElementById('modelStats').innerHTML, /120ms/);
 });
 
+test('dashboard fallback aggregates cache reads with v2 semantics', () => {
+  const { context } = createDashboardHarness();
+  const generatedAt = new Date().toISOString();
+  context.cacheUsageFixture = {
+    generated_at: generatedAt,
+    usage: {
+      apis: {
+        claude: {
+          models: {
+            'claude-opus-5': {
+              details: [{
+                timestamp: generatedAt,
+                model: 'claude-opus-5',
+                provider: 'claude',
+                failed: false,
+                tokens: {
+                  input_tokens: 2,
+                  output_tokens: 0,
+                  cached_tokens: 40,
+                  cache_read_tokens: 40,
+                  cache_tokens: 100,
+                  cache_write_tokens: 60,
+                  total_tokens: 102,
+                },
+              }],
+            },
+          },
+        },
+      },
+    },
+  };
+
+  const result = JSON.parse(vm.runInContext('JSON.stringify(buildSummaryFromFullUsage(cacheUsageFixture, "24h"))', context));
+  const model = result.model_stats[0];
+  assert.strictEqual(result.usage.cached_tokens, 40);
+  assert.strictEqual(result.usage.cache_write_tokens, 60);
+  assert.strictEqual(model.cached_tokens, 40);
+  assert.strictEqual(model.providers[0].cached_tokens, 40);
+  context.cacheModelRow = model;
+  assert.ok(Math.abs(vm.runInContext('cacheRate(cacheModelRow)', context) - (40 / 102 * 100)) < 1e-9);
+});
+
 test('dashboard fallback range uses detail model instead of outer alias key', async () => {
   const { context, document, fetchCalls } = createDashboardHarness({
     failDashboardSummary: true,
@@ -1905,7 +1947,7 @@ test('dashboard fallback keeps upstream aggregates when details are trimmed', as
   await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-data')) && document.getElementById('apiStats').innerHTML.includes('openai'));
 
   assert.strictEqual(document.getElementById('totalRequests').textContent, '4');
-  assert.strictEqual(document.getElementById('totalCost').textContent, 'US$0.000177');
+  assert.strictEqual(document.getElementById('totalCost').textContent, 'US$0.000176');
   assert.match(document.getElementById('apiStats').innerHTML, /4 <span class="ok">\(3<\/span> <span class="bad">1\)<\/span>/);
   assert.match(document.getElementById('modelStats').innerHTML, /100ms/);
 });
@@ -1927,7 +1969,7 @@ test('dashboard fallback uses persisted provider aggregates when details are tri
   });
 
   await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-data')) && document.getElementById('totalCost').textContent !== '-');
-  assert.strictEqual(document.getElementById('totalCost').textContent, 'US$0.00066');
+  assert.strictEqual(document.getElementById('totalCost').textContent, 'US$0.00064');
 });
 
 test('dashboard detail refresh sends conditional requests for events and api detail', async () => {
