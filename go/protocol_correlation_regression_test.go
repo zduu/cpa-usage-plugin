@@ -85,6 +85,85 @@ func TestProtocolCorrelationCanonicalShapesAcrossTranslation(t *testing.T) {
 	}
 }
 
+func TestProtocolCorrelationIgnoresClaudeCachedTokensCreationFallback(t *testing.T) {
+	base := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	native := testCorrelationRecord("claude", "ClaudeExecutor", "model", "model", "/v1/messages", "client", base, time.Second,
+		UsageDetail{
+			InputTokens: 100, OutputTokens: 20, TotalTokens: 130,
+			CachedTokens: 10, CacheReadTokens: 0, CacheCreationTokens: 10,
+		}, nil)
+	fallback := testCorrelationRecord("claude", responseInterceptorFallbackExecutor, "model", "model", "/v1/messages", "client", base.Add(time.Second), 0,
+		UsageDetail{InputTokens: 110, OutputTokens: 20, TotalTokens: 130},
+		testCorrelationMeta(protocolCorrelationKnownInput|protocolCorrelationKnownOutput|protocolCorrelationKnownTotal,
+			protocolInputModeCacheSubset, protocolOutputModeReasoningSubset, protocolCacheModeSplit))
+
+	nativeObservation := protocolObservationFromUsageRecord(native)
+	if len(nativeObservation.Tokens.Shapes) != 1 || nativeObservation.Tokens.Shapes[0].FullInput != 110 {
+		t.Fatalf("live Claude shapes = %#v, want canonical input 110", nativeObservation.Tokens.Shapes)
+	}
+	if _, ok := protocolCorrelationEdge(protocolObservationFromUsageRecord(fallback), nativeObservation); !ok {
+		t.Fatal("polluted live Claude record did not correlate with its canonical fallback")
+	}
+
+	legacyDetail := requestDetailFromUsageRecord(native, native.RequestedAt, headerWhitelist{})
+	legacyDetail.Correlation = nil
+	legacyDetail.Tokens.CachedTokens = 10
+	legacyDetail.Tokens.CacheReadTokens = 0
+	legacyDetail.Tokens.CacheWriteTokens = 10
+	legacyObservation := protocolObservationFromRequestDetail("model", legacyDetail)
+	if len(legacyObservation.Tokens.Shapes) != 1 || legacyObservation.Tokens.Shapes[0].FullInput != 110 {
+		t.Fatalf("legacy Claude shapes = %#v, want canonical input 110", legacyObservation.Tokens.Shapes)
+	}
+
+	// An explicit sidecar can mark a zero cache-read bucket as known. It must
+	// not cause evidence construction to reintroduce the parser fallback.
+	legacyDetail.Correlation = testCorrelationMeta(
+		protocolCorrelationKnownInput|protocolCorrelationKnownOutput|protocolCorrelationKnownCacheRead|
+			protocolCorrelationKnownCacheWrite|protocolCorrelationKnownTotal,
+		protocolInputModeCacheIndependent, protocolOutputModeReasoningSubset, protocolCacheModeSplit)
+	sidecarObservation := protocolObservationFromRequestDetail("model", legacyDetail)
+	if len(sidecarObservation.Tokens.Shapes) != 1 || sidecarObservation.Tokens.Shapes[0].FullInput != 110 {
+		t.Fatalf("sidecar Claude shapes = %#v, want canonical input 110", sidecarObservation.Tokens.Shapes)
+	}
+}
+
+func TestProtocolCorrelationKeepsAllAmbiguousTokenShapes(t *testing.T) {
+	evidence := protocolTokenEvidence{
+		Input: 100, Output: 20, Reasoning: 5,
+		CacheRead: 10, CacheWrite: 20, CacheCombined: 40,
+		KnownFields: protocolCorrelationKnownInput | protocolCorrelationKnownOutput |
+			protocolCorrelationKnownReasoning | protocolCorrelationKnownCacheRead |
+			protocolCorrelationKnownCacheWrite | protocolCorrelationKnownCacheCombined,
+		InputMode: protocolInputModeAmbiguous, OutputMode: protocolOutputModeAmbiguous,
+		CacheMode: protocolCacheModeAmbiguous,
+	}
+	shapes := buildProtocolTokenShapes(evidence, "gemini", protocolCorrelationRoleFallback)
+	if len(shapes) != 6 {
+		t.Fatalf("ambiguous shapes = %#v, want all 6 interpretations", shapes)
+	}
+	wantCombined := false
+	for _, shape := range shapes {
+		if shape.FullInput == 140 && shape.FullOutput == 25 {
+			wantCombined = true
+			break
+		}
+	}
+	if !wantCombined {
+		t.Fatalf("ambiguous shapes dropped combined-cache interpretation: %#v", shapes)
+	}
+	evidence.Shapes = shapes
+	native := protocolTokenEvidence{
+		Input: 140, Output: 25,
+		KnownFields: protocolCorrelationKnownInput | protocolCorrelationKnownOutput,
+		InputMode:   protocolInputModeCacheSubset, OutputMode: protocolOutputModeReasoningSubset,
+		CacheMode: protocolCacheModeCombined,
+	}
+	native.Shapes = buildProtocolTokenShapes(native, "gemini", protocolCorrelationRoleNative)
+	if _, ok := protocolTokenEvidenceCompatible(evidence, native); !ok {
+		t.Fatalf("combined-cache interpretation did not match native shape: fallback=%#v native=%#v", evidence.Shapes, native.Shapes)
+	}
+}
+
 func TestProtocolCorrelationFromRealResponseUsageShapes(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -352,6 +431,18 @@ func TestProtocolCorrelationRejectsWeakOrUnsafeEvidence(t *testing.T) {
 		Tokens: protocolObservationFromUsageRecord(native).Tokens,
 	}, protocolObservationFromRequestDetail("model", RequestDetail{})); ok {
 		t.Fatal("invalid observation was correlated")
+	}
+}
+
+func TestNormalizeAnthropicUsageDetailPreservesInputOnOverflow(t *testing.T) {
+	max := int64(^uint64(0) >> 1)
+	detail := UsageDetail{
+		InputTokens: max - 5, OutputTokens: 1,
+		CacheReadTokens: 6, CacheCreationTokens: 4,
+	}
+	got := normalizeAnthropicUsageDetail(detail, "openai")
+	if got != detail {
+		t.Fatalf("overflow normalization changed detail: got %#v, want %#v", got, detail)
 	}
 }
 

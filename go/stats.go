@@ -37,6 +37,11 @@ type RequestStatistics struct {
 	retention          time.Duration
 	dedupWindow        time.Duration
 	seen               map[requestDedupKey]time.Time
+	// protocolFallbackReconcileDirty is set only when a detail that can
+	// participate in protocol correlation is added or materially enriched.
+	// Repeated exports of unchanged statistics can therefore skip the global
+	// reconciliation scan.
+	protocolFallbackReconcileDirty bool
 
 	totalRequests    int64
 	successCount     int64
@@ -911,6 +916,9 @@ func (s *RequestStatistics) EnrichRecordedUsage(record UsageRecord, enrichment U
 		var persistUpdate *persistedDetail
 		if changed {
 			apiSt.Models[modelName].Details = details
+			if isAnonymousProtocolFallbackDetail(details[i]) || isNativeProtocolCorrelationDetail(details[i]) {
+				s.protocolFallbackReconcileDirty = true
+			}
 			s.invalidateSummaryLocked()
 			if s.storageEnabled {
 				persistUpdate = &persistedDetail{API: apiName, Model: modelName, Detail: details[i], MetadataOnly: true}
@@ -1519,6 +1527,9 @@ func (s *RequestStatistics) recordDetailLocked(apiName, modelName string, detail
 	s.incrementHealthBucketLocked(detail)
 	if detail.Timestamp.After(s.lastRecordedAt) {
 		s.lastRecordedAt = detail.Timestamp
+	}
+	if isAnonymousProtocolFallbackDetail(detail) || isNativeProtocolCorrelationDetail(detail) {
+		s.protocolFallbackReconcileDirty = true
 	}
 	s.invalidateSummaryLocked()
 	return true
@@ -2746,21 +2757,40 @@ func syncDir(dir string) error {
 func (s *RequestStatistics) replayStorageFilesLocked(dir string, legacyPath string, now time.Time, snapshotAt time.Time) error {
 	var warnings []string
 	seenFiles := make(map[string]struct{})
-	var records []persistedDetail
 	var invalidLines int
+	s.reconcileRecordedProtocolFallbacksLocked(now)
+	replayState := s.newPersistedReplayStateLocked()
+	var replayed bool
 	readFile := func(path string) {
 		path = filepath.Clean(path)
 		if _, seen := seenFiles[path]; seen {
 			return
 		}
 		seenFiles[path] = struct{}{}
-		fileRecords, invalid, err := readPersistedStorageFile(path)
+		invalid, err := scanPersistedStorageFile(path, func(records []persistedDetail) {
+			replayed = true
+			s.replayPersistedDetailBatchLocked(records, true, now, replayState)
+			// Bound restored detail memory as well as raw JSONL memory. Any
+			// evicted record is outside the configured visible-detail budget, so
+			// it cannot leave a duplicate in the exported statistics.
+			s.pruneLocked(now, true)
+			// Keep the replay dedup index proportional to retained details. A
+			// duplicate of an evicted old record may be read again, but it will be
+			// evicted by the same retention/detail limits and cannot affect the
+			// final snapshot.
+			replayState.existing = s.detailKeysLocked()
+		})
 		if err != nil {
 			warnings = append(warnings, err.Error())
-			return
 		}
-		records = append(records, fileRecords...)
 		invalidLines += invalid
+		if replayed {
+			// Reconcile at file boundaries so a pair split across adjacent daily
+			// shards is consumed without retaining every shard in a raw slice.
+			s.reconcileRecordedProtocolFallbacksLocked(now)
+			s.pruneLocked(now, true)
+			replayState.existing = s.detailKeysLocked()
+		}
 	}
 	if strings.TrimSpace(legacyPath) != "" && snapshotAt.IsZero() {
 		readFile(legacyPath)
@@ -2768,10 +2798,11 @@ func (s *RequestStatistics) replayStorageFilesLocked(dir string, legacyPath stri
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			if len(records) > 0 || invalidLines > 0 {
-				if err := s.replayPersistedDetailsLocked(records, invalidLines, true, now); err != nil {
-					warnings = append(warnings, err.Error())
-				}
+			if replayed {
+				s.finishPersistedReplayLocked(now)
+			}
+			if invalidLines > 0 {
+				warnings = append(warnings, fmt.Sprintf("replay storage skipped %d invalid line(s)", invalidLines))
 			}
 			return combineStorageWarnings(warnings)
 		}
@@ -2806,16 +2837,11 @@ func (s *RequestStatistics) replayStorageFilesLocked(dir string, legacyPath stri
 	for _, path := range files {
 		readFile(path)
 	}
-	// A protocol fallback and its native counterpart are not guaranteed to be
-	// written to the same daily shard.  Reconcile the complete replay set once,
-	// before adding any of it to the aggregates, so a fallback in one file can
-	// consume a native record in another file (or in the snapshot restored just
-	// before this function).  Metadata-only records are kept in the same batch so
-	// their order-independent pending update handling also spans file boundaries.
-	if len(records) > 0 || invalidLines > 0 {
-		if err := s.replayPersistedDetailsLocked(records, invalidLines, true, now); err != nil {
-			warnings = append(warnings, err.Error())
-		}
+	if replayed {
+		s.finishPersistedReplayLocked(now)
+	}
+	if invalidLines > 0 {
+		warnings = append(warnings, fmt.Sprintf("replay storage skipped %d invalid line(s)", invalidLines))
 	}
 	return combineStorageWarnings(warnings)
 }
@@ -2858,21 +2884,30 @@ func (s *RequestStatistics) cleanupStorageFilesLocked(now time.Time) error {
 	return nil
 }
 
-func readPersistedStorageFile(path string) ([]persistedDetail, int, error) {
+const persistedStorageReplayBatchSize = 1024
+
+func scanPersistedStorageFile(path string, consume func([]persistedDetail)) (int, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, 0, nil
+			return 0, nil
 		}
-		return nil, 0, err
+		return 0, err
 	}
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
 	buf := make([]byte, 0, 1024*1024)
 	scanner.Buffer(buf, 10*1024*1024)
-	var records []persistedDetail
+	records := make([]persistedDetail, 0, persistedStorageReplayBatchSize)
 	var invalidLines int
+	flush := func() {
+		if len(records) == 0 {
+			return
+		}
+		consume(records)
+		records = records[:0]
+	}
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
@@ -2889,26 +2924,44 @@ func readPersistedStorageFile(path string) ([]persistedDetail, int, error) {
 			continue
 		}
 		records = append(records, persisted)
+		if len(records) == cap(records) {
+			flush()
+		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, invalidLines, fmt.Errorf("scan storage %s: %w", path, err)
+		return invalidLines, fmt.Errorf("scan storage %s: %w", path, err)
 	}
-	return records, invalidLines, nil
+	flush()
+	return invalidLines, nil
 }
 
-func (s *RequestStatistics) replayPersistedDetailsLocked(records []persistedDetail, invalidLines int, reconcileBatch bool, now time.Time) error {
-	if s == nil {
-		return nil
+func readPersistedStorageFile(path string) ([]persistedDetail, int, error) {
+	var records []persistedDetail
+	invalidLines, err := scanPersistedStorageFile(path, func(batch []persistedDetail) {
+		records = append(records, batch...)
+	})
+	return records, invalidLines, err
+}
+
+type persistedReplayState struct {
+	existing        map[requestDedupKey]struct{}
+	pendingMetadata map[requestDedupKey]RequestDetail
+}
+
+func (s *RequestStatistics) newPersistedReplayStateLocked() *persistedReplayState {
+	return &persistedReplayState{
+		existing:        s.detailKeysLocked(),
+		pendingMetadata: make(map[requestDedupKey]RequestDetail),
 	}
-	if now.IsZero() {
-		now = time.Now()
+}
+
+func (s *RequestStatistics) replayPersistedDetailBatchLocked(records []persistedDetail, reconcileBatch bool, now time.Time, state *persistedReplayState) {
+	if s == nil || state == nil {
+		return
 	}
 	if reconcileBatch {
 		records, _ = reconcilePersistedProtocolFallbacks(records)
 	}
-	s.reconcileRecordedProtocolFallbacksLocked(now)
-	existing := s.detailKeysLocked()
-	pendingMetadata := make(map[requestDedupKey]RequestDetail)
 	for _, persisted := range records {
 		apiName := strings.TrimSpace(persisted.API)
 		detail := persisted.Detail
@@ -2929,32 +2982,48 @@ func (s *RequestStatistics) replayPersistedDetailsLocked(records []persistedDeta
 		canonicalKey := claudeCacheCanonicalDedupKey(apiName, modelName, detail)
 		if persisted.MetadataOnly {
 			if !s.enrichPersistedDetailMetadataLocked(apiName, modelName, key, detail) {
-				if pending, ok := pendingMetadata[key]; ok {
+				if pending, ok := state.pendingMetadata[key]; ok {
 					enrichRequestDetailMetadata(&pending, detail)
-					pendingMetadata[key] = pending
+					state.pendingMetadata[key] = pending
 				} else {
-					pendingMetadata[key] = detail
+					state.pendingMetadata[key] = detail
 				}
 			}
 			continue
 		}
-		if _, ok := existing[canonicalKey]; ok {
-			if pending, ok := pendingMetadata[key]; ok {
+		if _, ok := state.existing[canonicalKey]; ok {
+			if pending, ok := state.pendingMetadata[key]; ok {
 				s.enrichPersistedDetailMetadataLocked(apiName, modelName, key, pending)
-				delete(pendingMetadata, key)
+				delete(state.pendingMetadata, key)
 			}
 			continue
 		}
 		if s.recordDetailLocked(apiName, modelName, detail, key, now, false) {
-			existing[canonicalKey] = struct{}{}
-			if pending, ok := pendingMetadata[key]; ok {
+			state.existing[canonicalKey] = struct{}{}
+			if pending, ok := state.pendingMetadata[key]; ok {
 				s.enrichPersistedDetailMetadataLocked(apiName, modelName, key, pending)
-				delete(pendingMetadata, key)
+				delete(state.pendingMetadata, key)
 			}
 		}
 	}
+}
+
+func (s *RequestStatistics) finishPersistedReplayLocked(now time.Time) {
 	s.repairMigratedAttributionDetailsLocked(now)
 	s.reconcileRecordedProtocolFallbacksLocked(now)
+}
+
+func (s *RequestStatistics) replayPersistedDetailsLocked(records []persistedDetail, invalidLines int, reconcileBatch bool, now time.Time) error {
+	if s == nil {
+		return nil
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	s.reconcileRecordedProtocolFallbacksLocked(now)
+	state := s.newPersistedReplayStateLocked()
+	s.replayPersistedDetailBatchLocked(records, reconcileBatch, now, state)
+	s.finishPersistedReplayLocked(now)
 	if invalidLines > 0 {
 		return fmt.Errorf("replay storage skipped %d invalid line(s)", invalidLines)
 	}
@@ -2962,11 +3031,23 @@ func (s *RequestStatistics) replayPersistedDetailsLocked(records []persistedDeta
 }
 
 func (s *RequestStatistics) replayStorageLocked(path string) error {
-	records, invalidLines, err := readPersistedStorageFile(path)
+	if s == nil {
+		return nil
+	}
+	now := time.Now()
+	s.reconcileRecordedProtocolFallbacksLocked(now)
+	state := s.newPersistedReplayStateLocked()
+	invalidLines, err := scanPersistedStorageFile(path, func(records []persistedDetail) {
+		s.replayPersistedDetailBatchLocked(records, true, now, state)
+	})
 	if err != nil {
 		return fmt.Errorf("read storage %s: %w", path, err)
 	}
-	return s.replayPersistedDetailsLocked(records, invalidLines, true, time.Now())
+	s.finishPersistedReplayLocked(now)
+	if invalidLines > 0 {
+		return fmt.Errorf("replay storage skipped %d invalid line(s)", invalidLines)
+	}
+	return nil
 }
 
 func (s *RequestStatistics) enrichPersistedDetailMetadataLocked(apiName, modelName string, target requestDedupKey, update RequestDetail) bool {
@@ -2986,6 +3067,9 @@ func (s *RequestStatistics) enrichPersistedDetailMetadataLocked(apiName, modelNa
 			return false
 		}
 		apiSt.Models[modelName].Details = details
+		if isAnonymousProtocolFallbackDetail(details[i]) || isNativeProtocolCorrelationDetail(details[i]) {
+			s.protocolFallbackReconcileDirty = true
+		}
 		s.invalidateSummaryLocked()
 		return true
 	}
@@ -5307,9 +5391,8 @@ func usageDetailCacheTokenParts(detail UsageDetail, provider string) (int64, int
 	// cache_creation 回填进 CachedTokens。若不剔除,同一笔缓存创建会再计入一次
 	// 缓存命中,并把总量多算一份。Claude 家族带真实命中的记录 CacheReadTokens
 	// 一定非零,不受影响;其余 provider 不做该推断。
-	if providerUsesExclusiveCacheInput(provider) &&
-		nonNegativeInt64(detail.CacheReadTokens) == 0 && cacheWriteTokens > 0 &&
-		nonNegativeInt64(detail.CachedTokens) == cacheWriteTokens {
+	if cachedTokensAreCacheCreationFallback(provider, nonNegativeInt64(detail.CacheReadTokens),
+		nonNegativeInt64(detail.CachedTokens), cacheWriteTokens) {
 		cacheReadTokens = 0
 	}
 	return cacheReadTokens, cacheWriteTokens, saturatingProtocolAdd(cacheReadTokens, cacheWriteTokens)

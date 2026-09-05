@@ -371,10 +371,11 @@ func normalizeAnthropicUsageDetail(detail UsageDetail, providerFamily string) Us
 		}
 		return detail
 	}
-	detail.InputTokens, ok = checkedProtocolAdd(detail.InputTokens, cacheInput)
+	expandedInput, ok := checkedProtocolAdd(detail.InputTokens, cacheInput)
 	if !ok {
 		return detail
 	}
+	detail.InputTokens = expandedInput
 	inputOutput, ok := checkedProtocolAdd(detail.InputTokens, detail.OutputTokens)
 	if detail.TotalTokens != 0 && ok && detail.TotalTokens < inputOutput {
 		detail.TotalTokens = inputOutput

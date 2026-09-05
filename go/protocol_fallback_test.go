@@ -586,6 +586,36 @@ func TestPersistedProtocolFallbackReconciliationKeepsEnrichedNative(t *testing.T
 	}
 }
 
+func TestReconciledSnapshotSkipsUnchangedProtocolScan(t *testing.T) {
+	stats := NewRequestStatistics()
+	fallback, native := protocolFallbackTestRecords()
+	stats.Record(native)
+	if !stats.protocolFallbackReconcileDirty {
+		t.Fatal("native detail did not mark protocol reconciliation dirty")
+	}
+	stats.ReconciledSnapshot()
+	if stats.protocolFallbackReconcileDirty {
+		t.Fatal("completed reconciliation left dirty state set")
+	}
+
+	normal := UsageRecord{
+		Model: "ordinary", RequestedAt: time.Now(),
+		Detail: UsageDetail{InputTokens: 1, OutputTokens: 1, TotalTokens: 2},
+	}
+	stats.Record(normal)
+	if stats.protocolFallbackReconcileDirty {
+		t.Fatal("ordinary detail unnecessarily dirtied protocol reconciliation")
+	}
+	stats.Record(fallback)
+	if !stats.protocolFallbackReconcileDirty {
+		t.Fatal("fallback detail did not mark protocol reconciliation dirty")
+	}
+	stats.ReconciledSnapshot()
+	if stats.protocolFallbackReconcileDirty || stats.Snapshot().TotalRequests != 2 {
+		t.Fatalf("reconciliation dirty/requests = %v/%d, want false/2", stats.protocolFallbackReconcileDirty, stats.Snapshot().TotalRequests)
+	}
+}
+
 func TestStorageSnapshotRestoreReconcilesProtocolFallback(t *testing.T) {
 	fallback, native := protocolFallbackTestRecords()
 	oldStats := NewRequestStatistics()
@@ -641,6 +671,116 @@ func writeProtocolFallbackShard(t *testing.T, path string, records ...persistedD
 	}
 	if err := os.WriteFile(path, payload, 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestScanPersistedStorageFileUsesBoundedBatches(t *testing.T) {
+	records := make([]persistedDetail, persistedStorageReplayBatchSize*2+1)
+	for i := range records {
+		records[i] = persistedDetail{
+			API: "test", Model: "model",
+			Detail: RequestDetail{
+				Model: "model", Timestamp: time.Unix(0, int64(i+1)), Source: "test",
+				Tokens: TokenStats{InputTokens: int64(i + 1), TotalTokens: int64(i + 1)},
+			},
+		}
+	}
+	path := filepath.Join(t.TempDir(), "usage.jsonl")
+	writeProtocolFallbackShard(t, path, records...)
+
+	var batches, total, largest int
+	invalid, err := scanPersistedStorageFile(path, func(batch []persistedDetail) {
+		batches++
+		total += len(batch)
+		if len(batch) > largest {
+			largest = len(batch)
+		}
+	})
+	if err != nil || invalid != 0 {
+		t.Fatalf("scan error/invalid = %v/%d", err, invalid)
+	}
+	if batches != 3 || total != len(records) || largest > persistedStorageReplayBatchSize {
+		t.Fatalf("scan batches/total/largest = %d/%d/%d, want 3/%d/<=%d", batches, total, largest, len(records), persistedStorageReplayBatchSize)
+	}
+}
+
+func TestJSONLReplayAppliesMetadataOnlyAcrossBatches(t *testing.T) {
+	_, native := protocolFallbackTestRecords()
+	base := requestDetailFromUsageRecord(native, native.RequestedAt, headerWhitelist{})
+	base.Endpoint = ""
+	base.Stream = false
+	base.Thinking = UsageThinking{}
+	update := base
+	update.Endpoint = "/v1/responses"
+	update.Stream = true
+	update.Thinking = UsageThinking{Intensity: "xhigh", Level: "xhigh"}
+
+	records := make([]persistedDetail, 0, persistedStorageReplayBatchSize+2)
+	records = append(records, persistedDetail{API: usageGroupKey(native), Model: native.Model, Detail: update, MetadataOnly: true})
+	for i := 0; i < persistedStorageReplayBatchSize; i++ {
+		tokens := int64(i + 1)
+		records = append(records, persistedDetail{
+			API: "filler", Model: "filler",
+			Detail: RequestDetail{
+				Model: "filler", Timestamp: time.Unix(1, int64(i)), Source: "test",
+				Tokens: TokenStats{InputTokens: tokens, TotalTokens: tokens},
+			},
+		})
+	}
+	records = append(records, persistedDetail{API: usageGroupKey(native), Model: native.Model, Detail: base})
+	path := filepath.Join(t.TempDir(), "usage.jsonl")
+	writeProtocolFallbackShard(t, path, records...)
+
+	restored := NewRequestStatistics()
+	restored.mu.Lock()
+	err := restored.replayStorageLocked(path)
+	restored.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	details := restored.Snapshot().APIs[usageGroupKey(native)].Models[native.Model].Details
+	if len(details) != 1 || details[0].Endpoint != update.Endpoint || !details[0].Stream || details[0].Thinking != update.Thinking {
+		t.Fatalf("metadata-only update was not retained across batches: %#v", details)
+	}
+}
+
+func TestJSONLReplayReconcilesProtocolFallbackAcrossBatches(t *testing.T) {
+	fallback, native := protocolFallbackTestRecords()
+	records := make([]persistedDetail, 0, persistedStorageReplayBatchSize+2)
+	records = append(records, persistedDetail{
+		API: usageGroupKey(fallback), Model: fallback.Model,
+		Detail: requestDetailFromUsageRecord(fallback, fallback.RequestedAt, headerWhitelist{}),
+	})
+	for i := 0; i < persistedStorageReplayBatchSize; i++ {
+		tokens := int64(i + 1)
+		records = append(records, persistedDetail{
+			API: "filler", Model: "filler",
+			Detail: RequestDetail{
+				Model: "filler", Timestamp: time.Now().Add(time.Duration(i) * time.Nanosecond), Source: "test",
+				Tokens: TokenStats{InputTokens: tokens, TotalTokens: tokens},
+			},
+		})
+	}
+	records = append(records, persistedDetail{
+		API: usageGroupKey(native), Model: native.Model,
+		Detail: requestDetailFromUsageRecord(native, native.RequestedAt, headerWhitelist{}),
+	})
+	path := filepath.Join(t.TempDir(), "usage.jsonl")
+	writeProtocolFallbackShard(t, path, records...)
+
+	restored := NewRequestStatistics()
+	restored.mu.Lock()
+	err := restored.replayStorageLocked(path)
+	restored.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := restored.Snapshot()
+	if _, exists := snapshot.APIs[usageGroupKey(fallback)]; exists {
+		t.Fatal("fallback separated from native by a replay batch was not consumed")
+	}
+	if details := snapshot.APIs[usageGroupKey(native)].Models[native.Model].Details; len(details) != 1 {
+		t.Fatalf("native details = %d, want 1", len(details))
 	}
 }
 

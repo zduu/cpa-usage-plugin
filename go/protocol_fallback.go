@@ -412,6 +412,21 @@ func isKnownProtocolFamily(family string) bool {
 	}
 }
 
+// cachedTokensAreCacheCreationFallback identifies the compatibility value
+// written by CPA's Claude parser when cache_read is zero: CachedTokens is
+// populated from cache_creation even though it is not a cache-read bucket.
+// Keep the raw values here so correlation can still reject negative inputs.
+func cachedTokensAreCacheCreationFallback(provider string, cacheRead, cached, cacheWrite int64) bool {
+	return providerUsesExclusiveCacheInput(provider) && cacheRead == 0 && cacheWrite > 0 && cached == cacheWrite
+}
+
+func protocolCorrelationCacheRead(provider string, cacheRead, cached, cacheWrite int64) int64 {
+	if cacheRead == 0 && cached > 0 && !cachedTokensAreCacheCreationFallback(provider, cacheRead, cached, cacheWrite) {
+		return cached
+	}
+	return cacheRead
+}
+
 func protocolCorrelationMetaForUsageRecord(record UsageRecord) *ProtocolCorrelationMeta {
 	if record.protocolCorrelation != nil {
 		return cloneProtocolCorrelationMeta(record.protocolCorrelation)
@@ -420,16 +435,14 @@ func protocolCorrelationMetaForUsageRecord(record UsageRecord) *ProtocolCorrelat
 		return nil
 	}
 	detail := record.Detail
-	cacheRead := detail.CacheReadTokens
-	if cacheRead == 0 && detail.CachedTokens > 0 {
-		cacheRead = detail.CachedTokens
-	}
+	family := correlationFamilyForUsageRecord(record)
+	cacheRead := protocolCorrelationCacheRead(family, detail.CacheReadTokens, detail.CachedTokens, detail.CacheCreationTokens)
 	cacheCombined := int64(0)
-	if correlationFamilyForUsageRecord(record) == "gemini" {
+	if family == "gemini" {
 		cacheCombined = detail.CachedTokens
 		cacheRead = 0
 	}
-	return legacyProtocolCorrelationMeta(correlationFamilyForUsageRecord(record), detail.InputTokens, detail.OutputTokens,
+	return legacyProtocolCorrelationMeta(family, detail.InputTokens, detail.OutputTokens,
 		detail.ReasoningTokens, cacheRead, detail.CacheCreationTokens, cacheCombined, detail.TotalTokens)
 }
 
@@ -441,12 +454,10 @@ func protocolCorrelationMetaForDetail(detail RequestDetail) *ProtocolCorrelation
 		return nil
 	}
 	tokens := detail.Tokens
-	cacheRead := tokens.CacheReadTokens
-	if cacheRead == 0 && tokens.CachedTokens > 0 {
-		cacheRead = tokens.CachedTokens
-	}
+	family := correlationFamilyForDetail(detail)
+	cacheRead := protocolCorrelationCacheRead(family, tokens.CacheReadTokens, tokens.CachedTokens, tokens.CacheWriteTokens)
 	cacheCombined := int64(0)
-	if correlationFamilyForDetail(detail) == "gemini" {
+	if family == "gemini" {
 		cacheCombined = tokens.CacheTokens
 		if cacheCombined == 0 && tokens.CachedTokens > 0 && tokens.CacheWriteTokens > 0 {
 			if sum, ok := checkedProtocolAdd(tokens.CachedTokens, tokens.CacheWriteTokens); ok {
@@ -455,7 +466,7 @@ func protocolCorrelationMetaForDetail(detail RequestDetail) *ProtocolCorrelation
 		}
 		cacheRead = 0
 	}
-	return legacyProtocolCorrelationMeta(correlationFamilyForDetail(detail), tokens.InputTokens, tokens.OutputTokens,
+	return legacyProtocolCorrelationMeta(family, tokens.InputTokens, tokens.OutputTokens,
 		tokens.ReasoningTokens, cacheRead, tokens.CacheWriteTokens, cacheCombined, tokens.TotalTokens)
 }
 
@@ -545,7 +556,7 @@ func protocolTokenEvidenceFromUsageDetail(detail UsageDetail, meta *ProtocolCorr
 	cacheRead := detail.CacheReadTokens
 	cacheCombined := int64(0)
 	if meta != nil && meta.KnownFields&protocolCorrelationKnownCacheRead != 0 && cacheRead == 0 {
-		cacheRead = detail.CachedTokens
+		cacheRead = protocolCorrelationCacheRead(family, cacheRead, detail.CachedTokens, detail.CacheCreationTokens)
 	}
 	if meta != nil && meta.KnownFields&protocolCorrelationKnownCacheCombined != 0 {
 		cacheCombined = detail.CachedTokens
@@ -561,7 +572,7 @@ func protocolTokenEvidenceFromUsageDetail(detail UsageDetail, meta *ProtocolCorr
 func protocolTokenEvidenceFromTokenStats(tokens TokenStats, meta *ProtocolCorrelationMeta, family string, role protocolCorrelationRole) protocolTokenEvidence {
 	cacheRead := tokens.CacheReadTokens
 	if meta != nil && meta.KnownFields&protocolCorrelationKnownCacheRead != 0 && cacheRead == 0 {
-		cacheRead = tokens.CachedTokens
+		cacheRead = protocolCorrelationCacheRead(family, cacheRead, tokens.CachedTokens, tokens.CacheWriteTokens)
 	}
 	cacheCombined := tokens.CacheTokens
 	if meta == nil {
@@ -773,9 +784,9 @@ func buildProtocolTokenShapes(e protocolTokenEvidence, family string, role proto
 	// Derive a missing independent bucket only from the same reported total.
 	// This is deliberately done as complete pairs, not by modifying the
 	// independent input/output variant lists independently.
-	shapes := make([]protocolTokenShape, 0, 4)
+	shapes := make([]protocolTokenShape, 0, len(inputVariants)*len(outputVariants))
 	addShape := func(input, output int64, strength uint8) {
-		if len(shapes) >= 4 || input < 0 || output < 0 {
+		if input < 0 || output < 0 {
 			return
 		}
 		total, ok := checkedProtocolAdd(input, output)
@@ -1494,8 +1505,26 @@ func pairProtocolFallbackDetails(refs []protocolFallbackDetailRef) []protocolFal
 		if len(nativeIndexes) == 0 {
 			continue
 		}
+		// Shape collisions are common for small or repeated requests. Correlation
+		// can never cross the five-second completion window, so do not construct
+		// the full fallback×native product only to reject almost every edge.
+		sort.SliceStable(nativeIndexes, func(i, j int) bool {
+			return observations[nativeIndexes[i]].StableOrder.Completion.Before(observations[nativeIndexes[j]].StableOrder.Completion)
+		})
 		for _, fallbackIdx := range fallbackIndexes {
-			for _, nativeIdx := range nativeIndexes {
+			fallbackAt := observations[fallbackIdx].Timestamp
+			if fallbackAt.IsZero() {
+				continue
+			}
+			windowStart := fallbackAt.Add(-protocolFallbackCompletionToleranceMax)
+			windowEnd := fallbackAt.Add(protocolFallbackCompletionToleranceMax)
+			start := sort.Search(len(nativeIndexes), func(i int) bool {
+				return !observations[nativeIndexes[i]].StableOrder.Completion.Before(windowStart)
+			})
+			end := sort.Search(len(nativeIndexes), func(i int) bool {
+				return observations[nativeIndexes[i]].StableOrder.Completion.After(windowEnd)
+			})
+			for _, nativeIdx := range nativeIndexes[start:end] {
 				edge, ok := protocolCorrelationEdge(observations[fallbackIdx], observations[nativeIdx])
 				if !ok {
 					continue
@@ -1686,6 +1715,10 @@ func reconcileProtocolFallbackSnapshot(snapshot StatisticsSnapshot) (StatisticsS
 	}
 	result.CostTokensByDay = timeSeriesTokenStatsByDaySnapshot(daySeries)
 	result.CostTokensByHour = timeSeriesTokenStatsByHourSnapshot(hourSeries)
+	// This pure snapshot repair has no pricing context with which to subtract
+	// dollars safely. Callers that retain the repaired snapshot rebuild these
+	// two derived series from CostTokensBy*, while the no-pair path can preserve
+	// the original values unchanged.
 	result.CostByDay = nil
 	result.CostByHour = nil
 	return result, len(pairs)
@@ -1784,6 +1817,7 @@ func (s *RequestStatistics) reconcileRecordedProtocolFallbacksLocked(now time.Ti
 	if s == nil {
 		return 0
 	}
+	s.protocolFallbackReconcileDirty = false
 	refs := make([]protocolFallbackDetailRef, 0)
 	for apiName, apiSt := range s.apis {
 		if apiSt == nil {
@@ -1864,7 +1898,9 @@ func (s *RequestStatistics) ReconciledSnapshot() (StatisticsSnapshot, int64) {
 		return StatisticsSnapshot{}, 0
 	}
 	s.mu.Lock()
-	s.reconcileRecordedProtocolFallbacksLocked(time.Now())
+	if s.protocolFallbackReconcileDirty {
+		s.reconcileRecordedProtocolFallbacksLocked(time.Now())
+	}
 	snapshot := s.snapshotLocked()
 	detailCount := s.countDetailsLocked()
 	s.mu.Unlock()
