@@ -85,6 +85,48 @@ func TestProtocolCorrelationCanonicalShapesAcrossTranslation(t *testing.T) {
 	}
 }
 
+func TestClaudeTranslatedToOpenAIDoesNotGenerateDoubleExpandedShape(t *testing.T) {
+	base := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	fallback, ok := usageRecordFromResponseIntercept(ResponseInterceptRequest{
+		SourceFormat: "claude", Model: "route-model", RequestedModel: "model",
+		RequestHeaders: map[string][]string{"Authorization": {"Bearer client"}},
+		RequestBody:    []byte(`{"model":"model"}`),
+		Body:           []byte(`{"model":"route-model","usage":{"input_tokens":100,"output_tokens":25,"cache_read_input_tokens":30,"cache_creation_input_tokens":10}}`),
+		StatusCode:     200,
+		Metadata:       map[string]any{"selected_auth_id": "codex:relay"},
+	})
+	if !ok {
+		t.Fatal("translated Claude response was not parsed")
+	}
+	fallback.RequestedAt = base.Add(time.Second)
+	native := testCorrelationRecord("codex", "CodexExecutor", "route-model", "model", "/v1/responses", "client", base, time.Second,
+		UsageDetail{InputTokens: 180, OutputTokens: 25, TotalTokens: 205}, nil)
+	if _, ok := protocolCorrelationEdge(protocolObservationFromUsageRecord(fallback), protocolObservationFromUsageRecord(native)); ok {
+		t.Fatalf("translated fallback matched double-expanded native input: fallback=%#v native=%#v", protocolObservationFromUsageRecord(fallback).Tokens.Shapes, protocolObservationFromUsageRecord(native).Tokens.Shapes)
+	}
+}
+
+func TestGeminiTranslatedToOpenAIDoesNotGenerateDoubleExpandedShape(t *testing.T) {
+	base := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	fallback, ok := usageRecordFromResponseIntercept(ResponseInterceptRequest{
+		SourceFormat: "gemini", Model: "route-model", RequestedModel: "model",
+		RequestHeaders: map[string][]string{"Authorization": {"Bearer client"}},
+		RequestBody:    []byte(`{"model":"model"}`),
+		Body:           []byte(`{"model":"route-model","usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":25,"cachedContentTokenCount":40,"totalTokenCount":125}}`),
+		StatusCode:     200,
+		Metadata:       map[string]any{"selected_auth_id": "codex:relay"},
+	})
+	if !ok {
+		t.Fatal("translated Gemini response was not parsed")
+	}
+	fallback.RequestedAt = base.Add(time.Second)
+	native := testCorrelationRecord("codex", "CodexExecutor", "route-model", "model", "/v1/responses", "client", base, time.Second,
+		UsageDetail{InputTokens: 140, OutputTokens: 25, TotalTokens: 165}, nil)
+	if _, ok := protocolCorrelationEdge(protocolObservationFromUsageRecord(fallback), protocolObservationFromUsageRecord(native)); ok {
+		t.Fatalf("translated Gemini fallback matched double-expanded native input: fallback=%#v native=%#v", protocolObservationFromUsageRecord(fallback).Tokens.Shapes, protocolObservationFromUsageRecord(native).Tokens.Shapes)
+	}
+}
+
 func TestProtocolCorrelationIgnoresClaudeCachedTokensCreationFallback(t *testing.T) {
 	base := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
 	native := testCorrelationRecord("claude", "ClaudeExecutor", "model", "model", "/v1/messages", "client", base, time.Second,

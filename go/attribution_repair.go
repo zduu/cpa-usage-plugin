@@ -107,14 +107,19 @@ func attributionTwinTokensMatch(original, migrated RequestDetail) bool {
 		return false
 	}
 	cachedTokens := nonNegativeInt64(ot.CachedTokens)
+	inputTokens := nonNegativeInt64(ot.InputTokens)
 	folds := []int64{
 		0,
 		normalizedCacheTokens(ot),
 		cachedTokens,
-		cachedTokens + nonNegativeInt64(ot.CacheWriteTokens),
 	}
 	for _, fold := range folds {
-		if mt.InputTokens == ot.InputTokens+fold {
+		if expected, ok := checkedProtocolAdd(inputTokens, fold); ok && mt.InputTokens == expected {
+			return true
+		}
+	}
+	if fold, ok := checkedProtocolAdd(cachedTokens, nonNegativeInt64(ot.CacheWriteTokens)); ok {
+		if expected, ok := checkedProtocolAdd(inputTokens, fold); ok && mt.InputTokens == expected {
 			return true
 		}
 	}

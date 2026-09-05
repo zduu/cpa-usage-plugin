@@ -111,6 +111,18 @@ func TestGenuineEqualCacheReadWriteWithMarkerUntouched(t *testing.T) {
 	}
 }
 
+func TestClaudeCacheRepairRejectsOverflowingSignature(t *testing.T) {
+	max := int64(^uint64(0) >> 1)
+	detail := RequestDetail{Provider: "claude", Tokens: TokenStats{
+		InputTokens: max, OutputTokens: 1,
+		CachedTokens: max / 2, CacheTokens: max - 1, CacheWriteTokens: max / 2,
+		TotalTokens: max,
+	}}
+	if isPollutedClaudeCacheFallbackDetail(detail) {
+		t.Fatal("overflowing cache signature was accepted as a repairable record")
+	}
+}
+
 // TestFixedVersionEqualCacheRecordSurvivesRestart 端到端锁定审查 P1 场景:
 // 修复版原生记录真实「命中 == 创建」的 Claude 请求,重启冷恢复后不得被
 // 历史修复篡改。

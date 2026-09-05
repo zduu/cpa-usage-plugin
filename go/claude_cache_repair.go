@@ -34,19 +34,31 @@ func isPollutedClaudeCacheFallbackDetail(detail RequestDetail) bool {
 	if write == 0 || nonNegativeInt64(t.CachedTokens) != write {
 		return false
 	}
-	if nonNegativeInt64(t.CacheTokens) != write*2 {
+	doubledWrite, ok := checkedProtocolAdd(write, write)
+	if !ok || nonNegativeInt64(t.CacheTokens) != doubledWrite {
 		return false
 	}
-	expected := nonNegativeInt64(t.InputTokens) + nonNegativeInt64(t.OutputTokens) + write*2
-	return nonNegativeInt64(t.TotalTokens) == expected
+	inputOutput, ok := checkedProtocolAdd(nonNegativeInt64(t.InputTokens), nonNegativeInt64(t.OutputTokens))
+	if !ok {
+		return false
+	}
+	expected, ok := checkedProtocolAdd(inputOutput, doubledWrite)
+	return ok && nonNegativeInt64(t.TotalTokens) == expected
 }
 
 func repairClaudeCacheFallbackTokens(detail RequestDetail) RequestDetail {
 	write := nonNegativeInt64(detail.Tokens.CacheWriteTokens)
+	inputOutput, ok := checkedProtocolAdd(nonNegativeInt64(detail.Tokens.InputTokens), nonNegativeInt64(detail.Tokens.OutputTokens))
+	if !ok {
+		return detail
+	}
 	detail.Tokens.CachedTokens = 0
+	detail.Tokens.CacheReadTokens = 0
 	detail.Tokens.CacheTokens = write
-	detail.Tokens.TotalTokens = nonNegativeInt64(detail.Tokens.InputTokens) +
-		nonNegativeInt64(detail.Tokens.OutputTokens) + write
+	detail.Tokens.TotalTokens, ok = checkedProtocolAdd(inputOutput, write)
+	if !ok {
+		return detail
+	}
 	return detail
 }
 

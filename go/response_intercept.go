@@ -566,7 +566,14 @@ func correlationMetaForResponse(req ResponseInterceptRequest, raw *ProtocolCorre
 	family := responseProtocolFamily(req, provider)
 	switch family {
 	case "claude":
-		if meta.KnownFields&(protocolCorrelationKnownCacheRead|protocolCorrelationKnownCacheWrite|protocolCorrelationKnownCacheCombined) != 0 {
+		// Claude-shaped responses are normalized into the selected upstream's
+		// accounting representation before this metadata is attached. For a
+		// non-Claude upstream that normalization already folded split cache
+		// buckets into InputTokens; emitting an additional Claude expansion shape
+		// would double-expand the same cache and allow a false native match.
+		if accountingFamily := correlationFamilyForProvider(provider); accountingFamily != "" && accountingFamily != "claude" {
+			meta.InputMode = protocolInputModeCacheSubsetNormalized
+		} else if meta.KnownFields&(protocolCorrelationKnownCacheRead|protocolCorrelationKnownCacheWrite|protocolCorrelationKnownCacheCombined) != 0 {
 			meta.InputMode = protocolInputModeAmbiguous
 		} else {
 			meta.InputMode = protocolInputModeCacheIndependent
@@ -574,7 +581,18 @@ func correlationMetaForResponse(req ResponseInterceptRequest, raw *ProtocolCorre
 		meta.OutputMode = protocolOutputModeReasoningSubset
 		meta.CacheMode = protocolCacheModeSplit
 	case "gemini":
+		accountingFamily := correlationFamilyForProvider(provider)
 		meta.InputMode = protocolInputModeCacheSubset
+		if accountingFamily == "claude" {
+			// Claude's native accounting excludes cache from InputTokens, so a
+			// Gemini combined bucket must be expanded to form the comparable
+			// full-input shape.
+			meta.InputMode = protocolInputModeCacheIndependent
+		} else if accountingFamily != "" {
+			// Gemini promptTokenCount already includes cached content for the
+			// non-Claude accounting families. Do not add a second expanded shape.
+			meta.InputMode = protocolInputModeCacheSubsetNormalized
+		}
 		meta.OutputMode = protocolOutputModeAmbiguous
 		if meta.KnownFields&protocolCorrelationKnownCacheCombined != 0 {
 			meta.KnownFields &^= protocolCorrelationKnownCacheRead

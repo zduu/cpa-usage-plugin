@@ -44,6 +44,7 @@ const (
 		protocolCorrelationKnownTotal
 
 	protocolInputModeCacheSubset           = "cache_subset"
+	protocolInputModeCacheSubsetNormalized = "cache_subset_normalized"
 	protocolInputModeCacheIndependent      = "cache_independent"
 	protocolInputModeAmbiguous             = "ambiguous"
 	protocolOutputModeReasoningSubset      = "reasoning_subset"
@@ -238,9 +239,10 @@ func validProtocolCorrelationMeta(meta *ProtocolCorrelationMeta) bool {
 		return false
 	}
 	validInput := map[string]bool{
-		protocolInputModeCacheSubset:      true,
-		protocolInputModeCacheIndependent: true,
-		protocolInputModeAmbiguous:        true,
+		protocolInputModeCacheSubset:           true,
+		protocolInputModeCacheSubsetNormalized: true,
+		protocolInputModeCacheIndependent:      true,
+		protocolInputModeAmbiguous:             true,
 	}
 	validOutput := map[string]bool{
 		protocolOutputModeReasoningSubset:      true,
@@ -362,6 +364,23 @@ func correlationFamilyForDetail(detail RequestDetail) string {
 		default:
 			return family
 		}
+	}
+}
+
+// correlationFamilyForProvider returns the protocol accounting family implied
+// by a selected upstream provider. Unlike correlationFamilyForUsageRecord it
+// has no endpoint/source fallback logic, so it can be compared with the client
+// response family while constructing translated-response metadata.
+func correlationFamilyForProvider(provider string) string {
+	switch usageProviderFamily(provider) {
+	case "claude":
+		return "claude"
+	case "gemini", "vertex", "aistudio", "antigravity":
+		return "gemini"
+	case "codex", "openai-compatible", "openai", "kimi", "xai", "deepseek", "openrouter", "groq", "mistral", "cohere", "perplexity", "cerebras", "alibaba", "moonshotai":
+		return "openai"
+	default:
+		return ""
 	}
 }
 
@@ -736,6 +755,11 @@ func buildProtocolTokenShapes(e protocolTokenEvidence, family string, role proto
 		if role == protocolCorrelationRoleFallback && cacheCombinedKnown {
 			addExpandedInput(e.CacheCombined, 95)
 		}
+	case protocolInputModeCacheSubsetNormalized:
+		// The reported input already includes the cache bucket. This mode is
+		// emitted for translated responses after accounting normalization; keep
+		// the raw input as the sole candidate and retain cache evidence only for
+		// compatibility checks.
 	default:
 		return nil
 	}
