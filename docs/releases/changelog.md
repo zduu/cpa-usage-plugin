@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+## v2.6.2 - 2026-09-05
+
 ### 通用修复响应兜底与原生用量重复计数
 
 - 新明细持久化响应兜底的 executor 身份；实时与存量关联依据记录角色、模型、客户端身份、token、缓存、端点和完成时刻，不绑定模型名、客户端协议或实际上游 provider，旧版 `openai-compatible` 明细继续按窄化结构特征兼容识别
@@ -13,6 +15,25 @@
 - 用量导出在同一把统计锁内先清理所有可确认的兜底孪生记录，再生成快照和 `detail_count`；新增 OpenAI、Claude、Gemini 客户端协议跨 Codex、Claude 和 OpenAI-compatible 上游的实时回归，以及真实导出接口清理测试
 - Claude 格式响应省略缓存字段和总 token 时，仍可与完整原生用量关联，避免实时统计与导出重复计数
 - 模型价格默认保存到持久化 `data` 目录；使用默认路径且新文件不存在时自动迁移旧版根目录价格文件，显式配置旧路径或其他自定义路径时保留指定读写位置
+
+### 协议兜底关联与缓存口径
+
+- Claude 原生记录在 `cache_read=0` 时由 CPA 回填到 `CachedTokens` 的缓存创建量不再被误当作缓存读取，修复关联 shape 膨胀和错误配对
+- Claude、Gemini 翻译到不同上游协议时按实际上游 accounting family 生成候选，避免同一缓存被重复展开，同时保留 Claude/Gemini/OpenAI 跨协议关联能力
+- 移除按插入顺序截断的 4 个 shape 硬上限，候选 shape 去重并按强度排序，避免丢失唯一正确的 combined-cache 解释
+- Claude 缓存历史修复和 attribution twin 匹配增加溢出保护，异常 token 签名不会被误修复或用于关联
+
+### 持久化与发布可靠性
+
+- 持久化重放、快照恢复和导出继续使用同一套协议关联逻辑，导出仅在数据发生变化时执行全库 reconcile
+- 新增翻译响应重复 cache 展开、Claude 缓存污染和溢出签名回归测试
+
+### 验证
+
+- `go test ./... -count=1` 通过
+- `go test -race -count=1 ./...` 通过
+- `go vet ./...` 通过
+- Dashboard 前端测试 141/141 通过
 
 ## v2.6.1 - 2026-08-30
 
