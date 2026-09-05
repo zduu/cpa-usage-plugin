@@ -5,6 +5,7 @@
 *.h
 /go/cpa-usage-plugin
 usage-statistics-prices.json
+data/usage-statistics-prices.json
 
 # 临时文件
 *.backup.*

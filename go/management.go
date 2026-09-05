@@ -425,13 +425,13 @@ func modelPricesManagementResponse(data ModelPricesResponse, etag string) ([]byt
 }
 
 func handleExportUsage() ([]byte, error) {
-	snapshot := stats.Snapshot()
+	snapshot, detailCount := stats.ReconciledSnapshot()
 
 	exportPayload := ExportPayload{
 		Version:     1,
 		ExportedAt:  time.Now().UTC().Format(time.RFC3339),
 		Plugin:      pluginVersion,
-		DetailCount: stats.DetailCount(),
+		DetailCount: detailCount,
 		Config:      stats.ConfigSnapshot(),
 		Usage:       snapshot,
 	}
@@ -490,9 +490,21 @@ func handleImportUsage(body []byte) ([]byte, error) {
 			for detailIndex, detail := range modelSnapshot.Details {
 				t := detail.Tokens
 				if t.TotalTokens < 0 || t.InputTokens < 0 || t.OutputTokens < 0 ||
-					t.ReasoningTokens < 0 || t.CachedTokens < 0 || t.CacheTokens < 0 || t.CacheWriteTokens < 0 {
+					t.ReasoningTokens < 0 || t.CachedTokens < 0 || t.CacheReadTokens < 0 ||
+					t.CacheTokens < 0 || t.CacheWriteTokens < 0 {
 					return errorEnvelope("invalid_record",
 						fmt.Sprintf("negative token count found at api=%q model=%q detail_index=%d",
+							apiName, modelName, detailIndex)), nil
+				}
+				if detail.Correlation != nil && detail.Correlation.SchemaVersion == protocolCorrelationSchemaVersion &&
+					!validProtocolCorrelationMeta(detail.Correlation) {
+					return errorEnvelope("invalid_record",
+						fmt.Sprintf("invalid protocol correlation metadata at api=%q model=%q detail_index=%d",
+							apiName, modelName, detailIndex)), nil
+				}
+				if detail.Correlation != nil && detail.Correlation.SchemaVersion < 0 {
+					return errorEnvelope("invalid_record",
+						fmt.Sprintf("invalid protocol correlation schema at api=%q model=%q detail_index=%d",
 							apiName, modelName, detailIndex)), nil
 				}
 			}

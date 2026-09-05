@@ -294,12 +294,12 @@ func incrementTimeSeriesTokenStats(stats map[string]*TimeSeriesTokenStat, model,
 		stat = &TimeSeriesTokenStat{Model: model, Provider: provider}
 		stats[key] = stat
 	}
-	stat.TotalTokens += totals.totalTokens
-	stat.InputTokens += totals.inputTokens
-	stat.OutputTokens += totals.outputTokens
-	stat.CachedTokens += totals.cachedTokens
-	stat.CacheWriteTokens += totals.cacheWriteTokens
-	stat.ReasoningTokens += totals.reasoningTokens
+	stat.TotalTokens = addNonNegativeInt64(stat.TotalTokens, totals.totalTokens)
+	stat.InputTokens = addNonNegativeInt64(stat.InputTokens, totals.inputTokens)
+	stat.OutputTokens = addNonNegativeInt64(stat.OutputTokens, totals.outputTokens)
+	stat.CachedTokens = addNonNegativeInt64(stat.CachedTokens, totals.cachedTokens)
+	stat.CacheWriteTokens = addNonNegativeInt64(stat.CacheWriteTokens, totals.cacheWriteTokens)
+	stat.ReasoningTokens = addNonNegativeInt64(stat.ReasoningTokens, totals.reasoningTokens)
 	return stats
 }
 
@@ -312,12 +312,12 @@ func decrementTimeSeriesTokenStats(stats map[string]*TimeSeriesTokenStat, model,
 	if !ok || stat == nil {
 		return false
 	}
-	stat.TotalTokens -= totals.totalTokens
-	stat.InputTokens -= totals.inputTokens
-	stat.OutputTokens -= totals.outputTokens
-	stat.CachedTokens -= totals.cachedTokens
-	stat.CacheWriteTokens -= totals.cacheWriteTokens
-	stat.ReasoningTokens -= totals.reasoningTokens
+	stat.TotalTokens = subtractNonNegativeInt64(stat.TotalTokens, totals.totalTokens)
+	stat.InputTokens = subtractNonNegativeInt64(stat.InputTokens, totals.inputTokens)
+	stat.OutputTokens = subtractNonNegativeInt64(stat.OutputTokens, totals.outputTokens)
+	stat.CachedTokens = subtractNonNegativeInt64(stat.CachedTokens, totals.cachedTokens)
+	stat.CacheWriteTokens = subtractNonNegativeInt64(stat.CacheWriteTokens, totals.cacheWriteTokens)
+	stat.ReasoningTokens = subtractNonNegativeInt64(stat.ReasoningTokens, totals.reasoningTokens)
 	if stat.TotalTokens <= 0 && stat.InputTokens <= 0 && stat.OutputTokens <= 0 && stat.CachedTokens <= 0 && stat.CacheWriteTokens <= 0 && stat.ReasoningTokens <= 0 {
 		delete(stats, key)
 	}
@@ -338,18 +338,18 @@ func incrementModelProviderStats(stats map[string]*ModelProviderStat, provider s
 		stat = &ModelProviderStat{Provider: strings.TrimSpace(provider)}
 		stats[key] = stat
 	}
-	stat.TotalRequests++
+	stat.TotalRequests = addNonNegativeInt64(stat.TotalRequests, 1)
 	if failed {
-		stat.FailureCount++
+		stat.FailureCount = addNonNegativeInt64(stat.FailureCount, 1)
 	} else {
-		stat.SuccessCount++
+		stat.SuccessCount = addNonNegativeInt64(stat.SuccessCount, 1)
 	}
-	stat.TotalTokens += totals.totalTokens
-	stat.InputTokens += totals.inputTokens
-	stat.OutputTokens += totals.outputTokens
-	stat.CachedTokens += totals.cachedTokens
-	stat.CacheWriteTokens += totals.cacheWriteTokens
-	stat.ReasoningTokens += totals.reasoningTokens
+	stat.TotalTokens = addNonNegativeInt64(stat.TotalTokens, totals.totalTokens)
+	stat.InputTokens = addNonNegativeInt64(stat.InputTokens, totals.inputTokens)
+	stat.OutputTokens = addNonNegativeInt64(stat.OutputTokens, totals.outputTokens)
+	stat.CachedTokens = addNonNegativeInt64(stat.CachedTokens, totals.cachedTokens)
+	stat.CacheWriteTokens = addNonNegativeInt64(stat.CacheWriteTokens, totals.cacheWriteTokens)
+	stat.ReasoningTokens = addNonNegativeInt64(stat.ReasoningTokens, totals.reasoningTokens)
 	return stats
 }
 
@@ -362,18 +362,18 @@ func decrementModelProviderStats(stats map[string]*ModelProviderStat, provider s
 	if !ok {
 		return
 	}
-	stat.TotalRequests--
+	stat.TotalRequests = subtractNonNegativeInt64(stat.TotalRequests, 1)
 	if failed {
-		stat.FailureCount--
+		stat.FailureCount = subtractNonNegativeInt64(stat.FailureCount, 1)
 	} else {
-		stat.SuccessCount--
+		stat.SuccessCount = subtractNonNegativeInt64(stat.SuccessCount, 1)
 	}
-	stat.TotalTokens -= totals.totalTokens
-	stat.InputTokens -= totals.inputTokens
-	stat.OutputTokens -= totals.outputTokens
-	stat.CachedTokens -= totals.cachedTokens
-	stat.CacheWriteTokens -= totals.cacheWriteTokens
-	stat.ReasoningTokens -= totals.reasoningTokens
+	stat.TotalTokens = subtractNonNegativeInt64(stat.TotalTokens, totals.totalTokens)
+	stat.InputTokens = subtractNonNegativeInt64(stat.InputTokens, totals.inputTokens)
+	stat.OutputTokens = subtractNonNegativeInt64(stat.OutputTokens, totals.outputTokens)
+	stat.CachedTokens = subtractNonNegativeInt64(stat.CachedTokens, totals.cachedTokens)
+	stat.CacheWriteTokens = subtractNonNegativeInt64(stat.CacheWriteTokens, totals.cacheWriteTokens)
+	stat.ReasoningTokens = subtractNonNegativeInt64(stat.ReasoningTokens, totals.reasoningTokens)
 	if stat.TotalRequests <= 0 {
 		delete(stats, key)
 	}
@@ -385,15 +385,15 @@ func finalizedModelProviderStats(stats map[string]*ModelProviderStat, totalReque
 	for _, stat := range stats {
 		if stat != nil && stat.TotalRequests > 0 {
 			providers = append(providers, *stat)
-			providerRequests += stat.TotalRequests
-			providerSuccess += stat.SuccessCount
-			providerFailure += stat.FailureCount
-			providerTotal += stat.TotalTokens
-			providerInput += stat.InputTokens
-			providerOutput += stat.OutputTokens
-			providerCached += stat.CachedTokens
-			providerCacheWrite += stat.CacheWriteTokens
-			providerReasoning += stat.ReasoningTokens
+			providerRequests = addNonNegativeInt64(providerRequests, stat.TotalRequests)
+			providerSuccess = addNonNegativeInt64(providerSuccess, stat.SuccessCount)
+			providerFailure = addNonNegativeInt64(providerFailure, stat.FailureCount)
+			providerTotal = addNonNegativeInt64(providerTotal, stat.TotalTokens)
+			providerInput = addNonNegativeInt64(providerInput, stat.InputTokens)
+			providerOutput = addNonNegativeInt64(providerOutput, stat.OutputTokens)
+			providerCached = addNonNegativeInt64(providerCached, stat.CachedTokens)
+			providerCacheWrite = addNonNegativeInt64(providerCacheWrite, stat.CacheWriteTokens)
+			providerReasoning = addNonNegativeInt64(providerReasoning, stat.ReasoningTokens)
 		}
 	}
 	remainder := ModelProviderStat{
@@ -846,22 +846,24 @@ func (s *RequestStatistics) Record(record UsageRecord) {
 func requestDetailFromUsageRecord(record UsageRecord, timestamp time.Time, whitelist headerWhitelist) RequestDetail {
 	cacheReadTokens, cacheWriteTokens, cacheTokens := usageDetailCacheTokenParts(record.Detail, record.Provider)
 	totalTokens := usageDetailTotalTokens(record.Detail, record.Provider)
-	return RequestDetail{
-		Model:      firstNonEmpty(record.Model, "unknown"),
-		Timestamp:  timestamp,
-		LatencyMs:  record.Latency.Milliseconds(),
-		TTFTMs:     record.TTFT.Milliseconds(),
-		APIKey:     maskAPIKey(canonicalClientAPIKey(record.APIKey)),
-		APIKeyHash: hashAPIKey(record.APIKey),
-		Source:     usageSource(record),
-		Provider:   strings.TrimSpace(record.Provider),
-		AuthID:     strings.TrimSpace(record.AuthID),
-		AuthIndex:  strings.TrimSpace(record.AuthIndex),
-		AuthType:   strings.TrimSpace(record.AuthType),
-		Endpoint:   strings.TrimSpace(record.Endpoint),
-		BaseURL:    strings.TrimSpace(record.BaseURL),
-		Stream:     record.Stream,
-		Thinking:   usageThinking(record),
+	detail := RequestDetail{
+		Model:          firstNonEmpty(record.Model, "unknown"),
+		RequestedModel: strings.TrimSpace(firstNonEmpty(record.Alias, record.Model)),
+		Timestamp:      timestamp,
+		LatencyMs:      record.Latency.Milliseconds(),
+		TTFTMs:         record.TTFT.Milliseconds(),
+		APIKey:         maskAPIKey(canonicalClientAPIKey(record.APIKey)),
+		APIKeyHash:     hashAPIKey(record.APIKey),
+		Source:         usageSource(record),
+		Provider:       strings.TrimSpace(record.Provider),
+		ExecutorType:   strings.TrimSpace(record.ExecutorType),
+		AuthID:         strings.TrimSpace(record.AuthID),
+		AuthIndex:      strings.TrimSpace(record.AuthIndex),
+		AuthType:       strings.TrimSpace(record.AuthType),
+		Endpoint:       strings.TrimSpace(record.Endpoint),
+		BaseURL:        strings.TrimSpace(record.BaseURL),
+		Stream:         record.Stream,
+		Thinking:       usageThinking(record),
 		Tokens: TokenStats{
 			InputTokens:      record.Detail.InputTokens,
 			OutputTokens:     record.Detail.OutputTokens,
@@ -877,6 +879,10 @@ func requestDetailFromUsageRecord(record UsageRecord, timestamp time.Time, white
 		Failure:    trimLong(redactSensitiveText(record.Failure.Body), 500),
 		Headers:    filterHeaders(record.ResponseHeaders, whitelist),
 	}
+	if meta := protocolCorrelationMetaForUsageRecord(record); meta != nil {
+		detail.Correlation = meta
+	}
+	return detail
 }
 
 // EnrichRecordedUsage merges request metadata that response interceptors have
@@ -927,6 +933,10 @@ func enrichRequestDetailMetadata(detail *RequestDetail, update RequestDetail) bo
 	changed := false
 	if detail.Endpoint == "" && strings.TrimSpace(update.Endpoint) != "" {
 		detail.Endpoint = strings.TrimSpace(update.Endpoint)
+		changed = true
+	}
+	if strings.TrimSpace(detail.RequestedModel) == "" && strings.TrimSpace(update.RequestedModel) != "" {
+		detail.RequestedModel = strings.TrimSpace(update.RequestedModel)
 		changed = true
 	}
 	if detail.Thinking == (UsageThinking{}) && update.Thinking != (UsageThinking{}) {
@@ -1479,29 +1489,29 @@ func (s *RequestStatistics) recordDetailLocked(apiName, modelName string, detail
 	totals := s.updateAPIStats(apiSt, modelName, detail)
 	incrementAPISourceStats(apiSt, detail, totals)
 
-	s.totalRequests++
+	s.totalRequests = addNonNegativeInt64(s.totalRequests, 1)
 	if detail.Failed {
-		s.failureCount++
+		s.failureCount = addNonNegativeInt64(s.failureCount, 1)
 	} else {
-		s.successCount++
+		s.successCount = addNonNegativeInt64(s.successCount, 1)
 	}
-	s.totalTokens += totals.totalTokens
-	s.inputTokens += totals.inputTokens
-	s.outputTokens += totals.outputTokens
-	s.cachedTokens += totals.cachedTokens
-	s.cacheWriteTokens += totals.cacheWriteTokens
-	s.reasoningTokens += totals.reasoningTokens
-	s.latencySum += totals.latencySum
-	s.latencyN += totals.latencyN
+	s.totalTokens = addNonNegativeInt64(s.totalTokens, totals.totalTokens)
+	s.inputTokens = addNonNegativeInt64(s.inputTokens, totals.inputTokens)
+	s.outputTokens = addNonNegativeInt64(s.outputTokens, totals.outputTokens)
+	s.cachedTokens = addNonNegativeInt64(s.cachedTokens, totals.cachedTokens)
+	s.cacheWriteTokens = addNonNegativeInt64(s.cacheWriteTokens, totals.cacheWriteTokens)
+	s.reasoningTokens = addNonNegativeInt64(s.reasoningTokens, totals.reasoningTokens)
+	s.latencySum = addNonNegativeInt64(s.latencySum, totals.latencySum)
+	s.latencyN = addNonNegativeInt64(s.latencyN, totals.latencyN)
 	dayKey := detail.Timestamp.Format("2006-01-02")
 	hourKey := detail.Timestamp.Hour()
 	cost := s.detailCostLocked(modelName, detail, totals)
-	s.requestsByDay[dayKey]++
-	s.requestsByHour[hourKey]++
-	s.tokensByDay[dayKey] += totals.totalTokens
-	s.tokensByHour[hourKey] += totals.totalTokens
-	s.costByDay[dayKey] += cost
-	s.costByHour[hourKey] += cost
+	s.requestsByDay[dayKey] = addNonNegativeInt64(s.requestsByDay[dayKey], 1)
+	s.requestsByHour[hourKey] = addNonNegativeInt64(s.requestsByHour[hourKey], 1)
+	s.tokensByDay[dayKey] = addNonNegativeInt64(s.tokensByDay[dayKey], totals.totalTokens)
+	s.tokensByHour[hourKey] = addNonNegativeInt64(s.tokensByHour[hourKey], totals.totalTokens)
+	s.costByDay[dayKey] = addNonNegativeCost(s.costByDay[dayKey], cost)
+	s.costByHour[hourKey] = addNonNegativeCost(s.costByHour[hourKey], cost)
 	s.costTokensByDay[dayKey] = incrementTimeSeriesTokenStats(s.costTokensByDay[dayKey], detailModel(modelName, detail), detail.Provider, totals)
 	s.costTokensByHour[hourKey] = incrementTimeSeriesTokenStats(s.costTokensByHour[hourKey], detailModel(modelName, detail), detail.Provider, totals)
 	s.incrementModelSummaryStatsLocked(modelName, detail, totals)
@@ -1673,7 +1683,7 @@ func (s *RequestStatistics) restoreStorageSnapshotLocked(snapshot StatisticsSnap
 			continue
 		}
 		if storageSnapshotHasMultipleAPIGroupNames(apiName, apiSnapshot) {
-			restoredDetails += s.restoreStorageSnapshotSplitAPILocked(apiName, apiSnapshot, now)
+			restoredDetails = addNonNegativeInt64(restoredDetails, s.restoreStorageSnapshotSplitAPILocked(apiName, apiSnapshot, now))
 			continue
 		}
 		apiName = storageSnapshotAPIName(apiName, apiSnapshot)
@@ -1694,7 +1704,7 @@ func (s *RequestStatistics) restoreStorageSnapshotLocked(snapshot StatisticsSnap
 		for modelName, modelSnapshot := range apiSnapshot.Models {
 			modelName = normalizeModelName(modelName)
 			if storageSnapshotNeedsSplitModelRestore(modelName, modelSnapshot) {
-				restoredDetails += s.restoreStorageSnapshotSplitModelLocked(apiSt, modelName, modelSnapshot, now)
+				restoredDetails = addNonNegativeInt64(restoredDetails, s.restoreStorageSnapshotSplitModelLocked(apiSt, modelName, modelSnapshot, now))
 				continue
 			}
 			modelName = storageSnapshotModelName(modelName, modelSnapshot)
@@ -1717,17 +1727,17 @@ func (s *RequestStatistics) restoreStorageSnapshotLocked(snapshot StatisticsSnap
 			for _, detail := range modelSnapshot.Details {
 				detail = normalizeStorageSnapshotDetail(modelName, detail, now)
 				modelSt.Details = append(modelSt.Details, detail)
-				restoredDetails++
+				restoredDetails = addNonNegativeInt64(restoredDetails, 1)
 
 				totals := detailTotalsFromRequest(detail)
-				detailAggregates.totalTokens += totals.totalTokens
-				detailAggregates.inputTokens += totals.inputTokens
-				detailAggregates.outputTokens += totals.outputTokens
-				detailAggregates.cachedTokens += totals.cachedTokens
-				detailAggregates.cacheWriteTokens += totals.cacheWriteTokens
-				detailAggregates.reasoningTokens += totals.reasoningTokens
-				detailAggregates.latencySum += totals.latencySum
-				detailAggregates.latencyN += totals.latencyN
+				detailAggregates.totalTokens = addNonNegativeInt64(detailAggregates.totalTokens, totals.totalTokens)
+				detailAggregates.inputTokens = addNonNegativeInt64(detailAggregates.inputTokens, totals.inputTokens)
+				detailAggregates.outputTokens = addNonNegativeInt64(detailAggregates.outputTokens, totals.outputTokens)
+				detailAggregates.cachedTokens = addNonNegativeInt64(detailAggregates.cachedTokens, totals.cachedTokens)
+				detailAggregates.cacheWriteTokens = addNonNegativeInt64(detailAggregates.cacheWriteTokens, totals.cacheWriteTokens)
+				detailAggregates.reasoningTokens = addNonNegativeInt64(detailAggregates.reasoningTokens, totals.reasoningTokens)
+				detailAggregates.latencySum = addNonNegativeInt64(detailAggregates.latencySum, totals.latencySum)
+				detailAggregates.latencyN = addNonNegativeInt64(detailAggregates.latencyN, totals.latencyN)
 				incrementAPISourceStats(apiSt, detail, totals)
 				if len(snapshotProviderStats) == 0 {
 					modelSt.providerStats = incrementModelProviderStats(modelSt.providerStats, detail.Provider, detail.Failed, totals)
@@ -1796,17 +1806,17 @@ func mergeAPIStats(dst, src *apiStats) {
 	if dst == nil || src == nil {
 		return
 	}
-	dst.TotalRequests += src.TotalRequests
-	dst.SuccessCount += src.SuccessCount
-	dst.FailureCount += src.FailureCount
-	dst.TotalTokens += src.TotalTokens
-	dst.InputTokens += src.InputTokens
-	dst.OutputTokens += src.OutputTokens
-	dst.CachedTokens += src.CachedTokens
-	dst.CacheWriteTokens += src.CacheWriteTokens
-	dst.ReasoningTokens += src.ReasoningTokens
-	dst.latencySum += src.latencySum
-	dst.latencyN += src.latencyN
+	dst.TotalRequests = addNonNegativeInt64(dst.TotalRequests, src.TotalRequests)
+	dst.SuccessCount = addNonNegativeInt64(dst.SuccessCount, src.SuccessCount)
+	dst.FailureCount = addNonNegativeInt64(dst.FailureCount, src.FailureCount)
+	dst.TotalTokens = addNonNegativeInt64(dst.TotalTokens, src.TotalTokens)
+	dst.InputTokens = addNonNegativeInt64(dst.InputTokens, src.InputTokens)
+	dst.OutputTokens = addNonNegativeInt64(dst.OutputTokens, src.OutputTokens)
+	dst.CachedTokens = addNonNegativeInt64(dst.CachedTokens, src.CachedTokens)
+	dst.CacheWriteTokens = addNonNegativeInt64(dst.CacheWriteTokens, src.CacheWriteTokens)
+	dst.ReasoningTokens = addNonNegativeInt64(dst.ReasoningTokens, src.ReasoningTokens)
+	dst.latencySum = addNonNegativeInt64(dst.latencySum, src.latencySum)
+	dst.latencyN = addNonNegativeInt64(dst.latencyN, src.latencyN)
 	if dst.Models == nil {
 		dst.Models = make(map[string]*modelStats, len(src.Models))
 	}
@@ -1828,17 +1838,17 @@ func mergeModelStats(dst, src *modelStats) {
 	if dst == nil || src == nil {
 		return
 	}
-	dst.TotalRequests += src.TotalRequests
-	dst.SuccessCount += src.SuccessCount
-	dst.FailureCount += src.FailureCount
-	dst.TotalTokens += src.TotalTokens
-	dst.InputTokens += src.InputTokens
-	dst.OutputTokens += src.OutputTokens
-	dst.CachedTokens += src.CachedTokens
-	dst.CacheWriteTokens += src.CacheWriteTokens
-	dst.ReasoningTokens += src.ReasoningTokens
-	dst.latencySum += src.latencySum
-	dst.latencyN += src.latencyN
+	dst.TotalRequests = addNonNegativeInt64(dst.TotalRequests, src.TotalRequests)
+	dst.SuccessCount = addNonNegativeInt64(dst.SuccessCount, src.SuccessCount)
+	dst.FailureCount = addNonNegativeInt64(dst.FailureCount, src.FailureCount)
+	dst.TotalTokens = addNonNegativeInt64(dst.TotalTokens, src.TotalTokens)
+	dst.InputTokens = addNonNegativeInt64(dst.InputTokens, src.InputTokens)
+	dst.OutputTokens = addNonNegativeInt64(dst.OutputTokens, src.OutputTokens)
+	dst.CachedTokens = addNonNegativeInt64(dst.CachedTokens, src.CachedTokens)
+	dst.CacheWriteTokens = addNonNegativeInt64(dst.CacheWriteTokens, src.CacheWriteTokens)
+	dst.ReasoningTokens = addNonNegativeInt64(dst.ReasoningTokens, src.ReasoningTokens)
+	dst.latencySum = addNonNegativeInt64(dst.latencySum, src.latencySum)
+	dst.latencyN = addNonNegativeInt64(dst.latencyN, src.latencyN)
 	dst.Details = append(dst.Details, src.Details...)
 	dst.providerStats = mergeModelProviderStats(dst.providerStats, src.providerStats)
 }
@@ -1869,7 +1879,7 @@ func (s *RequestStatistics) restoreStorageSnapshotSplitModelLocked(apiSt *apiSta
 		if detail.Timestamp.After(s.lastRecordedAt) {
 			s.lastRecordedAt = detail.Timestamp
 		}
-		restoredDetails++
+		restoredDetails = addNonNegativeInt64(restoredDetails, 1)
 	}
 	for detailModelName, modelSt := range models {
 		mergeRestoredModelStats(apiSt, detailModelName, modelSt)
@@ -1885,20 +1895,20 @@ func (s *RequestStatistics) restoreStorageSnapshotSplitModelLocked(apiSt *apiSta
 
 func incrementModelStats(modelSt *modelStats, detail RequestDetail) detailTotals {
 	totals := detailTotalsFromRequest(detail)
-	modelSt.TotalRequests++
+	modelSt.TotalRequests = addNonNegativeInt64(modelSt.TotalRequests, 1)
 	if detail.Failed {
-		modelSt.FailureCount++
+		modelSt.FailureCount = addNonNegativeInt64(modelSt.FailureCount, 1)
 	} else {
-		modelSt.SuccessCount++
+		modelSt.SuccessCount = addNonNegativeInt64(modelSt.SuccessCount, 1)
 	}
-	modelSt.TotalTokens += totals.totalTokens
-	modelSt.InputTokens += totals.inputTokens
-	modelSt.OutputTokens += totals.outputTokens
-	modelSt.CachedTokens += totals.cachedTokens
-	modelSt.CacheWriteTokens += totals.cacheWriteTokens
-	modelSt.ReasoningTokens += totals.reasoningTokens
-	modelSt.latencySum += totals.latencySum
-	modelSt.latencyN += totals.latencyN
+	modelSt.TotalTokens = addNonNegativeInt64(modelSt.TotalTokens, totals.totalTokens)
+	modelSt.InputTokens = addNonNegativeInt64(modelSt.InputTokens, totals.inputTokens)
+	modelSt.OutputTokens = addNonNegativeInt64(modelSt.OutputTokens, totals.outputTokens)
+	modelSt.CachedTokens = addNonNegativeInt64(modelSt.CachedTokens, totals.cachedTokens)
+	modelSt.CacheWriteTokens = addNonNegativeInt64(modelSt.CacheWriteTokens, totals.cacheWriteTokens)
+	modelSt.ReasoningTokens = addNonNegativeInt64(modelSt.ReasoningTokens, totals.reasoningTokens)
+	modelSt.latencySum = addNonNegativeInt64(modelSt.latencySum, totals.latencySum)
+	modelSt.latencyN = addNonNegativeInt64(modelSt.latencyN, totals.latencyN)
 	modelSt.providerStats = incrementModelProviderStats(modelSt.providerStats, detail.Provider, detail.Failed, totals)
 	modelSt.Details = append(modelSt.Details, detail)
 	return totals
@@ -1921,15 +1931,15 @@ func mergeModelProviderStats(dst map[string]*ModelProviderStat, src map[string]*
 			dst[provider] = &copy
 			continue
 		}
-		dstStat.TotalRequests += srcStat.TotalRequests
-		dstStat.SuccessCount += srcStat.SuccessCount
-		dstStat.FailureCount += srcStat.FailureCount
-		dstStat.TotalTokens += srcStat.TotalTokens
-		dstStat.InputTokens += srcStat.InputTokens
-		dstStat.OutputTokens += srcStat.OutputTokens
-		dstStat.CachedTokens += srcStat.CachedTokens
-		dstStat.CacheWriteTokens += srcStat.CacheWriteTokens
-		dstStat.ReasoningTokens += srcStat.ReasoningTokens
+		dstStat.TotalRequests = addNonNegativeInt64(dstStat.TotalRequests, srcStat.TotalRequests)
+		dstStat.SuccessCount = addNonNegativeInt64(dstStat.SuccessCount, srcStat.SuccessCount)
+		dstStat.FailureCount = addNonNegativeInt64(dstStat.FailureCount, srcStat.FailureCount)
+		dstStat.TotalTokens = addNonNegativeInt64(dstStat.TotalTokens, srcStat.TotalTokens)
+		dstStat.InputTokens = addNonNegativeInt64(dstStat.InputTokens, srcStat.InputTokens)
+		dstStat.OutputTokens = addNonNegativeInt64(dstStat.OutputTokens, srcStat.OutputTokens)
+		dstStat.CachedTokens = addNonNegativeInt64(dstStat.CachedTokens, srcStat.CachedTokens)
+		dstStat.CacheWriteTokens = addNonNegativeInt64(dstStat.CacheWriteTokens, srcStat.CacheWriteTokens)
+		dstStat.ReasoningTokens = addNonNegativeInt64(dstStat.ReasoningTokens, srcStat.ReasoningTokens)
 	}
 	return dst
 }
@@ -1955,15 +1965,15 @@ func modelProviderStatsFromSnapshot(values []ModelProviderStat) map[string]*Mode
 			result = make(map[string]*ModelProviderStat)
 		}
 		if existing, ok := result[key]; ok {
-			existing.TotalRequests += value.TotalRequests
-			existing.SuccessCount += value.SuccessCount
-			existing.FailureCount += value.FailureCount
-			existing.TotalTokens += value.TotalTokens
-			existing.InputTokens += value.InputTokens
-			existing.OutputTokens += value.OutputTokens
-			existing.CachedTokens += value.CachedTokens
-			existing.CacheWriteTokens += value.CacheWriteTokens
-			existing.ReasoningTokens += value.ReasoningTokens
+			existing.TotalRequests = addNonNegativeInt64(existing.TotalRequests, value.TotalRequests)
+			existing.SuccessCount = addNonNegativeInt64(existing.SuccessCount, value.SuccessCount)
+			existing.FailureCount = addNonNegativeInt64(existing.FailureCount, value.FailureCount)
+			existing.TotalTokens = addNonNegativeInt64(existing.TotalTokens, value.TotalTokens)
+			existing.InputTokens = addNonNegativeInt64(existing.InputTokens, value.InputTokens)
+			existing.OutputTokens = addNonNegativeInt64(existing.OutputTokens, value.OutputTokens)
+			existing.CachedTokens = addNonNegativeInt64(existing.CachedTokens, value.CachedTokens)
+			existing.CacheWriteTokens = addNonNegativeInt64(existing.CacheWriteTokens, value.CacheWriteTokens)
+			existing.ReasoningTokens = addNonNegativeInt64(existing.ReasoningTokens, value.ReasoningTokens)
 			continue
 		}
 		copy := value
@@ -1979,15 +1989,15 @@ func residualModelProviderStats(values []ModelProviderStat, used map[string]*Mod
 		if stat == nil || usedStat == nil {
 			continue
 		}
-		stat.TotalRequests = maxInt64(stat.TotalRequests-usedStat.TotalRequests, 0)
-		stat.SuccessCount = maxInt64(stat.SuccessCount-usedStat.SuccessCount, 0)
-		stat.FailureCount = maxInt64(stat.FailureCount-usedStat.FailureCount, 0)
-		stat.TotalTokens = maxInt64(stat.TotalTokens-usedStat.TotalTokens, 0)
-		stat.InputTokens = maxInt64(stat.InputTokens-usedStat.InputTokens, 0)
-		stat.OutputTokens = maxInt64(stat.OutputTokens-usedStat.OutputTokens, 0)
-		stat.CachedTokens = maxInt64(stat.CachedTokens-usedStat.CachedTokens, 0)
-		stat.CacheWriteTokens = maxInt64(stat.CacheWriteTokens-usedStat.CacheWriteTokens, 0)
-		stat.ReasoningTokens = maxInt64(stat.ReasoningTokens-usedStat.ReasoningTokens, 0)
+		stat.TotalRequests = subtractNonNegativeInt64(stat.TotalRequests, usedStat.TotalRequests)
+		stat.SuccessCount = subtractNonNegativeInt64(stat.SuccessCount, usedStat.SuccessCount)
+		stat.FailureCount = subtractNonNegativeInt64(stat.FailureCount, usedStat.FailureCount)
+		stat.TotalTokens = subtractNonNegativeInt64(stat.TotalTokens, usedStat.TotalTokens)
+		stat.InputTokens = subtractNonNegativeInt64(stat.InputTokens, usedStat.InputTokens)
+		stat.OutputTokens = subtractNonNegativeInt64(stat.OutputTokens, usedStat.OutputTokens)
+		stat.CachedTokens = subtractNonNegativeInt64(stat.CachedTokens, usedStat.CachedTokens)
+		stat.CacheWriteTokens = subtractNonNegativeInt64(stat.CacheWriteTokens, usedStat.CacheWriteTokens)
+		stat.ReasoningTokens = subtractNonNegativeInt64(stat.ReasoningTokens, usedStat.ReasoningTokens)
 		if stat.TotalRequests <= 0 {
 			delete(result, key)
 		}
@@ -2011,10 +2021,10 @@ func mergeSourceStats(dst, src *apiStats) {
 			dst.Sources[source] = cloneSourceStatAccumulator(srcAgg)
 			continue
 		}
-		dstAgg.stat.TotalRequests += srcAgg.stat.TotalRequests
-		dstAgg.stat.SuccessCount += srcAgg.stat.SuccessCount
-		dstAgg.stat.FailureCount += srcAgg.stat.FailureCount
-		dstAgg.stat.TotalTokens += srcAgg.stat.TotalTokens
+		dstAgg.stat.TotalRequests = addNonNegativeInt64(dstAgg.stat.TotalRequests, srcAgg.stat.TotalRequests)
+		dstAgg.stat.SuccessCount = addNonNegativeInt64(dstAgg.stat.SuccessCount, srcAgg.stat.SuccessCount)
+		dstAgg.stat.FailureCount = addNonNegativeInt64(dstAgg.stat.FailureCount, srcAgg.stat.FailureCount)
+		dstAgg.stat.TotalTokens = addNonNegativeInt64(dstAgg.stat.TotalTokens, srcAgg.stat.TotalTokens)
 		if dstAgg.stat.Provider == "" {
 			dstAgg.stat.Provider = srcAgg.stat.Provider
 		}
@@ -2022,7 +2032,7 @@ func mergeSourceStats(dst, src *apiStats) {
 			dstAgg.providers = make(map[string]int64, len(srcAgg.providers))
 		}
 		for provider, count := range srcAgg.providers {
-			dstAgg.providers[provider] += count
+			dstAgg.providers[provider] = addNonNegativeInt64(dstAgg.providers[provider], count)
 		}
 	}
 }
@@ -2071,7 +2081,7 @@ func (s *RequestStatistics) restoreStorageSnapshotSplitAPILocked(apiName string,
 			if detail.Timestamp.After(s.lastRecordedAt) {
 				s.lastRecordedAt = detail.Timestamp
 			}
-			restoredDetails++
+			restoredDetails = addNonNegativeInt64(restoredDetails, 1)
 		}
 		if residualModelSt := storageSnapshotResidualModelStats(modelSnapshot, detailAggregate); residualModelSt != nil {
 			residualModelSt.providerStats = residualModelProviderStats(modelSnapshot.Providers, detailProviderStats)
@@ -2099,35 +2109,35 @@ func (a *storageSnapshotDetailAggregate) add(detail RequestDetail, totals detail
 	if a == nil {
 		return
 	}
-	a.totalRequests++
+	a.totalRequests = addNonNegativeInt64(a.totalRequests, 1)
 	if detail.Failed {
-		a.failureCount++
+		a.failureCount = addNonNegativeInt64(a.failureCount, 1)
 	} else {
-		a.successCount++
+		a.successCount = addNonNegativeInt64(a.successCount, 1)
 	}
-	a.totalTokens += totals.totalTokens
-	a.inputTokens += totals.inputTokens
-	a.outputTokens += totals.outputTokens
-	a.cachedTokens += totals.cachedTokens
-	a.cacheWriteTokens += totals.cacheWriteTokens
-	a.reasoningTokens += totals.reasoningTokens
-	a.latencySum += totals.latencySum
-	a.latencyN += totals.latencyN
+	a.totalTokens = addNonNegativeInt64(a.totalTokens, totals.totalTokens)
+	a.inputTokens = addNonNegativeInt64(a.inputTokens, totals.inputTokens)
+	a.outputTokens = addNonNegativeInt64(a.outputTokens, totals.outputTokens)
+	a.cachedTokens = addNonNegativeInt64(a.cachedTokens, totals.cachedTokens)
+	a.cacheWriteTokens = addNonNegativeInt64(a.cacheWriteTokens, totals.cacheWriteTokens)
+	a.reasoningTokens = addNonNegativeInt64(a.reasoningTokens, totals.reasoningTokens)
+	a.latencySum = addNonNegativeInt64(a.latencySum, totals.latencySum)
+	a.latencyN = addNonNegativeInt64(a.latencyN, totals.latencyN)
 }
 
 func storageSnapshotResidualModelStats(modelSnapshot ModelSnapshot, detailAggregate storageSnapshotDetailAggregate) *modelStats {
-	totalRequests := maxInt64(nonNegativeInt64(modelSnapshot.TotalRequests)-detailAggregate.totalRequests, 0)
-	successCount := maxInt64(nonNegativeInt64(modelSnapshot.SuccessCount)-detailAggregate.successCount, 0)
-	failureCount := maxInt64(nonNegativeInt64(modelSnapshot.FailureCount)-detailAggregate.failureCount, 0)
-	totalTokens := maxInt64(nonNegativeInt64(modelSnapshot.TotalTokens)-detailAggregate.totalTokens, 0)
-	inputTokens := maxInt64(nonNegativeInt64(modelSnapshot.InputTokens)-detailAggregate.inputTokens, 0)
-	outputTokens := maxInt64(nonNegativeInt64(modelSnapshot.OutputTokens)-detailAggregate.outputTokens, 0)
-	cachedTokens := maxInt64(nonNegativeInt64(modelSnapshot.CachedTokens)-detailAggregate.cachedTokens, 0)
-	cacheWriteTokens := maxInt64(nonNegativeInt64(modelSnapshot.CacheWriteTokens)-detailAggregate.cacheWriteTokens, 0)
-	reasoningTokens := maxInt64(nonNegativeInt64(modelSnapshot.ReasoningTokens)-detailAggregate.reasoningTokens, 0)
+	totalRequests := subtractNonNegativeInt64(modelSnapshot.TotalRequests, detailAggregate.totalRequests)
+	successCount := subtractNonNegativeInt64(modelSnapshot.SuccessCount, detailAggregate.successCount)
+	failureCount := subtractNonNegativeInt64(modelSnapshot.FailureCount, detailAggregate.failureCount)
+	totalTokens := subtractNonNegativeInt64(modelSnapshot.TotalTokens, detailAggregate.totalTokens)
+	inputTokens := subtractNonNegativeInt64(modelSnapshot.InputTokens, detailAggregate.inputTokens)
+	outputTokens := subtractNonNegativeInt64(modelSnapshot.OutputTokens, detailAggregate.outputTokens)
+	cachedTokens := subtractNonNegativeInt64(modelSnapshot.CachedTokens, detailAggregate.cachedTokens)
+	cacheWriteTokens := subtractNonNegativeInt64(modelSnapshot.CacheWriteTokens, detailAggregate.cacheWriteTokens)
+	reasoningTokens := subtractNonNegativeInt64(modelSnapshot.ReasoningTokens, detailAggregate.reasoningTokens)
 	latencySum, latencyN := restoredLatencyAggregate(modelSnapshot.AvgLatencyMs, nonNegativeInt64(modelSnapshot.TotalRequests))
-	latencySum = maxInt64(latencySum-detailAggregate.latencySum, 0)
-	latencyN = maxInt64(latencyN-detailAggregate.latencyN, 0)
+	latencySum = subtractNonNegativeInt64(latencySum, detailAggregate.latencySum)
+	latencyN = subtractNonNegativeInt64(latencyN, detailAggregate.latencyN)
 	if totalRequests == 0 && successCount == 0 && failureCount == 0 && totalTokens == 0 &&
 		inputTokens == 0 && outputTokens == 0 && cachedTokens == 0 && cacheWriteTokens == 0 && reasoningTokens == 0 && latencyN == 0 {
 		return nil
@@ -2160,29 +2170,29 @@ func (s *RequestStatistics) addStorageSnapshotResidualModelLocked(apiName, model
 		apiSt = &apiStats{Models: make(map[string]*modelStats), Sources: make(map[string]*sourceStatAccumulator)}
 		s.apis[apiName] = apiSt
 	}
-	apiSt.TotalRequests += modelSt.TotalRequests
-	apiSt.SuccessCount += modelSt.SuccessCount
-	apiSt.FailureCount += modelSt.FailureCount
-	apiSt.TotalTokens += modelSt.TotalTokens
-	apiSt.InputTokens += modelSt.InputTokens
-	apiSt.OutputTokens += modelSt.OutputTokens
-	apiSt.CachedTokens += modelSt.CachedTokens
-	apiSt.CacheWriteTokens += modelSt.CacheWriteTokens
-	apiSt.ReasoningTokens += modelSt.ReasoningTokens
-	apiSt.latencySum += modelSt.latencySum
-	apiSt.latencyN += modelSt.latencyN
+	apiSt.TotalRequests = addNonNegativeInt64(apiSt.TotalRequests, modelSt.TotalRequests)
+	apiSt.SuccessCount = addNonNegativeInt64(apiSt.SuccessCount, modelSt.SuccessCount)
+	apiSt.FailureCount = addNonNegativeInt64(apiSt.FailureCount, modelSt.FailureCount)
+	apiSt.TotalTokens = addNonNegativeInt64(apiSt.TotalTokens, modelSt.TotalTokens)
+	apiSt.InputTokens = addNonNegativeInt64(apiSt.InputTokens, modelSt.InputTokens)
+	apiSt.OutputTokens = addNonNegativeInt64(apiSt.OutputTokens, modelSt.OutputTokens)
+	apiSt.CachedTokens = addNonNegativeInt64(apiSt.CachedTokens, modelSt.CachedTokens)
+	apiSt.CacheWriteTokens = addNonNegativeInt64(apiSt.CacheWriteTokens, modelSt.CacheWriteTokens)
+	apiSt.ReasoningTokens = addNonNegativeInt64(apiSt.ReasoningTokens, modelSt.ReasoningTokens)
+	apiSt.latencySum = addNonNegativeInt64(apiSt.latencySum, modelSt.latencySum)
+	apiSt.latencyN = addNonNegativeInt64(apiSt.latencyN, modelSt.latencyN)
 	if existing, ok := apiSt.Models[modelName]; ok && existing != nil {
-		existing.TotalRequests += modelSt.TotalRequests
-		existing.SuccessCount += modelSt.SuccessCount
-		existing.FailureCount += modelSt.FailureCount
-		existing.TotalTokens += modelSt.TotalTokens
-		existing.InputTokens += modelSt.InputTokens
-		existing.OutputTokens += modelSt.OutputTokens
-		existing.CachedTokens += modelSt.CachedTokens
-		existing.CacheWriteTokens += modelSt.CacheWriteTokens
-		existing.ReasoningTokens += modelSt.ReasoningTokens
-		existing.latencySum += modelSt.latencySum
-		existing.latencyN += modelSt.latencyN
+		existing.TotalRequests = addNonNegativeInt64(existing.TotalRequests, modelSt.TotalRequests)
+		existing.SuccessCount = addNonNegativeInt64(existing.SuccessCount, modelSt.SuccessCount)
+		existing.FailureCount = addNonNegativeInt64(existing.FailureCount, modelSt.FailureCount)
+		existing.TotalTokens = addNonNegativeInt64(existing.TotalTokens, modelSt.TotalTokens)
+		existing.InputTokens = addNonNegativeInt64(existing.InputTokens, modelSt.InputTokens)
+		existing.OutputTokens = addNonNegativeInt64(existing.OutputTokens, modelSt.OutputTokens)
+		existing.CachedTokens = addNonNegativeInt64(existing.CachedTokens, modelSt.CachedTokens)
+		existing.CacheWriteTokens = addNonNegativeInt64(existing.CacheWriteTokens, modelSt.CacheWriteTokens)
+		existing.ReasoningTokens = addNonNegativeInt64(existing.ReasoningTokens, modelSt.ReasoningTokens)
+		existing.latencySum = addNonNegativeInt64(existing.latencySum, modelSt.latencySum)
+		existing.latencyN = addNonNegativeInt64(existing.latencyN, modelSt.latencyN)
 		existing.providerStats = mergeModelProviderStats(existing.providerStats, modelSt.providerStats)
 	} else {
 		apiSt.Models[modelName] = modelSt
@@ -2353,13 +2363,13 @@ func restoreAPIAggregatesFromModels(apiSt *apiStats) {
 		if modelSt == nil {
 			continue
 		}
-		inputTokens += nonNegativeInt64(modelSt.InputTokens)
-		outputTokens += nonNegativeInt64(modelSt.OutputTokens)
-		cachedTokens += nonNegativeInt64(modelSt.CachedTokens)
-		cacheWriteTokens += nonNegativeInt64(modelSt.CacheWriteTokens)
-		reasoningTokens += nonNegativeInt64(modelSt.ReasoningTokens)
-		latencySum += modelSt.latencySum
-		latencyN += modelSt.latencyN
+		inputTokens = addNonNegativeInt64(inputTokens, modelSt.InputTokens)
+		outputTokens = addNonNegativeInt64(outputTokens, modelSt.OutputTokens)
+		cachedTokens = addNonNegativeInt64(cachedTokens, modelSt.CachedTokens)
+		cacheWriteTokens = addNonNegativeInt64(cacheWriteTokens, modelSt.CacheWriteTokens)
+		reasoningTokens = addNonNegativeInt64(reasoningTokens, modelSt.ReasoningTokens)
+		latencySum = addNonNegativeInt64(latencySum, modelSt.latencySum)
+		latencyN = addNonNegativeInt64(latencyN, modelSt.latencyN)
 	}
 	apiSt.InputTokens = maxInt64(apiSt.InputTokens, inputTokens)
 	apiSt.OutputTokens = maxInt64(apiSt.OutputTokens, outputTokens)
@@ -2387,13 +2397,13 @@ func restoreSnapshotAggregatesFromAPIs(s *RequestStatistics) {
 		if apiSt == nil {
 			continue
 		}
-		inputTokens += nonNegativeInt64(apiSt.InputTokens)
-		outputTokens += nonNegativeInt64(apiSt.OutputTokens)
-		cachedTokens += nonNegativeInt64(apiSt.CachedTokens)
-		cacheWriteTokens += nonNegativeInt64(apiSt.CacheWriteTokens)
-		reasoningTokens += nonNegativeInt64(apiSt.ReasoningTokens)
-		latencySum += apiSt.latencySum
-		latencyN += apiSt.latencyN
+		inputTokens = addNonNegativeInt64(inputTokens, apiSt.InputTokens)
+		outputTokens = addNonNegativeInt64(outputTokens, apiSt.OutputTokens)
+		cachedTokens = addNonNegativeInt64(cachedTokens, apiSt.CachedTokens)
+		cacheWriteTokens = addNonNegativeInt64(cacheWriteTokens, apiSt.CacheWriteTokens)
+		reasoningTokens = addNonNegativeInt64(reasoningTokens, apiSt.ReasoningTokens)
+		latencySum = addNonNegativeInt64(latencySum, apiSt.latencySum)
+		latencyN = addNonNegativeInt64(latencyN, apiSt.latencyN)
 	}
 	s.inputTokens = maxInt64(s.inputTokens, inputTokens)
 	s.outputTokens = maxInt64(s.outputTokens, outputTokens)
@@ -2436,17 +2446,17 @@ func (s *RequestStatistics) mergeModelSummaryAggregateLocked(modelName string, m
 		stat = &ModelStat{Model: modelName}
 		s.modelSummaryStats[modelName] = stat
 	}
-	stat.TotalRequests += modelSt.TotalRequests
-	stat.SuccessCount += modelSt.SuccessCount
-	stat.FailureCount += modelSt.FailureCount
-	stat.TotalTokens += modelSt.TotalTokens
-	stat.InputTokens += modelSt.InputTokens
-	stat.OutputTokens += modelSt.OutputTokens
-	stat.CachedTokens += modelSt.CachedTokens
-	stat.CacheWriteTokens += modelSt.CacheWriteTokens
-	stat.ReasoningTokens += modelSt.ReasoningTokens
-	stat.latencySum += modelSt.latencySum
-	stat.latencyN += modelSt.latencyN
+	stat.TotalRequests = addNonNegativeInt64(stat.TotalRequests, modelSt.TotalRequests)
+	stat.SuccessCount = addNonNegativeInt64(stat.SuccessCount, modelSt.SuccessCount)
+	stat.FailureCount = addNonNegativeInt64(stat.FailureCount, modelSt.FailureCount)
+	stat.TotalTokens = addNonNegativeInt64(stat.TotalTokens, modelSt.TotalTokens)
+	stat.InputTokens = addNonNegativeInt64(stat.InputTokens, modelSt.InputTokens)
+	stat.OutputTokens = addNonNegativeInt64(stat.OutputTokens, modelSt.OutputTokens)
+	stat.CachedTokens = addNonNegativeInt64(stat.CachedTokens, modelSt.CachedTokens)
+	stat.CacheWriteTokens = addNonNegativeInt64(stat.CacheWriteTokens, modelSt.CacheWriteTokens)
+	stat.ReasoningTokens = addNonNegativeInt64(stat.ReasoningTokens, modelSt.ReasoningTokens)
+	stat.latencySum = addNonNegativeInt64(stat.latencySum, modelSt.latencySum)
+	stat.latencyN = addNonNegativeInt64(stat.latencyN, modelSt.latencyN)
 	for provider, providerStat := range modelSt.providerStats {
 		if providerStat == nil {
 			continue
@@ -2460,15 +2470,15 @@ func (s *RequestStatistics) mergeModelSummaryAggregateLocked(modelName string, m
 			stat.providerStats[provider] = &copy
 			continue
 		}
-		existing.TotalRequests += providerStat.TotalRequests
-		existing.SuccessCount += providerStat.SuccessCount
-		existing.FailureCount += providerStat.FailureCount
-		existing.TotalTokens += providerStat.TotalTokens
-		existing.InputTokens += providerStat.InputTokens
-		existing.OutputTokens += providerStat.OutputTokens
-		existing.CachedTokens += providerStat.CachedTokens
-		existing.CacheWriteTokens += providerStat.CacheWriteTokens
-		existing.ReasoningTokens += providerStat.ReasoningTokens
+		existing.TotalRequests = addNonNegativeInt64(existing.TotalRequests, providerStat.TotalRequests)
+		existing.SuccessCount = addNonNegativeInt64(existing.SuccessCount, providerStat.SuccessCount)
+		existing.FailureCount = addNonNegativeInt64(existing.FailureCount, providerStat.FailureCount)
+		existing.TotalTokens = addNonNegativeInt64(existing.TotalTokens, providerStat.TotalTokens)
+		existing.InputTokens = addNonNegativeInt64(existing.InputTokens, providerStat.InputTokens)
+		existing.OutputTokens = addNonNegativeInt64(existing.OutputTokens, providerStat.OutputTokens)
+		existing.CachedTokens = addNonNegativeInt64(existing.CachedTokens, providerStat.CachedTokens)
+		existing.CacheWriteTokens = addNonNegativeInt64(existing.CacheWriteTokens, providerStat.CacheWriteTokens)
+		existing.ReasoningTokens = addNonNegativeInt64(existing.ReasoningTokens, providerStat.ReasoningTokens)
 	}
 }
 
@@ -2478,7 +2488,7 @@ func copyStringInt64Map(values map[string]int64) map[string]int64 {
 	}
 	copied := make(map[string]int64, len(values))
 	for key, value := range values {
-		copied[key] = value
+		copied[key] = nonNegativeInt64(value)
 	}
 	return copied
 }
@@ -2489,7 +2499,7 @@ func copyStringFloat64Map(values map[string]float64) map[string]float64 {
 	}
 	copied := make(map[string]float64, len(values))
 	for key, value := range values {
-		copied[key] = value
+		copied[key] = normalizedNonNegativeCost(value)
 	}
 	return copied
 }
@@ -2501,7 +2511,7 @@ func hourStringMapToIntMap(values map[string]int64) map[int]int64 {
 		if err != nil || hour < 0 || hour >= 24 {
 			continue
 		}
-		result[hour] = value
+		result[hour] = nonNegativeInt64(value)
 	}
 	return result
 }
@@ -2513,7 +2523,7 @@ func hourStringMapToFloat64Map(values map[string]float64) map[int]float64 {
 		if err != nil || hour < 0 || hour >= 24 {
 			continue
 		}
-		result[hour] = value
+		result[hour] = normalizedNonNegativeCost(value)
 	}
 	return result
 }
@@ -2555,14 +2565,20 @@ func timeSeriesTokenStatsFromSnapshot(values []TimeSeriesTokenStat) map[string]*
 		if value.Model == "" {
 			continue
 		}
+		value.TotalTokens = nonNegativeInt64(value.TotalTokens)
+		value.InputTokens = nonNegativeInt64(value.InputTokens)
+		value.OutputTokens = nonNegativeInt64(value.OutputTokens)
+		value.CachedTokens = nonNegativeInt64(value.CachedTokens)
+		value.CacheWriteTokens = nonNegativeInt64(value.CacheWriteTokens)
+		value.ReasoningTokens = nonNegativeInt64(value.ReasoningTokens)
 		key := timeSeriesTokenKey(value.Model, value.Provider)
 		if existing, ok := result[key]; ok {
-			existing.TotalTokens += value.TotalTokens
-			existing.InputTokens += value.InputTokens
-			existing.OutputTokens += value.OutputTokens
-			existing.CachedTokens += value.CachedTokens
-			existing.CacheWriteTokens += value.CacheWriteTokens
-			existing.ReasoningTokens += value.ReasoningTokens
+			existing.TotalTokens = addNonNegativeInt64(existing.TotalTokens, value.TotalTokens)
+			existing.InputTokens = addNonNegativeInt64(existing.InputTokens, value.InputTokens)
+			existing.OutputTokens = addNonNegativeInt64(existing.OutputTokens, value.OutputTokens)
+			existing.CachedTokens = addNonNegativeInt64(existing.CachedTokens, value.CachedTokens)
+			existing.CacheWriteTokens = addNonNegativeInt64(existing.CacheWriteTokens, value.CacheWriteTokens)
+			existing.ReasoningTokens = addNonNegativeInt64(existing.ReasoningTokens, value.ReasoningTokens)
 			if existing.Model == "" {
 				existing.Model = value.Model
 			}
@@ -2730,15 +2746,33 @@ func syncDir(dir string) error {
 func (s *RequestStatistics) replayStorageFilesLocked(dir string, legacyPath string, now time.Time, snapshotAt time.Time) error {
 	var warnings []string
 	seenFiles := make(map[string]struct{})
-	if strings.TrimSpace(legacyPath) != "" && snapshotAt.IsZero() {
-		if err := s.replayStorageLocked(legacyPath); err != nil {
-			warnings = append(warnings, err.Error())
+	var records []persistedDetail
+	var invalidLines int
+	readFile := func(path string) {
+		path = filepath.Clean(path)
+		if _, seen := seenFiles[path]; seen {
+			return
 		}
-		seenFiles[legacyPath] = struct{}{}
+		seenFiles[path] = struct{}{}
+		fileRecords, invalid, err := readPersistedStorageFile(path)
+		if err != nil {
+			warnings = append(warnings, err.Error())
+			return
+		}
+		records = append(records, fileRecords...)
+		invalidLines += invalid
+	}
+	if strings.TrimSpace(legacyPath) != "" && snapshotAt.IsZero() {
+		readFile(legacyPath)
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			if len(records) > 0 || invalidLines > 0 {
+				if err := s.replayPersistedDetailsLocked(records, invalidLines, true, now); err != nil {
+					warnings = append(warnings, err.Error())
+				}
+			}
 			return combineStorageWarnings(warnings)
 		}
 		return err
@@ -2766,15 +2800,20 @@ func (s *RequestStatistics) replayStorageFilesLocked(dir string, legacyPath stri
 		if !snapshotDay.IsZero() && fileDate.Before(snapshotDay) {
 			continue
 		}
-		path := filepath.Join(dir, entry.Name())
-		if _, ok := seenFiles[path]; ok {
-			continue
-		}
-		files = append(files, path)
+		files = append(files, filepath.Join(dir, entry.Name()))
 	}
 	sort.Strings(files)
 	for _, path := range files {
-		if err := s.replayStorageLocked(path); err != nil {
+		readFile(path)
+	}
+	// A protocol fallback and its native counterpart are not guaranteed to be
+	// written to the same daily shard.  Reconcile the complete replay set once,
+	// before adding any of it to the aggregates, so a fallback in one file can
+	// consume a native record in another file (or in the snapshot restored just
+	// before this function).  Metadata-only records are kept in the same batch so
+	// their order-independent pending update handling also spans file boundaries.
+	if len(records) > 0 || invalidLines > 0 {
+		if err := s.replayPersistedDetailsLocked(records, invalidLines, true, now); err != nil {
 			warnings = append(warnings, err.Error())
 		}
 	}
@@ -2819,13 +2858,13 @@ func (s *RequestStatistics) cleanupStorageFilesLocked(now time.Time) error {
 	return nil
 }
 
-func (s *RequestStatistics) replayStorageLocked(path string) error {
+func readPersistedStorageFile(path string) ([]persistedDetail, int, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil
+			return nil, 0, nil
 		}
-		return err
+		return nil, 0, err
 	}
 	defer file.Close()
 
@@ -2852,11 +2891,21 @@ func (s *RequestStatistics) replayStorageLocked(path string) error {
 		records = append(records, persisted)
 	}
 	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("scan storage: %w", err)
+		return nil, invalidLines, fmt.Errorf("scan storage %s: %w", path, err)
 	}
+	return records, invalidLines, nil
+}
 
-	now := time.Now()
-	records, _ = reconcilePersistedProtocolFallbacks(records)
+func (s *RequestStatistics) replayPersistedDetailsLocked(records []persistedDetail, invalidLines int, reconcileBatch bool, now time.Time) error {
+	if s == nil {
+		return nil
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if reconcileBatch {
+		records, _ = reconcilePersistedProtocolFallbacks(records)
+	}
 	s.reconcileRecordedProtocolFallbacksLocked(now)
 	existing := s.detailKeysLocked()
 	pendingMetadata := make(map[requestDedupKey]RequestDetail)
@@ -2910,6 +2959,14 @@ func (s *RequestStatistics) replayStorageLocked(path string) error {
 		return fmt.Errorf("replay storage skipped %d invalid line(s)", invalidLines)
 	}
 	return nil
+}
+
+func (s *RequestStatistics) replayStorageLocked(path string) error {
+	records, invalidLines, err := readPersistedStorageFile(path)
+	if err != nil {
+		return fmt.Errorf("read storage %s: %w", path, err)
+	}
+	return s.replayPersistedDetailsLocked(records, invalidLines, true, time.Now())
 }
 
 func (s *RequestStatistics) enrichPersistedDetailMetadataLocked(apiName, modelName string, target requestDedupKey, update RequestDetail) bool {
@@ -3537,11 +3594,7 @@ func (s *RequestStatistics) loadModelPricesLocked() {
 	if s == nil {
 		return
 	}
-	path := strings.TrimSpace(s.priceStoragePath)
-	if path == "" {
-		path = defaultRuntimeConfig().PriceStoragePath
-	}
-	abs, err := filepath.Abs(path)
+	path, abs, legacyAbs, err := resolvePriceStoragePaths(s.priceStoragePath)
 	if err != nil {
 		s.priceStorageLastError = err.Error()
 		return
@@ -3550,6 +3603,11 @@ func (s *RequestStatistics) loadModelPricesLocked() {
 		return
 	}
 	raw, err := os.ReadFile(abs)
+	loadedFromLegacy := false
+	if errors.Is(err, os.ErrNotExist) && legacyAbs != "" && legacyAbs != abs {
+		raw, err = os.ReadFile(legacyAbs)
+		loadedFromLegacy = err == nil
+	}
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			s.priceStoragePath = path
@@ -3589,45 +3647,27 @@ func (s *RequestStatistics) loadModelPricesLocked() {
 	s.priceVersion++
 	s.modelPricesUpdatedAt = parseRFC3339OrZero(persisted.UpdatedAt)
 	s.priceStorageLastError = ""
+	if loadedFromLegacy {
+		// 旧版本默认把价格写在 CPA 工作目录根部。把内容复制到 data 目录后，
+		// CPA/插件更新只要保留数据目录就不会再丢失价格；保留旧文件作为用户
+		// 可回滚的备份，不做删除操作。
+		if err := writeModelPricesFile(abs, s.modelPricesUpdatedAt, s.modelPrices); err != nil {
+			s.priceStorageLastError = fmt.Sprintf("migrate legacy price file: %v", err)
+		}
+	}
 }
 
 func (s *RequestStatistics) saveModelPricesLocked() error {
 	if s == nil {
 		return nil
 	}
-	path := strings.TrimSpace(s.priceStoragePath)
-	if path == "" {
-		path = defaultRuntimeConfig().PriceStoragePath
-	}
-	abs, err := filepath.Abs(path)
+	path, abs, _, err := resolvePriceStoragePaths(s.priceStoragePath)
 	if err != nil {
-		s.priceStorageLastError = err.Error()
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		s.priceStorageLastError = err.Error()
 		return err
 	}
 	updatedAt := time.Now().UTC()
-	payload := struct {
-		UpdatedAt string                `json:"updated_at"`
-		Prices    map[string]ModelPrice `json:"prices"`
-	}{
-		UpdatedAt: updatedAt.Format(time.RFC3339),
-		Prices:    copyModelPrices(s.modelPrices),
-	}
-	raw, err := json.MarshalIndent(payload, "", "  ")
-	if err != nil {
-		s.priceStorageLastError = err.Error()
-		return err
-	}
-	tmp := abs + ".tmp"
-	if err := os.WriteFile(tmp, append(raw, '\n'), 0o600); err != nil {
-		s.priceStorageLastError = err.Error()
-		return err
-	}
-	if err := os.Rename(tmp, abs); err != nil {
-		_ = os.Remove(tmp)
+	if err := writeModelPricesFile(abs, updatedAt, s.modelPrices); err != nil {
 		s.priceStorageLastError = err.Error()
 		return err
 	}
@@ -3635,6 +3675,64 @@ func (s *RequestStatistics) saveModelPricesLocked() error {
 	s.priceStorageLoadedPath = abs
 	s.modelPricesUpdatedAt = updatedAt
 	s.priceStorageLastError = ""
+	return nil
+}
+
+// resolvePriceStoragePaths makes the new data-directory location the canonical
+// target while recognizing the old default path as a one-time migration source.
+// Explicit custom paths keep their configured semantics.
+func resolvePriceStoragePaths(configured string) (path, abs, legacyAbs string, err error) {
+	path = strings.TrimSpace(configured)
+	if path == "" {
+		path = defaultRuntimeConfig().PriceStoragePath
+	}
+	abs, err = filepath.Abs(path)
+	if err != nil {
+		return "", "", "", err
+	}
+	defaultAbs, err := filepath.Abs(defaultPriceStoragePath)
+	if err != nil {
+		return "", "", "", err
+	}
+	legacyAbs, err = filepath.Abs(legacyPriceStoragePath)
+	if err != nil {
+		return "", "", "", err
+	}
+	if abs == defaultAbs {
+		return defaultPriceStoragePath, defaultAbs, legacyAbs, nil
+	}
+	return path, abs, "", nil
+}
+
+func writeModelPricesFile(abs string, updatedAt time.Time, prices map[string]ModelPrice) error {
+	if strings.TrimSpace(abs) == "" {
+		return errors.New("price storage path is empty")
+	}
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		return err
+	}
+	if updatedAt.IsZero() {
+		updatedAt = time.Now().UTC()
+	}
+	payload := struct {
+		UpdatedAt string                `json:"updated_at"`
+		Prices    map[string]ModelPrice `json:"prices"`
+	}{
+		UpdatedAt: updatedAt.UTC().Format(time.RFC3339),
+		Prices:    copyModelPrices(prices),
+	}
+	raw, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := abs + ".tmp"
+	if err := os.WriteFile(tmp, append(raw, '\n'), 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, abs); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
 	return nil
 }
 
@@ -4189,42 +4287,42 @@ func (s *RequestStatistics) modelPricesResponseLocked() ModelPricesResponse {
 func (s *RequestStatistics) updateAPIStats(apiSt *apiStats, model string, detail RequestDetail) detailTotals {
 	totals := detailTotalsFromRequest(detail)
 	cost := s.detailCostLocked(model, detail, totals)
-	apiSt.TotalRequests++
+	apiSt.TotalRequests = addNonNegativeInt64(apiSt.TotalRequests, 1)
 	if detail.Failed {
-		apiSt.FailureCount++
+		apiSt.FailureCount = addNonNegativeInt64(apiSt.FailureCount, 1)
 	} else {
-		apiSt.SuccessCount++
+		apiSt.SuccessCount = addNonNegativeInt64(apiSt.SuccessCount, 1)
 	}
-	apiSt.TotalTokens += totals.totalTokens
-	apiSt.InputTokens += totals.inputTokens
-	apiSt.OutputTokens += totals.outputTokens
-	apiSt.CachedTokens += totals.cachedTokens
-	apiSt.CacheWriteTokens += totals.cacheWriteTokens
-	apiSt.ReasoningTokens += totals.reasoningTokens
-	apiSt.latencySum += totals.latencySum
-	apiSt.latencyN += totals.latencyN
-	apiSt.estimatedCost += cost
+	apiSt.TotalTokens = addNonNegativeInt64(apiSt.TotalTokens, totals.totalTokens)
+	apiSt.InputTokens = addNonNegativeInt64(apiSt.InputTokens, totals.inputTokens)
+	apiSt.OutputTokens = addNonNegativeInt64(apiSt.OutputTokens, totals.outputTokens)
+	apiSt.CachedTokens = addNonNegativeInt64(apiSt.CachedTokens, totals.cachedTokens)
+	apiSt.CacheWriteTokens = addNonNegativeInt64(apiSt.CacheWriteTokens, totals.cacheWriteTokens)
+	apiSt.ReasoningTokens = addNonNegativeInt64(apiSt.ReasoningTokens, totals.reasoningTokens)
+	apiSt.latencySum = addNonNegativeInt64(apiSt.latencySum, totals.latencySum)
+	apiSt.latencyN = addNonNegativeInt64(apiSt.latencyN, totals.latencyN)
+	apiSt.estimatedCost = addNonNegativeCost(apiSt.estimatedCost, cost)
 
 	modelSt, ok := apiSt.Models[model]
 	if !ok {
 		modelSt = &modelStats{}
 		apiSt.Models[model] = modelSt
 	}
-	modelSt.TotalRequests++
+	modelSt.TotalRequests = addNonNegativeInt64(modelSt.TotalRequests, 1)
 	if detail.Failed {
-		modelSt.FailureCount++
+		modelSt.FailureCount = addNonNegativeInt64(modelSt.FailureCount, 1)
 	} else {
-		modelSt.SuccessCount++
+		modelSt.SuccessCount = addNonNegativeInt64(modelSt.SuccessCount, 1)
 	}
-	modelSt.TotalTokens += totals.totalTokens
-	modelSt.InputTokens += totals.inputTokens
-	modelSt.OutputTokens += totals.outputTokens
-	modelSt.CachedTokens += totals.cachedTokens
-	modelSt.CacheWriteTokens += totals.cacheWriteTokens
-	modelSt.ReasoningTokens += totals.reasoningTokens
-	modelSt.latencySum += totals.latencySum
-	modelSt.latencyN += totals.latencyN
-	modelSt.estimatedCost += cost
+	modelSt.TotalTokens = addNonNegativeInt64(modelSt.TotalTokens, totals.totalTokens)
+	modelSt.InputTokens = addNonNegativeInt64(modelSt.InputTokens, totals.inputTokens)
+	modelSt.OutputTokens = addNonNegativeInt64(modelSt.OutputTokens, totals.outputTokens)
+	modelSt.CachedTokens = addNonNegativeInt64(modelSt.CachedTokens, totals.cachedTokens)
+	modelSt.CacheWriteTokens = addNonNegativeInt64(modelSt.CacheWriteTokens, totals.cacheWriteTokens)
+	modelSt.ReasoningTokens = addNonNegativeInt64(modelSt.ReasoningTokens, totals.reasoningTokens)
+	modelSt.latencySum = addNonNegativeInt64(modelSt.latencySum, totals.latencySum)
+	modelSt.latencyN = addNonNegativeInt64(modelSt.latencyN, totals.latencyN)
+	modelSt.estimatedCost = addNonNegativeCost(modelSt.estimatedCost, cost)
 	modelSt.providerStats = incrementModelProviderStats(modelSt.providerStats, detail.Provider, detail.Failed, totals)
 	modelSt.Details = append(modelSt.Details, detail)
 	return totals
@@ -4249,14 +4347,14 @@ func incrementAPISourceStats(apiSt *apiStats, detail RequestDetail, totals detai
 	if sourceAgg.stat.Provider == "" {
 		sourceAgg.stat.Provider = detail.Provider
 	}
-	sourceAgg.providers[detail.Provider]++
-	sourceAgg.stat.TotalRequests++
+	sourceAgg.providers[detail.Provider] = addNonNegativeInt64(sourceAgg.providers[detail.Provider], 1)
+	sourceAgg.stat.TotalRequests = addNonNegativeInt64(sourceAgg.stat.TotalRequests, 1)
 	if detail.Failed {
-		sourceAgg.stat.FailureCount++
+		sourceAgg.stat.FailureCount = addNonNegativeInt64(sourceAgg.stat.FailureCount, 1)
 	} else {
-		sourceAgg.stat.SuccessCount++
+		sourceAgg.stat.SuccessCount = addNonNegativeInt64(sourceAgg.stat.SuccessCount, 1)
 	}
-	sourceAgg.stat.TotalTokens += totals.totalTokens
+	sourceAgg.stat.TotalTokens = addNonNegativeInt64(sourceAgg.stat.TotalTokens, totals.totalTokens)
 }
 
 func decrementAPISourceStats(apiSt *apiStats, detail RequestDetail, totals detailTotals) {
@@ -4268,15 +4366,15 @@ func decrementAPISourceStats(apiSt *apiStats, detail RequestDetail, totals detai
 	if !ok {
 		return
 	}
-	sourceAgg.stat.TotalRequests--
+	sourceAgg.stat.TotalRequests = subtractNonNegativeInt64(sourceAgg.stat.TotalRequests, 1)
 	if detail.Failed {
-		sourceAgg.stat.FailureCount--
+		sourceAgg.stat.FailureCount = subtractNonNegativeInt64(sourceAgg.stat.FailureCount, 1)
 	} else {
-		sourceAgg.stat.SuccessCount--
+		sourceAgg.stat.SuccessCount = subtractNonNegativeInt64(sourceAgg.stat.SuccessCount, 1)
 	}
-	sourceAgg.stat.TotalTokens -= totals.totalTokens
+	sourceAgg.stat.TotalTokens = subtractNonNegativeInt64(sourceAgg.stat.TotalTokens, totals.totalTokens)
 	if sourceAgg.providers != nil {
-		sourceAgg.providers[detail.Provider]--
+		sourceAgg.providers[detail.Provider] = subtractNonNegativeInt64(sourceAgg.providers[detail.Provider], 1)
 		if sourceAgg.providers[detail.Provider] <= 0 {
 			delete(sourceAgg.providers, detail.Provider)
 		}
@@ -4302,22 +4400,22 @@ func (s *RequestStatistics) incrementModelSummaryStatsLocked(modelName string, d
 		modelStat = &ModelStat{Model: modelName}
 		s.modelSummaryStats[modelName] = modelStat
 	}
-	modelStat.TotalRequests++
+	modelStat.TotalRequests = addNonNegativeInt64(modelStat.TotalRequests, 1)
 	if detail.Failed {
-		modelStat.FailureCount++
+		modelStat.FailureCount = addNonNegativeInt64(modelStat.FailureCount, 1)
 	} else {
-		modelStat.SuccessCount++
+		modelStat.SuccessCount = addNonNegativeInt64(modelStat.SuccessCount, 1)
 	}
-	modelStat.TotalTokens += totals.totalTokens
-	modelStat.InputTokens += totals.inputTokens
-	modelStat.OutputTokens += totals.outputTokens
-	modelStat.CachedTokens += totals.cachedTokens
-	modelStat.CacheWriteTokens += totals.cacheWriteTokens
-	modelStat.ReasoningTokens += totals.reasoningTokens
-	modelStat.latencySum += totals.latencySum
-	modelStat.latencyN += totals.latencyN
+	modelStat.TotalTokens = addNonNegativeInt64(modelStat.TotalTokens, totals.totalTokens)
+	modelStat.InputTokens = addNonNegativeInt64(modelStat.InputTokens, totals.inputTokens)
+	modelStat.OutputTokens = addNonNegativeInt64(modelStat.OutputTokens, totals.outputTokens)
+	modelStat.CachedTokens = addNonNegativeInt64(modelStat.CachedTokens, totals.cachedTokens)
+	modelStat.CacheWriteTokens = addNonNegativeInt64(modelStat.CacheWriteTokens, totals.cacheWriteTokens)
+	modelStat.ReasoningTokens = addNonNegativeInt64(modelStat.ReasoningTokens, totals.reasoningTokens)
+	modelStat.latencySum = addNonNegativeInt64(modelStat.latencySum, totals.latencySum)
+	modelStat.latencyN = addNonNegativeInt64(modelStat.latencyN, totals.latencyN)
 	modelStat.providerStats = incrementModelProviderStats(modelStat.providerStats, detail.Provider, detail.Failed, totals)
-	modelStat.EstimatedCost += s.detailCostLocked(modelName, detail, totals)
+	modelStat.EstimatedCost = addNonNegativeCost(modelStat.EstimatedCost, s.detailCostLocked(modelName, detail, totals))
 }
 
 func (s *RequestStatistics) decrementModelSummaryStatsLocked(modelName string, detail RequestDetail, totals detailTotals) {
@@ -4325,22 +4423,22 @@ func (s *RequestStatistics) decrementModelSummaryStatsLocked(modelName string, d
 	if !ok {
 		return
 	}
-	modelStat.TotalRequests--
+	modelStat.TotalRequests = subtractNonNegativeInt64(modelStat.TotalRequests, 1)
 	if detail.Failed {
-		modelStat.FailureCount--
+		modelStat.FailureCount = subtractNonNegativeInt64(modelStat.FailureCount, 1)
 	} else {
-		modelStat.SuccessCount--
+		modelStat.SuccessCount = subtractNonNegativeInt64(modelStat.SuccessCount, 1)
 	}
-	modelStat.TotalTokens -= totals.totalTokens
-	modelStat.InputTokens -= totals.inputTokens
-	modelStat.OutputTokens -= totals.outputTokens
-	modelStat.CachedTokens -= totals.cachedTokens
-	modelStat.CacheWriteTokens -= totals.cacheWriteTokens
-	modelStat.ReasoningTokens -= totals.reasoningTokens
-	modelStat.latencySum -= totals.latencySum
-	modelStat.latencyN -= totals.latencyN
+	modelStat.TotalTokens = subtractNonNegativeInt64(modelStat.TotalTokens, totals.totalTokens)
+	modelStat.InputTokens = subtractNonNegativeInt64(modelStat.InputTokens, totals.inputTokens)
+	modelStat.OutputTokens = subtractNonNegativeInt64(modelStat.OutputTokens, totals.outputTokens)
+	modelStat.CachedTokens = subtractNonNegativeInt64(modelStat.CachedTokens, totals.cachedTokens)
+	modelStat.CacheWriteTokens = subtractNonNegativeInt64(modelStat.CacheWriteTokens, totals.cacheWriteTokens)
+	modelStat.ReasoningTokens = subtractNonNegativeInt64(modelStat.ReasoningTokens, totals.reasoningTokens)
+	modelStat.latencySum = subtractNonNegativeInt64(modelStat.latencySum, totals.latencySum)
+	modelStat.latencyN = subtractNonNegativeInt64(modelStat.latencyN, totals.latencyN)
 	decrementModelProviderStats(modelStat.providerStats, detail.Provider, detail.Failed, totals)
-	modelStat.EstimatedCost -= s.detailCostLocked(modelName, detail, totals)
+	modelStat.EstimatedCost = subtractNonNegativeCost(modelStat.EstimatedCost, s.detailCostLocked(modelName, detail, totals))
 	if modelStat.TotalRequests <= 0 {
 		delete(s.modelSummaryStats, modelName)
 	}
@@ -4369,14 +4467,14 @@ func (s *RequestStatistics) incrementSummaryDimensionStatsLocked(modelName strin
 	if sourceAgg.stat.Provider == "" {
 		sourceAgg.stat.Provider = detail.Provider
 	}
-	sourceAgg.providers[detail.Provider]++
-	sourceAgg.stat.TotalRequests++
+	sourceAgg.providers[detail.Provider] = addNonNegativeInt64(sourceAgg.providers[detail.Provider], 1)
+	sourceAgg.stat.TotalRequests = addNonNegativeInt64(sourceAgg.stat.TotalRequests, 1)
 	if detail.Failed {
-		sourceAgg.stat.FailureCount++
+		sourceAgg.stat.FailureCount = addNonNegativeInt64(sourceAgg.stat.FailureCount, 1)
 	} else {
-		sourceAgg.stat.SuccessCount++
+		sourceAgg.stat.SuccessCount = addNonNegativeInt64(sourceAgg.stat.SuccessCount, 1)
 	}
-	sourceAgg.stat.TotalTokens += totals.totalTokens
+	sourceAgg.stat.TotalTokens = addNonNegativeInt64(sourceAgg.stat.TotalTokens, totals.totalTokens)
 
 	credential := summaryCredentialKey(detail)
 	credentialStat, ok := s.credentialStats[credential]
@@ -4384,13 +4482,13 @@ func (s *RequestStatistics) incrementSummaryDimensionStatsLocked(modelName strin
 		credentialStat = &CredentialStat{AuthIndex: credential}
 		s.credentialStats[credential] = credentialStat
 	}
-	credentialStat.TotalRequests++
+	credentialStat.TotalRequests = addNonNegativeInt64(credentialStat.TotalRequests, 1)
 	if detail.Failed {
-		credentialStat.FailureCount++
+		credentialStat.FailureCount = addNonNegativeInt64(credentialStat.FailureCount, 1)
 	} else {
-		credentialStat.SuccessCount++
+		credentialStat.SuccessCount = addNonNegativeInt64(credentialStat.SuccessCount, 1)
 	}
-	credentialStat.TotalTokens += totals.totalTokens
+	credentialStat.TotalTokens = addNonNegativeInt64(credentialStat.TotalTokens, totals.totalTokens)
 
 	clientKey := clientAPIGroupKey(detail)
 	clientAgg, ok := s.clientAPIStats[clientKey]
@@ -4404,52 +4502,52 @@ func (s *RequestStatistics) incrementSummaryDimensionStatsLocked(modelName strin
 		}
 		s.clientAPIStats[clientKey] = clientAgg
 	}
-	clientAgg.stat.TotalRequests++
+	clientAgg.stat.TotalRequests = addNonNegativeInt64(clientAgg.stat.TotalRequests, 1)
 	if detail.Failed {
-		clientAgg.stat.FailureCount++
+		clientAgg.stat.FailureCount = addNonNegativeInt64(clientAgg.stat.FailureCount, 1)
 	} else {
-		clientAgg.stat.SuccessCount++
+		clientAgg.stat.SuccessCount = addNonNegativeInt64(clientAgg.stat.SuccessCount, 1)
 	}
-	clientAgg.stat.TotalTokens += totals.totalTokens
-	clientAgg.stat.InputTokens += totals.inputTokens
-	clientAgg.stat.OutputTokens += totals.outputTokens
-	clientAgg.stat.CachedTokens += totals.cachedTokens
-	clientAgg.stat.CacheWriteTokens += totals.cacheWriteTokens
-	clientAgg.stat.ReasoningTokens += totals.reasoningTokens
-	clientAgg.stat.EstimatedCost += s.detailCostLocked(modelName, detail, totals)
+	clientAgg.stat.TotalTokens = addNonNegativeInt64(clientAgg.stat.TotalTokens, totals.totalTokens)
+	clientAgg.stat.InputTokens = addNonNegativeInt64(clientAgg.stat.InputTokens, totals.inputTokens)
+	clientAgg.stat.OutputTokens = addNonNegativeInt64(clientAgg.stat.OutputTokens, totals.outputTokens)
+	clientAgg.stat.CachedTokens = addNonNegativeInt64(clientAgg.stat.CachedTokens, totals.cachedTokens)
+	clientAgg.stat.CacheWriteTokens = addNonNegativeInt64(clientAgg.stat.CacheWriteTokens, totals.cacheWriteTokens)
+	clientAgg.stat.ReasoningTokens = addNonNegativeInt64(clientAgg.stat.ReasoningTokens, totals.reasoningTokens)
+	clientAgg.stat.EstimatedCost = addNonNegativeCost(clientAgg.stat.EstimatedCost, s.detailCostLocked(modelName, detail, totals))
 
 	clientModel, ok := clientAgg.models[modelName]
 	if !ok {
 		clientModel = &ClientAPIModelStat{Model: modelName}
 		clientAgg.models[modelName] = clientModel
 	}
-	clientModel.TotalRequests++
+	clientModel.TotalRequests = addNonNegativeInt64(clientModel.TotalRequests, 1)
 	if detail.Failed {
-		clientModel.FailureCount++
+		clientModel.FailureCount = addNonNegativeInt64(clientModel.FailureCount, 1)
 	} else {
-		clientModel.SuccessCount++
+		clientModel.SuccessCount = addNonNegativeInt64(clientModel.SuccessCount, 1)
 	}
-	clientModel.TotalTokens += totals.totalTokens
-	clientModel.InputTokens += totals.inputTokens
-	clientModel.OutputTokens += totals.outputTokens
-	clientModel.CachedTokens += totals.cachedTokens
-	clientModel.CacheWriteTokens += totals.cacheWriteTokens
-	clientModel.ReasoningTokens += totals.reasoningTokens
+	clientModel.TotalTokens = addNonNegativeInt64(clientModel.TotalTokens, totals.totalTokens)
+	clientModel.InputTokens = addNonNegativeInt64(clientModel.InputTokens, totals.inputTokens)
+	clientModel.OutputTokens = addNonNegativeInt64(clientModel.OutputTokens, totals.outputTokens)
+	clientModel.CachedTokens = addNonNegativeInt64(clientModel.CachedTokens, totals.cachedTokens)
+	clientModel.CacheWriteTokens = addNonNegativeInt64(clientModel.CacheWriteTokens, totals.cacheWriteTokens)
+	clientModel.ReasoningTokens = addNonNegativeInt64(clientModel.ReasoningTokens, totals.reasoningTokens)
 	clientModel.providerStats = incrementModelProviderStats(clientModel.providerStats, detail.Provider, detail.Failed, totals)
-	clientModel.EstimatedCost += s.detailCostLocked(modelName, detail, totals)
+	clientModel.EstimatedCost = addNonNegativeCost(clientModel.EstimatedCost, s.detailCostLocked(modelName, detail, totals))
 }
 
 func (s *RequestStatistics) decrementSummaryDimensionStatsLocked(modelName string, detail RequestDetail, totals detailTotals) {
 	if sourceAgg, ok := s.sourceStats[summarySourceKey(detail)]; ok {
-		sourceAgg.stat.TotalRequests--
+		sourceAgg.stat.TotalRequests = subtractNonNegativeInt64(sourceAgg.stat.TotalRequests, 1)
 		if detail.Failed {
-			sourceAgg.stat.FailureCount--
+			sourceAgg.stat.FailureCount = subtractNonNegativeInt64(sourceAgg.stat.FailureCount, 1)
 		} else {
-			sourceAgg.stat.SuccessCount--
+			sourceAgg.stat.SuccessCount = subtractNonNegativeInt64(sourceAgg.stat.SuccessCount, 1)
 		}
-		sourceAgg.stat.TotalTokens -= totals.totalTokens
+		sourceAgg.stat.TotalTokens = subtractNonNegativeInt64(sourceAgg.stat.TotalTokens, totals.totalTokens)
 		if sourceAgg.providers != nil {
-			sourceAgg.providers[detail.Provider]--
+			sourceAgg.providers[detail.Provider] = subtractNonNegativeInt64(sourceAgg.providers[detail.Provider], 1)
 			if sourceAgg.providers[detail.Provider] <= 0 {
 				delete(sourceAgg.providers, detail.Provider)
 			}
@@ -4467,13 +4565,13 @@ func (s *RequestStatistics) decrementSummaryDimensionStatsLocked(modelName strin
 	}
 
 	if credentialStat, ok := s.credentialStats[summaryCredentialKey(detail)]; ok {
-		credentialStat.TotalRequests--
+		credentialStat.TotalRequests = subtractNonNegativeInt64(credentialStat.TotalRequests, 1)
 		if detail.Failed {
-			credentialStat.FailureCount--
+			credentialStat.FailureCount = subtractNonNegativeInt64(credentialStat.FailureCount, 1)
 		} else {
-			credentialStat.SuccessCount--
+			credentialStat.SuccessCount = subtractNonNegativeInt64(credentialStat.SuccessCount, 1)
 		}
-		credentialStat.TotalTokens -= totals.totalTokens
+		credentialStat.TotalTokens = subtractNonNegativeInt64(credentialStat.TotalTokens, totals.totalTokens)
 		if credentialStat.TotalRequests <= 0 {
 			delete(s.credentialStats, summaryCredentialKey(detail))
 		}
@@ -4481,34 +4579,34 @@ func (s *RequestStatistics) decrementSummaryDimensionStatsLocked(modelName strin
 
 	clientKey := clientAPIGroupKey(detail)
 	if clientAgg, ok := s.clientAPIStats[clientKey]; ok {
-		clientAgg.stat.TotalRequests--
+		clientAgg.stat.TotalRequests = subtractNonNegativeInt64(clientAgg.stat.TotalRequests, 1)
 		if detail.Failed {
-			clientAgg.stat.FailureCount--
+			clientAgg.stat.FailureCount = subtractNonNegativeInt64(clientAgg.stat.FailureCount, 1)
 		} else {
-			clientAgg.stat.SuccessCount--
+			clientAgg.stat.SuccessCount = subtractNonNegativeInt64(clientAgg.stat.SuccessCount, 1)
 		}
-		clientAgg.stat.TotalTokens -= totals.totalTokens
-		clientAgg.stat.InputTokens -= totals.inputTokens
-		clientAgg.stat.OutputTokens -= totals.outputTokens
-		clientAgg.stat.CachedTokens -= totals.cachedTokens
-		clientAgg.stat.CacheWriteTokens -= totals.cacheWriteTokens
-		clientAgg.stat.ReasoningTokens -= totals.reasoningTokens
-		clientAgg.stat.EstimatedCost -= s.detailCostLocked(modelName, detail, totals)
+		clientAgg.stat.TotalTokens = subtractNonNegativeInt64(clientAgg.stat.TotalTokens, totals.totalTokens)
+		clientAgg.stat.InputTokens = subtractNonNegativeInt64(clientAgg.stat.InputTokens, totals.inputTokens)
+		clientAgg.stat.OutputTokens = subtractNonNegativeInt64(clientAgg.stat.OutputTokens, totals.outputTokens)
+		clientAgg.stat.CachedTokens = subtractNonNegativeInt64(clientAgg.stat.CachedTokens, totals.cachedTokens)
+		clientAgg.stat.CacheWriteTokens = subtractNonNegativeInt64(clientAgg.stat.CacheWriteTokens, totals.cacheWriteTokens)
+		clientAgg.stat.ReasoningTokens = subtractNonNegativeInt64(clientAgg.stat.ReasoningTokens, totals.reasoningTokens)
+		clientAgg.stat.EstimatedCost = subtractNonNegativeCost(clientAgg.stat.EstimatedCost, s.detailCostLocked(modelName, detail, totals))
 
 		if clientModel, ok := clientAgg.models[modelName]; ok {
-			clientModel.TotalRequests--
+			clientModel.TotalRequests = subtractNonNegativeInt64(clientModel.TotalRequests, 1)
 			if detail.Failed {
-				clientModel.FailureCount--
+				clientModel.FailureCount = subtractNonNegativeInt64(clientModel.FailureCount, 1)
 			} else {
-				clientModel.SuccessCount--
+				clientModel.SuccessCount = subtractNonNegativeInt64(clientModel.SuccessCount, 1)
 			}
-			clientModel.TotalTokens -= totals.totalTokens
-			clientModel.InputTokens -= totals.inputTokens
-			clientModel.OutputTokens -= totals.outputTokens
-			clientModel.CachedTokens -= totals.cachedTokens
-			clientModel.CacheWriteTokens -= totals.cacheWriteTokens
-			clientModel.ReasoningTokens -= totals.reasoningTokens
-			clientModel.EstimatedCost -= s.detailCostLocked(modelName, detail, totals)
+			clientModel.TotalTokens = subtractNonNegativeInt64(clientModel.TotalTokens, totals.totalTokens)
+			clientModel.InputTokens = subtractNonNegativeInt64(clientModel.InputTokens, totals.inputTokens)
+			clientModel.OutputTokens = subtractNonNegativeInt64(clientModel.OutputTokens, totals.outputTokens)
+			clientModel.CachedTokens = subtractNonNegativeInt64(clientModel.CachedTokens, totals.cachedTokens)
+			clientModel.CacheWriteTokens = subtractNonNegativeInt64(clientModel.CacheWriteTokens, totals.cacheWriteTokens)
+			clientModel.ReasoningTokens = subtractNonNegativeInt64(clientModel.ReasoningTokens, totals.reasoningTokens)
+			clientModel.EstimatedCost = subtractNonNegativeCost(clientModel.EstimatedCost, s.detailCostLocked(modelName, detail, totals))
 			decrementModelProviderStats(clientModel.providerStats, detail.Provider, detail.Failed, totals)
 			if clientModel.TotalRequests <= 0 {
 				delete(clientAgg.models, modelName)
@@ -4530,9 +4628,9 @@ func (s *RequestStatistics) incrementHealthBucketLocked(detail RequestDetail) {
 	}
 	bucket := s.healthBuckets[key]
 	if detail.Failed {
-		bucket.failure++
+		bucket.failure = addNonNegativeInt64(bucket.failure, 1)
 	} else {
-		bucket.success++
+		bucket.success = addNonNegativeInt64(bucket.success, 1)
 	}
 	s.healthBuckets[key] = bucket
 }
@@ -4547,9 +4645,9 @@ func (s *RequestStatistics) decrementHealthBucketLocked(detail RequestDetail) {
 		return
 	}
 	if detail.Failed {
-		bucket.failure--
+		bucket.failure = subtractNonNegativeInt64(bucket.failure, 1)
 	} else {
-		bucket.success--
+		bucket.success = subtractNonNegativeInt64(bucket.success, 1)
 	}
 	if bucket.success <= 0 && bucket.failure <= 0 {
 		delete(s.healthBuckets, key)
@@ -4619,51 +4717,51 @@ func (s *RequestStatistics) pruneLocked(now time.Time, sortNeeded bool) {
 
 func (s *RequestStatistics) decrementCounters(d RequestDetail, apiSt *apiStats, modelSt *modelStats, modelName string) {
 	totals := detailTotalsFromRequest(d)
-	s.totalRequests--
+	s.totalRequests = subtractNonNegativeInt64(s.totalRequests, 1)
 	if d.Failed {
-		s.failureCount--
+		s.failureCount = subtractNonNegativeInt64(s.failureCount, 1)
 	} else {
-		s.successCount--
+		s.successCount = subtractNonNegativeInt64(s.successCount, 1)
 	}
-	s.totalTokens -= totals.totalTokens
-	s.inputTokens -= totals.inputTokens
-	s.outputTokens -= totals.outputTokens
-	s.cachedTokens -= totals.cachedTokens
-	s.cacheWriteTokens -= totals.cacheWriteTokens
-	s.reasoningTokens -= totals.reasoningTokens
-	s.latencySum -= totals.latencySum
-	s.latencyN -= totals.latencyN
+	s.totalTokens = subtractNonNegativeInt64(s.totalTokens, totals.totalTokens)
+	s.inputTokens = subtractNonNegativeInt64(s.inputTokens, totals.inputTokens)
+	s.outputTokens = subtractNonNegativeInt64(s.outputTokens, totals.outputTokens)
+	s.cachedTokens = subtractNonNegativeInt64(s.cachedTokens, totals.cachedTokens)
+	s.cacheWriteTokens = subtractNonNegativeInt64(s.cacheWriteTokens, totals.cacheWriteTokens)
+	s.reasoningTokens = subtractNonNegativeInt64(s.reasoningTokens, totals.reasoningTokens)
+	s.latencySum = subtractNonNegativeInt64(s.latencySum, totals.latencySum)
+	s.latencyN = subtractNonNegativeInt64(s.latencyN, totals.latencyN)
 
-	apiSt.TotalRequests--
+	apiSt.TotalRequests = subtractNonNegativeInt64(apiSt.TotalRequests, 1)
 	if d.Failed {
-		apiSt.FailureCount--
+		apiSt.FailureCount = subtractNonNegativeInt64(apiSt.FailureCount, 1)
 	} else {
-		apiSt.SuccessCount--
+		apiSt.SuccessCount = subtractNonNegativeInt64(apiSt.SuccessCount, 1)
 	}
-	apiSt.TotalTokens -= totals.totalTokens
-	apiSt.InputTokens -= totals.inputTokens
-	apiSt.OutputTokens -= totals.outputTokens
-	apiSt.CachedTokens -= totals.cachedTokens
-	apiSt.CacheWriteTokens -= totals.cacheWriteTokens
-	apiSt.ReasoningTokens -= totals.reasoningTokens
-	apiSt.latencySum -= totals.latencySum
-	apiSt.latencyN -= totals.latencyN
+	apiSt.TotalTokens = subtractNonNegativeInt64(apiSt.TotalTokens, totals.totalTokens)
+	apiSt.InputTokens = subtractNonNegativeInt64(apiSt.InputTokens, totals.inputTokens)
+	apiSt.OutputTokens = subtractNonNegativeInt64(apiSt.OutputTokens, totals.outputTokens)
+	apiSt.CachedTokens = subtractNonNegativeInt64(apiSt.CachedTokens, totals.cachedTokens)
+	apiSt.CacheWriteTokens = subtractNonNegativeInt64(apiSt.CacheWriteTokens, totals.cacheWriteTokens)
+	apiSt.ReasoningTokens = subtractNonNegativeInt64(apiSt.ReasoningTokens, totals.reasoningTokens)
+	apiSt.latencySum = subtractNonNegativeInt64(apiSt.latencySum, totals.latencySum)
+	apiSt.latencyN = subtractNonNegativeInt64(apiSt.latencyN, totals.latencyN)
 	decrementAPISourceStats(apiSt, d, totals)
 
-	modelSt.TotalRequests--
+	modelSt.TotalRequests = subtractNonNegativeInt64(modelSt.TotalRequests, 1)
 	if d.Failed {
-		modelSt.FailureCount--
+		modelSt.FailureCount = subtractNonNegativeInt64(modelSt.FailureCount, 1)
 	} else {
-		modelSt.SuccessCount--
+		modelSt.SuccessCount = subtractNonNegativeInt64(modelSt.SuccessCount, 1)
 	}
-	modelSt.TotalTokens -= totals.totalTokens
-	modelSt.InputTokens -= totals.inputTokens
-	modelSt.OutputTokens -= totals.outputTokens
-	modelSt.CachedTokens -= totals.cachedTokens
-	modelSt.CacheWriteTokens -= totals.cacheWriteTokens
-	modelSt.ReasoningTokens -= totals.reasoningTokens
-	modelSt.latencySum -= totals.latencySum
-	modelSt.latencyN -= totals.latencyN
+	modelSt.TotalTokens = subtractNonNegativeInt64(modelSt.TotalTokens, totals.totalTokens)
+	modelSt.InputTokens = subtractNonNegativeInt64(modelSt.InputTokens, totals.inputTokens)
+	modelSt.OutputTokens = subtractNonNegativeInt64(modelSt.OutputTokens, totals.outputTokens)
+	modelSt.CachedTokens = subtractNonNegativeInt64(modelSt.CachedTokens, totals.cachedTokens)
+	modelSt.CacheWriteTokens = subtractNonNegativeInt64(modelSt.CacheWriteTokens, totals.cacheWriteTokens)
+	modelSt.ReasoningTokens = subtractNonNegativeInt64(modelSt.ReasoningTokens, totals.reasoningTokens)
+	modelSt.latencySum = subtractNonNegativeInt64(modelSt.latencySum, totals.latencySum)
+	modelSt.latencyN = subtractNonNegativeInt64(modelSt.latencyN, totals.latencyN)
 	decrementModelProviderStats(modelSt.providerStats, d.Provider, d.Failed, totals)
 
 	dayKey := d.Timestamp.Format("2006-01-02")
@@ -4672,20 +4770,20 @@ func (s *RequestStatistics) decrementCounters(d RequestDetail, apiSt *apiStats, 
 	// 与 updateAPIStats 的累加保持对称。存在时段价格时
 	// applySummaryEstimatedCostsLocked 不再从聚合 token 重算 API 成本,漏减会让
 	// 已被 retention 淘汰的请求永久留在 API/API 模型成本里。
-	apiSt.estimatedCost -= cost
-	modelSt.estimatedCost -= cost
-	s.requestsByDay[dayKey]--
-	s.requestsByHour[hourKey]--
-	s.tokensByDay[dayKey] -= totals.totalTokens
-	s.tokensByHour[hourKey] -= totals.totalTokens
+	apiSt.estimatedCost = subtractNonNegativeCost(apiSt.estimatedCost, cost)
+	modelSt.estimatedCost = subtractNonNegativeCost(modelSt.estimatedCost, cost)
+	s.requestsByDay[dayKey] = subtractNonNegativeInt64(s.requestsByDay[dayKey], 1)
+	s.requestsByHour[hourKey] = subtractNonNegativeInt64(s.requestsByHour[hourKey], 1)
+	s.tokensByDay[dayKey] = subtractNonNegativeInt64(s.tokensByDay[dayKey], totals.totalTokens)
+	s.tokensByHour[hourKey] = subtractNonNegativeInt64(s.tokensByHour[hourKey], totals.totalTokens)
 	if decrementTimeSeriesTokenStats(s.costTokensByDay[dayKey], detailModel(modelName, d), d.Provider, totals) {
-		s.costByDay[dayKey] -= cost
+		s.costByDay[dayKey] = subtractNonNegativeCost(s.costByDay[dayKey], cost)
 	}
 	if len(s.costTokensByDay[dayKey]) == 0 {
 		delete(s.costTokensByDay, dayKey)
 	}
 	if decrementTimeSeriesTokenStats(s.costTokensByHour[hourKey], detailModel(modelName, d), d.Provider, totals) {
-		s.costByHour[hourKey] -= cost
+		s.costByHour[hourKey] = subtractNonNegativeCost(s.costByHour[hourKey], cost)
 	}
 	if len(s.costTokensByHour[hourKey]) == 0 {
 		delete(s.costTokensByHour, hourKey)
@@ -4753,55 +4851,55 @@ func (s *RequestStatistics) rebuildAggregatesLocked() {
 			modelSt.providerStats = nil
 			for _, detail := range modelSt.Details {
 				totals := detailTotalsFromRequest(detail)
-				s.totalRequests++
-				apiSt.TotalRequests++
-				modelSt.TotalRequests++
+				s.totalRequests = addNonNegativeInt64(s.totalRequests, 1)
+				apiSt.TotalRequests = addNonNegativeInt64(apiSt.TotalRequests, 1)
+				modelSt.TotalRequests = addNonNegativeInt64(modelSt.TotalRequests, 1)
 				if detail.Failed {
-					s.failureCount++
-					apiSt.FailureCount++
-					modelSt.FailureCount++
+					s.failureCount = addNonNegativeInt64(s.failureCount, 1)
+					apiSt.FailureCount = addNonNegativeInt64(apiSt.FailureCount, 1)
+					modelSt.FailureCount = addNonNegativeInt64(modelSt.FailureCount, 1)
 				} else {
-					s.successCount++
-					apiSt.SuccessCount++
-					modelSt.SuccessCount++
+					s.successCount = addNonNegativeInt64(s.successCount, 1)
+					apiSt.SuccessCount = addNonNegativeInt64(apiSt.SuccessCount, 1)
+					modelSt.SuccessCount = addNonNegativeInt64(modelSt.SuccessCount, 1)
 				}
-				s.totalTokens += totals.totalTokens
-				s.inputTokens += totals.inputTokens
-				s.outputTokens += totals.outputTokens
-				s.cachedTokens += totals.cachedTokens
-				s.cacheWriteTokens += totals.cacheWriteTokens
-				s.reasoningTokens += totals.reasoningTokens
-				s.latencySum += totals.latencySum
-				s.latencyN += totals.latencyN
-				apiSt.TotalTokens += totals.totalTokens
-				apiSt.InputTokens += totals.inputTokens
-				apiSt.OutputTokens += totals.outputTokens
-				apiSt.CachedTokens += totals.cachedTokens
-				apiSt.CacheWriteTokens += totals.cacheWriteTokens
-				apiSt.ReasoningTokens += totals.reasoningTokens
-				apiSt.latencySum += totals.latencySum
-				apiSt.latencyN += totals.latencyN
+				s.totalTokens = addNonNegativeInt64(s.totalTokens, totals.totalTokens)
+				s.inputTokens = addNonNegativeInt64(s.inputTokens, totals.inputTokens)
+				s.outputTokens = addNonNegativeInt64(s.outputTokens, totals.outputTokens)
+				s.cachedTokens = addNonNegativeInt64(s.cachedTokens, totals.cachedTokens)
+				s.cacheWriteTokens = addNonNegativeInt64(s.cacheWriteTokens, totals.cacheWriteTokens)
+				s.reasoningTokens = addNonNegativeInt64(s.reasoningTokens, totals.reasoningTokens)
+				s.latencySum = addNonNegativeInt64(s.latencySum, totals.latencySum)
+				s.latencyN = addNonNegativeInt64(s.latencyN, totals.latencyN)
+				apiSt.TotalTokens = addNonNegativeInt64(apiSt.TotalTokens, totals.totalTokens)
+				apiSt.InputTokens = addNonNegativeInt64(apiSt.InputTokens, totals.inputTokens)
+				apiSt.OutputTokens = addNonNegativeInt64(apiSt.OutputTokens, totals.outputTokens)
+				apiSt.CachedTokens = addNonNegativeInt64(apiSt.CachedTokens, totals.cachedTokens)
+				apiSt.CacheWriteTokens = addNonNegativeInt64(apiSt.CacheWriteTokens, totals.cacheWriteTokens)
+				apiSt.ReasoningTokens = addNonNegativeInt64(apiSt.ReasoningTokens, totals.reasoningTokens)
+				apiSt.latencySum = addNonNegativeInt64(apiSt.latencySum, totals.latencySum)
+				apiSt.latencyN = addNonNegativeInt64(apiSt.latencyN, totals.latencyN)
 				incrementAPISourceStats(apiSt, detail, totals)
-				modelSt.TotalTokens += totals.totalTokens
-				modelSt.InputTokens += totals.inputTokens
-				modelSt.OutputTokens += totals.outputTokens
-				modelSt.CachedTokens += totals.cachedTokens
-				modelSt.CacheWriteTokens += totals.cacheWriteTokens
-				modelSt.ReasoningTokens += totals.reasoningTokens
-				modelSt.latencySum += totals.latencySum
-				modelSt.latencyN += totals.latencyN
+				modelSt.TotalTokens = addNonNegativeInt64(modelSt.TotalTokens, totals.totalTokens)
+				modelSt.InputTokens = addNonNegativeInt64(modelSt.InputTokens, totals.inputTokens)
+				modelSt.OutputTokens = addNonNegativeInt64(modelSt.OutputTokens, totals.outputTokens)
+				modelSt.CachedTokens = addNonNegativeInt64(modelSt.CachedTokens, totals.cachedTokens)
+				modelSt.CacheWriteTokens = addNonNegativeInt64(modelSt.CacheWriteTokens, totals.cacheWriteTokens)
+				modelSt.ReasoningTokens = addNonNegativeInt64(modelSt.ReasoningTokens, totals.reasoningTokens)
+				modelSt.latencySum = addNonNegativeInt64(modelSt.latencySum, totals.latencySum)
+				modelSt.latencyN = addNonNegativeInt64(modelSt.latencyN, totals.latencyN)
 				modelSt.providerStats = incrementModelProviderStats(modelSt.providerStats, detail.Provider, detail.Failed, totals)
 				dayKey := detail.Timestamp.Format("2006-01-02")
 				hourKey := detail.Timestamp.Hour()
 				cost := s.detailCostLocked(modelName, detail, totals)
-				apiSt.estimatedCost += cost
-				modelSt.estimatedCost += cost
-				s.requestsByDay[dayKey]++
-				s.requestsByHour[hourKey]++
-				s.tokensByDay[dayKey] += totals.totalTokens
-				s.tokensByHour[hourKey] += totals.totalTokens
-				s.costByDay[dayKey] += cost
-				s.costByHour[hourKey] += cost
+				apiSt.estimatedCost = addNonNegativeCost(apiSt.estimatedCost, cost)
+				modelSt.estimatedCost = addNonNegativeCost(modelSt.estimatedCost, cost)
+				s.requestsByDay[dayKey] = addNonNegativeInt64(s.requestsByDay[dayKey], 1)
+				s.requestsByHour[hourKey] = addNonNegativeInt64(s.requestsByHour[hourKey], 1)
+				s.tokensByDay[dayKey] = addNonNegativeInt64(s.tokensByDay[dayKey], totals.totalTokens)
+				s.tokensByHour[hourKey] = addNonNegativeInt64(s.tokensByHour[hourKey], totals.totalTokens)
+				s.costByDay[dayKey] = addNonNegativeCost(s.costByDay[dayKey], cost)
+				s.costByHour[hourKey] = addNonNegativeCost(s.costByHour[hourKey], cost)
 				s.costTokensByDay[dayKey] = incrementTimeSeriesTokenStats(s.costTokensByDay[dayKey], detailModel(modelName, detail), detail.Provider, totals)
 				s.costTokensByHour[hourKey] = incrementTimeSeriesTokenStats(s.costTokensByHour[hourKey], detailModel(modelName, detail), detail.Provider, totals)
 				s.incrementModelSummaryStatsLocked(modelName, detail, totals)
@@ -4839,10 +4937,12 @@ func (s *RequestStatistics) rebuildCostSeriesLocked() {
 					totals := detailTotalsFromRequest(detail)
 					delta := s.detailTimePriceDeltaLocked(modelName, detail, totals)
 					if rebuiltDay {
-						s.costByDay[detail.Timestamp.Format("2006-01-02")] += delta
+						day := detail.Timestamp.Format("2006-01-02")
+						s.costByDay[day] = addCostDelta(s.costByDay[day], delta)
 					}
 					if rebuiltHour {
-						s.costByHour[detail.Timestamp.Hour()] += delta
+						hour := detail.Timestamp.Hour()
+						s.costByHour[hour] = addCostDelta(s.costByHour[hour], delta)
 					}
 				}
 			}
@@ -4891,7 +4991,7 @@ func (s *RequestStatistics) costByDayFromTokenSeriesLocked() map[string]float64 
 			if stat == nil {
 				continue
 			}
-			result[day] += s.timeSeriesTokenCostLocked(*stat)
+			result[day] = addNonNegativeCost(result[day], s.timeSeriesTokenCostLocked(*stat))
 		}
 	}
 	return result
@@ -4904,7 +5004,7 @@ func (s *RequestStatistics) costByHourFromTokenSeriesLocked() map[int]float64 {
 			if stat == nil {
 				continue
 			}
-			result[hour] += s.timeSeriesTokenCostLocked(*stat)
+			result[hour] = addNonNegativeCost(result[hour], s.timeSeriesTokenCostLocked(*stat))
 		}
 	}
 	return result
@@ -4956,7 +5056,9 @@ func (s *RequestStatistics) snapshotLocked() StatisticsSnapshot {
 		}
 		for modelName, modelSt := range apiSt.Models {
 			details := make([]RequestDetail, len(modelSt.Details))
-			copy(details, modelSt.Details)
+			for i, detail := range modelSt.Details {
+				details[i] = cloneRequestDetail(detail)
+			}
 			apiSnapshot.Models[modelName] = ModelSnapshot{
 				TotalRequests:    modelSt.TotalRequests,
 				SuccessCount:     modelSt.SuccessCount,
@@ -5020,6 +5122,18 @@ func (s *RequestStatistics) snapshotLocked() StatisticsSnapshot {
 	return result
 }
 
+func cloneRequestDetail(detail RequestDetail) RequestDetail {
+	copy := detail
+	copy.Correlation = cloneProtocolCorrelationMeta(detail.Correlation)
+	if detail.Headers != nil {
+		copy.Headers = make(map[string][]string, len(detail.Headers))
+		for name, values := range detail.Headers {
+			copy.Headers[name] = append([]string(nil), values...)
+		}
+	}
+	return copy
+}
+
 // MergeSnapshot imports a snapshot into the current statistics.
 func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResult {
 	result := MergeResult{}
@@ -5041,7 +5155,7 @@ func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, per
 	var persisted []persistedDetail
 	var reconciledProtocolFallbacks int
 	snapshot, reconciledProtocolFallbacks = reconcileProtocolFallbackSnapshot(snapshot)
-	result.Skipped += int64(reconciledProtocolFallbacks)
+	result.Skipped = addNonNegativeInt64(result.Skipped, int64(reconciledProtocolFallbacks))
 	s.reconcileRecordedProtocolFallbacksLocked(now)
 	var cutoff time.Time
 	if s.retention > 0 {
@@ -5097,13 +5211,13 @@ func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, per
 				}
 
 				if !cutoff.IsZero() && !detail.Timestamp.IsZero() && detail.Timestamp.Before(cutoff) {
-					result.IgnoredByRetention++
+					result.IgnoredByRetention = addNonNegativeInt64(result.IgnoredByRetention, 1)
 					continue
 				}
 
 				key := claudeCacheCanonicalDedupKey(importAPIName, importModelName, detail)
 				if _, exists := seen[key]; exists {
-					result.Skipped++
+					result.Skipped = addNonNegativeInt64(result.Skipped, 1)
 					continue
 				}
 				seen[key] = struct{}{}
@@ -5112,7 +5226,7 @@ func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, per
 					if persist && s.storageEnabled {
 						persisted = append(persisted, persistedDetail{API: importAPIName, Model: importModelName, Detail: detail})
 					}
-					result.Added++
+					result.Added = addNonNegativeInt64(result.Added, 1)
 				}
 			}
 		}
@@ -5121,8 +5235,8 @@ func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, per
 	s.pruneLocked(now, true)
 	reconciledRecorded := s.reconcileRecordedProtocolFallbacksLocked(now)
 	if reconciledRecorded > 0 {
-		result.Skipped += int64(reconciledRecorded)
-		result.Added = maxInt64(result.Added-int64(reconciledRecorded), 0)
+		result.Skipped = addNonNegativeInt64(result.Skipped, int64(reconciledRecorded))
+		result.Added = subtractNonNegativeInt64(result.Added, int64(reconciledRecorded))
 	}
 	if repaired := s.repairMigratedAttributionDetailsLocked(now); len(repaired) > 0 {
 		removed := make(map[requestDedupKey]struct{}, len(repaired))
@@ -5133,14 +5247,14 @@ func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, per
 		var droppedAdded int64
 		for _, item := range persisted {
 			if _, ok := removed[dedupKey(item.API, item.Model, item.Detail)]; ok {
-				droppedAdded++
+				droppedAdded = addNonNegativeInt64(droppedAdded, 1)
 				continue
 			}
 			keptPersisted = append(keptPersisted, item)
 		}
 		persisted = keptPersisted
-		result.Skipped += int64(len(repaired))
-		result.Added = maxInt64(result.Added-droppedAdded, 0)
+		result.Skipped = addNonNegativeInt64(result.Skipped, int64(len(repaired)))
+		result.Added = subtractNonNegativeInt64(result.Added, droppedAdded)
 	}
 	s.rebuildSeenLocked(now)
 	return result, persisted
@@ -5158,7 +5272,7 @@ func snapshotImportDetailCapacity(snapshot StatisticsSnapshot, cutoff time.Time,
 		}
 		for _, modelSnapshot := range apiSnapshot.Models {
 			if cutoff.IsZero() {
-				count += int64(len(modelSnapshot.Details))
+				count = addNonNegativeInt64(count, int64(len(modelSnapshot.Details)))
 				continue
 			}
 			for _, detail := range modelSnapshot.Details {
@@ -5167,7 +5281,7 @@ func snapshotImportDetailCapacity(snapshot StatisticsSnapshot, cutoff time.Time,
 					timestamp = now
 				}
 				if !timestamp.Before(cutoff) {
-					count++
+					count = addNonNegativeInt64(count, 1)
 				}
 			}
 		}
@@ -5179,9 +5293,9 @@ func usageDetailTotalTokens(detail UsageDetail, provider string) int64 {
 	_, _, cacheTokens := usageDetailCacheTokenParts(detail, provider)
 	inputTokens := nonNegativeInt64(detail.InputTokens)
 	outputTokens := nonNegativeInt64(detail.OutputTokens)
-	computedTokens := inputTokens + outputTokens
+	computedTokens := saturatingProtocolAdd(inputTokens, outputTokens)
 	if usesExclusiveCacheInput(provider, inputTokens, outputTokens, cacheTokens, detail.TotalTokens) {
-		computedTokens += cacheTokens
+		computedTokens = saturatingProtocolAdd(computedTokens, cacheTokens)
 	}
 	return maxInt64(nonNegativeInt64(detail.TotalTokens), computedTokens)
 }
@@ -5198,11 +5312,11 @@ func usageDetailCacheTokenParts(detail UsageDetail, provider string) (int64, int
 		nonNegativeInt64(detail.CachedTokens) == cacheWriteTokens {
 		cacheReadTokens = 0
 	}
-	return cacheReadTokens, cacheWriteTokens, cacheReadTokens + cacheWriteTokens
+	return cacheReadTokens, cacheWriteTokens, saturatingProtocolAdd(cacheReadTokens, cacheWriteTokens)
 }
 
 func detailTotalTokens(tokens TokenStats) int64 {
-	computedTokens := nonNegativeInt64(tokens.InputTokens) + nonNegativeInt64(tokens.OutputTokens)
+	computedTokens := saturatingProtocolAdd(nonNegativeInt64(tokens.InputTokens), nonNegativeInt64(tokens.OutputTokens))
 	return maxInt64(nonNegativeInt64(tokens.TotalTokens), computedTokens)
 }
 
@@ -5212,7 +5326,8 @@ func detailTotalTokensForRequest(detail RequestDetail) int64 {
 	outputTokens := nonNegativeInt64(detail.Tokens.OutputTokens)
 	cacheTokens := normalizedCacheTokens(detail.Tokens)
 	if usesExclusiveCacheInput(detail.Provider, inputTokens, outputTokens, cacheTokens, detail.Tokens.TotalTokens) {
-		expandedTokens := inputTokens + outputTokens + cacheTokens
+		expandedTokens := saturatingProtocolAdd(inputTokens, outputTokens)
+		expandedTokens = saturatingProtocolAdd(expandedTokens, cacheTokens)
 		totalTokens = maxInt64(totalTokens, expandedTokens)
 	}
 	return totalTokens
@@ -5234,7 +5349,9 @@ func usesExclusiveCacheInput(provider string, inputTokens, outputTokens, cacheTo
 	if providerUsesExclusiveCacheInput(provider) {
 		return true
 	}
-	return strings.TrimSpace(provider) == "" && totalTokens > 0 && totalTokens >= inputTokens+outputTokens+cacheTokens
+	computed := saturatingProtocolAdd(inputTokens, outputTokens)
+	computed = saturatingProtocolAdd(computed, cacheTokens)
+	return strings.TrimSpace(provider) == "" && totalTokens > 0 && totalTokens >= computed
 }
 
 func providerUsesExclusiveCacheInput(provider string) bool {
@@ -5397,15 +5514,31 @@ func tokenCostForPrice(stat TimeSeriesTokenStat, price ModelPrice) float64 {
 	totalTokens := nonNegativeInt64(stat.TotalTokens)
 	cacheReadTokens := nonNegativeInt64(stat.CachedTokens)
 	cacheWriteTokens := nonNegativeInt64(stat.CacheWriteTokens)
-	cacheTotal := cacheReadTokens + cacheWriteTokens
+	cacheTotal := saturatingProtocolAdd(cacheReadTokens, cacheWriteTokens)
 	uncachedInputTokens := maxInt64(inputTokens-cacheTotal, 0)
 	if usesExclusiveCacheInput(stat.Provider, inputTokens, outputTokens, cacheTotal, totalTokens) {
 		uncachedInputTokens = inputTokens
 	}
-	return float64(uncachedInputTokens)/1e6*price.Prompt +
-		float64(outputTokens)/1e6*price.Completion +
-		float64(cacheReadTokens)/1e6*price.Cache +
-		float64(cacheWriteTokens)/1e6*price.CacheWrite
+	cost := 0.0
+	cost = addNonNegativeCost(cost, scaledTokenCost(uncachedInputTokens, price.Prompt))
+	cost = addNonNegativeCost(cost, scaledTokenCost(outputTokens, price.Completion))
+	cost = addNonNegativeCost(cost, scaledTokenCost(cacheReadTokens, price.Cache))
+	cost = addNonNegativeCost(cost, scaledTokenCost(cacheWriteTokens, price.CacheWrite))
+	return cost
+}
+
+func scaledTokenCost(tokens int64, price float64) float64 {
+	if tokens <= 0 || price <= 0 || math.IsNaN(price) || math.IsInf(price, -1) {
+		return 0
+	}
+	if math.IsInf(price, 1) {
+		return math.MaxFloat64
+	}
+	cost := float64(tokens) / 1e6 * price
+	if math.IsInf(cost, 1) || math.IsNaN(cost) {
+		return math.MaxFloat64
+	}
+	return cost
 }
 
 func (s *RequestStatistics) aggregateEstimatedCostLocked(model string, totalTokens, inputTokens, outputTokens, cachedTokens, cacheWriteTokens int64, providers []ModelProviderStat) float64 {
@@ -5421,7 +5554,7 @@ func (s *RequestStatistics) aggregateEstimatedCostLocked(model string, totalToke
 	}
 	var cost float64
 	for _, provider := range providers {
-		cost += s.timeSeriesTokenCostLocked(TimeSeriesTokenStat{
+		cost = addNonNegativeCost(cost, s.timeSeriesTokenCostLocked(TimeSeriesTokenStat{
 			Model:            model,
 			Provider:         provider.Provider,
 			TotalTokens:      provider.TotalTokens,
@@ -5429,7 +5562,7 @@ func (s *RequestStatistics) aggregateEstimatedCostLocked(model string, totalToke
 			OutputTokens:     provider.OutputTokens,
 			CachedTokens:     provider.CachedTokens,
 			CacheWriteTokens: provider.CacheWriteTokens,
-		})
+		}))
 	}
 	return cost
 }
@@ -5441,7 +5574,7 @@ func (s *RequestStatistics) applySummaryEstimatedCostsLocked(summary *DashboardS
 	if s.hasTimeBasedPricesLocked() {
 		summary.Usage.TotalCost = 0
 		for _, model := range summary.ModelStats {
-			summary.Usage.TotalCost += model.EstimatedCost
+			summary.Usage.TotalCost = addNonNegativeCost(summary.Usage.TotalCost, model.EstimatedCost)
 		}
 		return
 	}
@@ -5449,13 +5582,13 @@ func (s *RequestStatistics) applySummaryEstimatedCostsLocked(summary *DashboardS
 	for i := range summary.ModelStats {
 		model := &summary.ModelStats[i]
 		model.EstimatedCost = s.aggregateEstimatedCostLocked(model.Model, model.TotalTokens, model.InputTokens, model.OutputTokens, model.CachedTokens, model.CacheWriteTokens, model.Providers)
-		summary.Usage.TotalCost += model.EstimatedCost
+		summary.Usage.TotalCost = addNonNegativeCost(summary.Usage.TotalCost, model.EstimatedCost)
 	}
 	for apiName, api := range summary.Usage.APIs {
 		api.EstimatedCost = 0
 		for modelName, model := range api.Models {
 			model.EstimatedCost = s.aggregateEstimatedCostLocked(modelName, model.TotalTokens, model.InputTokens, model.OutputTokens, model.CachedTokens, model.CacheWriteTokens, model.Providers)
-			api.EstimatedCost += model.EstimatedCost
+			api.EstimatedCost = addNonNegativeCost(api.EstimatedCost, model.EstimatedCost)
 			api.Models[modelName] = model
 		}
 		summary.Usage.APIs[apiName] = api
@@ -5466,7 +5599,7 @@ func (s *RequestStatistics) applySummaryEstimatedCostsLocked(summary *DashboardS
 		for j := range client.Models {
 			model := &client.Models[j]
 			model.EstimatedCost = s.aggregateEstimatedCostLocked(model.Model, model.TotalTokens, model.InputTokens, model.OutputTokens, model.CachedTokens, model.CacheWriteTokens, model.Providers)
-			client.EstimatedCost += model.EstimatedCost
+			client.EstimatedCost = addNonNegativeCost(client.EstimatedCost, model.EstimatedCost)
 		}
 	}
 }
@@ -5507,7 +5640,7 @@ func (s *RequestStatistics) rebuildEstimatedCostsLocked() {
 		api.estimatedCost = 0
 		for modelName, model := range api.Models {
 			model.estimatedCost = s.aggregateEstimatedCostLocked(modelName, model.TotalTokens, model.InputTokens, model.OutputTokens, model.CachedTokens, model.CacheWriteTokens, finalizedModelProviderStats(model.providerStats, model.TotalRequests, model.SuccessCount, model.FailureCount, model.TotalTokens, model.InputTokens, model.OutputTokens, model.CachedTokens, model.CacheWriteTokens, model.ReasoningTokens))
-			api.estimatedCost += model.estimatedCost
+			api.estimatedCost = addNonNegativeCost(api.estimatedCost, model.estimatedCost)
 		}
 	}
 	for modelName, model := range s.modelSummaryStats {
@@ -5517,7 +5650,7 @@ func (s *RequestStatistics) rebuildEstimatedCostsLocked() {
 		client.stat.EstimatedCost = 0
 		for modelName, model := range client.models {
 			model.EstimatedCost = s.aggregateEstimatedCostLocked(modelName, model.TotalTokens, model.InputTokens, model.OutputTokens, model.CachedTokens, model.CacheWriteTokens, finalizedModelProviderStats(model.providerStats, model.TotalRequests, model.SuccessCount, model.FailureCount, model.TotalTokens, model.InputTokens, model.OutputTokens, model.CachedTokens, model.CacheWriteTokens, model.ReasoningTokens))
-			client.stat.EstimatedCost += model.EstimatedCost
+			client.stat.EstimatedCost = addNonNegativeCost(client.stat.EstimatedCost, model.EstimatedCost)
 		}
 	}
 	if !s.hasTimeBasedPricesLocked() {
@@ -5527,15 +5660,15 @@ func (s *RequestStatistics) rebuildEstimatedCostsLocked() {
 		for modelName, model := range api.Models {
 			for _, detail := range model.Details {
 				delta := s.detailTimePriceDeltaLocked(modelName, detail, detailTotalsFromRequest(detail))
-				api.estimatedCost += delta
-				model.estimatedCost += delta
+				api.estimatedCost = addCostDelta(api.estimatedCost, delta)
+				model.estimatedCost = addCostDelta(model.estimatedCost, delta)
 				if summaryModel := s.modelSummaryStats[modelName]; summaryModel != nil {
-					summaryModel.EstimatedCost += delta
+					summaryModel.EstimatedCost = addCostDelta(summaryModel.EstimatedCost, delta)
 				}
 				if client := s.clientAPIStats[clientAPIGroupKey(detail)]; client != nil {
-					client.stat.EstimatedCost += delta
+					client.stat.EstimatedCost = addCostDelta(client.stat.EstimatedCost, delta)
 					if clientModel := client.models[modelName]; clientModel != nil {
-						clientModel.EstimatedCost += delta
+						clientModel.EstimatedCost = addCostDelta(clientModel.EstimatedCost, delta)
 					}
 				}
 			}
@@ -5547,7 +5680,7 @@ func (s *RequestStatistics) applyModelEstimatedCostsLocked(models []ModelStat) f
 	if s.hasTimeBasedPricesLocked() {
 		var total float64
 		for i := range models {
-			total += models[i].EstimatedCost
+			total = addNonNegativeCost(total, models[i].EstimatedCost)
 		}
 		return total
 	}
@@ -5555,7 +5688,7 @@ func (s *RequestStatistics) applyModelEstimatedCostsLocked(models []ModelStat) f
 	for i := range models {
 		model := &models[i]
 		model.EstimatedCost = s.aggregateEstimatedCostLocked(model.Model, model.TotalTokens, model.InputTokens, model.OutputTokens, model.CachedTokens, model.CacheWriteTokens, model.Providers)
-		total += model.EstimatedCost
+		total = addNonNegativeCost(total, model.EstimatedCost)
 	}
 	return total
 }
@@ -5672,7 +5805,7 @@ func normalizedCacheTokens(tokens TokenStats) int64 {
 	if cacheTokens > 0 {
 		return maxInt64(cacheTokens, maxInt64(cachedTokens, cacheWriteTokens))
 	}
-	return cachedTokens + cacheWriteTokens
+	return saturatingProtocolAdd(cachedTokens, cacheWriteTokens)
 }
 
 // normalizedCacheReadTokens returns cache hits only. CacheTokens stores the
@@ -5694,6 +5827,84 @@ func nonNegativeInt64(value int64) int64 {
 		return 0
 	}
 	return value
+}
+
+// addNonNegativeInt64 is used for counters whose domain is non-negative. It
+// deliberately saturates instead of wrapping around when a corrupted import
+// or a very large long-running total reaches MaxInt64.
+func addNonNegativeInt64(left, right int64) int64 {
+	return saturatingProtocolAdd(left, right)
+}
+
+// subtractNonNegativeInt64 keeps aggregate counters at or above zero. In
+// particular, fallback reconciliation and retention pruning must not turn a
+// malformed or already-repaired aggregate into a negative statistic.
+func subtractNonNegativeInt64(left, right int64) int64 {
+	left = nonNegativeInt64(left)
+	right = nonNegativeInt64(right)
+	if left <= right {
+		return 0
+	}
+	return left - right
+}
+
+// addNonNegativeCost is the floating-point counterpart of
+// addNonNegativeInt64. Costs are derived from imported/user-controlled data,
+// so invalid or overflowing values must not poison all subsequent summaries.
+func addNonNegativeCost(left, right float64) float64 {
+	left = normalizedNonNegativeCost(left)
+	right = normalizedNonNegativeCost(right)
+	if left == math.MaxFloat64 || right == math.MaxFloat64 {
+		return math.MaxFloat64
+	}
+	sum := left + right
+	if math.IsInf(sum, 1) || math.IsNaN(sum) {
+		return math.MaxFloat64
+	}
+	return sum
+}
+
+func normalizedNonNegativeCost(value float64) float64 {
+	switch {
+	case math.IsNaN(value), value < 0, math.IsInf(value, -1):
+		return 0
+	case math.IsInf(value, 1):
+		return math.MaxFloat64
+	default:
+		return value
+	}
+}
+
+// addCostDelta applies a signed repricing delta while keeping the aggregate
+// finite and non-negative. Unlike addNonNegativeCost, the delta may be below
+// zero because a time rule can be cheaper than the base price.
+func addCostDelta(left, delta float64) float64 {
+	left = normalizedNonNegativeCost(left)
+	if math.IsNaN(delta) || math.IsInf(delta, -1) {
+		return 0
+	}
+	if math.IsInf(delta, 1) {
+		return math.MaxFloat64
+	}
+	value := left + delta
+	if math.IsNaN(value) || value <= 0 {
+		return 0
+	}
+	if math.IsInf(value, 1) {
+		return math.MaxFloat64
+	}
+	return value
+}
+
+// subtractNonNegativeCost clamps a cost aggregate to zero. This is important
+// when retention removes a record after a partial/malformed import.
+func subtractNonNegativeCost(left, right float64) float64 {
+	left = normalizedNonNegativeCost(left)
+	right = normalizedNonNegativeCost(right)
+	if left <= right {
+		return 0
+	}
+	return normalizedNonNegativeCost(left - right)
 }
 
 func nonNegativeIntFromInt64(value int64) int {
@@ -6256,55 +6467,55 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Ti
 				dModel := detailModel(modelName, detail)
 
 				// Global usage
-				totalRequests++
+				totalRequests = addNonNegativeInt64(totalRequests, 1)
 				if detail.Failed {
-					failureCount++
+					failureCount = addNonNegativeInt64(failureCount, 1)
 				} else {
-					successCount++
+					successCount = addNonNegativeInt64(successCount, 1)
 				}
-				totalTokens += totals.totalTokens
-				inputTokens += totals.inputTokens
-				outputTokens += totals.outputTokens
-				cachedTokens += totals.cachedTokens
-				cacheWriteTokens += totals.cacheWriteTokens
-				reasoningTokens += totals.reasoningTokens
+				totalTokens = addNonNegativeInt64(totalTokens, totals.totalTokens)
+				inputTokens = addNonNegativeInt64(inputTokens, totals.inputTokens)
+				outputTokens = addNonNegativeInt64(outputTokens, totals.outputTokens)
+				cachedTokens = addNonNegativeInt64(cachedTokens, totals.cachedTokens)
+				cacheWriteTokens = addNonNegativeInt64(cacheWriteTokens, totals.cacheWriteTokens)
+				reasoningTokens = addNonNegativeInt64(reasoningTokens, totals.reasoningTokens)
 				if detail.LatencyMs > 0 {
-					latencySum += detail.LatencyMs
-					latencyN++
+					latencySum = addNonNegativeInt64(latencySum, detail.LatencyMs)
+					latencyN = addNonNegativeInt64(latencyN, 1)
 				}
 
 				// Day/hour time series
 				dayKey := newSummaryDayKey(detail.Timestamp)
 				hourKey := detail.Timestamp.Hour()
 				cost := s.detailCostLocked(modelName, detail, totals)
-				requestsByDay[dayKey]++
-				requestsByHour[hourKey]++
-				tokensByDay[dayKey] += totals.totalTokens
-				tokensByHour[hourKey] += totals.totalTokens
-				costByDay[dayKey] += cost
-				costByHour[hourKey] += cost
+				requestsByDay[dayKey] = addNonNegativeInt64(requestsByDay[dayKey], 1)
+				requestsByHour[hourKey] = addNonNegativeInt64(requestsByHour[hourKey], 1)
+				tokensByDay[dayKey] = addNonNegativeInt64(tokensByDay[dayKey], totals.totalTokens)
+				tokensByHour[hourKey] = addNonNegativeInt64(tokensByHour[hourKey], totals.totalTokens)
+				costByDay[dayKey] = addNonNegativeCost(costByDay[dayKey], cost)
+				costByHour[hourKey] = addNonNegativeCost(costByHour[hourKey], cost)
 
 				// Per-API aggregation
 				api := getOrCreateAPIRangeAgg(apiAgg, apiName)
-				api.estimatedCost += cost
-				api.TotalRequests++
+				api.estimatedCost = addNonNegativeCost(api.estimatedCost, cost)
+				api.TotalRequests = addNonNegativeInt64(api.TotalRequests, 1)
 				if detail.Failed {
-					api.FailureCount++
+					api.FailureCount = addNonNegativeInt64(api.FailureCount, 1)
 				} else {
-					api.SuccessCount++
+					api.SuccessCount = addNonNegativeInt64(api.SuccessCount, 1)
 				}
-				api.TotalTokens += totals.totalTokens
-				api.InputTokens += totals.inputTokens
-				api.OutputTokens += totals.outputTokens
-				api.CachedTokens += totals.cachedTokens
-				api.CacheWriteTokens += totals.cacheWriteTokens
-				api.ReasoningTokens += totals.reasoningTokens
+				api.TotalTokens = addNonNegativeInt64(api.TotalTokens, totals.totalTokens)
+				api.InputTokens = addNonNegativeInt64(api.InputTokens, totals.inputTokens)
+				api.OutputTokens = addNonNegativeInt64(api.OutputTokens, totals.outputTokens)
+				api.CachedTokens = addNonNegativeInt64(api.CachedTokens, totals.cachedTokens)
+				api.CacheWriteTokens = addNonNegativeInt64(api.CacheWriteTokens, totals.cacheWriteTokens)
+				api.ReasoningTokens = addNonNegativeInt64(api.ReasoningTokens, totals.reasoningTokens)
 				if detail.LatencyMs > 0 {
-					api.latencySum += detail.LatencyMs
-					api.latencyN++
+					api.latencySum = addNonNegativeInt64(api.latencySum, detail.LatencyMs)
+					api.latencyN = addNonNegativeInt64(api.latencyN, 1)
 				}
 				rangeIncrementAPIModel(api, dModel, detail, totals)
-				api.models[dModel].estimatedCost += cost
+				api.models[dModel].estimatedCost = addNonNegativeCost(api.models[dModel].estimatedCost, cost)
 
 				// Model summary stats
 				ms, ok := modelAgg[dModel]
@@ -6312,23 +6523,23 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Ti
 					ms = &ModelStat{Model: dModel}
 					modelAgg[dModel] = ms
 				}
-				ms.TotalRequests++
+				ms.TotalRequests = addNonNegativeInt64(ms.TotalRequests, 1)
 				if detail.Failed {
-					ms.FailureCount++
+					ms.FailureCount = addNonNegativeInt64(ms.FailureCount, 1)
 				} else {
-					ms.SuccessCount++
+					ms.SuccessCount = addNonNegativeInt64(ms.SuccessCount, 1)
 				}
-				ms.TotalTokens += totals.totalTokens
-				ms.EstimatedCost += cost
-				ms.InputTokens += totals.inputTokens
-				ms.OutputTokens += totals.outputTokens
-				ms.CachedTokens += totals.cachedTokens
-				ms.CacheWriteTokens += totals.cacheWriteTokens
-				ms.ReasoningTokens += totals.reasoningTokens
+				ms.TotalTokens = addNonNegativeInt64(ms.TotalTokens, totals.totalTokens)
+				ms.EstimatedCost = addNonNegativeCost(ms.EstimatedCost, cost)
+				ms.InputTokens = addNonNegativeInt64(ms.InputTokens, totals.inputTokens)
+				ms.OutputTokens = addNonNegativeInt64(ms.OutputTokens, totals.outputTokens)
+				ms.CachedTokens = addNonNegativeInt64(ms.CachedTokens, totals.cachedTokens)
+				ms.CacheWriteTokens = addNonNegativeInt64(ms.CacheWriteTokens, totals.cacheWriteTokens)
+				ms.ReasoningTokens = addNonNegativeInt64(ms.ReasoningTokens, totals.reasoningTokens)
 				ms.providerStats = incrementModelProviderStats(ms.providerStats, detail.Provider, detail.Failed, totals)
 				if detail.LatencyMs > 0 {
-					ms.latencySum += detail.LatencyMs
-					ms.latencyN++
+					ms.latencySum = addNonNegativeInt64(ms.latencySum, detail.LatencyMs)
+					ms.latencyN = addNonNegativeInt64(ms.latencyN, 1)
 				}
 
 				// Source stats
@@ -6344,13 +6555,13 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Ti
 				if src.stat.Provider == "" {
 					src.stat.Provider = detail.Provider
 				}
-				src.stat.TotalRequests++
+				src.stat.TotalRequests = addNonNegativeInt64(src.stat.TotalRequests, 1)
 				if detail.Failed {
-					src.stat.FailureCount++
+					src.stat.FailureCount = addNonNegativeInt64(src.stat.FailureCount, 1)
 				} else {
-					src.stat.SuccessCount++
+					src.stat.SuccessCount = addNonNegativeInt64(src.stat.SuccessCount, 1)
 				}
-				src.stat.TotalTokens += totals.totalTokens
+				src.stat.TotalTokens = addNonNegativeInt64(src.stat.TotalTokens, totals.totalTokens)
 
 				// Credential stats
 				credKey := summaryCredentialKey(detail)
@@ -6359,13 +6570,13 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Ti
 					cred = &CredentialStat{AuthIndex: credKey}
 					credentialAgg[credKey] = cred
 				}
-				cred.TotalRequests++
+				cred.TotalRequests = addNonNegativeInt64(cred.TotalRequests, 1)
 				if detail.Failed {
-					cred.FailureCount++
+					cred.FailureCount = addNonNegativeInt64(cred.FailureCount, 1)
 				} else {
-					cred.SuccessCount++
+					cred.SuccessCount = addNonNegativeInt64(cred.SuccessCount, 1)
 				}
-				cred.TotalTokens += totals.totalTokens
+				cred.TotalTokens = addNonNegativeInt64(cred.TotalTokens, totals.totalTokens)
 
 				// Client API stats
 				clientKey := clientAPIIdentity(detail)
@@ -6380,21 +6591,21 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Ti
 					}
 					clientAPIAgg[clientKey] = client
 				}
-				client.stat.TotalRequests++
+				client.stat.TotalRequests = addNonNegativeInt64(client.stat.TotalRequests, 1)
 				if detail.Failed {
-					client.stat.FailureCount++
+					client.stat.FailureCount = addNonNegativeInt64(client.stat.FailureCount, 1)
 				} else {
-					client.stat.SuccessCount++
+					client.stat.SuccessCount = addNonNegativeInt64(client.stat.SuccessCount, 1)
 				}
-				client.stat.TotalTokens += totals.totalTokens
-				client.stat.InputTokens += totals.inputTokens
-				client.stat.OutputTokens += totals.outputTokens
-				client.stat.CachedTokens += totals.cachedTokens
-				client.stat.CacheWriteTokens += totals.cacheWriteTokens
-				client.stat.ReasoningTokens += totals.reasoningTokens
-				client.stat.EstimatedCost += cost
+				client.stat.TotalTokens = addNonNegativeInt64(client.stat.TotalTokens, totals.totalTokens)
+				client.stat.InputTokens = addNonNegativeInt64(client.stat.InputTokens, totals.inputTokens)
+				client.stat.OutputTokens = addNonNegativeInt64(client.stat.OutputTokens, totals.outputTokens)
+				client.stat.CachedTokens = addNonNegativeInt64(client.stat.CachedTokens, totals.cachedTokens)
+				client.stat.CacheWriteTokens = addNonNegativeInt64(client.stat.CacheWriteTokens, totals.cacheWriteTokens)
+				client.stat.ReasoningTokens = addNonNegativeInt64(client.stat.ReasoningTokens, totals.reasoningTokens)
+				client.stat.EstimatedCost = addNonNegativeCost(client.stat.EstimatedCost, cost)
 				rangeIncrementClientModel(client, dModel, detail, totals)
-				client.models[dModel].EstimatedCost += cost
+				client.models[dModel].EstimatedCost = addNonNegativeCost(client.models[dModel].EstimatedCost, cost)
 			}
 		}
 	}
@@ -6622,22 +6833,22 @@ func rangeIncrementAPIModel(api *apiRangeAgg, modelName string, detail RequestDe
 		m = &modelRangeAgg{}
 		api.models[modelName] = m
 	}
-	m.TotalRequests++
+	m.TotalRequests = addNonNegativeInt64(m.TotalRequests, 1)
 	if detail.Failed {
-		m.FailureCount++
+		m.FailureCount = addNonNegativeInt64(m.FailureCount, 1)
 	} else {
-		m.SuccessCount++
+		m.SuccessCount = addNonNegativeInt64(m.SuccessCount, 1)
 	}
-	m.TotalTokens += totals.totalTokens
-	m.InputTokens += totals.inputTokens
-	m.OutputTokens += totals.outputTokens
-	m.CachedTokens += totals.cachedTokens
-	m.CacheWriteTokens += totals.cacheWriteTokens
-	m.ReasoningTokens += totals.reasoningTokens
+	m.TotalTokens = addNonNegativeInt64(m.TotalTokens, totals.totalTokens)
+	m.InputTokens = addNonNegativeInt64(m.InputTokens, totals.inputTokens)
+	m.OutputTokens = addNonNegativeInt64(m.OutputTokens, totals.outputTokens)
+	m.CachedTokens = addNonNegativeInt64(m.CachedTokens, totals.cachedTokens)
+	m.CacheWriteTokens = addNonNegativeInt64(m.CacheWriteTokens, totals.cacheWriteTokens)
+	m.ReasoningTokens = addNonNegativeInt64(m.ReasoningTokens, totals.reasoningTokens)
 	m.providerStats = incrementModelProviderStats(m.providerStats, detail.Provider, detail.Failed, totals)
 	if detail.LatencyMs > 0 {
-		m.latencySum += detail.LatencyMs
-		m.latencyN++
+		m.latencySum = addNonNegativeInt64(m.latencySum, detail.LatencyMs)
+		m.latencyN = addNonNegativeInt64(m.latencyN, 1)
 	}
 }
 
@@ -6647,18 +6858,18 @@ func rangeIncrementClientModel(client *clientAPIStatAccumulator, modelName strin
 		cm = &ClientAPIModelStat{Model: modelName}
 		client.models[modelName] = cm
 	}
-	cm.TotalRequests++
+	cm.TotalRequests = addNonNegativeInt64(cm.TotalRequests, 1)
 	if detail.Failed {
-		cm.FailureCount++
+		cm.FailureCount = addNonNegativeInt64(cm.FailureCount, 1)
 	} else {
-		cm.SuccessCount++
+		cm.SuccessCount = addNonNegativeInt64(cm.SuccessCount, 1)
 	}
-	cm.TotalTokens += totals.totalTokens
-	cm.InputTokens += totals.inputTokens
-	cm.OutputTokens += totals.outputTokens
-	cm.CachedTokens += totals.cachedTokens
-	cm.CacheWriteTokens += totals.cacheWriteTokens
-	cm.ReasoningTokens += totals.reasoningTokens
+	cm.TotalTokens = addNonNegativeInt64(cm.TotalTokens, totals.totalTokens)
+	cm.InputTokens = addNonNegativeInt64(cm.InputTokens, totals.inputTokens)
+	cm.OutputTokens = addNonNegativeInt64(cm.OutputTokens, totals.outputTokens)
+	cm.CachedTokens = addNonNegativeInt64(cm.CachedTokens, totals.cachedTokens)
+	cm.CacheWriteTokens = addNonNegativeInt64(cm.CacheWriteTokens, totals.cacheWriteTokens)
+	cm.ReasoningTokens = addNonNegativeInt64(cm.ReasoningTokens, totals.reasoningTokens)
 	cm.providerStats = incrementModelProviderStats(cm.providerStats, detail.Provider, detail.Failed, totals)
 }
 
@@ -6912,15 +7123,15 @@ func mergeClientAPIStat(dst *ClientAPIStat, src ClientAPIStat) {
 	if strings.TrimSpace(dst.APIKeyHash) == "" {
 		dst.APIKeyHash = src.APIKeyHash
 	}
-	dst.TotalRequests += src.TotalRequests
-	dst.SuccessCount += src.SuccessCount
-	dst.FailureCount += src.FailureCount
-	dst.TotalTokens += src.TotalTokens
-	dst.InputTokens += src.InputTokens
-	dst.OutputTokens += src.OutputTokens
-	dst.CachedTokens += src.CachedTokens
-	dst.CacheWriteTokens += src.CacheWriteTokens
-	dst.ReasoningTokens += src.ReasoningTokens
+	dst.TotalRequests = addNonNegativeInt64(dst.TotalRequests, src.TotalRequests)
+	dst.SuccessCount = addNonNegativeInt64(dst.SuccessCount, src.SuccessCount)
+	dst.FailureCount = addNonNegativeInt64(dst.FailureCount, src.FailureCount)
+	dst.TotalTokens = addNonNegativeInt64(dst.TotalTokens, src.TotalTokens)
+	dst.InputTokens = addNonNegativeInt64(dst.InputTokens, src.InputTokens)
+	dst.OutputTokens = addNonNegativeInt64(dst.OutputTokens, src.OutputTokens)
+	dst.CachedTokens = addNonNegativeInt64(dst.CachedTokens, src.CachedTokens)
+	dst.CacheWriteTokens = addNonNegativeInt64(dst.CacheWriteTokens, src.CacheWriteTokens)
+	dst.ReasoningTokens = addNonNegativeInt64(dst.ReasoningTokens, src.ReasoningTokens)
 
 	models := make(map[string]*ClientAPIModelStat, len(dst.Models)+len(src.Models))
 	for _, model := range dst.Models {
@@ -6950,15 +7161,15 @@ func mergeClientAPIModelStat(dst *ClientAPIModelStat, src ClientAPIModelStat) {
 	if dst == nil {
 		return
 	}
-	dst.TotalRequests += src.TotalRequests
-	dst.SuccessCount += src.SuccessCount
-	dst.FailureCount += src.FailureCount
-	dst.TotalTokens += src.TotalTokens
-	dst.InputTokens += src.InputTokens
-	dst.OutputTokens += src.OutputTokens
-	dst.CachedTokens += src.CachedTokens
-	dst.CacheWriteTokens += src.CacheWriteTokens
-	dst.ReasoningTokens += src.ReasoningTokens
+	dst.TotalRequests = addNonNegativeInt64(dst.TotalRequests, src.TotalRequests)
+	dst.SuccessCount = addNonNegativeInt64(dst.SuccessCount, src.SuccessCount)
+	dst.FailureCount = addNonNegativeInt64(dst.FailureCount, src.FailureCount)
+	dst.TotalTokens = addNonNegativeInt64(dst.TotalTokens, src.TotalTokens)
+	dst.InputTokens = addNonNegativeInt64(dst.InputTokens, src.InputTokens)
+	dst.OutputTokens = addNonNegativeInt64(dst.OutputTokens, src.OutputTokens)
+	dst.CachedTokens = addNonNegativeInt64(dst.CachedTokens, src.CachedTokens)
+	dst.CacheWriteTokens = addNonNegativeInt64(dst.CacheWriteTokens, src.CacheWriteTokens)
+	dst.ReasoningTokens = addNonNegativeInt64(dst.ReasoningTokens, src.ReasoningTokens)
 	dst.Providers = mergeFinalizedProviderStats(dst.Providers, src.Providers)
 }
 
@@ -6979,15 +7190,15 @@ func mergeFinalizedProviderStats(dst []ModelProviderStat, src []ModelProviderSta
 			merged[key] = &providerCopy
 			continue
 		}
-		existing.TotalRequests += provider.TotalRequests
-		existing.SuccessCount += provider.SuccessCount
-		existing.FailureCount += provider.FailureCount
-		existing.TotalTokens += provider.TotalTokens
-		existing.InputTokens += provider.InputTokens
-		existing.OutputTokens += provider.OutputTokens
-		existing.CachedTokens += provider.CachedTokens
-		existing.CacheWriteTokens += provider.CacheWriteTokens
-		existing.ReasoningTokens += provider.ReasoningTokens
+		existing.TotalRequests = addNonNegativeInt64(existing.TotalRequests, provider.TotalRequests)
+		existing.SuccessCount = addNonNegativeInt64(existing.SuccessCount, provider.SuccessCount)
+		existing.FailureCount = addNonNegativeInt64(existing.FailureCount, provider.FailureCount)
+		existing.TotalTokens = addNonNegativeInt64(existing.TotalTokens, provider.TotalTokens)
+		existing.InputTokens = addNonNegativeInt64(existing.InputTokens, provider.InputTokens)
+		existing.OutputTokens = addNonNegativeInt64(existing.OutputTokens, provider.OutputTokens)
+		existing.CachedTokens = addNonNegativeInt64(existing.CachedTokens, provider.CachedTokens)
+		existing.CacheWriteTokens = addNonNegativeInt64(existing.CacheWriteTokens, provider.CacheWriteTokens)
+		existing.ReasoningTokens = addNonNegativeInt64(existing.ReasoningTokens, provider.ReasoningTokens)
 	}
 	out := make([]ModelProviderStat, 0, len(merged))
 	for _, provider := range merged {
@@ -7906,21 +8117,21 @@ func (s *RequestStatistics) QueryAPIDetailForClientAPIAt(api string, rangeKey st
 
 		if !aggregateScope {
 			result.TotalEvents++
-			result.Summary.TotalRequests++
+			result.Summary.TotalRequests = addNonNegativeInt64(result.Summary.TotalRequests, 1)
 			if d.Failed {
-				result.Summary.FailureCount++
+				result.Summary.FailureCount = addNonNegativeInt64(result.Summary.FailureCount, 1)
 			} else {
-				result.Summary.SuccessCount++
+				result.Summary.SuccessCount = addNonNegativeInt64(result.Summary.SuccessCount, 1)
 			}
-			result.Summary.TotalTokens += totalTokens
-			result.Summary.InputTokens += inputTokens
-			result.Summary.OutputTokens += outputTokens
-			result.Summary.CachedTokens += cachedTokens
-			result.Summary.CacheWriteTokens += cacheWriteTokens
-			result.Summary.ReasoningTokens += reasoningTokens
+			result.Summary.TotalTokens = addNonNegativeInt64(result.Summary.TotalTokens, totalTokens)
+			result.Summary.InputTokens = addNonNegativeInt64(result.Summary.InputTokens, inputTokens)
+			result.Summary.OutputTokens = addNonNegativeInt64(result.Summary.OutputTokens, outputTokens)
+			result.Summary.CachedTokens = addNonNegativeInt64(result.Summary.CachedTokens, cachedTokens)
+			result.Summary.CacheWriteTokens = addNonNegativeInt64(result.Summary.CacheWriteTokens, cacheWriteTokens)
+			result.Summary.ReasoningTokens = addNonNegativeInt64(result.Summary.ReasoningTokens, reasoningTokens)
 			if d.LatencyMs > 0 {
-				latencySum += d.LatencyMs
-				latencyN++
+				latencySum = addNonNegativeInt64(latencySum, d.LatencyMs)
+				latencyN = addNonNegativeInt64(latencyN, 1)
 			}
 
 			modelLabel := normalizeModelName(dm.modelName)
@@ -7932,19 +8143,19 @@ func (s *RequestStatistics) QueryAPIDetailForClientAPIAt(api string, rangeKey st
 				ms = &ModelStat{Model: modelLabel}
 				modelAgg[modelLabel] = ms
 			}
-			ms.TotalRequests++
+			ms.TotalRequests = addNonNegativeInt64(ms.TotalRequests, 1)
 			if d.Failed {
-				ms.FailureCount++
+				ms.FailureCount = addNonNegativeInt64(ms.FailureCount, 1)
 			} else {
-				ms.SuccessCount++
+				ms.SuccessCount = addNonNegativeInt64(ms.SuccessCount, 1)
 			}
-			ms.TotalTokens += totalTokens
-			ms.EstimatedCost += s.detailCostLocked(modelLabel, d, detailTotals{totalTokens: totalTokens, inputTokens: inputTokens, outputTokens: outputTokens, cachedTokens: cachedTokens, cacheWriteTokens: cacheWriteTokens, reasoningTokens: reasoningTokens})
-			ms.InputTokens += inputTokens
-			ms.OutputTokens += outputTokens
-			ms.CachedTokens += cachedTokens
-			ms.CacheWriteTokens += cacheWriteTokens
-			ms.ReasoningTokens += reasoningTokens
+			ms.TotalTokens = addNonNegativeInt64(ms.TotalTokens, totalTokens)
+			ms.EstimatedCost = addNonNegativeCost(ms.EstimatedCost, s.detailCostLocked(modelLabel, d, detailTotals{totalTokens: totalTokens, inputTokens: inputTokens, outputTokens: outputTokens, cachedTokens: cachedTokens, cacheWriteTokens: cacheWriteTokens, reasoningTokens: reasoningTokens}))
+			ms.InputTokens = addNonNegativeInt64(ms.InputTokens, inputTokens)
+			ms.OutputTokens = addNonNegativeInt64(ms.OutputTokens, outputTokens)
+			ms.CachedTokens = addNonNegativeInt64(ms.CachedTokens, cachedTokens)
+			ms.CacheWriteTokens = addNonNegativeInt64(ms.CacheWriteTokens, cacheWriteTokens)
+			ms.ReasoningTokens = addNonNegativeInt64(ms.ReasoningTokens, reasoningTokens)
 			ms.providerStats = incrementModelProviderStats(ms.providerStats, d.Provider, d.Failed, detailTotals{
 				totalTokens:      totalTokens,
 				inputTokens:      inputTokens,
@@ -7954,8 +8165,8 @@ func (s *RequestStatistics) QueryAPIDetailForClientAPIAt(api string, rangeKey st
 				reasoningTokens:  reasoningTokens,
 			})
 			if d.LatencyMs > 0 {
-				ms.latencySum += d.LatencyMs
-				ms.latencyN++
+				ms.latencySum = addNonNegativeInt64(ms.latencySum, d.LatencyMs)
+				ms.latencyN = addNonNegativeInt64(ms.latencyN, 1)
 			}
 
 			source := strings.TrimSpace(d.Source)
@@ -7967,13 +8178,13 @@ func (s *RequestStatistics) QueryAPIDetailForClientAPIAt(api string, rangeKey st
 				ss = &SourceStat{Source: source, Provider: d.Provider}
 				sourceAgg[source] = ss
 			}
-			ss.TotalRequests++
+			ss.TotalRequests = addNonNegativeInt64(ss.TotalRequests, 1)
 			if d.Failed {
-				ss.FailureCount++
+				ss.FailureCount = addNonNegativeInt64(ss.FailureCount, 1)
 			} else {
-				ss.SuccessCount++
+				ss.SuccessCount = addNonNegativeInt64(ss.SuccessCount, 1)
 			}
-			ss.TotalTokens += totalTokens
+			ss.TotalTokens = addNonNegativeInt64(ss.TotalTokens, totalTokens)
 		}
 
 		if d.Failed {

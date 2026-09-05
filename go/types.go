@@ -22,7 +22,8 @@ const (
 	defaultStorageWriteQueueSize             = 4096
 	defaultStorageWriteBatchSize             = 128
 	defaultExportMaxRecords                  = 100000
-	defaultPriceStoragePath                  = "usage-statistics-prices.json"
+	defaultPriceStoragePath                  = "data/usage-statistics-prices.json"
+	legacyPriceStoragePath                   = "usage-statistics-prices.json"
 	defaultModelsDevPricesURL                = "https://models.dev/api.json"
 	defaultModelsDevRefreshSeconds           = 12 * 60 * 60
 	defaultPricingTimezone                   = "Asia/Shanghai"
@@ -160,6 +161,12 @@ type UsageRecord struct {
 	Failure         UsageFailure        `json:"failure"`
 	Detail          UsageDetail         `json:"detail"`
 	ResponseHeaders map[string][]string `json:"response_headers"`
+	// protocolCorrelation is deliberately kept out of the public UsageRecord
+	// JSON.  The response interceptor fills it from the raw usage object before
+	// normalisation; native records derive the conservative equivalent in the
+	// correlation adapter.  Keeping this sidecar here prevents the accounting
+	// fields from having to carry presence/semantic information they never had.
+	protocolCorrelation *ProtocolCorrelationMeta `json:"-"`
 }
 
 func (r *UsageRecord) UnmarshalJSON(data []byte) error {
@@ -432,6 +439,19 @@ type UsageDetail struct {
 	CacheReadTokens     int64 `json:"cache_read_tokens"`
 	CacheCreationTokens int64 `json:"cache_creation_tokens"`
 	TotalTokens         int64 `json:"total_tokens"`
+}
+
+// Protocol correlation metadata describes the observation behind the normal
+// accounting counters.  TokenStats/UsageDetail intentionally remain the
+// dashboard and billing representation; this optional sidecar only answers
+// whether a field was actually present and how a translated protocol may have
+// bucketed it.
+type ProtocolCorrelationMeta struct {
+	SchemaVersion int    `json:"schema_version"`
+	KnownFields   uint16 `json:"known_fields"`
+	InputMode     string `json:"input_mode,omitempty"`
+	OutputMode    string `json:"output_mode,omitempty"`
+	CacheMode     string `json:"cache_mode,omitempty"`
 }
 
 func (d *UsageDetail) UnmarshalJSON(data []byte) error {
@@ -816,27 +836,30 @@ type RequestDetail struct {
 	// UpstreamAPI is the exact dashboard grouping key for the upstream
 	// interface, for example "codex · 上游 b374b8e7c98ca23c". It is populated
 	// only on query result copies and is not stored with recorded details.
-	UpstreamAPI string              `json:"api,omitempty"`
-	Model       string              `json:"model,omitempty"`
-	Timestamp   time.Time           `json:"timestamp"`
-	LatencyMs   int64               `json:"latency_ms"`
-	TTFTMs      int64               `json:"ttft_ms,omitempty"`
-	APIKey      string              `json:"api_key,omitempty"`
-	APIKeyHash  string              `json:"api_key_hash,omitempty"`
-	Source      string              `json:"source"`
-	Provider    string              `json:"provider,omitempty"`
-	AuthID      string              `json:"auth_id,omitempty"`
-	AuthIndex   string              `json:"auth_index"`
-	AuthType    string              `json:"auth_type,omitempty"`
-	Endpoint    string              `json:"endpoint,omitempty"`
-	BaseURL     string              `json:"base_url,omitempty"`
-	Stream      bool                `json:"stream,omitempty"`
-	Thinking    UsageThinking       `json:"thinking,omitempty"`
-	Tokens      TokenStats          `json:"tokens"`
-	Failed      bool                `json:"failed"`
-	StatusCode  int                 `json:"status_code,omitempty"`
-	Failure     string              `json:"failure,omitempty"`
-	Headers     map[string][]string `json:"headers,omitempty"`
+	UpstreamAPI    string                   `json:"api,omitempty"`
+	Model          string                   `json:"model,omitempty"`
+	RequestedModel string                   `json:"requested_model,omitempty"`
+	Timestamp      time.Time                `json:"timestamp"`
+	LatencyMs      int64                    `json:"latency_ms"`
+	TTFTMs         int64                    `json:"ttft_ms,omitempty"`
+	APIKey         string                   `json:"api_key,omitempty"`
+	APIKeyHash     string                   `json:"api_key_hash,omitempty"`
+	Source         string                   `json:"source"`
+	Provider       string                   `json:"provider,omitempty"`
+	ExecutorType   string                   `json:"executor_type,omitempty"`
+	Correlation    *ProtocolCorrelationMeta `json:"correlation,omitempty"`
+	AuthID         string                   `json:"auth_id,omitempty"`
+	AuthIndex      string                   `json:"auth_index"`
+	AuthType       string                   `json:"auth_type,omitempty"`
+	Endpoint       string                   `json:"endpoint,omitempty"`
+	BaseURL        string                   `json:"base_url,omitempty"`
+	Stream         bool                     `json:"stream,omitempty"`
+	Thinking       UsageThinking            `json:"thinking,omitempty"`
+	Tokens         TokenStats               `json:"tokens"`
+	Failed         bool                     `json:"failed"`
+	StatusCode     int                      `json:"status_code,omitempty"`
+	Failure        string                   `json:"failure,omitempty"`
+	Headers        map[string][]string      `json:"headers,omitempty"`
 	// TimestampSynthetic 标记 Timestamp 是导入/恢复时补出来的,不是真实请求时间。
 	// 分桶、排序、retention 仍需要一个可用的时间,所以时间戳照样填,但时段价格必须
 	// 按图纸「无时间戳记录维持基础价」回落,不能拿服务器当时的钟点去套峰谷规则。

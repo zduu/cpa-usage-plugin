@@ -39,7 +39,7 @@ func protocolFallbackTestRecords() (UsageRecord, UsageRecord) {
 	}
 	fallback := UsageRecord{
 		Provider:        "openai-compatible",
-		ExecutorType:    "ResponseInterceptorFallback",
+		ExecutorType:    responseInterceptorFallbackExecutor,
 		Model:           "gpt-5.6-luna",
 		Alias:           "gpt-5.6-luna",
 		APIKey:          "sk-client-protocol-fallback-test",
@@ -121,6 +121,69 @@ func TestAnonymousOpenAIChatFallbackMatchesRecordedNativeCodex(t *testing.T) {
 	assertProtocolFallbackMergedSnapshot(t, stats.Snapshot(), fallback.ReasoningEffort)
 }
 
+// The policy is based on record shape, not a specific model or upstream. Any
+// explicitly tagged response fallback can correlate with any authenticated
+// native provider after the short exact-fingerprint window has elapsed.
+func TestAnonymousProtocolFallbackMatchesAnyRecordedNativeAfterExactWindow(t *testing.T) {
+	tests := []struct {
+		name             string
+		fallbackProvider string
+		fallbackEndpoint string
+		nativeProvider   string
+		nativeEndpoint   string
+		nativeAuthID     string
+	}{
+		{"openai-to-codex", "openai-compatible", "/v1/responses", "codex", "/v1/responses", "codex-user.json"},
+		{"claude-to-compat", "claude", "/v1/messages", "openai-compatible-relay", "/v1/responses", "openai-compatible-relay.json"},
+		{"gemini-to-claude", "gemini", "/v1beta/models/example:generateContent", "claude", "/v1/messages", "claude-relay.json"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			coordinator := withProtocolFallbackTestGlobals(t, 50*time.Millisecond)
+			fallback, native := protocolFallbackTestRecords()
+			fallback.Provider = tt.fallbackProvider
+			fallback.Endpoint = tt.fallbackEndpoint
+			native.Provider = tt.nativeProvider
+			native.Endpoint = tt.nativeEndpoint
+			native.AuthID = tt.nativeAuthID
+			native.AuthIndex = tt.name
+			native.ReasoningEffort = ""
+
+			got, accepted := coordinator.HandleNative(native)
+			if !accepted {
+				t.Fatal("native record was not accepted")
+			}
+			stats.Record(got)
+
+			// Age the in-memory callback occurrence without making the test sleep
+			// for nearly a second. Protocol completion timestamps stay unchanged.
+			coordinator.mu.Lock()
+			for _, items := range coordinator.nativeRecent {
+				for _, item := range items {
+					item.observedAt = time.Now().Add(-usageFallbackNativeRecentWindow - time.Millisecond)
+				}
+			}
+			coordinator.mu.Unlock()
+
+			coordinator.Schedule(fallback)
+			time.Sleep(2 * usageFallbackRecordDelay)
+			snapshot := stats.Snapshot()
+			if snapshot.TotalRequests != 1 || len(snapshot.APIs) != 1 {
+				t.Fatalf("snapshot requests/APIs = %d/%d, want 1/1", snapshot.TotalRequests, len(snapshot.APIs))
+			}
+			api, ok := snapshot.APIs[usageGroupKey(native)]
+			if !ok {
+				t.Fatalf("native API group missing: %#v", snapshot.APIs)
+			}
+			details := api.Models[native.Model].Details
+			if len(details) != 1 || details[0].Provider != native.Provider {
+				t.Fatalf("canonical native details = %#v", details)
+			}
+		})
+	}
+}
+
 func TestAnonymousOpenAIChatFallbackLateNativeReplacesCommittedFallback(t *testing.T) {
 	coordinator := withProtocolFallbackTestGlobals(t, 10*time.Millisecond)
 	fallback, native := protocolFallbackTestRecords()
@@ -192,6 +255,20 @@ func TestAnonymousOpenAIChatFallbackOutsideCompletionWindowIsNotMerged(t *testin
 	reconciled, count := reconcileProtocolFallbackSnapshot(oldStats.Snapshot())
 	if count != 0 || reconciled.TotalRequests != 2 {
 		t.Fatalf("reconciled count/requests = %d/%d, want 0/2", count, reconciled.TotalRequests)
+	}
+}
+
+func TestLiveExactFingerprintOutsideCompletionWindowIsNotMerged(t *testing.T) {
+	fallback, native := protocolFallbackTestRecords()
+	fallback.Provider = native.Provider
+	fallback.Endpoint = "/v1/responses"
+	native.Endpoint = fallback.Endpoint
+	fallback.RequestedAt = native.RequestedAt.Add(native.Latency).Add(2 * protocolFallbackCompletionTolerance)
+	if usageRecordFingerprint(fallback) != usageRecordFingerprint(native) {
+		t.Fatal("test requires the exact-fingerprint compatibility path")
+	}
+	if _, ok := protocolLiveCorrelationEdge(fallback, native); ok {
+		t.Fatal("modern exact-fingerprint records outside the completion window were merged")
 	}
 }
 
@@ -322,6 +399,25 @@ func TestProtocolFallbackToleranceStaysBounded(t *testing.T) {
 	}
 }
 
+func TestNativeRecentRetentionFollowsCorrelationPolicy(t *testing.T) {
+	plain := &usageFallbackOccurrence{}
+	if got := nativeRecentRetention(plain); got != usageFallbackNativeRecentWindow {
+		t.Fatalf("plain retention = %v, want %v", got, usageFallbackNativeRecentWindow)
+	}
+
+	short := &usageFallbackOccurrence{correlationKey: "short", record: UsageRecord{Latency: 2 * time.Second}}
+	wantShort := protocolFallbackTolerance(short.record.Latency) + usageFallbackCorrelationRetentionGrace
+	if got := nativeRecentRetention(short); got != wantShort {
+		t.Fatalf("short correlated retention = %v, want %v", got, wantShort)
+	}
+
+	long := &usageFallbackOccurrence{correlationKey: "long", record: UsageRecord{Latency: 10 * time.Hour}}
+	wantLong := protocolFallbackCompletionToleranceMax + usageFallbackCorrelationRetentionGrace
+	if got := nativeRecentRetention(long); got != wantLong {
+		t.Fatalf("long correlated retention = %v, want %v", got, wantLong)
+	}
+}
+
 func TestAnonymousOpenAIResponsesFallbackMatchesNativeCodex(t *testing.T) {
 	fallback, native := protocolFallbackTestRecords()
 	fallback.Endpoint = "/v1/responses"
@@ -362,6 +458,115 @@ func TestProtocolFallbackSnapshotReconciliationRepairsExportShape(t *testing.T) 
 		t.Fatalf("merge result = %#v, want added=1 skipped=1", result)
 	}
 	assertProtocolFallbackMergedSnapshot(t, imported.Snapshot(), native.ReasoningEffort)
+}
+
+func TestProtocolFallbackSnapshotReconciliationDeepCopiesTokenSeriesWithoutPair(t *testing.T) {
+	_, native := protocolFallbackTestRecords()
+	stats := NewRequestStatistics()
+	stats.Record(native)
+	original := stats.Snapshot()
+
+	reconciled, count := reconcileProtocolFallbackSnapshot(original)
+	if count != 0 {
+		t.Fatalf("reconciled count = %d, want 0", count)
+	}
+	if len(original.CostTokensByDay) == 0 || len(original.CostTokensByHour) == 0 {
+		t.Fatal("fixture did not contain cost token series")
+	}
+
+	dayKey := native.RequestedAt.Format("2006-01-02")
+	daySeries := original.CostTokensByDay[dayKey]
+	reconciledDaySeries := reconciled.CostTokensByDay[dayKey]
+	if len(daySeries) == 0 || len(reconciledDaySeries) == 0 {
+		t.Fatalf("day series = %#v/%#v", daySeries, reconciledDaySeries)
+	}
+	reconciledDaySeries[0].InputTokens++
+	if original.CostTokensByDay[dayKey][0].InputTokens == reconciledDaySeries[0].InputTokens {
+		t.Fatal("reconciled day token series aliases input snapshot")
+	}
+
+	hourKey := native.RequestedAt.Format("15")
+	reconciled.CostTokensByHour[hourKey][0].OutputTokens++
+	if original.CostTokensByHour[hourKey][0].OutputTokens == reconciled.CostTokensByHour[hourKey][0].OutputTokens {
+		t.Fatal("reconciled hour token series aliases input snapshot")
+	}
+
+	reconciled.CostByDay[dayKey]++
+	if original.CostByDay[dayKey] == reconciled.CostByDay[dayKey] {
+		t.Fatal("reconciled day cost map aliases input snapshot")
+	}
+}
+
+func TestTaggedProtocolFallbackSnapshotCrossMatchesProviderFamilies(t *testing.T) {
+	fallback, native := protocolFallbackTestRecords()
+	fallback.Provider = "gemini"
+	fallback.Endpoint = "/v1beta/models/example:generateContent"
+	native.Provider = "claude"
+	native.Endpoint = "/v1/messages"
+	native.AuthID = "claude-relay.json"
+	native.AuthIndex = "claude-relay"
+
+	oldStats := NewRequestStatistics()
+	oldStats.Record(fallback)
+	oldStats.Record(native)
+	reconciled, count := reconcileProtocolFallbackSnapshot(oldStats.Snapshot())
+	if count != 1 || reconciled.TotalRequests != 1 || len(reconciled.APIs) != 1 {
+		t.Fatalf("reconciled count/requests/APIs = %d/%d/%d, want 1/1/1", count, reconciled.TotalRequests, len(reconciled.APIs))
+	}
+	if _, ok := reconciled.APIs[usageGroupKey(native)]; !ok {
+		t.Fatalf("native API group missing: %#v", reconciled.APIs)
+	}
+}
+
+func TestLegacyOpenAIProtocolFallbackWithoutExecutorStillReconciles(t *testing.T) {
+	fallback, native := protocolFallbackTestRecords()
+	oldStats := NewRequestStatistics()
+	oldStats.Record(fallback)
+	oldStats.Record(native)
+	snapshot := oldStats.Snapshot()
+
+	apiName := usageGroupKey(fallback)
+	api := snapshot.APIs[apiName]
+	model := api.Models[fallback.Model]
+	model.Details[0].ExecutorType = ""
+	api.Models[fallback.Model] = model
+	snapshot.APIs[apiName] = api
+
+	reconciled, count := reconcileProtocolFallbackSnapshot(snapshot)
+	if count != 1 {
+		t.Fatalf("legacy reconciled count = %d, want 1", count)
+	}
+	assertProtocolFallbackMergedSnapshot(t, reconciled, native.ReasoningEffort)
+}
+
+func TestExportUsageReconcilesRecordedProtocolFallbacks(t *testing.T) {
+	withProtocolFallbackTestGlobals(t, 50*time.Millisecond)
+	fallback, native := protocolFallbackTestRecords()
+	stats.Record(fallback)
+	stats.Record(native)
+
+	raw, err := handleExportUsage()
+	if err != nil {
+		t.Fatalf("handleExportUsage() error = %v", err)
+	}
+	var env envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	var response ManagementResponse
+	if err := json.Unmarshal(env.Result, &response); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	var payload ExportPayload
+	if err := json.Unmarshal(response.Body, &payload); err != nil {
+		t.Fatalf("unmarshal export payload: %v", err)
+	}
+
+	if payload.DetailCount != 1 {
+		t.Fatalf("export detail_count = %d, want 1", payload.DetailCount)
+	}
+	assertProtocolFallbackMergedSnapshot(t, payload.Usage, native.ReasoningEffort)
+	assertProtocolFallbackMergedSnapshot(t, stats.Snapshot(), native.ReasoningEffort)
 }
 
 func TestPersistedProtocolFallbackReconciliationKeepsEnrichedNative(t *testing.T) {
@@ -416,6 +621,105 @@ func TestJSONLReplayReconcilesProtocolFallback(t *testing.T) {
 	restored := NewRequestStatistics()
 	restored.mu.Lock()
 	err := restored.replayStorageLocked(path)
+	restored.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertProtocolFallbackMergedSnapshot(t, restored.Snapshot(), native.ReasoningEffort)
+}
+
+func writeProtocolFallbackShard(t *testing.T, path string, records ...persistedDetail) {
+	t.Helper()
+	var payload []byte
+	for _, record := range records {
+		line, err := json.Marshal(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload = append(payload, line...)
+		payload = append(payload, '\n')
+	}
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestJSONLReplayReconcilesProtocolFallbackAcrossShards(t *testing.T) {
+	fallback, native := protocolFallbackTestRecords()
+	now := time.Now().UTC()
+	dir := t.TempDir()
+	fallbackPath := filepath.Join(dir, storageFileName(now.Format("2006-01-02")))
+	nativePath := filepath.Join(dir, storageFileName(now.Add(-24*time.Hour).Format("2006-01-02")))
+	writeProtocolFallbackShard(t, fallbackPath, persistedDetail{
+		API: usageGroupKey(fallback), Model: fallback.Model,
+		Detail: requestDetailFromUsageRecord(fallback, fallback.RequestedAt, headerWhitelist{}),
+	})
+	writeProtocolFallbackShard(t, nativePath, persistedDetail{
+		API: usageGroupKey(native), Model: native.Model,
+		Detail: requestDetailFromUsageRecord(native, native.RequestedAt, headerWhitelist{}),
+	})
+
+	restored := NewRequestStatistics()
+	restored.mu.Lock()
+	err := restored.replayStorageFilesLocked(dir, "", now, time.Time{})
+	restored.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertProtocolFallbackMergedSnapshot(t, restored.Snapshot(), native.ReasoningEffort)
+}
+
+func TestJSONLReplayAppliesMetadataOnlyAcrossShards(t *testing.T) {
+	_, native := protocolFallbackTestRecords()
+	base := requestDetailFromUsageRecord(native, native.RequestedAt, headerWhitelist{})
+	base.Endpoint = ""
+	base.Stream = false
+	base.Thinking = UsageThinking{}
+	update := base
+	update.Endpoint = "/v1/responses"
+	update.Stream = true
+	update.Thinking = UsageThinking{Intensity: "xhigh", Level: "xhigh"}
+	now := time.Now().UTC()
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, storageFileName(now.Add(-24*time.Hour).Format("2006-01-02")))
+	updatePath := filepath.Join(dir, storageFileName(now.Format("2006-01-02")))
+	writeProtocolFallbackShard(t, basePath, persistedDetail{API: usageGroupKey(native), Model: native.Model, Detail: base})
+	writeProtocolFallbackShard(t, updatePath, persistedDetail{API: usageGroupKey(native), Model: native.Model, Detail: update, MetadataOnly: true})
+
+	restored := NewRequestStatistics()
+	restored.mu.Lock()
+	err := restored.replayStorageFilesLocked(dir, "", now, time.Time{})
+	restored.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := restored.Snapshot()
+	details := snapshot.APIs[usageGroupKey(native)].Models[native.Model].Details
+	if len(details) != 1 {
+		t.Fatalf("details = %d, want 1", len(details))
+	}
+	if details[0].Endpoint != update.Endpoint || !details[0].Stream || details[0].Thinking != update.Thinking {
+		t.Fatalf("metadata-only update was not applied across shards: %#v", details[0])
+	}
+}
+
+func TestJSONLReplayReconcilesProtocolFallbackBetweenSnapshotAndTail(t *testing.T) {
+	fallback, native := protocolFallbackTestRecords()
+	oldStats := NewRequestStatistics()
+	oldStats.Record(fallback)
+	snapshot := oldStats.Snapshot()
+	now := time.Now().UTC()
+	dir := t.TempDir()
+	path := filepath.Join(dir, storageFileName(now.Format("2006-01-02")))
+	writeProtocolFallbackShard(t, path, persistedDetail{
+		API: usageGroupKey(native), Model: native.Model,
+		Detail: requestDetailFromUsageRecord(native, native.RequestedAt, headerWhitelist{}),
+	})
+
+	restored := NewRequestStatistics()
+	restored.mu.Lock()
+	restored.restoreStorageSnapshotLocked(snapshot, now)
+	err := restored.replayStorageFilesLocked(dir, "", now, now)
 	restored.mu.Unlock()
 	if err != nil {
 		t.Fatal(err)

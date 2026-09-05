@@ -12,9 +12,11 @@ import (
 )
 
 const (
-	defaultUsageFallbackDelay       = 2 * time.Second
-	usageFallbackNativeRecentWindow = 750 * time.Millisecond
-	usageFallbackLateNativeWindow   = 30 * time.Second
+	responseInterceptorFallbackExecutor    = "ResponseInterceptorFallback"
+	defaultUsageFallbackDelay              = 2 * time.Second
+	usageFallbackNativeRecentWindow        = 750 * time.Millisecond
+	usageFallbackCorrelationRetentionGrace = time.Second
+	usageFallbackLateNativeWindow          = 30 * time.Second
 )
 
 var (
@@ -256,7 +258,7 @@ func usageRecordFromStreamValues(req ResponseInterceptRequest, responseValues []
 }
 
 func usageRecordFromValues(req ResponseInterceptRequest, responseValues []any, detailPaths []string) (UsageRecord, bool) {
-	detail, ok := usageDetailFromResponseValues(responseValues, detailPaths)
+	detail, correlation, ok := usageDetailCorrelationFromResponseValues(responseValues, detailPaths)
 	if !ok {
 		return UsageRecord{}, false
 	}
@@ -274,6 +276,7 @@ func usageRecordFromValues(req ResponseInterceptRequest, responseValues []any, d
 	if responseUsesAnthropicUsageAccounting(req) {
 		detail = normalizeAnthropicUsageDetail(detail, usageProviderFamily(provider))
 	}
+	correlation = correlationMetaForResponse(req, correlation, provider)
 	model := firstNonEmpty(
 		jsonStringPathFromValues(responseValues, "model", "response.model", "message.model"),
 		req.Model,
@@ -288,23 +291,24 @@ func usageRecordFromValues(req ResponseInterceptRequest, responseValues []any, d
 		model,
 	)
 	return UsageRecord{
-		Provider:        provider,
-		ExecutorType:    "ResponseInterceptorFallback",
-		Model:           model,
-		Alias:           requestedModel,
-		APIKey:          apiKeyFromHeaders(req.RequestHeaders),
-		AuthID:          authID,
-		AuthIndex:       fallbackAuthIndex(req.Metadata, authID),
-		AuthType:        fallbackAuthType(req.Metadata, authID),
-		Endpoint:        fallbackRequestEndpoint(req),
-		ReasoningEffort: fallbackReasoningEffort(req, requestRoot),
-		ServiceTier:     firstNonEmpty(metadataString(req.Metadata, "service_tier"), jsonStringPath(requestRoot, "service_tier")),
-		Stream:          req.Stream,
-		RequestedAt:     time.Now(),
-		Detail:          detail,
-		BaseURL:         metadataString(req.Metadata, "upstream_base_url", "provider_base_url", "base_url", "baseURL"),
-		Source:          metadataString(req.Metadata, "upstream_source", "provider_source", "selected_source"),
-		ResponseHeaders: req.ResponseHeaders,
+		Provider:            provider,
+		ExecutorType:        responseInterceptorFallbackExecutor,
+		Model:               model,
+		Alias:               requestedModel,
+		APIKey:              apiKeyFromHeaders(req.RequestHeaders),
+		AuthID:              authID,
+		AuthIndex:           fallbackAuthIndex(req.Metadata, authID),
+		AuthType:            fallbackAuthType(req.Metadata, authID),
+		Endpoint:            fallbackRequestEndpoint(req),
+		ReasoningEffort:     fallbackReasoningEffort(req, requestRoot),
+		ServiceTier:         firstNonEmpty(metadataString(req.Metadata, "service_tier"), jsonStringPath(requestRoot, "service_tier")),
+		Stream:              req.Stream,
+		RequestedAt:         time.Now(),
+		Detail:              detail,
+		BaseURL:             metadataString(req.Metadata, "upstream_base_url", "provider_base_url", "base_url", "baseURL"),
+		Source:              metadataString(req.Metadata, "upstream_source", "provider_source", "selected_source"),
+		ResponseHeaders:     req.ResponseHeaders,
+		protocolCorrelation: correlation,
 	}, true
 }
 
@@ -346,20 +350,34 @@ func responseUsesAnthropicUsageAccounting(req ResponseInterceptRequest) bool {
 //   - Every other upstream (openai-compatible, codex, ...) reports
 //     prompt_tokens with cache included, so cache is folded into input.
 func normalizeAnthropicUsageDetail(detail UsageDetail, providerFamily string) UsageDetail {
-	cacheInput := detail.CacheReadTokens + detail.CacheCreationTokens
+	cacheInput, ok := checkedProtocolAdd(detail.CacheReadTokens, detail.CacheCreationTokens)
+	if !ok {
+		return detail
+	}
 	if cacheInput <= 0 {
 		return detail
 	}
 	if providerFamily == "claude" {
-		expanded := detail.InputTokens + detail.OutputTokens + cacheInput
+		expanded, ok := checkedProtocolAdd(detail.InputTokens, detail.OutputTokens)
+		if !ok {
+			return detail
+		}
+		expanded, ok = checkedProtocolAdd(expanded, cacheInput)
+		if !ok {
+			return detail
+		}
 		if detail.TotalTokens < expanded {
 			detail.TotalTokens = expanded
 		}
 		return detail
 	}
-	detail.InputTokens += cacheInput
-	if detail.TotalTokens != 0 && detail.TotalTokens < detail.InputTokens+detail.OutputTokens {
-		detail.TotalTokens = detail.InputTokens + detail.OutputTokens
+	detail.InputTokens, ok = checkedProtocolAdd(detail.InputTokens, cacheInput)
+	if !ok {
+		return detail
+	}
+	inputOutput, ok := checkedProtocolAdd(detail.InputTokens, detail.OutputTokens)
+	if detail.TotalTokens != 0 && ok && detail.TotalTokens < inputOutput {
+		detail.TotalTokens = inputOutput
 	}
 	return detail
 }
@@ -429,18 +447,200 @@ func usageDetailFromResponseValues(values []any, detailPaths []string) (UsageDet
 	return best, found
 }
 
+// usageDetailCorrelationFromResponseValues is the evidence-preserving
+// counterpart of usageDetailFromResponseValues.  The latter is kept as a
+// small compatibility helper for callers that only need billing counters;
+// correlation must select the metadata together with the most complete usage
+// node or a later SSE chunk could pair values from one node with presence bits
+// from another.
+func usageDetailCorrelationFromResponseValues(values []any, detailPaths []string) (UsageDetail, *ProtocolCorrelationMeta, bool) {
+	var best UsageDetail
+	var bestMeta *ProtocolCorrelationMeta
+	var found bool
+	var bestCompleteness int64
+	for _, value := range values {
+		detail, meta, ok := usageDetailCorrelationFromResponseRoot(value, detailPaths)
+		if !ok {
+			continue
+		}
+		completeness := usageDetailCompleteness(detail)
+		if !found || completeness >= bestCompleteness {
+			best = detail
+			bestMeta = meta
+			bestCompleteness = completeness
+			found = true
+		}
+	}
+	return best, bestMeta, found
+}
+
+func usageDetailCorrelationFromResponseRoot(root any, detailPaths []string) (UsageDetail, *ProtocolCorrelationMeta, bool) {
+	for _, path := range detailPaths {
+		if node, ok := jsonValuePath(root, path); ok {
+			if detail, meta, ok := usageDetailCorrelationFromValue(node); ok {
+				return detail, meta, true
+			}
+		}
+	}
+	return UsageDetail{}, nil, false
+}
+
+func usageDetailCorrelationFromValue(value any) (UsageDetail, *ProtocolCorrelationMeta, bool) {
+	detail, ok := usageDetailFromValue(value)
+	meta := protocolCorrelationMetaFromUsageValue(value)
+	// A valid usage object containing only explicit zeroes is still a real
+	// observation.  The old numeric helper cannot distinguish that case from a
+	// missing usage node, but the raw presence bits can.
+	if !ok && (meta == nil || meta.KnownFields == 0) {
+		return UsageDetail{}, nil, false
+	}
+	return detail, meta, true
+}
+
+func protocolCorrelationMetaFromUsageValue(value any) *ProtocolCorrelationMeta {
+	m, ok := value.(map[string]any)
+	if !ok || len(m) == 0 {
+		return nil
+	}
+	meta := &ProtocolCorrelationMeta{
+		SchemaVersion: protocolCorrelationSchemaVersion,
+	}
+	if jsonFieldPresent(m, "input_tokens", "InputTokens", "prompt_tokens", "PromptTokens", "inputTokenCount", "promptTokenCount", "total_input_tokens") {
+		meta.KnownFields |= protocolCorrelationKnownInput
+	}
+	if jsonFieldPresent(m, "output_tokens", "OutputTokens", "completion_tokens", "CompletionTokens", "outputTokenCount", "candidatesTokenCount", "total_output_tokens") {
+		meta.KnownFields |= protocolCorrelationKnownOutput
+	}
+	if jsonFieldPresent(m, "reasoning_tokens", "ReasoningTokens", "thoughtsTokenCount", "total_thought_tokens") ||
+		jsonNestedFieldPresent(m, "reasoning_tokens", "ReasoningTokens", "thoughtsTokenCount") {
+		meta.KnownFields |= protocolCorrelationKnownReasoning
+	}
+	if jsonFieldPresent(m, "cache_read_tokens", "CacheReadTokens", "cacheReadTokens", "cache_read_input_tokens", "CachedTokens") ||
+		jsonNestedFieldPresent(m, "cached_tokens", "CachedTokens", "cache_read_tokens") {
+		meta.KnownFields |= protocolCorrelationKnownCacheRead
+	}
+	if jsonFieldPresent(m, "cache_creation_tokens", "CacheCreationTokens", "cacheCreationTokens", "cache_creation_input_tokens", "cache_write_tokens", "CacheWriteTokens") ||
+		jsonNestedFieldPresent(m, "cache_creation_tokens", "CacheCreationTokens", "cache_write_tokens", "CacheWriteTokens") {
+		meta.KnownFields |= protocolCorrelationKnownCacheWrite
+	}
+	if jsonFieldPresent(m, "cachedContentTokenCount", "cached_content_token_count", "cache_tokens", "CacheTokens") {
+		meta.KnownFields |= protocolCorrelationKnownCacheCombined
+	}
+	if jsonFieldPresent(m, "total_tokens", "TotalTokens", "totalTokenCount") {
+		meta.KnownFields |= protocolCorrelationKnownTotal
+	}
+	if meta.KnownFields == 0 {
+		return nil
+	}
+	return meta
+}
+
+func jsonFieldPresent(m map[string]any, keys ...string) bool {
+	for _, key := range keys {
+		if _, ok := m[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func jsonNestedFieldPresent(m map[string]any, keys ...string) bool {
+	for _, value := range m {
+		child, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		if jsonFieldPresent(child, keys...) {
+			return true
+		}
+	}
+	return false
+}
+
+func correlationMetaForResponse(req ResponseInterceptRequest, raw *ProtocolCorrelationMeta, provider string) *ProtocolCorrelationMeta {
+	meta := cloneProtocolCorrelationMeta(raw)
+	if meta == nil {
+		meta = &ProtocolCorrelationMeta{SchemaVersion: protocolCorrelationSchemaVersion}
+	}
+	family := responseProtocolFamily(req, provider)
+	switch family {
+	case "claude":
+		if meta.KnownFields&(protocolCorrelationKnownCacheRead|protocolCorrelationKnownCacheWrite|protocolCorrelationKnownCacheCombined) != 0 {
+			meta.InputMode = protocolInputModeAmbiguous
+		} else {
+			meta.InputMode = protocolInputModeCacheIndependent
+		}
+		meta.OutputMode = protocolOutputModeReasoningSubset
+		meta.CacheMode = protocolCacheModeSplit
+	case "gemini":
+		meta.InputMode = protocolInputModeCacheSubset
+		meta.OutputMode = protocolOutputModeAmbiguous
+		if meta.KnownFields&protocolCorrelationKnownCacheCombined != 0 {
+			meta.KnownFields &^= protocolCorrelationKnownCacheRead
+			meta.CacheMode = protocolCacheModeCombined
+		} else {
+			meta.CacheMode = protocolCacheModeSplit
+		}
+	case "openai":
+		meta.InputMode = protocolInputModeCacheSubset
+		meta.OutputMode = protocolOutputModeReasoningSubset
+		meta.CacheMode = protocolCacheModeSplit
+	default:
+		meta.InputMode = protocolInputModeAmbiguous
+		meta.OutputMode = protocolOutputModeAmbiguous
+		meta.CacheMode = protocolCacheModeAmbiguous
+	}
+	return meta
+}
+
+func responseProtocolFamily(req ResponseInterceptRequest, provider string) string {
+	source := strings.ToLower(strings.TrimSpace(req.SourceFormat))
+	switch {
+	case strings.Contains(source, "claude"), strings.Contains(source, "anthropic"):
+		return "claude"
+	case strings.Contains(source, "gemini"), strings.Contains(source, "google"):
+		return "gemini"
+	case strings.Contains(source, "openai"), strings.Contains(source, "codex"):
+		return "openai"
+	}
+	endpoint := strings.ToLower(strings.TrimSpace(fallbackRequestEndpoint(req)))
+	if strings.Contains(endpoint, "messages") {
+		return "claude"
+	}
+	if strings.Contains(endpoint, "generatecontent") || strings.Contains(endpoint, "v1beta") {
+		return "gemini"
+	}
+	if isOpenAIProtocolFallbackEndpoint(endpoint) {
+		return "openai"
+	}
+	switch usageProviderFamily(provider) {
+	case "claude":
+		return "claude"
+	case "gemini", "vertex", "aistudio", "antigravity":
+		return "gemini"
+	case "codex", "openai-compatible", "openai", "kimi", "xai", "deepseek", "openrouter":
+		return "openai"
+	default:
+		return ""
+	}
+}
+
 func usageDetailCompleteness(detail UsageDetail) int64 {
-	return absInt64(detail.TotalTokens) +
-		absInt64(detail.InputTokens) +
-		absInt64(detail.OutputTokens) +
-		absInt64(detail.ReasoningTokens) +
-		absInt64(detail.CachedTokens) +
-		absInt64(detail.CacheReadTokens) +
-		absInt64(detail.CacheCreationTokens)
+	completeness := int64(0)
+	for _, value := range []int64{
+		detail.TotalTokens, detail.InputTokens, detail.OutputTokens, detail.ReasoningTokens,
+		detail.CachedTokens, detail.CacheReadTokens, detail.CacheCreationTokens,
+	} {
+		completeness = saturatingProtocolAdd(completeness, absInt64(value))
+	}
+	return completeness
 }
 
 func absInt64(value int64) int64 {
 	if value < 0 {
+		if value == -1<<63 {
+			return 1<<63 - 1
+		}
 		return -value
 	}
 	return value
@@ -532,12 +732,43 @@ func usageDetailFromValue(value any) (UsageDetail, bool) {
 		}
 	}
 	if detail.TotalTokens == 0 {
-		detail.TotalTokens = detail.InputTokens + detail.OutputTokens
+		if input, ok := jsonValueInt(value, "input_tokens", "InputTokens", "prompt_tokens", "PromptTokens", "promptTokenCount", "inputTokenCount", "total_input_tokens"); ok {
+			if output, outputOK := jsonValueInt(value, "output_tokens", "OutputTokens", "completion_tokens", "CompletionTokens", "outputTokenCount", "candidatesTokenCount", "total_output_tokens"); outputOK {
+				if total, totalOK := checkedProtocolAdd(input, output); totalOK {
+					// An explicitly reported zero is presence, not an omitted
+					// total.  Preserve it so the correlation adapter can apply
+					// the protocol's own total semantics.
+					if !jsonFieldPresentValue(value, "total_tokens", "TotalTokens", "totalTokenCount") {
+						detail.TotalTokens = total
+					}
+				}
+			}
+		}
 	}
 	if !usageDetailHasTokens(detail) {
 		return UsageDetail{}, false
 	}
 	return detail, true
+}
+
+func jsonFieldPresentValue(value any, keys ...string) bool {
+	m, ok := value.(map[string]any)
+	return ok && jsonFieldPresent(m, keys...)
+}
+
+func jsonValueInt(value any, keys ...string) (int64, bool) {
+	m, ok := value.(map[string]any)
+	if !ok {
+		return 0, false
+	}
+	for _, key := range keys {
+		candidate, exists := m[key]
+		if !exists {
+			continue
+		}
+		return jsonInt(candidate), true
+	}
+	return 0, false
 }
 
 func usageDetailHasTokens(detail UsageDetail) bool {
@@ -562,20 +793,22 @@ type usageFallbackCoordinator struct {
 }
 
 type pendingUsageFallback struct {
-	key            string
-	correlationKey string
-	record         UsageRecord
-	requestAt      time.Time
-	timer          *time.Timer
-	cancelled      bool
+	key             string
+	correlationKey  string
+	correlationKeys []string
+	record          UsageRecord
+	requestAt       time.Time
+	timer           *time.Timer
+	cancelled       bool
 }
 
 type usageFallbackOccurrence struct {
-	key            string
-	correlationKey string
-	requestAt      time.Time
-	observedAt     time.Time
-	record         UsageRecord
+	key             string
+	correlationKey  string
+	correlationKeys []string
+	requestAt       time.Time
+	observedAt      time.Time
+	record          UsageRecord
 }
 
 func newUsageFallbackCoordinator() *usageFallbackCoordinator {
@@ -606,11 +839,12 @@ func (c *usageFallbackCoordinator) Schedule(record UsageRecord) {
 	if delay < 0 {
 		delay = 0
 	}
-	correlationKey := ""
-	if isAnonymousOpenAIProtocolFallback(record) {
-		correlationKey = usageProtocolCorrelationKey(record)
+	correlationKeys := []string(nil)
+	if isAnonymousProtocolFallback(record) {
+		correlationKeys = protocolObservationShapeKeys(protocolObservationFromUsageRecord(record))
 	}
-	pending := &pendingUsageFallback{key: key, correlationKey: correlationKey, record: record, requestAt: requestAt}
+	correlationKey := firstNonEmpty(correlationKeys...)
+	pending := &pendingUsageFallback{key: key, correlationKey: correlationKey, correlationKeys: correlationKeys, record: record, requestAt: requestAt}
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -618,21 +852,23 @@ func (c *usageFallbackCoordinator) Schedule(record UsageRecord) {
 	}
 	now := time.Now()
 	c.cleanupLocked(now)
-	if nativeRecord, ok := c.consumeNativeRecentLocked(key, requestAt, now); ok {
+	if nativeRecord, ok := c.consumeNativeRecentLocked(key, requestAt, now, record); ok {
 		c.mu.Unlock()
 		stats.EnrichRecordedUsage(nativeRecord, record)
 		return
 	}
-	if correlationKey != "" {
-		if nativeRecord, ok := c.consumeCorrelatedNativeRecentLocked(correlationKey, record, now); ok {
+	if len(correlationKeys) > 0 {
+		if nativeRecord, ok := c.consumeCorrelatedNativeRecentLocked(correlationKeys, record, now); ok {
 			c.mu.Unlock()
 			stats.EnrichRecordedUsage(nativeRecord, record)
 			return
 		}
 	}
 	c.pending[key] = append(c.pending[key], pending)
-	if correlationKey != "" {
-		c.pendingCorrelated[correlationKey] = append(c.pendingCorrelated[correlationKey], pending)
+	for _, correlationKey := range correlationKeys {
+		if correlationKey != "" {
+			c.pendingCorrelated[correlationKey] = append(c.pendingCorrelated[correlationKey], pending)
+		}
 	}
 	pending.timer = time.AfterFunc(delay, func() {
 		c.commit(pending)
@@ -653,14 +889,14 @@ func (c *usageFallbackCoordinator) HandleNative(record UsageRecord) (UsageRecord
 		requestAt = time.Now()
 		record.RequestedAt = requestAt
 	}
-	correlationKey := ""
+	correlationKeys := []string(nil)
 	if isNativeProtocolCorrelationRecord(record) {
-		correlationKey = usageProtocolCorrelationKey(record)
+		correlationKeys = protocolObservationShapeKeys(protocolObservationFromUsageRecord(record))
 	}
 	c.mu.Lock()
 	now := time.Now()
 	c.cleanupLocked(now)
-	if pending := c.popPendingLocked(key); pending != nil {
+	if pending := c.popPendingForNativeLocked(key, record); pending != nil {
 		pending.cancelled = true
 		if pending.timer != nil {
 			pending.timer.Stop()
@@ -668,8 +904,8 @@ func (c *usageFallbackCoordinator) HandleNative(record UsageRecord) (UsageRecord
 		c.mu.Unlock()
 		return enrichUsageRecord(record, pending.record), true
 	}
-	if correlationKey != "" {
-		if pending := c.popCorrelatedPendingLocked(correlationKey, record); pending != nil {
+	if len(correlationKeys) > 0 {
+		if pending := c.popCorrelatedPendingLocked(correlationKeys, record); pending != nil {
 			pending.cancelled = true
 			if pending.timer != nil {
 				pending.timer.Stop()
@@ -678,15 +914,15 @@ func (c *usageFallbackCoordinator) HandleNative(record UsageRecord) (UsageRecord
 			return enrichUsageRecord(record, pending.record), true
 		}
 	}
-	if fallbackRecord, ok := c.consumeFallbackRecentLocked(key, requestAt, now); ok {
+	if fallbackRecord, ok := c.consumeFallbackRecentLocked(key, requestAt, now, record); ok {
 		c.mu.Unlock()
 		if stats.RemoveRecordedUsage(fallbackRecord) {
 			return enrichUsageRecord(record, fallbackRecord), true
 		}
 		return record, false
 	}
-	if correlationKey != "" {
-		if fallbackRecord, ok := c.consumeCorrelatedFallbackRecentLocked(correlationKey, record, now); ok {
+	if len(correlationKeys) > 0 {
+		if fallbackRecord, ok := c.consumeCorrelatedFallbackRecentLocked(correlationKeys, record, now); ok {
 			c.mu.Unlock()
 			if stats.RemoveRecordedUsage(fallbackRecord) {
 				return enrichUsageRecord(record, fallbackRecord), true
@@ -695,17 +931,23 @@ func (c *usageFallbackCoordinator) HandleNative(record UsageRecord) (UsageRecord
 		}
 	}
 	occurrence := &usageFallbackOccurrence{
-		key: key, correlationKey: correlationKey, requestAt: requestAt, observedAt: now, record: record,
+		key: key, correlationKey: firstNonEmpty(correlationKeys...), correlationKeys: correlationKeys,
+		requestAt: requestAt, observedAt: now, record: record,
 	}
 	c.nativeRecent[key] = append(c.nativeRecent[key], occurrence)
-	if correlationKey != "" {
-		c.nativeRecentCorrelated[correlationKey] = append(c.nativeRecentCorrelated[correlationKey], occurrence)
+	for _, correlationKey := range correlationKeys {
+		if correlationKey != "" {
+			c.nativeRecentCorrelated[correlationKey] = append(c.nativeRecentCorrelated[correlationKey], occurrence)
+		}
 	}
 	c.mu.Unlock()
 	return record, true
 }
 
 func enrichUsageRecord(record UsageRecord, enrichment UsageRecord) UsageRecord {
+	if strings.TrimSpace(record.Alias) == "" && strings.TrimSpace(enrichment.Alias) != "" {
+		record.Alias = strings.TrimSpace(enrichment.Alias)
+	}
 	if strings.TrimSpace(record.Endpoint) == "" {
 		record.Endpoint = strings.TrimSpace(enrichment.Endpoint)
 	}
@@ -785,15 +1027,18 @@ func (c *usageFallbackCoordinator) commit(pending *pendingUsageFallback) {
 	c.removePendingLocked(pending)
 	now := time.Now()
 	occurrence := &usageFallbackOccurrence{
-		key:            pending.key,
-		correlationKey: pending.correlationKey,
-		requestAt:      pending.requestAt,
-		observedAt:     now,
-		record:         pending.record,
+		key:             pending.key,
+		correlationKey:  pending.correlationKey,
+		correlationKeys: pending.correlationKeys,
+		requestAt:       pending.requestAt,
+		observedAt:      now,
+		record:          pending.record,
 	}
 	c.fallbackRecent[pending.key] = append(c.fallbackRecent[pending.key], occurrence)
-	if pending.correlationKey != "" {
-		c.fallbackRecentCorrelated[pending.correlationKey] = append(c.fallbackRecentCorrelated[pending.correlationKey], occurrence)
+	for _, correlationKey := range pending.correlationKeys {
+		if correlationKey != "" {
+			c.fallbackRecentCorrelated[correlationKey] = append(c.fallbackRecentCorrelated[correlationKey], occurrence)
+		}
 	}
 	c.cleanupLocked(now)
 	record := pending.record
@@ -827,6 +1072,34 @@ func (c *usageFallbackCoordinator) popPendingLocked(key string) *pendingUsageFal
 	return nil
 }
 
+func (c *usageFallbackCoordinator) popPendingForNativeLocked(key string, native UsageRecord) *pendingUsageFallback {
+	items := c.pending[key]
+	var selected *pendingUsageFallback
+	var selectedDistance time.Duration
+	var selectedStrength int64
+	for _, item := range items {
+		if item == nil || item.cancelled {
+			continue
+		}
+		edge, ok := protocolLiveCorrelationEdge(item.record, native)
+		if !ok {
+			continue
+		}
+		if selected != nil && !betterProtocolLiveCandidate(edge.Strength, edge.Distance,
+			protocolObservationFromUsageRecord(item.record).StableOrder, selectedStrength, selectedDistance,
+			protocolObservationFromUsageRecord(selected.record).StableOrder) {
+			continue
+		}
+		selected = item
+		selectedDistance = edge.Distance
+		selectedStrength = edge.Strength
+	}
+	if selected != nil {
+		c.removePendingLocked(selected)
+	}
+	return selected
+}
+
 func (c *usageFallbackCoordinator) removePendingLocked(pending *pendingUsageFallback) {
 	if pending == nil {
 		return
@@ -846,36 +1119,49 @@ func (c *usageFallbackCoordinator) removePendingLocked(pending *pendingUsageFall
 }
 
 func (c *usageFallbackCoordinator) removeCorrelatedPendingLocked(pending *pendingUsageFallback) {
-	if pending == nil || pending.correlationKey == "" {
+	if pending == nil {
 		return
 	}
-	items := c.pendingCorrelated[pending.correlationKey]
-	for i, item := range items {
-		if item != pending {
+	for _, correlationKey := range pending.correlationKeys {
+		if correlationKey == "" {
 			continue
 		}
-		c.pendingCorrelated[pending.correlationKey] = append(items[:i], items[i+1:]...)
-		if len(c.pendingCorrelated[pending.correlationKey]) == 0 {
-			delete(c.pendingCorrelated, pending.correlationKey)
+		items := c.pendingCorrelated[correlationKey]
+		for i, item := range items {
+			if item != pending {
+				continue
+			}
+			c.pendingCorrelated[correlationKey] = append(items[:i], items[i+1:]...)
+			if len(c.pendingCorrelated[correlationKey]) == 0 {
+				delete(c.pendingCorrelated, correlationKey)
+			}
+			break
 		}
-		return
 	}
 }
 
-func (c *usageFallbackCoordinator) popCorrelatedPendingLocked(correlationKey string, native UsageRecord) *pendingUsageFallback {
-	items := c.pendingCorrelated[correlationKey]
+func (c *usageFallbackCoordinator) popCorrelatedPendingLocked(correlationKeys []string, native UsageRecord) *pendingUsageFallback {
+	seen := make(map[*pendingUsageFallback]struct{})
 	var selected *pendingUsageFallback
 	var selectedDistance time.Duration
-	for _, item := range items {
-		if item == nil || item.cancelled {
-			continue
+	var selectedStrength int64
+	for _, correlationKey := range correlationKeys {
+		for _, item := range c.pendingCorrelated[correlationKey] {
+			if item == nil || item.cancelled {
+				continue
+			}
+			if _, exists := seen[item]; exists {
+				continue
+			}
+			seen[item] = struct{}{}
+			edge, ok := protocolCorrelationEdge(protocolObservationFromUsageRecord(item.record), protocolObservationFromUsageRecord(native))
+			if !ok || (selected != nil && !betterProtocolLiveCandidate(edge.Strength, edge.Distance, protocolObservationFromUsageRecord(item.record).StableOrder, selectedStrength, selectedDistance, protocolObservationFromUsageRecord(selected.record).StableOrder)) {
+				continue
+			}
+			selected = item
+			selectedDistance = edge.Distance
+			selectedStrength = edge.Strength
 		}
-		distance, ok := protocolUsageCompletionDistance(item.record, native)
-		if !ok || (selected != nil && distance >= selectedDistance) {
-			continue
-		}
-		selected = item
-		selectedDistance = distance
 	}
 	if selected != nil {
 		c.removePendingLocked(selected)
@@ -883,26 +1169,43 @@ func (c *usageFallbackCoordinator) popCorrelatedPendingLocked(correlationKey str
 	return selected
 }
 
-func (c *usageFallbackCoordinator) consumeNativeRecentLocked(key string, requestAt time.Time, now time.Time) (UsageRecord, bool) {
+func (c *usageFallbackCoordinator) consumeNativeRecentLocked(key string, requestAt time.Time, now time.Time, fallback UsageRecord) (UsageRecord, bool) {
 	items := c.nativeRecent[key]
+	var selected *usageFallbackOccurrence
+	var selectedDistance time.Duration
+	var selectedStrength int64
 	for _, item := range items {
 		if item == nil {
 			continue
 		}
-		if now.Sub(item.observedAt) > usageFallbackNativeRecentWindow {
+		if now.Sub(item.observedAt) > nativeRecentRetention(item) {
 			continue
 		}
-		if !item.requestAt.IsZero() && item.requestAt.After(requestAt.Add(time.Second)) {
+		edge, ok := protocolLiveCorrelationEdge(fallback, item.record)
+		if !ok {
 			continue
 		}
-		c.removeNativeRecentLocked(item)
-		return item.record, true
+		if selected != nil && !betterProtocolLiveCandidate(edge.Strength, edge.Distance,
+			protocolObservationFromUsageRecord(item.record).StableOrder, selectedStrength, selectedDistance,
+			protocolObservationFromUsageRecord(selected.record).StableOrder) {
+			continue
+		}
+		selected = item
+		selectedDistance = edge.Distance
+		selectedStrength = edge.Strength
+	}
+	if selected != nil {
+		c.removeNativeRecentLocked(selected)
+		return selected.record, true
 	}
 	return UsageRecord{}, false
 }
 
-func (c *usageFallbackCoordinator) consumeFallbackRecentLocked(key string, requestAt time.Time, now time.Time) (UsageRecord, bool) {
+func (c *usageFallbackCoordinator) consumeFallbackRecentLocked(key string, requestAt time.Time, now time.Time, native UsageRecord) (UsageRecord, bool) {
 	items := c.fallbackRecent[key]
+	var selected *usageFallbackOccurrence
+	var selectedDistance time.Duration
+	var selectedStrength int64
 	for _, item := range items {
 		if item == nil {
 			continue
@@ -910,28 +1213,48 @@ func (c *usageFallbackCoordinator) consumeFallbackRecentLocked(key string, reque
 		if now.Sub(item.observedAt) > usageFallbackLateNativeWindow {
 			continue
 		}
-		if requestAt.IsZero() || !requestAt.After(item.requestAt.Add(time.Second)) {
-			c.removeFallbackRecentLocked(item)
-			return item.record, true
+		edge, ok := protocolLiveCorrelationEdge(item.record, native)
+		if !ok {
+			continue
 		}
+		if selected != nil && !betterProtocolLiveCandidate(edge.Strength, edge.Distance,
+			protocolObservationFromUsageRecord(item.record).StableOrder, selectedStrength, selectedDistance,
+			protocolObservationFromUsageRecord(selected.record).StableOrder) {
+			continue
+		}
+		selected = item
+		selectedDistance = edge.Distance
+		selectedStrength = edge.Strength
+	}
+	if selected != nil {
+		c.removeFallbackRecentLocked(selected)
+		return selected.record, true
 	}
 	return UsageRecord{}, false
 }
 
-func (c *usageFallbackCoordinator) consumeCorrelatedNativeRecentLocked(correlationKey string, fallback UsageRecord, now time.Time) (UsageRecord, bool) {
-	items := c.nativeRecentCorrelated[correlationKey]
+func (c *usageFallbackCoordinator) consumeCorrelatedNativeRecentLocked(correlationKeys []string, fallback UsageRecord, now time.Time) (UsageRecord, bool) {
+	seen := make(map[*usageFallbackOccurrence]struct{})
 	var selected *usageFallbackOccurrence
 	var selectedDistance time.Duration
-	for _, item := range items {
-		if item == nil || now.Sub(item.observedAt) > usageFallbackNativeRecentWindow {
-			continue
+	var selectedStrength int64
+	for _, correlationKey := range correlationKeys {
+		for _, item := range c.nativeRecentCorrelated[correlationKey] {
+			if item == nil || now.Sub(item.observedAt) > nativeRecentRetention(item) {
+				continue
+			}
+			if _, exists := seen[item]; exists {
+				continue
+			}
+			seen[item] = struct{}{}
+			edge, ok := protocolCorrelationEdge(protocolObservationFromUsageRecord(fallback), protocolObservationFromUsageRecord(item.record))
+			if !ok || (selected != nil && !betterProtocolLiveCandidate(edge.Strength, edge.Distance, protocolObservationFromUsageRecord(item.record).StableOrder, selectedStrength, selectedDistance, protocolObservationFromUsageRecord(selected.record).StableOrder)) {
+				continue
+			}
+			selected = item
+			selectedDistance = edge.Distance
+			selectedStrength = edge.Strength
 		}
-		distance, ok := protocolUsageCompletionDistance(fallback, item.record)
-		if !ok || (selected != nil && distance >= selectedDistance) {
-			continue
-		}
-		selected = item
-		selectedDistance = distance
 	}
 	if selected == nil {
 		return UsageRecord{}, false
@@ -940,20 +1263,38 @@ func (c *usageFallbackCoordinator) consumeCorrelatedNativeRecentLocked(correlati
 	return selected.record, true
 }
 
-func (c *usageFallbackCoordinator) consumeCorrelatedFallbackRecentLocked(correlationKey string, native UsageRecord, now time.Time) (UsageRecord, bool) {
-	items := c.fallbackRecentCorrelated[correlationKey]
+func nativeRecentRetention(item *usageFallbackOccurrence) time.Duration {
+	if item == nil || item.correlationKey == "" {
+		return usageFallbackNativeRecentWindow
+	}
+	// Derive retention from the same latency-aware policy that validates the
+	// pair, then leave a small allowance for callback scheduling. Retention only
+	// keeps a candidate reachable; it never expands the accepted time distance.
+	return protocolFallbackTolerance(item.record.Latency) + usageFallbackCorrelationRetentionGrace
+}
+
+func (c *usageFallbackCoordinator) consumeCorrelatedFallbackRecentLocked(correlationKeys []string, native UsageRecord, now time.Time) (UsageRecord, bool) {
+	seen := make(map[*usageFallbackOccurrence]struct{})
 	var selected *usageFallbackOccurrence
 	var selectedDistance time.Duration
-	for _, item := range items {
-		if item == nil || now.Sub(item.observedAt) > usageFallbackLateNativeWindow {
-			continue
+	var selectedStrength int64
+	for _, correlationKey := range correlationKeys {
+		for _, item := range c.fallbackRecentCorrelated[correlationKey] {
+			if item == nil || now.Sub(item.observedAt) > usageFallbackLateNativeWindow {
+				continue
+			}
+			if _, exists := seen[item]; exists {
+				continue
+			}
+			seen[item] = struct{}{}
+			edge, ok := protocolCorrelationEdge(protocolObservationFromUsageRecord(item.record), protocolObservationFromUsageRecord(native))
+			if !ok || (selected != nil && !betterProtocolLiveCandidate(edge.Strength, edge.Distance, protocolObservationFromUsageRecord(item.record).StableOrder, selectedStrength, selectedDistance, protocolObservationFromUsageRecord(selected.record).StableOrder)) {
+				continue
+			}
+			selected = item
+			selectedStrength = edge.Strength
+			selectedDistance = edge.Distance
 		}
-		distance, ok := protocolUsageCompletionDistance(item.record, native)
-		if !ok || (selected != nil && distance >= selectedDistance) {
-			continue
-		}
-		selected = item
-		selectedDistance = distance
 	}
 	if selected == nil {
 		return UsageRecord{}, false
@@ -962,17 +1303,33 @@ func (c *usageFallbackCoordinator) consumeCorrelatedFallbackRecentLocked(correla
 	return selected.record, true
 }
 
+func betterProtocolLiveCandidate(strength int64, distance time.Duration, order protocolStableOrder,
+	selectedStrength int64, selectedDistance time.Duration, selectedOrder protocolStableOrder,
+) bool {
+	if strength != selectedStrength {
+		return strength > selectedStrength
+	}
+	if distance != selectedDistance {
+		return distance < selectedDistance
+	}
+	return protocolStableOrderLess(order, selectedOrder)
+}
+
 func (c *usageFallbackCoordinator) removeNativeRecentLocked(target *usageFallbackOccurrence) {
 	c.removeOccurrenceLocked(c.nativeRecent, target.key, target)
-	if target.correlationKey != "" {
-		c.removeOccurrenceLocked(c.nativeRecentCorrelated, target.correlationKey, target)
+	for _, correlationKey := range target.correlationKeys {
+		if correlationKey != "" {
+			c.removeOccurrenceLocked(c.nativeRecentCorrelated, correlationKey, target)
+		}
 	}
 }
 
 func (c *usageFallbackCoordinator) removeFallbackRecentLocked(target *usageFallbackOccurrence) {
 	c.removeOccurrenceLocked(c.fallbackRecent, target.key, target)
-	if target.correlationKey != "" {
-		c.removeOccurrenceLocked(c.fallbackRecentCorrelated, target.correlationKey, target)
+	for _, correlationKey := range target.correlationKeys {
+		if correlationKey != "" {
+			c.removeOccurrenceLocked(c.fallbackRecentCorrelated, correlationKey, target)
+		}
 	}
 }
 
@@ -995,10 +1352,20 @@ func (c *usageFallbackCoordinator) cleanupLocked(now time.Time) {
 	for key, items := range c.nativeRecent {
 		kept := items[:0]
 		for _, item := range items {
-			if item != nil && now.Sub(item.observedAt) <= usageFallbackNativeRecentWindow {
+			if item == nil {
+				continue
+			}
+			// Exact provider fingerprints keep their deliberately tight window,
+			// while anonymous protocol fallbacks need enough time to use the
+			// completion tolerance (up to five seconds). Keeping the occurrence
+			// for one extra second only preserves the candidate; the timestamp,
+			// endpoint, cache and token checks still decide whether it can match.
+			if now.Sub(item.observedAt) <= nativeRecentRetention(item) {
 				kept = append(kept, item)
-				if item.correlationKey != "" {
-					c.nativeRecentCorrelated[item.correlationKey] = append(c.nativeRecentCorrelated[item.correlationKey], item)
+				for _, correlationKey := range item.correlationKeys {
+					if correlationKey != "" {
+						c.nativeRecentCorrelated[correlationKey] = append(c.nativeRecentCorrelated[correlationKey], item)
+					}
 				}
 			}
 		}
@@ -1014,8 +1381,10 @@ func (c *usageFallbackCoordinator) cleanupLocked(now time.Time) {
 		for _, item := range items {
 			if item != nil && now.Sub(item.observedAt) <= usageFallbackLateNativeWindow {
 				kept = append(kept, item)
-				if item.correlationKey != "" {
-					c.fallbackRecentCorrelated[item.correlationKey] = append(c.fallbackRecentCorrelated[item.correlationKey], item)
+				for _, correlationKey := range item.correlationKeys {
+					if correlationKey != "" {
+						c.fallbackRecentCorrelated[correlationKey] = append(c.fallbackRecentCorrelated[correlationKey], item)
+					}
 				}
 			}
 		}
@@ -1031,8 +1400,10 @@ func (c *usageFallbackCoordinator) cleanupLocked(now time.Time) {
 		for _, item := range items {
 			if item != nil && !item.cancelled {
 				kept = append(kept, item)
-				if item.correlationKey != "" {
-					c.pendingCorrelated[item.correlationKey] = append(c.pendingCorrelated[item.correlationKey], item)
+				for _, correlationKey := range item.correlationKeys {
+					if correlationKey != "" {
+						c.pendingCorrelated[correlationKey] = append(c.pendingCorrelated[correlationKey], item)
+					}
 				}
 			}
 		}
@@ -1067,7 +1438,7 @@ func (c *usageFallbackCoordinator) cleanupLocked(now time.Time) {
 // deliberately excluded: the two sides derive them from different sources and
 // the token triple already discriminates requests.
 func usageRecordFingerprint(record UsageRecord) string {
-	if !usageDetailHasTokens(record.Detail) {
+	if !usageRecordHasTokenEvidence(record) {
 		return ""
 	}
 	providerFamily := usageProviderFamily(record.Provider)
@@ -1077,18 +1448,43 @@ func usageRecordFingerprint(record UsageRecord) string {
 	}
 	inputTokens := record.Detail.InputTokens
 	if providerFamily == "claude" {
-		inputTokens += record.Detail.CacheReadTokens + record.Detail.CacheCreationTokens
+		cacheTokens, ok := checkedProtocolAdd(record.Detail.CacheReadTokens, record.Detail.CacheCreationTokens)
+		if !ok {
+			return ""
+		}
+		inputTokens, ok = checkedProtocolAdd(inputTokens, cacheTokens)
+		if !ok {
+			return ""
+		}
 	}
 	outputTokens := record.Detail.OutputTokens
+	totalTokens, ok := checkedProtocolAdd(inputTokens, outputTokens)
+	if !ok {
+		return ""
+	}
 	parts := []string{
 		upstreamIdentity,
 		strings.ToLower(strings.TrimSpace(firstNonEmpty(record.Alias, record.Model))),
 		canonicalClientAPIKey(record.APIKey),
 		fmt.Sprintf("%d", inputTokens),
 		fmt.Sprintf("%d", outputTokens),
-		fmt.Sprintf("%d", inputTokens+outputTokens),
+		fmt.Sprintf("%d", totalTokens),
 	}
 	return strings.Join(parts, "\x00")
+}
+
+func usageRecordHasTokenEvidence(record UsageRecord) bool {
+	meta := record.protocolCorrelation
+	if meta != nil && meta.SchemaVersion == protocolCorrelationSchemaVersion &&
+		meta.KnownFields&(protocolCorrelationKnownInput|protocolCorrelationKnownOutput) ==
+			(protocolCorrelationKnownInput|protocolCorrelationKnownOutput) {
+		return true
+	}
+	// Legacy UsageDetail has no presence bits. A non-zero input or output is
+	// enough to establish both legacy buckets (the adapter treats the omitted
+	// counterpart as an unknown zero), but a total-only record is too weak for
+	// an exact fallback/native identity.
+	return record.Detail.InputTokens != 0 || record.Detail.OutputTokens != 0
 }
 
 func usageProviderFamily(provider string) string {

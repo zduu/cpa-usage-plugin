@@ -97,7 +97,7 @@ plugins:
       storage_sync_interval_seconds: 0
       storage_sync_record_interval: 0
       export_max_records: 100000
-      price_storage_path: "usage-statistics-prices.json"
+      price_storage_path: "data/usage-statistics-prices.json"
       models_dev_prices_enabled: false
       models_dev_prices_url: "https://models.dev/api.json"
       models_dev_prices_refresh_interval_seconds: 43200

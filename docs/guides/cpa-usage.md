@@ -57,7 +57,7 @@ plugins:
 - `config.yaml`（CPA 配置文件）
 - `data/usage-statistics/` 目录（历史统计数据）
 - `data/usage-statistics.jsonl`（如果用的是单文件模式）
-- 价格配置文件（通常叫 `usage-statistics-prices.json`）
+- 价格配置文件（新版默认是 `data/usage-statistics-prices.json`，旧版通常叫 `usage-statistics-prices.json`）
 
 **第 2 步：关掉 CPA**
 
@@ -294,8 +294,8 @@ plugins:
       storage_sync_record_interval: 0
       # 可选：看板事件导出最多返回的明细条数。默认 100000，0 表示不限制。
       export_max_records: 100000
-      # 可选：模型价格表 JSON 文件路径。相对路径基于 CPA 工作目录。
-      price_storage_path: usage-statistics-prices.json
+      # 可选：模型价格表 JSON 文件路径。相对路径基于 CPA 工作目录；建议放在持久化 data 目录。
+      price_storage_path: data/usage-statistics-prices.json
       # 可选：启用 models.dev 默认价格。手动价格优先级更高，模型名大小写不敏感。默认 false。
       models_dev_prices_enabled: false
       # 可选：models.dev 价格 JSON 地址。默认 https://models.dev/api.json。
@@ -550,6 +550,7 @@ plugins:
 - `storage_flush_interval_seconds` 越小，异常退出时最多丢失的数据越少；默认 30 秒，想更稳可以设为 5 或 1。
 - `storage_snapshot_interval_seconds` 和 `storage_snapshot_record_interval` 控制启动恢复成本；默认 300 秒或 1000 条写一次快照，高请求量实例可降低记录间隔，低频实例可保持默认。
 - `storage_sync_interval_seconds` 和 `storage_sync_record_interval` 默认关闭；如果需要更强的异常断电保护，可配置如 `storage_sync_interval_seconds: 30` 或 `storage_sync_record_interval: 1000`，但会增加磁盘 I/O。
+- 模型价格默认保存在同一持久化目录下的 `data/usage-statistics-prices.json`；使用默认路径且新文件不存在时，启动会自动迁移旧版根目录的 `usage-statistics-prices.json`。显式配置旧路径或其他自定义路径时，继续在指定位置读写。若使用 Docker，请确保价格文件所在位置持久化；采用默认路径时请挂载 `data` 目录。
 - `/health` 的 `storage.write_queue_length` 和 `storage.write_queue_capacity` 可观察后台写入队列积压；`storage.last_write_batch_records`、`storage.last_write_batch_duration_ms`、`storage.last_write_queue_wait_ms` 可观察最近 writer 批次规模、写入耗时和最长排队时长；`storage.write_batch_avg_duration_ms`、`storage.write_batch_p95_duration_ms`、`storage.write_batch_p99_duration_ms`、`storage.write_queue_wait_avg_ms`、`storage.write_queue_wait_p95_ms`、`storage.write_queue_wait_p99_ms` 和 `storage.write_pressure` 可观察持续磁盘压力与长尾抖动。看板底部出现"持久化排队中"或"持久化写入偏慢"时，说明磁盘写入速度短时间低于请求记录速度。
 - 如果已经有内存数据，建议先导出；开启持久化并重启后，再把导出的 JSON 导入一次，后续数据才会继续写入持久化文件。
 
