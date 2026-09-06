@@ -269,7 +269,7 @@ func TestHandleUsageAcceptsOpenAICompatibleLoosePayload(t *testing.T) {
 	}
 }
 
-func TestRegisterAdvertisesResponseInterceptor(t *testing.T) {
+func TestRegisterUsesNativeUsageOnly(t *testing.T) {
 	raw, err := handleRegister(nil)
 	if err != nil {
 		t.Fatalf("handleRegister() error = %v", err)
@@ -285,11 +285,11 @@ func TestRegisterAdvertisesResponseInterceptor(t *testing.T) {
 	if err := json.Unmarshal(env.Result, &resp); err != nil {
 		t.Fatalf("unmarshal register response: %v", err)
 	}
-	if !resp.Capabilities.ResponseInterceptor {
-		t.Fatalf("response_interceptor capability = false, want true")
+	if resp.Capabilities.ResponseInterceptor {
+		t.Fatal("response_interceptor must be disabled")
 	}
-	if !resp.Capabilities.ResponseStreamInterceptor {
-		t.Fatalf("response_stream_interceptor capability = false, want true")
+	if resp.Capabilities.ResponseStreamInterceptor {
+		t.Fatal("response_stream_interceptor must be disabled")
 	}
 }
 

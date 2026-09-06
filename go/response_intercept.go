@@ -21,8 +21,10 @@ const (
 
 var (
 	usageFallbackRecordDelay = defaultUsageFallbackDelay
-	usageFallbacks           = newUsageFallbackCoordinator()
-	authIndexes              = newAuthIndexLearner()
+	// Current CPA publishes native usage even after client cancellation. Keep
+	// legacy correlation helpers for history repair, but no live coordinator.
+	usageFallbacks *usageFallbackCoordinator
+	authIndexes    = newAuthIndexLearner()
 )
 
 // authIndexLearner remembers the CPA-computed auth index for each auth ID.

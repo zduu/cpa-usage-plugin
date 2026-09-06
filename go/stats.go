@@ -35,8 +35,10 @@ type RequestStatistics struct {
 
 	maxDetailsPerModel int
 	retention          time.Duration
+	nextDetailExpiry   time.Time
 	dedupWindow        time.Duration
 	seen               map[requestDedupKey]time.Time
+	nextSeenExpiry     time.Time
 	// protocolFallbackReconcileDirty is set only when a detail that can
 	// participate in protocol correlation is added or materially enriched.
 	// Repeated exports of unchanged statistics can therefore skip the global
@@ -830,16 +832,21 @@ func (s *RequestStatistics) Record(record UsageRecord) {
 	}
 	statsKey := usageGroupKey(record)
 	modelName := firstNonEmpty(record.Model, "unknown")
-	detail := requestDetailFromUsageRecord(record, timestamp, s.logResponseHeaders)
 	var persistDetail *persistedDetail
 	s.mu.Lock()
+	detail := requestDetailFromUsageRecord(record, timestamp, s.logResponseHeaders)
 
 	now := time.Now()
 	if s.recordDetailLocked(statsKey, modelName, detail, requestDedupKey{}, now, false) {
 		if s.storageEnabled {
 			persistDetail = &persistedDetail{API: statsKey, Model: modelName, Detail: detail}
 		}
-		s.pruneLocked(now, false)
+		if s.retention > 0 && (s.nextDetailExpiry.IsZero() || !now.Before(s.nextDetailExpiry)) {
+			s.pruneLocked(now, false)
+		}
+		if api := s.apis[statsKey]; api != nil {
+			s.trimModelDetailsLocked(api.Models[modelName])
+		}
 		s.pruneSeenLocked(now)
 	}
 	s.mu.Unlock()
@@ -1477,6 +1484,12 @@ func (s *RequestStatistics) recordDetailLocked(apiName, modelName string, detail
 	// cost_usd 只在查询期附加。导入的导出文件里带着当时的成本,留着会被原样写进
 	// JSONL 并且永远不会被读取,反而让存储记录与「后端没算过成本」的语义冲突。
 	detail.CostUSD = nil
+	if s.retention > 0 && !detail.Timestamp.IsZero() {
+		expires := detail.Timestamp.Add(s.retention)
+		if s.nextDetailExpiry.IsZero() || expires.Before(s.nextDetailExpiry) {
+			s.nextDetailExpiry = expires
+		}
+	}
 	if dedup == (requestDedupKey{}) {
 		dedup = dedupKey(apiName, modelName, detail)
 	}
@@ -1486,6 +1499,10 @@ func (s *RequestStatistics) recordDetailLocked(apiName, modelName string, detail
 			return false
 		}
 		s.seen[dedup] = now
+		expires := now.Add(s.dedupWindow)
+		if s.nextSeenExpiry.IsZero() || expires.Before(s.nextSeenExpiry) {
+			s.nextSeenExpiry = expires
+		}
 	}
 
 	apiSt, ok := s.apis[apiName]
@@ -4740,11 +4757,28 @@ func (s *RequestStatistics) decrementHealthBucketLocked(detail RequestDetail) {
 	s.healthBuckets[key] = bucket
 }
 
+// Drop references to evicted details without copying the entire retained
+// window on every request. Append grows the slice only amortized over time.
+func (s *RequestStatistics) trimModelDetailsLocked(model *modelStats) bool {
+	if model == nil || s.maxDetailsPerModel < 0 || len(model.Details) <= s.maxDetailsPerModel {
+		return false
+	}
+	removed := len(model.Details) - s.maxDetailsPerModel
+	clear(model.Details[:removed])
+	model.Details = model.Details[removed:]
+	if len(model.Details) == 0 {
+		model.Details = nil
+	}
+	s.evictedTotal += int64(removed)
+	return true
+}
+
 func (s *RequestStatistics) pruneLocked(now time.Time, sortNeeded bool) {
 	if s == nil {
 		return
 	}
 	changed := false
+	s.nextDetailExpiry = time.Time{}
 	var cutoff time.Time
 	if s.retention > 0 {
 		cutoff = now.Add(-s.retention)
@@ -4765,12 +4799,19 @@ func (s *RequestStatistics) pruneLocked(now time.Time, sortNeeded bool) {
 				for _, d := range details {
 					if d.Timestamp.IsZero() || !d.Timestamp.Before(cutoff) {
 						kept = append(kept, d)
+						if !d.Timestamp.IsZero() {
+							expires := d.Timestamp.Add(s.retention)
+							if s.nextDetailExpiry.IsZero() || expires.Before(s.nextDetailExpiry) {
+								s.nextDetailExpiry = expires
+							}
+						}
 					} else {
 						s.decrementCounters(d, apiSt, modelSt, modelName)
 						s.evictedTotal++
 						changed = true
 					}
 				}
+				clear(details[len(kept):])
 				details = kept
 			}
 			if sortNeeded {
@@ -4778,14 +4819,13 @@ func (s *RequestStatistics) pruneLocked(now time.Time, sortNeeded bool) {
 					return details[i].Timestamp.Before(details[j].Timestamp)
 				})
 			}
-			if s.maxDetailsPerModel >= 0 && len(details) > s.maxDetailsPerModel {
-				keep := s.maxDetailsPerModel
-				removed := details[:len(details)-keep]
-				s.evictedTotal += int64(len(removed))
-				changed = true
-				details = append([]RequestDetail(nil), details[len(details)-keep:]...)
-			}
 			modelSt.Details = details
+			if len(details) == 0 {
+				modelSt.Details = nil
+			}
+			if s.trimModelDetailsLocked(modelSt) {
+				changed = true
+			}
 			if len(modelSt.Details) == 0 && modelSt.TotalRequests <= 0 {
 				delete(apiSt.Models, modelName)
 			}
@@ -6020,10 +6060,16 @@ func (s *RequestStatistics) pruneSeenLocked(now time.Time) {
 	if s == nil || s.dedupWindow <= 0 {
 		return
 	}
+	if !s.nextSeenExpiry.IsZero() && now.Before(s.nextSeenExpiry) {
+		return
+	}
+	s.nextSeenExpiry = time.Time{}
 	cutoff := now.Add(-s.dedupWindow)
 	for key, seenAt := range s.seen {
 		if seenAt.Before(cutoff) {
 			delete(s.seen, key)
+		} else if expires := seenAt.Add(s.dedupWindow); s.nextSeenExpiry.IsZero() || expires.Before(s.nextSeenExpiry) {
+			s.nextSeenExpiry = expires
 		}
 	}
 }
@@ -6032,6 +6078,7 @@ func (s *RequestStatistics) rebuildSeenLocked(now time.Time) {
 	if s == nil {
 		return
 	}
+	s.nextSeenExpiry = time.Time{}
 	if s.dedupWindow <= 0 {
 		s.seen = make(map[requestDedupKey]time.Time)
 		return

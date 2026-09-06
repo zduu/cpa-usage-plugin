@@ -1506,6 +1506,16 @@ func protocolMinimumCostMatching(fallbacks, natives []int, candidates map[int]ma
 }
 
 func pairProtocolFallbackDetails(refs []protocolFallbackDetailRef) []protocolFallbackDetailPair {
+	hasFallback := false
+	for _, ref := range refs {
+		if isAnonymousProtocolFallbackDetail(ref.detail) {
+			hasFallback = true
+			break
+		}
+	}
+	if !hasFallback {
+		return nil
+	}
 	observations := make(map[int]protocolCorrelationObservation, len(refs))
 	byShapeFallback := make(map[string][]int)
 	byShapeNative := make(map[string][]int)
@@ -1842,6 +1852,9 @@ func (s *RequestStatistics) reconcileRecordedProtocolFallbacksLocked(now time.Ti
 		return 0
 	}
 	s.protocolFallbackReconcileDirty = false
+	if !s.hasRecordedProtocolFallbackLocked() {
+		return 0
+	}
 	refs := make([]protocolFallbackDetailRef, 0)
 	for apiName, apiSt := range s.apis {
 		if apiSt == nil {
@@ -1902,6 +1915,25 @@ func (s *RequestStatistics) reconcileRecordedProtocolFallbacksLocked(now time.Ti
 	s.rebuildSeenLocked(now)
 	s.invalidateSummaryLocked()
 	return len(pairs)
+}
+
+func (s *RequestStatistics) hasRecordedProtocolFallbackLocked() bool {
+	for _, api := range s.apis {
+		if api == nil {
+			continue
+		}
+		for _, model := range api.Models {
+			if model == nil {
+				continue
+			}
+			for _, detail := range model.Details {
+				if isAnonymousProtocolFallbackDetail(detail) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func (s *RequestStatistics) ReconcileProtocolFallbacks() int {

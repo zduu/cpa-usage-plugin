@@ -132,9 +132,9 @@ func handleMethod(method string, requestBody []byte) ([]byte, error) {
 	case "usage.handle":
 		return handleUsage(requestBody)
 	case "response.intercept_after":
-		return handleResponseIntercept(requestBody)
+		return okEnvelopeJSON("{}")
 	case "response.intercept_stream_chunk":
-		return handleResponseStreamChunk(requestBody)
+		return okEnvelopeJSON("{}")
 	case "management.handle":
 		return handleManagement(requestBody)
 	default:
