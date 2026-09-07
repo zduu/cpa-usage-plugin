@@ -12,7 +12,7 @@ import (
 
 const pluginID = "usage-dashboard-zduu"
 const legacyPluginID = "usage-statistics"
-const pluginVersion = "2.6.3"
+const pluginVersion = "2.6.4"
 
 func handleRegister(requestBody []byte) ([]byte, error) {
 	applyRuntimeConfig(requestBody)
