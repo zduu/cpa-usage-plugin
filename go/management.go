@@ -14,6 +14,7 @@ func handleUsage(requestBody []byte) ([]byte, error) {
 	if err := json.Unmarshal(requestBody, &usageRecord); err != nil {
 		return nil, fmt.Errorf("failed to parse usage record: %w", err)
 	}
+	usageRecord = requestMetadata.enrich(usageRecord, time.Now())
 	if usageRecord.RequestedAt.IsZero() {
 		usageRecord.RequestedAt = time.Now()
 	}

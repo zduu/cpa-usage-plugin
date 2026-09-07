@@ -131,6 +131,8 @@ func handleMethod(method string, requestBody []byte) ([]byte, error) {
 		return handleManagementRegister()
 	case "usage.handle":
 		return handleUsage(requestBody)
+	case "request.intercept_before", "request.intercept_after", "request.complete":
+		return handleRequestMetadata(method, requestBody)
 	case "response.intercept_after":
 		return okEnvelopeJSON("{}")
 	case "response.intercept_stream_chunk":

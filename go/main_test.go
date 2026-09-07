@@ -291,6 +291,9 @@ func TestRegisterUsesNativeUsageOnly(t *testing.T) {
 	if resp.Capabilities.ResponseStreamInterceptor {
 		t.Fatal("response_stream_interceptor must be disabled")
 	}
+	if !resp.Capabilities.RequestInterceptor || !resp.Capabilities.RequestLifecyclePlugin {
+		t.Fatal("request metadata capabilities must be enabled")
+	}
 }
 
 func TestResponseInterceptFallbackRecordsOpenAIUsage(t *testing.T) {

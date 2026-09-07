@@ -156,6 +156,8 @@ func handleRegister(requestBody []byte) ([]byte, error) {
 		},
 		Capabilities: PluginCapabilities{
 			UsagePlugin:               true,
+			RequestInterceptor:        true,
+			RequestLifecyclePlugin:    true,
 			ResponseInterceptor:       false,
 			ResponseStreamInterceptor: false,
 			ManagementAPI:             true,

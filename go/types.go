@@ -140,6 +140,7 @@ func defaultRuntimeConfig() runtimeConfig {
 // ============================================================================
 
 type UsageRecord struct {
+	streamPresent   bool
 	Provider        string              `json:"provider"`
 	ExecutorType    string              `json:"executor_type"`
 	Model           string              `json:"model"`
@@ -232,14 +233,15 @@ func (r *UsageRecord) UnmarshalJSON(data []byte) error {
 	var aliases struct {
 		BaseURLCamel string `json:"baseURL"`
 		BaseUrlCamel string `json:"baseUrl"`
-		Streaming    bool   `json:"streaming"`
-		StreamingOld bool   `json:"Streaming"`
+		Stream       *bool  `json:"stream"`
+		Streaming    *bool  `json:"streaming"`
 	}
 	if err := json.Unmarshal(data, &aliases); err != nil {
 		return err
 	}
 
 	record := UsageRecord{
+		streamPresent:   aliases.Stream != nil || aliases.Streaming != nil,
 		Provider:        firstNonEmpty(current.Provider, legacy.Provider),
 		ExecutorType:    firstNonEmpty(current.ExecutorType, legacy.ExecutorType),
 		Model:           firstNonEmpty(current.Model, legacy.Model),
@@ -253,7 +255,7 @@ func (r *UsageRecord) UnmarshalJSON(data []byte) error {
 		Source:          firstNonEmpty(current.Source, legacy.Source),
 		ReasoningEffort: firstNonEmpty(current.ReasoningEffort, legacy.ReasoningEffort),
 		ServiceTier:     firstNonEmpty(current.ServiceTier, legacy.ServiceTier),
-		Stream:          current.Stream || legacy.Stream || aliases.Streaming || aliases.StreamingOld,
+		Stream:          current.Stream || legacy.Stream || (aliases.Streaming != nil && *aliases.Streaming),
 		RequestedAt:     firstNonZeroTime(parseFlexibleTime(current.RequestedAt), parseFlexibleTime(current.RequestedAtMs), parseFlexibleTime(legacy.RequestedAt), parseFlexibleTime(legacy.RequestedAtMs)),
 		Latency:         firstNonZeroDuration(parseFlexibleDuration(current.Latency, time.Nanosecond), parseFlexibleDuration(current.LatencyMs, time.Millisecond), parseFlexibleDuration(legacy.Latency, time.Nanosecond), parseFlexibleDuration(legacy.LatencyMs, time.Millisecond)),
 		TTFT:            firstNonZeroDuration(parseFlexibleDuration(current.TTFT, time.Nanosecond), parseFlexibleDuration(current.TTFTMs, time.Millisecond), parseFlexibleDuration(legacy.TTFT, time.Nanosecond), parseFlexibleDuration(legacy.TTFTMs, time.Millisecond)),
@@ -543,6 +545,17 @@ type ManagementResponse struct {
 	Body       []byte              `json:"body"`
 }
 
+// CPA decodes this result into pluginapi.ManagementResponse, whose field is
+// named StatusCode without a JSON tag. Keep status_code for existing clients
+// while also emitting the host's spelling (case folding does not remove '_').
+func (r ManagementResponse) MarshalJSON() ([]byte, error) {
+	type wire ManagementResponse
+	return json.Marshal(struct {
+		wire
+		HostStatusCode int `json:"StatusCode"`
+	}{wire: wire(r), HostStatusCode: r.StatusCode})
+}
+
 type PluginRegisterResponse struct {
 	SchemaVersion int                `json:"schema_version"`
 	Metadata      PluginMetadata     `json:"metadata"`
@@ -566,6 +579,8 @@ type ConfigField struct {
 }
 
 type PluginCapabilities struct {
+	RequestInterceptor        bool `json:"request_interceptor"`
+	RequestLifecyclePlugin    bool `json:"request_lifecycle_plugin"`
 	UsagePlugin               bool `json:"usage_plugin"`
 	ResponseInterceptor       bool `json:"response_interceptor"`
 	ResponseStreamInterceptor bool `json:"response_stream_interceptor"`

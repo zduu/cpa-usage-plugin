@@ -30,6 +30,16 @@ jobs:
       - name: Run Go tests
         run: cd go && go test -v -race ./...
 
+      - name: Vet Go
+        run: cd go && go vet ./...
+
+      - name: Verify shared-library ABI with stock CPA SDK
+        run: |
+          cd go
+          go build -buildmode=c-shared -buildvcs=false -trimpath -o "$RUNNER_TEMP/usage-dashboard-zduu.so" .
+          cd ../tests/stock-host
+          go run . "$RUNNER_TEMP/usage-dashboard-zduu.so"
+
       - name: Run Go benchmarks
         run: cd go && go test -run '^$' -bench='Benchmark(RecordIncremental|Snapshot|SummaryWithoutDetails|QueryEvents|QueryAPIDetail)' -benchtime=100ms -count=1 ./...
 
