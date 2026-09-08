@@ -30,6 +30,9 @@ jobs:
       - name: Run Go tests
         run: cd go && go test -v -race ./...
 
+      - name: Test release updater
+        run: python3 tests/update_latest_release_test.py
+
       - name: Vet Go
         run: cd go && go vet ./...
 

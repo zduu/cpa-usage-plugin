@@ -958,6 +958,7 @@ type TimeSeriesTokenStat struct {
 }
 
 type ModelSnapshot struct {
+	Accounting       []RequestDetail     `json:"accounting,omitempty"`
 	TotalRequests    int64               `json:"total_requests"`
 	SuccessCount     int64               `json:"success_count"`
 	FailureCount     int64               `json:"failure_count"`

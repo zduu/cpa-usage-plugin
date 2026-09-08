@@ -1,6 +1,7 @@
 package main
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -600,6 +601,10 @@ func isSensitiveHeader(name string) bool {
 
 const redactedMarker = "******"
 
+// Explicit credential contexts must not depend on a vendor prefix or token
+// length. Match the value itself, preserving whitespace and surrounding JSON.
+var credentialTextPattern = regexp.MustCompile(`(?i)(\b(?:bearer|basic)[ \t]+|\b(?:authorization|proxy-authorization|x-api-key|api-key)["']?[ \t]*:[ \t]*["']?)([^\s,;"'<>}]+)`)
+
 func redactSensitiveText(value string) string {
 	if value == "" {
 		return ""
@@ -610,15 +615,13 @@ func redactSensitiveText(value string) string {
 	value = redactKeyPrefix(value, "pk_")
 	value = redactKeyPrefix(value, "rk_")
 
-	value = redactAuthHeader(value, "Authorization:")
-	value = redactAuthHeader(value, "authorization:")
-	value = redactAuthHeader(value, "Bearer ")
-	value = redactAuthHeader(value, "bearer ")
-
-	value = redactAuthHeader(value, "X-API-Key:")
-	value = redactAuthHeader(value, "x-api-key:")
-	value = redactAuthHeader(value, "Api-Key:")
-	value = redactAuthHeader(value, "api-key:")
+	// Run the scheme match first: a header match must not consume "Bearer"
+	// and leave its credential behind.
+	value = redactCredentialSchemes(value)
+	value = credentialTextPattern.ReplaceAllStringFunc(value, func(match string) string {
+		parts := credentialTextPattern.FindStringSubmatch(match)
+		return parts[1] + redactedMarker
+	})
 
 	value = redactQueryParam(value, "key")
 	value = redactQueryParam(value, "token")
@@ -650,31 +653,10 @@ func redactKeyPrefix(s, prefix string) string {
 	return result
 }
 
-func redactAuthHeader(s, marker string) string {
-	idx := strings.Index(s, marker)
-	if idx < 0 {
-		return s
-	}
-	rest := s[idx+len(marker):]
-	rest = strings.TrimLeft(rest, " \t")
-	if rest == "" {
-		return s
-	}
-	end := strings.IndexAny(rest, " ,\n\r;")
-	var token string
-	if end < 0 {
-		token = rest
-	} else {
-		token = rest[:end]
-	}
-	if len(token) == 0 {
-		return s
-	}
-	if !looksLikeSecretToken(token) {
-		return s
-	}
-	masked := maskToken(token)
-	return strings.Replace(s, marker+" "+token, marker+" "+masked, 1)
+var credentialSchemePattern = regexp.MustCompile(`(?i)(\b(?:bearer|basic)[ \t]+)([^\s,;"'<>}]+)`)
+
+func redactCredentialSchemes(s string) string {
+	return credentialSchemePattern.ReplaceAllString(s, "${1}"+redactedMarker)
 }
 
 func redactQueryParam(s, param string) string {

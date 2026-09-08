@@ -85,11 +85,25 @@ func (s *RequestStatistics) repairClaudeCacheFallbackDetailsLocked(now time.Time
 		return 0
 	}
 	var repairs []claudeCacheFallbackRepair
+	archivedRepairs := 0
 	for apiName, apiSt := range s.apis {
 		if apiSt == nil {
 			continue
 		}
 		for modelName, modelSt := range apiSt.Models {
+			if modelSt != nil {
+				for i := len(modelSt.Accounting) - 1; i >= 0; i-- {
+					detail := modelSt.Accounting[i].detail()
+					if !isPollutedClaudeCacheFallbackDetail(detail) {
+						continue
+					}
+					s.decrementCounters(detail, apiSt, modelSt, modelName)
+					repaired := repairClaudeCacheFallbackTokens(detail)
+					modelSt.removeAccountingDetailAt(len(modelSt.Details) + i)
+					s.recordDetailWithAccountingLocked(apiName, modelName, repaired, requestDedupKey{}, now, false, true)
+					archivedRepairs++
+				}
+			}
 			if modelSt == nil || len(modelSt.Details) == 0 {
 				continue
 			}
@@ -106,10 +120,11 @@ func (s *RequestStatistics) repairClaudeCacheFallbackDetailsLocked(now time.Time
 					detail:    repairClaudeCacheFallbackTokens(detail),
 				})
 			}
+			clear(modelSt.Details[len(kept):])
 			modelSt.Details = kept
 		}
 	}
-	if len(repairs) == 0 {
+	if len(repairs) == 0 && archivedRepairs == 0 {
 		return 0
 	}
 	for _, repair := range repairs {
@@ -117,5 +132,5 @@ func (s *RequestStatistics) repairClaudeCacheFallbackDetailsLocked(now time.Time
 	}
 	s.rebuildSeenLocked(now)
 	s.invalidateSummaryLocked()
-	return len(repairs)
+	return len(repairs) + archivedRepairs
 }

@@ -142,7 +142,8 @@ func (s *RequestStatistics) repairMigratedAttributionDetailsLocked(now time.Time
 			if modelSt == nil {
 				continue
 			}
-			for _, detail := range modelSt.Details {
+			for i := 0; i < modelSt.accountingCount(); i++ {
+				detail := modelSt.accountingDetailAt(i)
 				if !isOriginalClaudeDeepSeekDetail(detail) {
 					continue
 				}
@@ -162,19 +163,18 @@ func (s *RequestStatistics) repairMigratedAttributionDetailsLocked(now time.Time
 			continue
 		}
 		for modelName, modelSt := range apiSt.Models {
-			if modelSt == nil || len(modelSt.Details) == 0 {
+			if modelSt == nil || modelSt.accountingCount() == 0 {
 				continue
 			}
-			kept := modelSt.Details[:0]
-			for _, detail := range modelSt.Details {
+			for i := modelSt.accountingCount() - 1; i >= 0; i-- {
+				detail := modelSt.accountingDetailAt(i)
 				if !s.isRepairableMigratedTwinLocked(originals, detail) {
-					kept = append(kept, detail)
 					continue
 				}
 				s.decrementCounters(detail, apiSt, modelSt, modelName)
 				removed = append(removed, dedupKey(apiName, modelName, detail))
+				modelSt.removeAccountingDetailAt(i)
 			}
-			modelSt.Details = kept
 		}
 	}
 	if len(removed) == 0 {

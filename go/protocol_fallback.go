@@ -1686,12 +1686,13 @@ func reconcileProtocolFallbackSnapshot(snapshot StatisticsSnapshot) (StatisticsS
 		for modelName, modelSnapshot := range apiSnapshot.Models {
 			modelCopy := modelSnapshot
 			modelCopy.Providers = append([]ModelProviderStat(nil), modelSnapshot.Providers...)
-			modelCopy.Details = make([]RequestDetail, len(modelSnapshot.Details))
-			for i, detail := range modelCopy.Details {
-				detail = cloneRequestDetail(modelSnapshot.Details[i])
+			modelCopy.Details = cloneRequestDetails(modelSnapshot.Details)
+			modelCopy.Accounting = cloneRequestDetails(modelSnapshot.Accounting)
+			for i := 0; i < modelCopy.accountingCount(); i++ {
+				detail := modelCopy.accountingDetailAt(i)
 				detail.Model = normalizeDetailModelName(modelName, detail.Model)
 				detail.Tokens.TotalTokens = detailTotalTokensForRequest(detail)
-				modelCopy.Details[i] = detail
+				modelCopy.setAccountingDetailAt(i, detail)
 				refs = append(refs, protocolFallbackDetailRef{
 					apiName: apiName, modelName: modelName, index: i, detail: detail,
 				})
@@ -1711,9 +1712,9 @@ func reconcileProtocolFallbackSnapshot(snapshot StatisticsSnapshot) (StatisticsS
 	for _, pair := range pairs {
 		apiSnapshot := result.APIs[pair.native.apiName]
 		modelSnapshot := apiSnapshot.Models[pair.native.modelName]
-		native := modelSnapshot.Details[pair.native.index]
+		native := modelSnapshot.accountingDetailAt(pair.native.index)
 		enrichRequestDetailMetadata(&native, pair.fallback.detail)
-		modelSnapshot.Details[pair.native.index] = native
+		modelSnapshot.setAccountingDetailAt(pair.native.index, native)
 		apiSnapshot.Models[pair.native.modelName] = modelSnapshot
 		result.APIs[pair.native.apiName] = apiSnapshot
 
@@ -1728,13 +1729,19 @@ func reconcileProtocolFallbackSnapshot(snapshot StatisticsSnapshot) (StatisticsS
 		parts := strings.SplitN(compound, "\x00", 2)
 		apiSnapshot := result.APIs[parts[0]]
 		modelSnapshot := apiSnapshot.Models[parts[1]]
-		kept := make([]RequestDetail, 0, len(modelSnapshot.Details)-len(indexes))
-		for i, detail := range modelSnapshot.Details {
+		kept := make([]RequestDetail, 0, len(modelSnapshot.Details))
+		var archived []RequestDetail
+		for i, detail := range modelSnapshot.accountingDetails() {
 			if _, drop := indexes[i]; drop {
 				continue
 			}
-			kept = append(kept, detail)
+			if i < len(modelSnapshot.Details) {
+				kept = append(kept, detail)
+			} else {
+				archived = append(archived, detail)
+			}
 		}
+		modelSnapshot.Accounting = archived
 		modelSnapshot.Details = kept
 		if modelSnapshot.TotalRequests <= 0 && len(modelSnapshot.Details) == 0 {
 			delete(apiSnapshot.Models, parts[1])
@@ -1864,7 +1871,8 @@ func (s *RequestStatistics) reconcileRecordedProtocolFallbacksLocked(now time.Ti
 			if modelSt == nil {
 				continue
 			}
-			for i, detail := range modelSt.Details {
+			for i := 0; i < modelSt.accountingCount(); i++ {
+				detail := modelSt.accountingDetailAt(i)
 				refs = append(refs, protocolFallbackDetailRef{
 					apiName: apiName, modelName: modelName, index: i, detail: detail,
 				})
@@ -1879,7 +1887,9 @@ func (s *RequestStatistics) reconcileRecordedProtocolFallbacksLocked(now time.Ti
 	for _, pair := range pairs {
 		apiSt := s.apis[pair.native.apiName]
 		modelSt := apiSt.Models[pair.native.modelName]
-		enrichRequestDetailMetadata(&modelSt.Details[pair.native.index], pair.fallback.detail)
+		detail := modelSt.accountingDetailAt(pair.native.index)
+		enrichRequestDetailMetadata(&detail, pair.fallback.detail)
+		modelSt.setAccountingDetailAt(pair.native.index, detail)
 	}
 	removeByModel := make(map[string][]protocolFallbackDetailRef)
 	for _, pair := range pairs {
@@ -1892,9 +1902,9 @@ func (s *RequestStatistics) reconcileRecordedProtocolFallbacksLocked(now time.Ti
 		modelSt := apiSt.Models[parts[1]]
 		sort.Slice(removals, func(i, j int) bool { return removals[i].index > removals[j].index })
 		for _, removal := range removals {
-			detail := modelSt.Details[removal.index]
+			detail := modelSt.accountingDetailAt(removal.index)
 			s.decrementCounters(detail, apiSt, modelSt, parts[1])
-			modelSt.Details = append(modelSt.Details[:removal.index], modelSt.Details[removal.index+1:]...)
+			modelSt.removeAccountingDetailAt(removal.index)
 		}
 	}
 	for apiName, apiSt := range s.apis {
@@ -1926,7 +1936,8 @@ func (s *RequestStatistics) hasRecordedProtocolFallbackLocked() bool {
 			if model == nil {
 				continue
 			}
-			for _, detail := range model.Details {
+			for i := 0; i < model.accountingCount(); i++ {
+				detail := model.accountingDetailAt(i)
 				if isAnonymousProtocolFallbackDetail(detail) {
 					return true
 				}
@@ -1958,7 +1969,7 @@ func (s *RequestStatistics) ReconciledSnapshot() (StatisticsSnapshot, int64) {
 		s.reconcileRecordedProtocolFallbacksLocked(time.Now())
 	}
 	snapshot := s.snapshotLocked()
-	detailCount := s.countDetailsLocked()
+	detailCount := s.countAccountingLocked()
 	s.mu.Unlock()
 	return snapshot, detailCount
 }
@@ -1977,13 +1988,13 @@ func (s *RequestStatistics) RemoveRecordedUsage(record UsageRecord) bool {
 		return false
 	}
 	modelSt := apiSt.Models[modelName]
-	for i := len(modelSt.Details) - 1; i >= 0; i-- {
-		if dedupKey(apiName, modelName, modelSt.Details[i]) != target {
+	for i := modelSt.accountingCount() - 1; i >= 0; i-- {
+		if dedupKey(apiName, modelName, modelSt.accountingDetailAt(i)) != target {
 			continue
 		}
-		detail := modelSt.Details[i]
+		detail := modelSt.accountingDetailAt(i)
 		s.decrementCounters(detail, apiSt, modelSt, modelName)
-		modelSt.Details = append(modelSt.Details[:i], modelSt.Details[i+1:]...)
+		modelSt.removeAccountingDetailAt(i)
 		if len(modelSt.Details) == 0 && modelSt.TotalRequests <= 0 {
 			delete(apiSt.Models, modelName)
 		}

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/csv"
@@ -240,6 +241,8 @@ const (
 )
 
 type dashboardEventsExportOptions struct {
+	frozen *eventExportSnapshot
+	ctx    context.Context
 	Format dashboardExportFormat
 	Gzip   bool
 	Limit  int

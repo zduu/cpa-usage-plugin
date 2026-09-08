@@ -478,7 +478,7 @@ func handleImportUsage(body []byte) ([]byte, error) {
 	var recordCount int64
 	for _, apiSnapshot := range importPayload.Usage.APIs {
 		for _, modelSnapshot := range apiSnapshot.Models {
-			recordCount += int64(len(modelSnapshot.Details))
+			recordCount += int64(modelSnapshot.accountingCount())
 		}
 	}
 	if recordCount > maxRecordCount {
@@ -488,7 +488,7 @@ func handleImportUsage(body []byte) ([]byte, error) {
 
 	for apiName, apiSnapshot := range importPayload.Usage.APIs {
 		for modelName, modelSnapshot := range apiSnapshot.Models {
-			for detailIndex, detail := range modelSnapshot.Details {
+			for detailIndex, detail := range modelSnapshot.accountingDetails() {
 				t := detail.Tokens
 				if t.TotalTokens < 0 || t.InputTokens < 0 || t.OutputTokens < 0 ||
 					t.ReasoningTokens < 0 || t.CachedTokens < 0 || t.CacheReadTokens < 0 ||

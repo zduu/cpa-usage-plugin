@@ -115,13 +115,13 @@ func TestTimePricingKeepsTrimmedCostsWhenRepricing(t *testing.T) {
 	}
 
 	summary := stats.SummaryWithoutDetails()
-	// Two old records have been trimmed. They retain their base-price cost;
-	// the retained record receives the peak delta, so no historical cost is lost.
-	assertFloatNear(t, "total cost after time reprice", summary.Usage.TotalCost, 0.0004)
-	assertFloatNear(t, "daily cost after time reprice", summary.Usage.CostByDay["2026-08-22"], 0.0004)
+	// The accounting ledger preserves timestamps after visible detail eviction,
+	// so all three requests receive the same peak price.
+	assertFloatNear(t, "total cost after time reprice", summary.Usage.TotalCost, 0.0006)
+	assertFloatNear(t, "daily cost after time reprice", summary.Usage.CostByDay["2026-08-22"], 0.0006)
 	api := summary.Usage.APIs["deepseek"]
-	assertFloatNear(t, "api cost after time reprice", api.EstimatedCost, 0.0004)
-	assertFloatNear(t, "model cost after time reprice", api.Models["deepseek-chat"].EstimatedCost, 0.0004)
+	assertFloatNear(t, "api cost after time reprice", api.EstimatedCost, 0.0006)
+	assertFloatNear(t, "model cost after time reprice", api.Models["deepseek-chat"].EstimatedCost, 0.0006)
 }
 
 func TestExchangeRateParsingAndStateFallback(t *testing.T) {

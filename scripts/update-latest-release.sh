@@ -156,6 +156,25 @@ if [ -z "$PLUGIN_ASSET" ]; then
   asset_auto=1
 fi
 
+restart_if_requested() {
+  if [ -n "$RESTART" ]; then
+    if command -v docker >/dev/null 2>&1; then
+      log "restarting Docker container '$DOCKER_CONTAINER'..."
+      if restart_output="$(docker restart "$DOCKER_CONTAINER" 2>&1)"; then
+        log "docker: $restart_output"
+      else
+        log "docker restart failed: $restart_output"
+        exit 1
+      fi
+      log "restart done"
+    else
+      log "docker not found, skipping restart"
+    fi
+  else
+    log "restart CPA manually to load the new plugin"
+  fi
+}
+
 # --- skip if already on this version ---
 state_file="$STATE_DIR/.usage-dashboard-zduu.release.$PLUGIN_PLATFORM"
 legacy_state_file="$STATE_DIR/.usage-dashboard-zduu.release"
@@ -170,15 +189,20 @@ fi
 if [ -z "$FORCE" ] && [ "$current_tag" = "$target_tag" ] && [ -f "$PLUGIN_DIR/$PLUGIN_FILE" ]; then
 	printf '%s' "$target_tag" > "$state_file"
 	log "already on $target_tag"
+	restart_if_requested
 	exit 0
 fi
 
 # --- download ---
 tmp_dir="$(mktemp -d)"
+install_tmp=""
 cleanup() {
+  if [ -n "$install_tmp" ]; then rm -f "$install_tmp"; fi
   rm -rf "$tmp_dir"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 asset_url="https://github.com/$REPO/releases/download/$target_tag/$PLUGIN_ASSET"
 tmp_file="$tmp_dir/$PLUGIN_ASSET"
@@ -210,6 +234,7 @@ fi
 if [ -z "$FORCE" ] && [ -n "$old_sha" ] && [ "$old_sha" = "$new_sha" ]; then
   printf '%s' "$target_tag" > "$state_file"
   log "binary unchanged: $target_tag $new_sha"
+  restart_if_requested
   exit 0
 fi
 
@@ -221,21 +246,15 @@ if [ -f "$PLUGIN_DIR/$PLUGIN_FILE" ]; then
   log "backup created: $backup"
 fi
 
-cp "$tmp_file" "$PLUGIN_DIR/$PLUGIN_FILE"
-chmod 755 "$PLUGIN_DIR/$PLUGIN_FILE"
+# Keep the inode mapped by the running CPA intact. Stage on the destination
+# filesystem so the final rename is atomic, including when /tmp is elsewhere.
+install_tmp="$(mktemp "$PLUGIN_DIR/.usage-dashboard-zduu-install.XXXXXX")"
+cp "$tmp_file" "$install_tmp"
+chmod 755 "$install_tmp"
+mv -f "$install_tmp" "$PLUGIN_DIR/$PLUGIN_FILE"
+install_tmp=""
 printf '%s' "$target_tag" > "$state_file"
 
 log "installed $target_tag sha256=$new_sha"
 
-# --- restart ---
-if [ -n "$RESTART" ]; then
-  if command -v docker >/dev/null 2>&1; then
-    log "restarting Docker container '$DOCKER_CONTAINER'..."
-    docker restart "$DOCKER_CONTAINER" 2>&1 | while IFS= read -r line; do log "docker: $line"; done
-    log "restart done"
-  else
-    log "docker not found, skipping restart"
-  fi
-else
-  log "restart CPA manually to load the new plugin"
-fi
+restart_if_requested
