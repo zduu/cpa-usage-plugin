@@ -1090,8 +1090,8 @@ func TestDashboardEventsCacheReturnsCopyAndInvalidates(t *testing.T) {
 	if len(stats.eventQueryCache) != 0 {
 		t.Fatalf("event cache len after record = %d, want 0", len(stats.eventQueryCache))
 	}
-	if stats.eventIndex != nil || stats.eventIndexVersion != 0 {
-		t.Fatalf("event index after record = len %d version %d, want cleared", len(stats.eventIndex), stats.eventIndexVersion)
+	if len(stats.eventIndex) != 3 || len(stats.eventIndexPending) != 1 {
+		t.Fatalf("event index after record = len %d, pending %d; want retained index and one incremental update", len(stats.eventIndex), len(stats.eventIndexPending))
 	}
 	updated := stats.QueryEvents(params)
 	if len(updated.Events) != 2 || updated.Events[0].Tokens.TotalTokens != 99 {
@@ -1258,11 +1258,11 @@ func TestDashboardEventsSecondaryIndexesBuildAndInvalidate(t *testing.T) {
 
 	stats.mu.RLock()
 	defer stats.mu.RUnlock()
-	if stats.eventIndex != nil || stats.eventModelIndex != nil || stats.eventSourceIndex != nil || stats.eventAuthIndex != nil {
-		t.Fatalf("event indexes should be cleared after record")
+	if stats.eventIndex != nil || stats.eventModelIndex == nil || stats.eventSourceIndex == nil || stats.eventAuthIndex == nil {
+		t.Fatalf("only the previously requested secondary indexes should be retained")
 	}
-	if stats.eventIndexVersion != 0 {
-		t.Fatalf("event index version after record = %d, want 0", stats.eventIndexVersion)
+	if stats.eventIndexVersion != stats.summaryVersion || len(stats.eventIndexPending) != 1 {
+		t.Fatalf("event indexes should retain one pending insertion at version %d", stats.summaryVersion)
 	}
 }
 

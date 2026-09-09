@@ -133,6 +133,8 @@ func (m ModelSnapshot) accountingDetails() []RequestDetail {
 // Combined indexes keep archived records addressable during repair and replay.
 func (m *modelStats) setAccountingDetailAt(i int, d RequestDetail) {
 	if i < len(m.Details) {
+		d.eventRef = m.Details[i].eventRef
+		d.eventSequence = m.Details[i].eventSequence
 		m.Details[i] = d
 		return
 	}
@@ -144,9 +146,13 @@ func (m *modelStats) setAccountingDetailAt(i int, d RequestDetail) {
 
 func (m *modelStats) removeAccountingDetailAt(i int) {
 	if i < len(m.Details) {
+		if ref := m.Details[i].eventRef; ref != nil {
+			ref.detail = nil
+		}
 		copy(m.Details[i:], m.Details[i+1:])
 		m.Details[len(m.Details)-1] = RequestDetail{}
 		m.Details = m.Details[:len(m.Details)-1]
+		m.rebindEventRefs(i)
 		return
 	}
 	i -= len(m.Details)
@@ -156,17 +162,35 @@ func (m *modelStats) removeAccountingDetailAt(i int) {
 }
 
 func (m *modelStats) appendDetail(d RequestDetail, archived bool) {
+	m.lastEventRef = nil
 	if archived {
 		m.archiveDetail(d)
 		return
 	}
+	m.initializeEventSequences()
+	m.nextEventSequence++
+	d.eventSequence = m.nextEventSequence
+	if d.eventRef != nil {
+		d.eventRef.sequence = d.eventSequence
+	}
+	reallocated := len(m.Details) == cap(m.Details)
 	m.Details = append(m.Details, d)
 	last := len(m.Details) - 1
+	changedFrom := last
 	if last > 0 && m.Details[last-1].Timestamp.After(d.Timestamp) {
 		at := sort.Search(last, func(i int) bool { return m.Details[i].Timestamp.After(d.Timestamp) })
 		copy(m.Details[at+1:], m.Details[at:last])
 		m.Details[at] = d
+		changedFrom = at
 	}
+	if d.eventRef != nil {
+		m.hasEventRefs = true
+		m.lastEventRef = d.eventRef
+	}
+	if reallocated {
+		changedFrom = 0
+	}
+	m.rebindEventRefs(changedFrom)
 }
 
 func (m ModelSnapshot) accountingCount() int { return len(m.Details) + len(m.Accounting) }

@@ -792,6 +792,8 @@ type RuntimeStatus struct {
 	LastEventsQueryTotal       int                                 `json:"last_events_query_total,omitempty"`
 	EventIndexVersion          uint64                              `json:"event_index_version,omitempty"`
 	EventIndexEntries          int                                 `json:"event_index_entries,omitempty"`
+	EventIndexBytes            int64                               `json:"event_index_bytes,omitempty"`
+	EventCacheEstimatedBytes   int64                               `json:"event_cache_estimated_bytes,omitempty"`
 	APIDetailQueries           int64                               `json:"api_detail_queries,omitempty"`
 	LastAPIDetailDurationMs    float64                             `json:"last_api_detail_duration_ms,omitempty"`
 	LastAPIDetailTotalEvents   int                                 `json:"last_api_detail_total_events,omitempty"`
@@ -848,6 +850,9 @@ type ImportResponse struct {
 // ============================================================================
 
 type RequestDetail struct {
+	// Internal stable index reference; never retained by a query/snapshot copy.
+	eventRef      *dashboardEventRef
+	eventSequence int64
 	// UpstreamAPI is the exact dashboard grouping key for the upstream
 	// interface, for example "codex · 上游 b374b8e7c98ca23c". It is populated
 	// only on query result copies and is not stored with recorded details.

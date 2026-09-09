@@ -1,0 +1,31 @@
+host: "0.0.0.0"
+port: 8317
+auth-dir: /performance-data/auths
+remote-management:
+  allow-remote: true
+  secret-key: "isolated-performance-test-only"
+  disable-control-panel: true
+api-keys: ["isolated-performance-client-only"]
+usage-statistics-enabled: false
+logging-to-file: false
+request-log: false
+plugins:
+  enabled: true
+  dir: /performance
+  configs:
+    usage-dashboard-zduu:
+      enabled: true
+      max_details_per_model: 5000
+      retention_days: 30
+      dedup_window_minutes: 0
+      storage_enabled: true
+      storage_path: /performance-data/usage-statistics.jsonl
+      storage_flush_interval_seconds: 5
+      storage_snapshot_interval_seconds: 300
+      storage_snapshot_record_interval: 1000
+      storage_sync_interval_seconds: 5
+      storage_sync_record_interval: 1000
+      export_max_records: 100000
+      price_storage_path: /performance-data/prices.json
+      exchange_rate_enabled: false
+      models_dev_prices_enabled: false

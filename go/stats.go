@@ -182,6 +182,9 @@ type RequestStatistics struct {
 	eventModelIndex      map[string][]dashboardEventDetail
 	eventSourceIndex     map[string][]dashboardEventDetail
 	eventAuthIndex       map[string][]dashboardEventDetail
+	eventIndexPending    []dashboardEventDetail
+	eventIndexDirty      bool
+	eventQueryCacheBytes int64
 
 	summaryCacheHits           int64
 	summaryCacheMisses         int64
@@ -225,6 +228,9 @@ type apiStats struct {
 }
 
 type modelStats struct {
+	hasEventRefs         bool
+	lastEventRef         *dashboardEventRef
+	nextEventSequence    int64
 	Accounting           []accountingRecord
 	accountingIdentities map[accountingIdentity]*accountingIdentity
 	TotalRequests        int64
@@ -809,16 +815,21 @@ func (s *RequestStatistics) invalidateSummaryLocked() {
 	if s == nil {
 		return
 	}
+	s.invalidateCachedResponsesLocked()
+	s.clearDashboardEventIndexesLocked()
+}
+
+// Price changes and metadata enrichment invalidate responses, but do not move
+// records or change any of the event-index filtering keys.
+func (s *RequestStatistics) invalidateCachedResponsesLocked() {
 	s.summaryVersion++
 	s.summaryCacheValid = false
 	s.eventQueryCache = nil
 	s.eventQueryCacheOrder = nil
-	s.eventIndexVersion = 0
-	s.eventIndex = nil
-	s.eventAPIIndex = nil
-	s.eventModelIndex = nil
-	s.eventSourceIndex = nil
-	s.eventAuthIndex = nil
+	s.eventQueryCacheBytes = 0
+	if s.hasDashboardEventIndexesLocked() {
+		s.eventIndexVersion = s.summaryVersion
+	}
 	s.summaryRangeCache = nil
 	s.summaryRangeCacheWindow = nil
 }
@@ -929,7 +940,7 @@ func (s *RequestStatistics) EnrichRecordedUsage(record UsageRecord, enrichment U
 			if isAnonymousProtocolFallbackDetail(detail) || isNativeProtocolCorrelationDetail(detail) {
 				s.protocolFallbackReconcileDirty = true
 			}
-			s.invalidateSummaryLocked()
+			s.invalidateCachedResponsesLocked()
 			if s.storageEnabled {
 				persistUpdate = &persistedDetail{API: apiName, Model: modelName, Detail: detail, MetadataOnly: true}
 			}
@@ -1003,6 +1014,7 @@ type storageWorkerState struct {
 	cfg                 storageWorkerConfig
 	file                *os.File
 	writer              *bufio.Writer
+	encoder             *json.Encoder
 	loadedPath          string
 	activeDate          string
 	lastFlush           time.Time
@@ -1013,6 +1025,9 @@ type storageWorkerState struct {
 	buffered            int64
 	snapshotRecords     int64
 	unsyncedRecords     int64
+	flushRetryAt        time.Time
+	syncRetryAt         time.Time
+	snapshotRetryAt     time.Time
 }
 
 func (s *RequestStatistics) startStorageWorkerLocked() {
@@ -1113,14 +1128,17 @@ func (s *RequestStatistics) updateStorageQueueLength(length int) {
 
 func (s *RequestStatistics) storageWorkerLoop(cfg storageWorkerConfig, queue <-chan persistedDetail, stop <-chan struct{}, done chan<- struct{}) {
 	state := &storageWorkerState{cfg: cfg, lastSnapshot: cfg.lastSnapshot}
-	interval := 100 * time.Millisecond
-	for _, candidate := range []time.Duration{cfg.flushInterval, cfg.syncInterval, cfg.snapshotInterval} {
-		if candidate > 0 && candidate < interval {
-			interval = candidate
-		}
+	timer := time.NewTimer(time.Hour)
+	timer.Stop()
+	defer timer.Stop()
+	batchBuffer := make([]persistedDetail, 0, defaultStorageWriteBatchSize)
+	appendQueued := func(detail persistedDetail) {
+		batchBuffer = collectStorageBatchInto(queue, detail, batchBuffer[:0])
+		s.updateStorageQueueLength(len(queue))
+		state.appendBatch(s, batchBuffer)
+		clear(batchBuffer)
+		batchBuffer = batchBuffer[:0]
 	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
 	defer close(done)
 	defer func() {
 		state.close(s)
@@ -1135,8 +1153,15 @@ func (s *RequestStatistics) storageWorkerLoop(cfg storageWorkerConfig, queue <-c
 	}()
 
 	for {
+		var wake <-chan time.Time
+		if deadline := state.nextDeadline(time.Now()); !deadline.IsZero() {
+			timer.Reset(max(time.Until(deadline), 0))
+			wake = timer.C
+		} else {
+			timer.Stop()
+		}
 		select {
-		case now := <-ticker.C:
+		case now := <-wake:
 			if state.flushDue(now) {
 				state.flush(s, now)
 			}
@@ -1147,16 +1172,12 @@ func (s *RequestStatistics) storageWorkerLoop(cfg storageWorkerConfig, queue <-c
 				state.writeSnapshot(s, now)
 			}
 		case detail := <-queue:
-			batch := collectStorageBatch(queue, detail)
-			s.updateStorageQueueLength(len(queue))
-			state.appendBatch(s, batch)
+			appendQueued(detail)
 		case <-stop:
 			for {
 				select {
 				case detail := <-queue:
-					batch := collectStorageBatch(queue, detail)
-					s.updateStorageQueueLength(len(queue))
-					state.appendBatch(s, batch)
+					appendQueued(detail)
 				default:
 					return
 				}
@@ -1173,7 +1194,10 @@ func collectStorageBatch(queue <-chan persistedDetail, first persistedDetail) []
 	if capacity <= 0 {
 		capacity = 1
 	}
-	batch := make([]persistedDetail, 0, capacity)
+	return collectStorageBatchInto(queue, first, make([]persistedDetail, 0, capacity))
+}
+
+func collectStorageBatchInto(queue <-chan persistedDetail, first persistedDetail, batch []persistedDetail) []persistedDetail {
 	batch = append(batch, first)
 	for len(batch) < defaultStorageWriteBatchSize {
 		select {
@@ -1197,16 +1221,7 @@ func (w *storageWorkerState) appendBatch(s *RequestStatistics, batch []persisted
 	}
 	records := 0
 	for _, detail := range batch {
-		raw, err := json.Marshal(detail)
-		if err != nil {
-			s.setStorageLastError(err)
-			continue
-		}
-		if _, err := w.writer.Write(raw); err != nil {
-			s.setStorageLastError(err)
-			continue
-		}
-		if err := w.writer.WriteByte('\n'); err != nil {
+		if err := w.encoder.Encode(detail); err != nil {
 			s.setStorageLastError(err)
 			continue
 		}
@@ -1333,6 +1348,7 @@ func (w *storageWorkerState) open(s *RequestStatistics, now time.Time) error {
 	}
 	w.file = file
 	w.writer = bufio.NewWriter(file)
+	w.encoder = json.NewEncoder(w.writer)
 	w.loadedPath = path
 	w.activeDate = date
 	w.report(s)
@@ -1340,14 +1356,14 @@ func (w *storageWorkerState) open(s *RequestStatistics, now time.Time) error {
 }
 
 func (w *storageWorkerState) flushDue(now time.Time) bool {
-	if w == nil || w.writer == nil || w.buffered <= 0 {
+	if w == nil || w.writer == nil || w.buffered <= 0 || now.Before(w.flushRetryAt) {
 		return false
 	}
 	return w.cfg.flushInterval <= 0 || w.lastFlush.IsZero() || now.Sub(w.lastFlush) >= w.cfg.flushInterval
 }
 
 func (w *storageWorkerState) syncDue(now time.Time) bool {
-	if w == nil || w.file == nil || w.unsyncedRecords <= 0 {
+	if w == nil || w.file == nil || w.unsyncedRecords <= 0 || now.Before(w.syncRetryAt) {
 		return false
 	}
 	if w.cfg.syncRecordInterval > 0 && w.unsyncedRecords >= int64(w.cfg.syncRecordInterval) {
@@ -1364,7 +1380,7 @@ func (w *storageWorkerState) syncDue(now time.Time) bool {
 }
 
 func (w *storageWorkerState) snapshotDue(now time.Time) bool {
-	if w == nil || w.snapshotRecords <= 0 {
+	if w == nil || w.snapshotRecords <= 0 || now.Before(w.snapshotRetryAt) {
 		return false
 	}
 	if w.cfg.snapshotRecordInterval > 0 && w.snapshotRecords >= int64(w.cfg.snapshotRecordInterval) {
@@ -1385,10 +1401,12 @@ func (w *storageWorkerState) flush(s *RequestStatistics, now time.Time) bool {
 		return true
 	}
 	if err := w.writer.Flush(); err != nil {
+		w.flushRetryAt = time.Now().Add(storageRetryDelay)
 		s.setStorageLastError(err)
 		return false
 	}
 	w.buffered = 0
+	w.flushRetryAt = time.Time{}
 	w.lastFlush = now
 	w.report(s)
 	return true
@@ -1399,13 +1417,16 @@ func (w *storageWorkerState) sync(s *RequestStatistics, now time.Time) bool {
 		return true
 	}
 	if !w.flush(s, now) {
+		w.syncRetryAt = time.Now().Add(storageRetryDelay)
 		return false
 	}
 	if err := w.file.Sync(); err != nil {
+		w.syncRetryAt = time.Now().Add(storageRetryDelay)
 		s.setStorageLastError(err)
 		return false
 	}
 	w.unsyncedRecords = 0
+	w.syncRetryAt = time.Time{}
 	w.lastSync = now
 	w.report(s)
 	return true
@@ -1420,6 +1441,7 @@ func (w *storageWorkerState) writeSnapshot(s *RequestStatistics, now time.Time) 
 	}
 	snapshot := s.Snapshot()
 	if err := writeStorageSnapshotFile(w.cfg.dir, snapshot, now); err != nil {
+		w.snapshotRetryAt = time.Now().Add(storageRetryDelay)
 		s.setStorageLastError(err)
 		return false
 	}
@@ -1430,6 +1452,7 @@ func (w *storageWorkerState) writeSnapshot(s *RequestStatistics, now time.Time) 
 		s.updateStorageCompaction(compacted, now)
 	}
 	w.lastSnapshot = now
+	w.snapshotRetryAt = time.Time{}
 	w.snapshotRecords = 0
 	w.report(s)
 	return true
@@ -1458,6 +1481,7 @@ func (w *storageWorkerState) closeFile(s *RequestStatistics, now time.Time, sync
 			w.lastFlush = now
 		}
 		w.writer = nil
+		w.encoder = nil
 	}
 	if w.file != nil {
 		if syncFile {
@@ -1581,7 +1605,10 @@ func (s *RequestStatistics) recordDetailWithAccountingLocked(apiName, modelName 
 	if isAnonymousProtocolFallbackDetail(detail) || isNativeProtocolCorrelationDetail(detail) {
 		s.protocolFallbackReconcileDirty = true
 	}
-	s.invalidateSummaryLocked()
+	s.invalidateCachedResponsesLocked()
+	if !archived {
+		s.queueDashboardEventLocked(apiName, modelName, apiSt.Models[modelName].lastEventRef)
+	}
 	return true
 }
 
@@ -1915,6 +1942,9 @@ func mergeModelStats(dst, src *modelStats) {
 	dst.latencySum = addNonNegativeInt64(dst.latencySum, src.latencySum)
 	dst.latencyN = addNonNegativeInt64(dst.latencyN, src.latencyN)
 	dst.Details = append(dst.Details, src.Details...)
+	// Snapshot normalization can merge models with independently assigned
+	// sequences. Initialize their combined order before queries or new writes.
+	dst.nextEventSequence = 0
 	for _, r := range src.Accounting {
 		dst.archiveDetail(r.detail())
 	}
@@ -3352,7 +3382,7 @@ func (s *RequestStatistics) refreshExchangeRateOnce(stop <-chan struct{}) {
 	s.exchangeRateLastError = ""
 	s.exchangeRateFailures = 0
 	s.currencyVersion++
-	s.invalidateSummaryLocked()
+	s.invalidateCachedResponsesLocked()
 	s.mu.Unlock()
 }
 
@@ -3393,7 +3423,7 @@ func (s *RequestStatistics) recordExchangeRateFailure(err error) {
 		s.exchangeRateLastError = err.Error()
 	}
 	s.currencyVersion++
-	s.invalidateSummaryLocked()
+	s.invalidateCachedResponsesLocked()
 }
 
 func (s *RequestStatistics) currencyStateLocked(now time.Time) CurrencyState {
@@ -3612,7 +3642,7 @@ func (s *RequestStatistics) refreshModelsDevPricesOnceWithStop(stop <-chan struc
 	s.modelsDevLastError = ""
 	s.modelsDevETag = resp.Header.Get("ETag")
 	s.rebuildCostSeriesLocked()
-	s.invalidateSummaryLocked()
+	s.invalidateCachedResponsesLocked()
 	s.mu.Unlock()
 }
 
@@ -4378,10 +4408,10 @@ func (s *RequestStatistics) UpsertModelPrice(model string, price ModelPrice) (Mo
 	// all derived aggregates before returning either success or failure.
 	s.rebuildCostSeriesLocked()
 	if err := s.saveModelPricesLocked(); err != nil {
-		s.invalidateSummaryLocked()
+		s.invalidateCachedResponsesLocked()
 		return ModelPricesResponse{}, err
 	}
-	s.invalidateSummaryLocked()
+	s.invalidateCachedResponsesLocked()
 	return s.modelPricesResponseLocked(), nil
 }
 
@@ -4404,10 +4434,10 @@ func (s *RequestStatistics) DeleteModelPrice(model string) (ModelPricesResponse,
 	s.priceVersion++
 	s.rebuildCostSeriesLocked()
 	if err := s.saveModelPricesLocked(); err != nil {
-		s.invalidateSummaryLocked()
+		s.invalidateCachedResponsesLocked()
 		return ModelPricesResponse{}, err
 	}
-	s.invalidateSummaryLocked()
+	s.invalidateCachedResponsesLocked()
 	return s.modelPricesResponseLocked(), nil
 }
 
@@ -4473,6 +4503,9 @@ func (s *RequestStatistics) updateAPIStatsWithAccounting(apiSt *apiStats, model 
 	modelSt.latencyN = addNonNegativeInt64(modelSt.latencyN, totals.latencyN)
 	modelSt.estimatedCost = addNonNegativeCost(modelSt.estimatedCost, cost)
 	modelSt.providerStats = incrementModelProviderStats(modelSt.providerStats, detail.Provider, detail.Failed, totals)
+	if !archived && s.hasDashboardEventIndexesLocked() {
+		detail.eventRef = &dashboardEventRef{}
+	}
 	modelSt.appendDetail(detail, archived)
 	return totals
 }
@@ -4814,6 +4847,10 @@ func (s *RequestStatistics) trimModelDetailsLocked(model *modelStats) bool {
 	removed := len(model.Details) - s.maxDetailsPerModel
 	for _, d := range model.Details[:removed] {
 		model.archiveDetail(d)
+		if d.eventRef != nil {
+			d.eventRef.detail = nil
+			s.eventIndexDirty = true
+		}
 	}
 	clear(model.Details[:removed])
 	model.Details = model.Details[removed:]
@@ -4860,6 +4897,9 @@ func (s *RequestStatistics) pruneLocked(now time.Time, sortNeeded bool) {
 							}
 						}
 					} else {
+						if d.eventRef != nil {
+							d.eventRef.detail = nil
+						}
 						s.decrementCounters(d, apiSt, modelSt, modelName)
 						s.evictedTotal++
 						changed = true
@@ -4874,6 +4914,7 @@ func (s *RequestStatistics) pruneLocked(now time.Time, sortNeeded bool) {
 				})
 			}
 			modelSt.Details = details
+			modelSt.rebindEventRefs(0)
 			if len(details) == 0 {
 				modelSt.Details = nil
 			}
@@ -5306,6 +5347,8 @@ func (s *RequestStatistics) snapshotLocked() StatisticsSnapshot {
 
 func cloneRequestDetail(detail RequestDetail) RequestDetail {
 	copy := detail
+	copy.eventRef = nil
+	copy.eventSequence = 0
 	if detail.CostUSD != nil {
 		cost := *detail.CostUSD
 		copy.CostUSD = &cost
@@ -7468,6 +7511,7 @@ func dashboardRangeCutoff(rangeKey string, now time.Time) time.Time {
 type dashboardEventDetail struct {
 	accounting  bool
 	detail      *RequestDetail
+	ref         *dashboardEventRef
 	upstreamAPI string
 	sortKey     string
 	modelName   string
@@ -7475,19 +7519,23 @@ type dashboardEventDetail struct {
 }
 
 func (d dashboardEventDetail) requestDetail() RequestDetail {
-	if d.detail == nil {
+	p := d.detailPointer()
+	if p == nil {
 		return RequestDetail{}
 	}
-	detail := *d.detail
+	detail := *p
+	detail.eventRef = nil
+	detail.eventSequence = 0
 	detail.UpstreamAPI = d.upstreamAPI
 	return detail
 }
 
 func (d dashboardEventDetail) timestamp() time.Time {
-	if d.detail == nil {
+	p := d.detailPointer()
+	if p == nil {
 		return time.Time{}
 	}
-	return d.detail.Timestamp
+	return p.Timestamp
 }
 
 func dashboardEventBefore(a, b dashboardEventDetail) bool {
@@ -7498,6 +7546,9 @@ func dashboardEventBefore(a, b dashboardEventDetail) bool {
 	}
 	if a.sortKey != b.sortKey {
 		return a.sortKey < b.sortKey
+	}
+	if a.modelName != b.modelName {
+		return a.modelName < b.modelName
 	}
 	return a.sequence < b.sequence
 }
@@ -7591,16 +7642,26 @@ func (s *RequestStatistics) cacheDashboardEventsLocked(key dashboardEventCacheKe
 	if s == nil {
 		return
 	}
+	bytes := eventCacheEntryEstimatedBytes(key, result)
+	if bytes > dashboardEventCacheByteBudget {
+		return
+	}
 	if s.eventQueryCache == nil {
 		s.eventQueryCache = make(map[dashboardEventCacheKey]EventsResult)
+		s.eventQueryCacheBytes = 0
 	}
-	if _, exists := s.eventQueryCache[key]; !exists {
+	if old, exists := s.eventQueryCache[key]; exists {
+		s.eventQueryCacheBytes -= eventCacheEntryEstimatedBytes(key, old)
+	} else {
 		s.eventQueryCacheOrder = append(s.eventQueryCacheOrder, key)
 	}
 	s.eventQueryCache[key] = cloneEventsResult(result, time.Time{})
-	for len(s.eventQueryCacheOrder) > dashboardEventCacheMax {
+	s.eventQueryCacheBytes += bytes
+	for len(s.eventQueryCacheOrder) > dashboardEventCacheMax || s.eventQueryCacheBytes > dashboardEventCacheByteBudget {
 		evict := s.eventQueryCacheOrder[0]
+		s.eventQueryCacheOrder[0] = dashboardEventCacheKey{}
 		s.eventQueryCacheOrder = s.eventQueryCacheOrder[1:]
+		s.eventQueryCacheBytes -= eventCacheEntryEstimatedBytes(evict, s.eventQueryCache[evict])
 		delete(s.eventQueryCache, evict)
 	}
 }
@@ -7610,13 +7671,10 @@ func (s *RequestStatistics) refreshDashboardEventIndexesLocked() {
 		return
 	}
 	if s.eventIndexVersion != s.summaryVersion {
+		s.clearDashboardEventIndexesLocked()
 		s.eventIndexVersion = s.summaryVersion
-		s.eventIndex = nil
-		s.eventAPIIndex = nil
-		s.eventModelIndex = nil
-		s.eventSourceIndex = nil
-		s.eventAuthIndex = nil
 	}
+	s.applyDashboardEventUpdatesLocked()
 }
 
 func (s *RequestStatistics) dashboardEventIndexLocked(api string) []dashboardEventDetail {
@@ -7632,7 +7690,9 @@ func (s *RequestStatistics) dashboardEventIndexLocked(api string) []dashboardEve
 			return events
 		}
 		events := buildDashboardEventIndexForAPI(api, s.apis[api])
-		s.eventAPIIndex[api] = events
+		if s.admitDashboardEventIndexLocked(events) {
+			s.eventAPIIndex[api] = events
+		}
 		return events
 	}
 	if s.eventIndex == nil {
@@ -7643,7 +7703,10 @@ func (s *RequestStatistics) dashboardEventIndexLocked(api string) []dashboardEve
 		sort.Slice(events, func(i, j int) bool {
 			return dashboardEventBefore(events[i], events[j])
 		})
-		s.eventIndex = events
+		if s.admitDashboardEventIndexLocked(events) {
+			s.eventIndex = events
+		}
+		return events
 	}
 	return s.eventIndex
 }
@@ -7707,7 +7770,9 @@ func (s *RequestStatistics) dashboardEventModelIndexLocked(model string) []dashb
 		return events
 	}
 	events := buildDashboardEventIndexForFilter(s.apis, dashboardEventIndexFilterModel, model)
-	s.eventModelIndex[model] = events
+	if s.admitDashboardEventIndexLocked(events) {
+		s.eventModelIndex[model] = events
+	}
 	return events
 }
 
@@ -7723,7 +7788,9 @@ func (s *RequestStatistics) dashboardEventSourceIndexLocked(source string) []das
 		return events
 	}
 	events := buildDashboardEventIndexForFilter(s.apis, dashboardEventIndexFilterSource, source)
-	s.eventSourceIndex[source] = events
+	if s.admitDashboardEventIndexLocked(events) {
+		s.eventSourceIndex[source] = events
+	}
 	return events
 }
 
@@ -7739,12 +7806,14 @@ func (s *RequestStatistics) dashboardEventAuthIndexLocked(authIndex string) []da
 		return events
 	}
 	events := buildDashboardEventIndexForFilter(s.apis, dashboardEventIndexFilterAuth, authIndex)
-	s.eventAuthIndex[authIndex] = events
+	if s.admitDashboardEventIndexLocked(events) {
+		s.eventAuthIndex[authIndex] = events
+	}
 	return events
 }
 
 func dashboardEventModelKey(event dashboardEventDetail) string {
-	return dashboardEventDetailModelKey(event.detail, event.modelName)
+	return dashboardEventDetailModelKey(event.detailPointer(), event.modelName)
 }
 
 func dashboardEventDetailModelKey(detail *RequestDetail, modelName string) string {
@@ -7755,7 +7824,7 @@ func dashboardEventDetailModelKey(detail *RequestDetail, modelName string) strin
 }
 
 func dashboardEventSourceKey(event dashboardEventDetail) string {
-	return dashboardEventDetailSourceKey(event.detail)
+	return dashboardEventDetailSourceKey(event.detailPointer())
 }
 
 func dashboardEventDetailSourceKey(detail *RequestDetail) string {
@@ -7766,7 +7835,7 @@ func dashboardEventDetailSourceKey(detail *RequestDetail) string {
 }
 
 func dashboardEventAuthKey(event dashboardEventDetail) string {
-	return dashboardEventDetailAuthKey(event.detail)
+	return dashboardEventDetailAuthKey(event.detailPointer())
 }
 
 func dashboardEventDetailAuthKey(detail *RequestDetail) string {
@@ -7819,16 +7888,14 @@ func appendDashboardEventIndexForFilter(events []dashboardEventDetail, apiName s
 	if apiSt == nil {
 		return events
 	}
-	sequence := int64(len(events))
 	for modelName, modelSt := range apiSt.Models {
 		if modelSt == nil {
 			continue
 		}
 		for i := range modelSt.Details {
 			if dashboardEventIndexFilterMatches(&modelSt.Details[i], modelName, filter, value) {
-				events = append(events, dashboardEventDetail{detail: &modelSt.Details[i], upstreamAPI: apiName, sortKey: apiName, modelName: modelName, sequence: sequence})
+				events = append(events, modelSt.eventAt(apiName, modelName, i))
 			}
-			sequence++
 		}
 	}
 	return events
@@ -7874,14 +7941,12 @@ func appendDashboardEventIndexForAPI(events []dashboardEventDetail, apiName stri
 	if apiSt == nil {
 		return events
 	}
-	sequence := int64(len(events))
 	for modelName, modelSt := range apiSt.Models {
 		if modelSt == nil {
 			continue
 		}
 		for i := range modelSt.Details {
-			events = append(events, dashboardEventDetail{detail: &modelSt.Details[i], upstreamAPI: apiName, sortKey: apiName, modelName: modelName, sequence: sequence})
-			sequence++
+			events = append(events, modelSt.eventAt(apiName, modelName, i))
 		}
 	}
 	return events
@@ -7890,7 +7955,7 @@ func appendDashboardEventIndexForAPI(events []dashboardEventDetail, apiName stri
 func requestDetailsFromDashboardEvents(events []dashboardEventDetail) []RequestDetail {
 	details := make([]RequestDetail, len(events))
 	for i, event := range events {
-		details[i] = event.requestDetail()
+		details[i] = cloneRequestDetail(event.requestDetail())
 	}
 	return details
 }
@@ -8000,7 +8065,7 @@ func (s *RequestStatistics) QueryExportEventsPage(params EventsQuery, offset int
 		}
 		matchOffset := total
 		if (maxRecords <= 0 || matchOffset < maxRecords) && matchOffset >= offset && len(events) < pageLimit {
-			events = append(events, d)
+			events = append(events, cloneRequestDetail(d))
 		}
 		total++
 	}
@@ -8162,10 +8227,10 @@ func (s *RequestStatistics) queryEventsAt(params EventsQuery, paginate bool, exp
 		}
 		if !paginate {
 			if exportLimit <= 0 || len(events) < exportLimit {
-				events = append(events, d)
+				events = append(events, cloneRequestDetail(d))
 			}
 		} else if total >= params.Offset && len(events) < params.Limit {
-			events = append(events, d)
+			events = append(events, cloneRequestDetail(d))
 		}
 		total++
 	}
@@ -8438,7 +8503,7 @@ func (s *RequestStatistics) QueryAPIDetailForClientAPIAt(api string, rangeKey st
 	})
 	result.RecentEvents = make([]RequestDetail, len(recentEvents))
 	for i, dm := range recentEvents {
-		result.RecentEvents[i] = dm.requestDetail()
+		result.RecentEvents[i] = cloneRequestDetail(dm.requestDetail())
 	}
 	result.GeneratedAt = generatedAt
 	return finish(result)
@@ -8806,6 +8871,8 @@ func (s *RequestStatistics) RuntimeStatus() RuntimeStatus {
 		LastEventsQueryTotal:       s.lastEventsQueryTotal,
 		EventIndexVersion:          s.eventIndexVersion,
 		EventIndexEntries:          s.dashboardEventIndexEntriesLocked(),
+		EventIndexBytes:            s.dashboardEventIndexBytesLocked(),
+		EventCacheEstimatedBytes:   s.eventQueryCacheBytes,
 		APIDetailQueries:           s.apiDetailQueries,
 		LastAPIDetailDurationMs:    durationMilliseconds(s.lastAPIDetailDuration),
 		LastAPIDetailTotalEvents:   s.lastAPIDetailTotal,
