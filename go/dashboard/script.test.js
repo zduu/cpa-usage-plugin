@@ -855,6 +855,55 @@ test('dashboard blob downloads keep object URLs alive for Safari', () => {
   assert.strictEqual(timeoutDelays.at(-1), 60000);
 });
 
+test('conditional cache does not let an older response replace newer data', async () => {
+  const { context } = createDashboardHarness();
+  await context.load();
+  const pending = [];
+  context.fetchJsonPayloadWithMeta = () => new Promise((resolve) => pending.push(resolve));
+  const older = context.fetchConditionalJsonPayloadWithMeta('race', '/race');
+  const newer = context.fetchConditionalJsonPayloadWithMeta('race', '/race');
+  pending[1]({ statusCode: 200, headers: { ETag: 'new' }, data: { version: 2 } });
+  await newer;
+  pending[0]({ statusCode: 200, headers: { ETag: 'old' }, data: { version: 1 } });
+  await older;
+  context.fetchJsonPayloadWithMeta = async () => ({ statusCode: 304, headers: {} });
+  const cached = await context.fetchConditionalJsonPayloadWithMeta('race', '/race');
+  assert.strictEqual(cached.data.version, 2);
+  assert.strictEqual(cached.etag, 'new');
+});
+
+test('filtered summary ignores older success and error for the same selection', async () => {
+  const { context } = createDashboardHarness();
+  await context.load();
+  vm.runInContext('selectedClientApi = { selector: "test-client" }', context);
+  const pending = [];
+  context.fetchConditionalJsonPayloadWithMeta = () => new Promise((resolve, reject) => pending.push({ resolve, reject }));
+  for (const failOlder of [false, true]) {
+    const start = pending.length;
+    const older = context.refreshFilteredSummary();
+    const newer = context.refreshFilteredSummary();
+    pending[start + 1].resolve({ data: { version: 2 }, notModified: false });
+    await newer;
+    if (failOlder) pending[start].reject(new Error('stale failure'));
+    else pending[start].resolve({ data: { version: 1 }, notModified: false });
+    await older;
+    assert.strictEqual(vm.runInContext('filteredSummaryData.version', context), 2);
+    assert.strictEqual(vm.runInContext('filteredSummaryError', context), null);
+  }
+});
+
+test('API detail cache evicts old selections and conditional request tokens are released', async () => {
+  const { context } = createDashboardHarness();
+  await context.load();
+  for (let i = 0; i < 80; i++) context.cacheApiDetail('selection-' + i, { version: i });
+  assert.strictEqual(vm.runInContext('apiDetailCache.size', context), 32);
+  assert.strictEqual(vm.runInContext('apiDetailCache.has("selection-0")', context), false);
+  assert.strictEqual(vm.runInContext('apiDetailCache.get("selection-79").version', context), 79);
+  context.fetchJsonPayloadWithMeta = async () => { throw new Error('network error'); };
+  await assert.rejects(context.fetchConditionalJsonPayloadWithMeta('failure', '/failure'), /network error/);
+  assert.strictEqual(vm.runInContext('conditionalPayloadRequests.size', context), 0);
+});
+
 test('dashboard fallback merges legacy hashless client API stats into a unique hashed group', () => {
   const { context } = createDashboardHarness();
   const rows = context.coalesceLegacyHashlessClientApiStats([

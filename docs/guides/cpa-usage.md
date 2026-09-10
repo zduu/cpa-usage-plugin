@@ -554,6 +554,8 @@ plugins:
 - `/health` 的 `storage.write_queue_length` 和 `storage.write_queue_capacity` 可观察后台写入队列积压；`storage.last_write_batch_records`、`storage.last_write_batch_duration_ms`、`storage.last_write_queue_wait_ms` 可观察最近 writer 批次规模、写入耗时和最长排队时长；`storage.write_batch_avg_duration_ms`、`storage.write_batch_p95_duration_ms`、`storage.write_batch_p99_duration_ms`、`storage.write_queue_wait_avg_ms`、`storage.write_queue_wait_p95_ms`、`storage.write_queue_wait_p99_ms` 和 `storage.write_pressure` 可观察持续磁盘压力与长尾抖动。看板底部出现"持久化排队中"或"持久化写入偏慢"时，说明磁盘写入速度短时间低于请求记录速度。
 - 如果已经有内存数据，建议先导出；开启持久化并重启后，再把导出的 JSON 导入一次，后续数据才会继续写入持久化文件。
 
+开发中候选的恢复保护：如果 `snapshot.json` 的版本不受支持或 `generated_at` 无效，插件会报告 `invalid storage snapshot header`，不加载该快照，也不对该目标启动 writer、自动清理分片或在关闭时覆盖快照。此时配置仍可能显示已开启持久化，但新增统计仅留在内存，不能视为已经落盘。请保留原目录，检查 `/health` 的存储错误；导出当前内存数据后，使用兼容版本或已验证的备份恢复，再重启核验。不要直接把未知快照版本号改小或删除旧分片来绕过错误。SQLite 迁移仍处于开发阶段，当前没有可启用的数据库后端配置。
+
 ## 8. 更新插件
 
 ### 方式 A：管理面板一键更新

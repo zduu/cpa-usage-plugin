@@ -35,8 +35,11 @@ const hiddenPollDelayMs = 300000;
 let apiDetailSeq = 0;
 let eventsSeq = 0;
 let summaryLoadSeq = 0;
+let filteredSummarySeq = 0;
 const apiDetailCache = new Map();
+const apiDetailCacheMax = 32;
 const conditionalPayloadCache = new Map();
+const conditionalPayloadRequests = new Map();
 const conditionalPayloadCacheMax = 64;
 let apiDetailLastRender = null;
 let updatedState = { type: 'loading', generatedAt: null, message: '' };
@@ -396,6 +399,16 @@ function cacheConditionalPayload(cacheKey, value) {
 }
 
 async function fetchConditionalJsonPayloadWithMeta(cacheKey, url, options) {
+  const request = {};
+  conditionalPayloadRequests.set(cacheKey, request);
+  try {
+    return await fetchConditionalJsonPayloadRequest(cacheKey, url, options, request);
+  } finally {
+    if (conditionalPayloadRequests.get(cacheKey) === request) conditionalPayloadRequests.delete(cacheKey);
+  }
+}
+
+async function fetchConditionalJsonPayloadRequest(cacheKey, url, options, request) {
   const cached = conditionalPayloadCache.get(cacheKey);
   const merged = Object.assign({}, options || {});
   const headers = cloneHeaders(merged.headers);
@@ -413,8 +426,12 @@ async function fetchConditionalJsonPayloadWithMeta(cacheKey, url, options) {
     if (meta.statusCode === 304) throw new Error(t('no_304_cache'));
   }
   const etag = headerValue(meta.headers, 'ETag');
-  if (etag) cacheConditionalPayload(cacheKey, { etag, data: meta.data });
-  else conditionalPayloadCache.delete(cacheKey);
+  // Rendering guards alone are insufficient: a late response must not poison
+  // the ETag cache subsequently used by a current request's 304 response.
+  if (conditionalPayloadRequests.get(cacheKey) === request) {
+    if (etag) cacheConditionalPayload(cacheKey, { etag, data: meta.data });
+    else conditionalPayloadCache.delete(cacheKey);
+  }
   return { data: meta.data, etag: etag, notModified: false };
 }
 
@@ -1284,6 +1301,7 @@ function renderClientApiStats() {
 
 async function selectClientApiCard(selector, rows) {
   if (!selector) return;
+  filteredSummarySeq++;
   eventsOffset = 0;
   if (selectedClientApi && selectedClientApi.selector === selector) {
     selectedClientApi = null;
@@ -1302,6 +1320,7 @@ async function selectClientApiCard(selector, rows) {
 }
 
 async function refreshFilteredSummary() {
+  const requestSeq = ++filteredSummarySeq;
   if (!selectedClientApi) return null;
   const context = clientApiFilterContext();
   const params = new URLSearchParams();
@@ -1312,13 +1331,13 @@ async function refreshFilteredSummary() {
   try {
     const result = await fetchConditionalJsonPayloadWithMeta('dashboard-summary:' + url, url, pluginFetchOptions({ cache: 'no-store' }));
     const data = requireObjectPayload(result.data, 'dashboard-summary');
-    if (context !== clientApiFilterContext()) return null;
+    if (requestSeq !== filteredSummarySeq || context !== clientApiFilterContext()) return null;
     filteredSummaryData = data;
     filteredSummaryContext = context;
     filteredSummaryError = null;
     return { data, notModified: result.notModified };
   } catch (error) {
-    if (context === clientApiFilterContext()) {
+    if (requestSeq === filteredSummarySeq && context === clientApiFilterContext()) {
       if (filteredSummaryContext !== context) filteredSummaryData = null;
       filteredSummaryError = error;
     }
@@ -1399,6 +1418,12 @@ function apiDetailCacheKey(api) {
   return api + '|' + $('range').value + '|' + selectedClientApiSelector();
 }
 
+function cacheApiDetail(cacheKey, detail) {
+  if (apiDetailCache.has(cacheKey)) apiDetailCache.delete(cacheKey);
+  apiDetailCache.set(cacheKey, detail);
+  while (apiDetailCache.size > apiDetailCacheMax) apiDetailCache.delete(apiDetailCache.keys().next().value);
+}
+
 function apiDetailErrorHtml(errorRows, loading, error, knownFailureCount) {
   if (loading && !errorRows.length) return '<div><div class="subtle" style="margin-bottom:8px">' + t('error_stats') + '</div><div class="empty">' + t('loading_api_detail') + '</div></div>';
   if (error && !errorRows.length && num(knownFailureCount) === 0) return '<div><div class="subtle" style="margin-bottom:8px">' + t('error_stats') + '</div><div class="empty">' + t('no_failures') + '</div></div>';
@@ -1477,7 +1502,7 @@ async function renderApiDetail() {
   try {
     const result = await fetchApiDetailData(api);
     if (seq !== apiDetailSeq || api !== selectedApi) return;
-    apiDetailCache.set(cacheKey, result);
+    cacheApiDetail(cacheKey, result);
     renderApiDetailContent(apiData, { detail: result });
   } catch (e) {
     if (seq !== apiDetailSeq || api !== selectedApi) return;
@@ -2349,6 +2374,7 @@ async function load(options) {
     renderUpdated();
     const refreshDetails = !!selectedClientApi || shouldRefreshDetails(previousSummary, summaryData, forceDetails);
     await rerender({ refreshEvents: refreshDetails, refreshApiDetail: refreshDetails });
+    if (requestSeq !== summaryLoadSeq) return;
     currentRange = selectedRange;
     pollFailures = 0; schedulePoll(pollDelay());
   } catch (error) {
@@ -2371,6 +2397,7 @@ async function load(options) {
       renderUpdated();
       const refreshDetails = shouldRefreshDetails(previousSummary, summaryData, forceDetails);
       await rerender({ refreshEvents: refreshDetails, refreshApiDetail: refreshDetails });
+      if (requestSeq !== summaryLoadSeq) return;
       currentRange = selectedRange;
       pollFailures = 0; schedulePoll(pollDelay());
     } catch (fallbackError) {

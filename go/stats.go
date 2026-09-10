@@ -995,6 +995,8 @@ type persistedStorageSnapshot struct {
 
 const currentStorageSnapshotVersion = 2
 
+var errInvalidStorageSnapshotHeader = errors.New("invalid storage snapshot header")
+
 type storageWorkerConfig struct {
 	dir                    string
 	flushInterval          time.Duration
@@ -1639,6 +1641,15 @@ func (s *RequestStatistics) configureStorageLocked() {
 	var warnings []string
 	snapshotAt, err := s.loadStorageSnapshotLocked(dir, now)
 	if err != nil {
+		if errors.Is(err, errInvalidStorageSnapshotHeader) {
+			// Do not start a writer or run retention cleanup against an input
+			// whose version/cutoff we cannot interpret. Clear the target too:
+			// Close otherwise writes a fresh snapshot even without a worker.
+			s.storageDir = ""
+			s.storageLegacyPath = ""
+			s.storageLastError = err.Error()
+			return
+		}
 		warnings = append(warnings, err.Error())
 	}
 	if err := s.replayStorageFilesLocked(dir, legacyPath, now, snapshotAt); err != nil {
@@ -1714,6 +1725,13 @@ func (s *RequestStatistics) loadStorageSnapshotLocked(dir string, now time.Time)
 	if err := json.Unmarshal(raw, &persisted); err != nil {
 		return time.Time{}, fmt.Errorf("load storage snapshot: %w", err)
 	}
+	// Validate before changing live counters or replay cutoff. Previously a
+	// malformed generated_at restored the counters first and then returned
+	// an error, leaving a partially accepted snapshot in live statistics.
+	generatedAt, err := validateStorageSnapshotHeader(persisted.Version, persisted.GeneratedAt)
+	if err != nil {
+		return time.Time{}, err
+	}
 	if persisted.Version < currentStorageSnapshotVersion {
 		migrateLegacySnapshotCacheReads(&persisted.Usage)
 	}
@@ -1723,9 +1741,16 @@ func (s *RequestStatistics) loadStorageSnapshotLocked(dir string, now time.Time)
 		s.restoreStorageSnapshotLocked(persisted.Usage, now)
 		s.repairMigratedAttributionDetailsLocked(now)
 	}
-	generatedAt, err := time.Parse(time.RFC3339, persisted.GeneratedAt)
+	return generatedAt, nil
+}
+
+func validateStorageSnapshotHeader(version int, generated string) (time.Time, error) {
+	if version < 0 || version > currentStorageSnapshotVersion {
+		return time.Time{}, fmt.Errorf("%w: unsupported version %d", errInvalidStorageSnapshotHeader, version)
+	}
+	generatedAt, err := time.Parse(time.RFC3339, generated)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("parse storage snapshot time: %w", err)
+		return time.Time{}, fmt.Errorf("%w: parse storage snapshot time: %v", errInvalidStorageSnapshotHeader, err)
 	}
 	return generatedAt, nil
 }
@@ -5615,6 +5640,30 @@ func (s *RequestStatistics) detailCostLocked(modelName string, detail RequestDet
 	return tokenCostForPrice(detailTimeSeriesTokenStat(modelName, detail, totals), price)
 }
 
+// queryDetailPricer remembers only the last base-price lookup, not an effective
+// (time-dependent) price. It is bounded regardless of dimension cardinality and
+// lives for one query under s.mu, so repricing cannot leave stale entries.
+type queryDetailPricer struct {
+	stats           *RequestStatistics
+	model, provider string
+	price           ModelPrice
+	valid, found    bool
+}
+
+func (p *queryDetailPricer) cost(modelName string, detail RequestDetail, totals detailTotals) float64 {
+	model := detailModel(modelName, detail)
+	if !p.valid || p.model != model || p.provider != detail.Provider {
+		p.model, p.provider = model, detail.Provider
+		p.price, p.found = p.stats.priceForDetailLocked(model, detail.Provider)
+		p.valid = true
+	}
+	if !p.found {
+		return 0
+	}
+	price := effectiveDetailPrice(p.price, detail, p.stats.pricingLocation)
+	return tokenCostForPrice(detailTimeSeriesTokenStat(modelName, detail, totals), price)
+}
+
 // effectiveDetailPrice 在 effectivePrice 之上加一道回落:导入/恢复时被补出时间戳的
 // 记录不得套用时段规则(图纸「无时间戳记录维持基础价」)。effectivePrice 自己的
 // IsZero 守卫对这些记录已经失效——时间戳在它看到之前就被填上了。
@@ -6666,6 +6715,7 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsLocked(now time.Time, heal
 // and builds a fresh DashboardSummary. Caller must hold s.mu.
 func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Time, healthWindow time.Time, cutoff time.Time, clientAPI string) DashboardSummary {
 	summary := DashboardSummary{}
+	pricer := queryDetailPricer{stats: s}
 
 	// Usage accumulators
 	var totalRequests, successCount, failureCount int64
@@ -6726,7 +6776,7 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Ti
 				// Day/hour time series
 				dayKey := newSummaryDayKey(detail.Timestamp)
 				hourKey := detail.Timestamp.Hour()
-				cost := s.detailCostLocked(modelName, detail, totals)
+				cost := pricer.cost(modelName, detail, totals)
 				requestsByDay[dayKey] = addNonNegativeInt64(requestsByDay[dayKey], 1)
 				requestsByHour[hourKey] = addNonNegativeInt64(requestsByHour[hourKey], 1)
 				tokensByDay[dayKey] = addNonNegativeInt64(tokensByDay[dayKey], totals.totalTokens)
@@ -7509,7 +7559,6 @@ func dashboardRangeCutoff(rangeKey string, now time.Time) time.Time {
 }
 
 type dashboardEventDetail struct {
-	accounting  bool
 	detail      *RequestDetail
 	ref         *dashboardEventRef
 	upstreamAPI string
@@ -7968,14 +8017,14 @@ func dashboardEventQueryHasFilters(params EventsQuery) bool {
 		params.ClientAPI != ""
 }
 
-func dashboardEventPastCutoff(d RequestDetail, cutoff time.Time) bool {
+func dashboardEventPastCutoff(d *RequestDetail, cutoff time.Time) bool {
 	if cutoff.IsZero() {
 		return false
 	}
 	return d.Timestamp.IsZero() || d.Timestamp.Before(cutoff)
 }
 
-func dashboardEventMatches(d RequestDetail, params EventsQuery, cutoff time.Time) bool {
+func dashboardEventMatches(d *RequestDetail, params EventsQuery, cutoff time.Time) bool {
 	if dashboardEventPastCutoff(d, cutoff) {
 		return false
 	}
@@ -7994,7 +8043,7 @@ func dashboardEventMatches(d RequestDetail, params EventsQuery, cutoff time.Time
 	if params.AuthIndex != "" && d.AuthIndex != params.AuthIndex {
 		return false
 	}
-	if !clientAPISelectorMatchesDetail(params.ClientAPI, d) {
+	if params.ClientAPI != "" && !clientAPISelectorMatchesDetail(params.ClientAPI, *d) {
 		return false
 	}
 	return true
@@ -8053,7 +8102,10 @@ func (s *RequestStatistics) QueryExportEventsPage(params EventsQuery, offset int
 	events := make([]RequestDetail, 0, capacity)
 	total := 0
 	for _, dm := range index {
-		d := dm.requestDetail()
+		d := dm.detailPointer()
+		if d == nil {
+			continue
+		}
 		if !snapshotAt.IsZero() && !d.Timestamp.IsZero() && d.Timestamp.After(snapshotAt) {
 			continue
 		}
@@ -8065,7 +8117,7 @@ func (s *RequestStatistics) QueryExportEventsPage(params EventsQuery, offset int
 		}
 		matchOffset := total
 		if (maxRecords <= 0 || matchOffset < maxRecords) && matchOffset >= offset && len(events) < pageLimit {
-			events = append(events, cloneRequestDetail(d))
+			events = append(events, cloneRequestDetail(dm.requestDetail()))
 		}
 		total++
 	}
@@ -8218,7 +8270,11 @@ func (s *RequestStatistics) queryEventsAt(params EventsQuery, paginate bool, exp
 	events := make([]RequestDetail, 0, eventsCap)
 	total := 0
 	for _, dm := range index {
-		d := dm.requestDetail()
+		// Filter borrowed records under s.mu; copy only the requested page.
+		d := dm.detailPointer()
+		if d == nil {
+			continue
+		}
 		if dashboardEventPastCutoff(d, cutoff) {
 			break
 		}
@@ -8227,10 +8283,10 @@ func (s *RequestStatistics) queryEventsAt(params EventsQuery, paginate bool, exp
 		}
 		if !paginate {
 			if exportLimit <= 0 || len(events) < exportLimit {
-				events = append(events, cloneRequestDetail(d))
+				events = append(events, cloneRequestDetail(dm.requestDetail()))
 			}
 		} else if total >= params.Offset && len(events) < params.Limit {
-			events = append(events, cloneRequestDetail(d))
+			events = append(events, cloneRequestDetail(dm.requestDetail()))
 		}
 		total++
 	}
@@ -8273,9 +8329,10 @@ func (s *RequestStatistics) queryEventsAt(params EventsQuery, paginate bool, exp
 }
 
 func (s *RequestStatistics) attachEventCostsLocked(events []RequestDetail) {
+	pricer := queryDetailPricer{stats: s}
 	for i := range events {
 		detail := &events[i]
-		cost := s.detailCostLocked(detail.Model, *detail, detailTotalsFromRequest(*detail))
+		cost := pricer.cost(detail.Model, *detail, detailTotalsFromRequest(*detail))
 		detail.CostUSD = &cost
 	}
 }
@@ -8355,13 +8412,32 @@ func (s *RequestStatistics) QueryAPIDetailForClientAPIAt(api string, rangeKey st
 	errorAgg := make(map[apiDetailErrorKey]*APIDetailErrorStat)
 	recentEvents := make(dashboardEventHeap, 0, recentLimit)
 	heap.Init(&recentEvents)
+	// Select recent visible records newest-first, independently of accounting
+	// iteration. Aggregation keeps its original order (including the provider
+	// chosen for a shared source), while the heap avoids replacing every entry
+	// as an ascending history scan encounters newer requests.
+	for modelName, model := range apiSt.Models {
+		if model == nil {
+			continue
+		}
+		for i := len(model.Details) - 1; i >= 0; i-- {
+			d := &model.Details[i]
+			if dashboardEventPastCutoff(d, cutoff) || !clientAPISelectorMatchesDetail(clientAPI, *d) {
+				continue
+			}
+			appendBoundedDashboardEventHeap(&recentEvents, dashboardEventDetail{detail: d, upstreamAPI: api, sortKey: d.Model, modelName: modelName, sequence: int64(i)}, recentLimit)
+		}
+	}
 	var latencySum int64
 	var latencyN int64
-	sequence := int64(0)
+	// Without time rules finish computes prices from provider-aware totals.
+	// Per-record pricing would be discarded by applyModelEstimatedCostsLocked.
+	needsDetailPrices := s.hasTimeBasedPricesLocked()
+	pricer := queryDetailPricer{stats: s}
 
 	for dm := range apiAccountingEvents(api, apiSt) {
 		d := dm.requestDetail()
-		if dashboardEventPastCutoff(d, cutoff) {
+		if dashboardEventPastCutoff(&d, cutoff) {
 			continue
 		}
 		if !clientAPISelectorMatchesDetail(clientAPI, d) {
@@ -8409,7 +8485,9 @@ func (s *RequestStatistics) QueryAPIDetailForClientAPIAt(api string, rangeKey st
 				ms.SuccessCount = addNonNegativeInt64(ms.SuccessCount, 1)
 			}
 			ms.TotalTokens = addNonNegativeInt64(ms.TotalTokens, totalTokens)
-			ms.EstimatedCost = addNonNegativeCost(ms.EstimatedCost, s.detailCostLocked(modelLabel, d, detailTotals{totalTokens: totalTokens, inputTokens: inputTokens, outputTokens: outputTokens, cachedTokens: cachedTokens, cacheWriteTokens: cacheWriteTokens, reasoningTokens: reasoningTokens}))
+			if needsDetailPrices {
+				ms.EstimatedCost = addNonNegativeCost(ms.EstimatedCost, pricer.cost(modelLabel, d, detailTotals{totalTokens: totalTokens, inputTokens: inputTokens, outputTokens: outputTokens, cachedTokens: cachedTokens, cacheWriteTokens: cacheWriteTokens, reasoningTokens: reasoningTokens}))
+			}
 			ms.InputTokens = addNonNegativeInt64(ms.InputTokens, inputTokens)
 			ms.OutputTokens = addNonNegativeInt64(ms.OutputTokens, outputTokens)
 			ms.CachedTokens = addNonNegativeInt64(ms.CachedTokens, cachedTokens)
@@ -8460,10 +8538,6 @@ func (s *RequestStatistics) QueryAPIDetailForClientAPIAt(api string, rangeKey st
 			es.Count++
 		}
 
-		if !dm.accounting {
-			appendBoundedDashboardEventHeap(&recentEvents, dashboardEventDetail{detail: dm.detail, upstreamAPI: dm.upstreamAPI, sortKey: d.Model, sequence: sequence}, recentLimit)
-		}
-		sequence++
 	}
 
 	if !aggregateScope {

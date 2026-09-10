@@ -72,7 +72,7 @@ CPA 用量统计插件，用于在 CLIProxyAPI/CPA v7 插件系统中记录请�
 
 自 `v2.0.0` 起，发布说明以 [docs/releases/changelog.md](docs/releases/changelog.md) 为准，并由 workflow 在打 `vX.Y.Z` tag 时校验版本号并生成 GitHub Release。
 
-本地构建（需要 Go 1.26+ 和 CGO）：
+本地构建（需要 Go 1.26.6+ 和 CGO；已提高补丁版本下限以修复已知标准库安全问题）：
 
 ```bash
 cd go

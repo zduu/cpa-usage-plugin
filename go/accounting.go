@@ -52,6 +52,9 @@ func apiAccountingEvents(api string, a *apiStats) iter.Seq[dashboardEventDetail]
 			return
 		}
 		for name, m := range a.Models {
+			if m == nil {
+				continue
+			}
 			for i := range m.Details {
 				if !yield(dashboardEventDetail{detail: &m.Details[i], upstreamAPI: api, modelName: name}) {
 					return
@@ -59,7 +62,7 @@ func apiAccountingEvents(api string, a *apiStats) iter.Seq[dashboardEventDetail]
 			}
 			for _, r := range m.Accounting {
 				d := r.detail()
-				if !yield(dashboardEventDetail{detail: &d, upstreamAPI: api, modelName: name, accounting: true}) {
+				if !yield(dashboardEventDetail{detail: &d, upstreamAPI: api, modelName: name}) {
 					return
 				}
 			}
@@ -101,6 +104,14 @@ func (m *modelStats) pruneAccounting(s *RequestStatistics, api *apiStats, model 
 	}
 	changed := len(kept) != len(m.Accounting)
 	clear(m.Accounting[len(kept):])
+	// A past traffic burst must not keep an almost-empty ledger backing array
+	// resident for the entire retention period. Hysteresis avoids copying on
+	// every expiry; small arrays are left alone.
+	if changed && len(kept) > 0 && cap(kept) >= 1024 && len(kept) <= cap(kept)/4 {
+		compact := make([]accountingRecord, len(kept))
+		copy(compact, kept)
+		kept = compact
+	}
 	m.Accounting = kept
 	if changed {
 		m.accountingIdentities = make(map[accountingIdentity]*accountingIdentity)

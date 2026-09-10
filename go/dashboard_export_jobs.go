@@ -436,7 +436,8 @@ type eventExportSnapshot struct{ result EventsResult }
 
 func (s *RequestStatistics) captureEventExport(params EventsQuery, limit int, at time.Time) *eventExportSnapshot {
 	result := s.QueryExportEventsPage(params, 0, math.MaxInt, limit, at, nil)
-	result.Events = cloneRequestDetails(result.Events)
+	// QueryExportEventsPage already deep-clones records under the statistics
+	// lock and freezes their costs. A second clone doubles snapshot allocations.
 	return &eventExportSnapshot{result: result}
 }
 
