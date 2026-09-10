@@ -1833,10 +1833,59 @@ async function fetchExportJobResult(params) {
   try {
     const completed = await waitForExportJob(job);
     const downloadPath = completed.download_path || ('dashboard-events-export-download?id=' + encodeURIComponent(job.id));
+    if (completed.chunk_size && completed.etag && !completed.gzip) {
+      return await fetchExportJobChunks(completed, downloadPath);
+    }
     return await fetchTextPayloadWithMeta(managementEndpoint(downloadPath), pluginFetchOptions({ cache: 'no-store' }));
   } finally {
     await deleteExportJob(job.id);
   }
+}
+
+const exportCRC32Table = Uint32Array.from({ length: 256 }, (_, value) => {
+  for (let bit = 0; bit < 8; bit++) value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+  return value >>> 0;
+});
+
+function exportChunkChecksum(bytes) {
+  let crc = 0xffffffff;
+  for (const value of bytes) crc = exportCRC32Table[(crc ^ value) & 255] ^ (crc >>> 8);
+  return ((crc ^ 0xffffffff) >>> 0).toString(16).padStart(8, '0');
+}
+
+async function fetchExportJobChunks(job, downloadPath) {
+  const total = job.body_bytes;
+  const size = Math.min(job.chunk_size, 256 * 1024);
+  if (!Number.isSafeInteger(total) || total < 0 || !Number.isSafeInteger(size) || size <= 0) throw new Error(t('export_failed'));
+  const parts = [];
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  let offset = 0;
+  do {
+    const length = Math.min(size, Math.max(1, total - offset));
+    const params = new URLSearchParams({ chunk: '1', offset: String(offset), length: String(length), version: job.etag });
+    const url = managementEndpoint(downloadPath) + (downloadPath.includes('?') ? '&' : '?') + params.toString();
+    let chunk;
+    // Retry the same immutable file range; never advance on a failed read.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        chunk = await fetchJsonPayload(url, pluginFetchOptions({ cache: 'no-store' }));
+        break;
+      } catch (error) {
+        if (attempt === 2) throw error;
+        await delay(250 * (attempt + 1));
+      }
+    }
+    if (!chunk || chunk.offset !== offset || chunk.total !== total || chunk.etag !== job.etag || typeof chunk.data !== 'string') throw new Error(t('export_failed'));
+    const bytes = Uint8Array.from(atob(chunk.data), (value) => value.charCodeAt(0));
+    if (bytes.length !== Math.min(length, total - offset) || exportChunkChecksum(bytes) !== chunk.checksum_crc32) throw new Error(t('export_failed'));
+    parts.push(decoder.decode(bytes, { stream: true }));
+    offset += bytes.length;
+  } while (offset < total);
+  parts.push(decoder.decode());
+  return { data: parts.join(''), statusCode: 200, headers: {
+    'Content-Type': [job.content_type], 'X-Total-Count': [String(job.total)],
+    'X-Exported-Count': [String(job.exported)], 'X-Export-Truncated': [String(!!job.truncated)],
+  } };
 }
 
 function rowsCsv(rows) {

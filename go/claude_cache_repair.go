@@ -92,8 +92,8 @@ func (s *RequestStatistics) repairClaudeCacheFallbackDetailsLocked(now time.Time
 		}
 		for modelName, modelSt := range apiSt.Models {
 			if modelSt != nil {
-				for i := len(modelSt.Accounting) - 1; i >= 0; i-- {
-					detail := modelSt.Accounting[i].detail()
+				for i := modelSt.accounting.count - 1; i >= 0; i-- {
+					detail := modelSt.accounting.at(i).detail()
 					if !isPollutedClaudeCacheFallbackDetail(detail) {
 						continue
 					}

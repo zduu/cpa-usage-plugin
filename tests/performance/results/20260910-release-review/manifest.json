@@ -1,0 +1,26 @@
+{
+  "date": "2026-09-10T19:49:52.036569+08:00",
+  "candidate": "01373e5546bbfd5142b12b532496a354b36393fc",
+  "baseline": "ece14ec76bfe6939d35548088ce3e710129128d4",
+  "B1": "967915b23e9d35ff62e0da975b63cf9eab0dead7",
+  "toolchain": "go1.26.6",
+  "os": "macOS 26.6.2 / 25G83",
+  "architecture": "arm64",
+  "cpu": "Apple M1",
+  "gomaxprocs": 8,
+  "benchmark_repetitions": 3,
+  "benchtime": "300ms",
+  "benchmark_order": [
+    "v2.6.4",
+    "HEAD",
+    "B1"
+  ],
+  "ci_url": "https://github.com/zduu/cpa-usage-plugin/actions/runs/34472119147",
+  "sha256": {
+    "go/stats.go": "39a396eb44f137d6be39dd75f85b38ce6fd43939eed9dc75b9bd0b13add30a30",
+    "go/accounting.go": "cf0df0493df74e5950352d839ff57c8c075d4e030abf0c905fc8f0adb4444bb0",
+    "go/main_test.go": "30b4ed268b669d0d044d027ebd7ebb91b598ec96e13f6e899a762979d017c895",
+    "go/resource_regression_test.go": "103e72f98526ec0610c3271fcb0e8973aff9f2daf24b4d103609ea7b9e6555ce",
+    "go/dashboard_export_jobs.go": "ad9fc58841b01c80753998b481e1e350b9bf6752b6a1885d806cb1f2bdbc792f"
+  }
+}

@@ -1,0 +1,2 @@
+PASS
+ok  	github.com/zduu/cpa-usage-plugin	7.387s

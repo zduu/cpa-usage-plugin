@@ -508,6 +508,8 @@ function createDashboardHarness(options = {}) {
     Set,
     URL,
     URLSearchParams,
+    TextDecoder,
+    atob: (value) => Buffer.from(value, 'base64').toString('binary'),
     document,
     localStorage,
     location: { pathname: options.pathname || '/v0/management/plugins/usage-dashboard-zduu/dashboard', host: 'test.local' },
@@ -1128,6 +1130,49 @@ test('dashboard api detail export uses management endpoints from resource iframe
   assert.ok(downloadsReq.length > 0, 'expected an export job download request');
   assert.match(creates[0].url, /^\/v0\/management\/plugins\/usage-dashboard-zduu\/dashboard-events-export-jobs\?/);
   assert.match(downloadsReq[0].url, /^\/v0\/management\/plugins\/usage-dashboard-zduu\/dashboard-events-export-download\?/);
+});
+
+test('chunk export retries immutable offsets and decodes split UTF-8', async () => {
+  const { context, document } = createDashboardHarness({ managementKey: 'chunk-management-key' });
+  await waitFor(() => document.getElementById('apiSelect').value === 'openai');
+  const job = { id: 'chunks', status: 'succeeded', body_bytes: 10, chunk_size: 2, etag: 'W/"file-version"', total: 1, exported: 1, content_type: 'text/csv' };
+  // Independent CRC-32/IEEE fixtures generated with Python zlib.crc32.
+  const fixtures = [['5Lg=', 'be711fa9'], ['rfA=', 'e7cd2247'], ['n5k=', '3ed3afca'], ['guY=', '0105af7b'], ['loc=', '151e29e0']];
+  const offsets = [];
+  let removed = 0;
+  let failed = false;
+  context.createExportJob = async () => job;
+  context.deleteExportJob = async (id) => { assert.strictEqual(id, job.id); removed++; };
+  context.delay = async () => {};
+  context.fetchJsonPayload = async (url, options) => {
+    const parsed = new URL(url, 'http://test.local');
+    const offset = Number(parsed.searchParams.get('offset'));
+    offsets.push(offset);
+    assert.strictEqual(parsed.searchParams.get('version'), job.etag);
+    assert.strictEqual(options.headers.Authorization, 'Bearer chunk-management-key');
+    if (offset === 2 && !failed) { failed = true; throw new Error('transient read failure'); }
+    return { offset, total: 10, etag: job.etag, data: fixtures[offset / 2][0], checksum_crc32: fixtures[offset / 2][1] };
+  };
+  const result = await context.fetchExportJobResult(new URLSearchParams());
+  assert.strictEqual(result.data, '中🙂文');
+  assert.deepStrictEqual(offsets, [0, 2, 2, 4, 6, 8]);
+  assert.strictEqual(result.headers['X-Exported-Count'][0], '1');
+  assert.strictEqual(removed, 1);
+  assert.strictEqual(context.exportChunkChecksum(Buffer.from('123456789')), 'cbf43926');
+});
+
+test('chunk export rejects corruption, missing bytes and changed versions and deletes its job', async () => {
+  for (const invalid of [{ checksum_crc32: '00000000' }, { data: '' }, { offset: 2 }, { total: 3 }, { etag: 'another-file' }]) {
+    const { context, document } = createDashboardHarness();
+    await waitFor(() => document.getElementById('apiSelect').value === 'openai');
+    const job = { id: 'bad-chunk', status: 'succeeded', body_bytes: 2, chunk_size: 2, etag: 'version' };
+    let removed = 0;
+    context.createExportJob = async () => job;
+    context.deleteExportJob = async () => { removed++; };
+    context.fetchJsonPayload = async () => Object.assign({ offset: 0, total: 2, etag: job.etag, data: '5Lg=', checksum_crc32: 'be711fa9' }, invalid);
+    await assert.rejects(context.fetchExportJobResult(new URLSearchParams()));
+    assert.strictEqual(removed, 1);
+  }
 });
 
 test('dashboard bare model input can use a price-source value as an override starting point', async () => {

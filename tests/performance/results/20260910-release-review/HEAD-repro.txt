@@ -1,0 +1,17 @@
+=== RUN   TestAuditMalformedSnapshotPreserved
+=== RUN   TestAuditMalformedSnapshotPreserved/{"version":3
+    zz_release_audit_test.go:19: writer=true lastError="load storage snapshot: json: cannot unmarshal string into Go struct field StatisticsSnapshot.usage.total_requests of type int64" preserved=false
+    zz_release_audit_test.go:20: unreadable recovery snapshot overwritten on Close
+=== RUN   TestAuditMalformedSnapshotPreserved/{"version":2
+    zz_release_audit_test.go:19: writer=true lastError="load storage snapshot: unexpected end of JSON input" preserved=false
+    zz_release_audit_test.go:20: unreadable recovery snapshot overwritten on Close
+--- FAIL: TestAuditMalformedSnapshotPreserved (0.04s)
+    --- FAIL: TestAuditMalformedSnapshotPreserved/{"version":3 (0.02s)
+    --- FAIL: TestAuditMalformedSnapshotPreserved/{"version":2 (0.02s)
+=== RUN   TestAuditArchivedImportJSONLParity
+    zz_release_audit_test.go:38: visible events before=0 after JSONL replay=1; totals before=1 after=1
+    zz_release_audit_test.go:39: JSONL replay promoted archived accounting into visible event history
+--- FAIL: TestAuditArchivedImportJSONLParity (0.02s)
+FAIL
+exit status 1
+FAIL	github.com/zduu/cpa-usage-plugin	0.399s

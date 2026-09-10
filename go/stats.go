@@ -231,7 +231,8 @@ type modelStats struct {
 	hasEventRefs         bool
 	lastEventRef         *dashboardEventRef
 	nextEventSequence    int64
-	Accounting           []accountingRecord
+	accounting           accountingBlocks
+	detailStorage        []RequestDetail
 	accountingIdentities map[accountingIdentity]*accountingIdentity
 	TotalRequests        int64
 	SuccessCount         int64
@@ -860,7 +861,6 @@ func (s *RequestStatistics) Record(record UsageRecord) {
 		if api := s.apis[statsKey]; api != nil {
 			s.trimModelDetailsLocked(api.Models[modelName])
 		}
-		s.pruneSeenLocked(now)
 	}
 	s.mu.Unlock()
 	if persistDetail != nil {
@@ -984,6 +984,7 @@ type persistedDetail struct {
 	Model        string        `json:"model"`
 	Detail       RequestDetail `json:"detail"`
 	MetadataOnly bool          `json:"metadata_only,omitempty"`
+	Archived     bool          `json:"archived,omitempty"`
 	enqueuedAt   time.Time     `json:"-"`
 }
 
@@ -1549,11 +1550,11 @@ func (s *RequestStatistics) recordDetailWithAccountingLocked(apiName, modelName 
 			s.nextDetailExpiry = expires
 		}
 	}
-	if dedup == (requestDedupKey{}) {
-		dedup = dedupKey(apiName, modelName, detail)
-	}
 	s.pruneSeenLocked(now)
 	if useDedupWindow && s.dedupWindow > 0 {
+		if dedup == (requestDedupKey{}) {
+			dedup = dedupKey(apiName, modelName, detail)
+		}
 		if _, exists := s.seen[dedup]; exists {
 			return false
 		}
@@ -1570,7 +1571,9 @@ func (s *RequestStatistics) recordDetailWithAccountingLocked(apiName, modelName 
 		s.apis[apiName] = apiSt
 	}
 
-	totals := s.updateAPIStatsWithAccounting(apiSt, modelName, detail, archived)
+	totals := detailTotalsFromRequest(detail)
+	cost := s.detailCostLocked(modelName, detail, totals)
+	s.applyAPIStatsWithAccounting(apiSt, modelName, detail, totals, cost, archived)
 	incrementAPISourceStats(apiSt, detail, totals)
 
 	s.totalRequests = addNonNegativeInt64(s.totalRequests, 1)
@@ -1589,7 +1592,6 @@ func (s *RequestStatistics) recordDetailWithAccountingLocked(apiName, modelName 
 	s.latencyN = addNonNegativeInt64(s.latencyN, totals.latencyN)
 	dayKey := detail.Timestamp.Format("2006-01-02")
 	hourKey := detail.Timestamp.Hour()
-	cost := s.detailCostLocked(modelName, detail, totals)
 	s.requestsByDay[dayKey] = addNonNegativeInt64(s.requestsByDay[dayKey], 1)
 	s.requestsByHour[hourKey] = addNonNegativeInt64(s.requestsByHour[hourKey], 1)
 	s.tokensByDay[dayKey] = addNonNegativeInt64(s.tokensByDay[dayKey], totals.totalTokens)
@@ -1598,8 +1600,8 @@ func (s *RequestStatistics) recordDetailWithAccountingLocked(apiName, modelName 
 	s.costByHour[hourKey] = addNonNegativeCost(s.costByHour[hourKey], cost)
 	s.costTokensByDay[dayKey] = incrementTimeSeriesTokenStats(s.costTokensByDay[dayKey], detailModel(modelName, detail), detail.Provider, totals)
 	s.costTokensByHour[hourKey] = incrementTimeSeriesTokenStats(s.costTokensByHour[hourKey], detailModel(modelName, detail), detail.Provider, totals)
-	s.incrementModelSummaryStatsLocked(modelName, detail, totals)
-	s.incrementSummaryDimensionStatsLocked(modelName, detail, totals)
+	s.incrementModelSummaryStatsWithCostLocked(modelName, detail, totals, cost)
+	s.incrementSummaryDimensionStatsWithCostLocked(modelName, detail, totals, cost)
 	s.incrementHealthBucketLocked(detail)
 	if detail.Timestamp.After(s.lastRecordedAt) {
 		s.lastRecordedAt = detail.Timestamp
@@ -1641,16 +1643,14 @@ func (s *RequestStatistics) configureStorageLocked() {
 	var warnings []string
 	snapshotAt, err := s.loadStorageSnapshotLocked(dir, now)
 	if err != nil {
-		if errors.Is(err, errInvalidStorageSnapshotHeader) {
-			// Do not start a writer or run retention cleanup against an input
-			// whose version/cutoff we cannot interpret. Clear the target too:
-			// Close otherwise writes a fresh snapshot even without a worker.
-			s.storageDir = ""
-			s.storageLegacyPath = ""
-			s.storageLastError = err.Error()
-			return
-		}
-		warnings = append(warnings, err.Error())
+		// A missing snapshot is handled as an empty input by the loader. All
+		// other failures must preserve the recovery source, including malformed
+		// JSON, incompatible field types and read errors before header validation.
+		// Close also writes a snapshot without a worker, so clear its target.
+		s.storageDir = ""
+		s.storageLegacyPath = ""
+		s.storageLastError = err.Error()
+		return
 	}
 	if err := s.replayStorageFilesLocked(dir, legacyPath, now, snapshotAt); err != nil {
 		warnings = append(warnings, err.Error())
@@ -1967,10 +1967,11 @@ func mergeModelStats(dst, src *modelStats) {
 	dst.latencySum = addNonNegativeInt64(dst.latencySum, src.latencySum)
 	dst.latencyN = addNonNegativeInt64(dst.latencyN, src.latencyN)
 	dst.Details = append(dst.Details, src.Details...)
+	dst.detailStorage = nil
 	// Snapshot normalization can merge models with independently assigned
 	// sequences. Initialize their combined order before queries or new writes.
 	dst.nextEventSequence = 0
-	for _, r := range src.Accounting {
+	for r := range src.accounting.records() {
 		dst.archiveDetail(r.detail())
 	}
 	dst.providerStats = mergeModelProviderStats(dst.providerStats, src.providerStats)
@@ -3110,7 +3111,7 @@ func (s *RequestStatistics) replayPersistedDetailBatchLocked(records []persisted
 			}
 			continue
 		}
-		if s.recordDetailLocked(apiName, modelName, detail, key, now, false) {
+		if s.recordDetailWithAccountingLocked(apiName, modelName, detail, key, now, false, persisted.Archived) {
 			state.existing[canonicalKey] = struct{}{}
 			if pending, ok := state.pendingMetadata[key]; ok {
 				s.enrichPersistedDetailMetadataLocked(apiName, modelName, key, pending)
@@ -4491,6 +4492,11 @@ func (s *RequestStatistics) updateAPIStats(apiSt *apiStats, model string, detail
 func (s *RequestStatistics) updateAPIStatsWithAccounting(apiSt *apiStats, model string, detail RequestDetail, archived bool) detailTotals {
 	totals := detailTotalsFromRequest(detail)
 	cost := s.detailCostLocked(model, detail, totals)
+	s.applyAPIStatsWithAccounting(apiSt, model, detail, totals, cost, archived)
+	return totals
+}
+
+func (s *RequestStatistics) applyAPIStatsWithAccounting(apiSt *apiStats, model string, detail RequestDetail, totals detailTotals, cost float64, archived bool) {
 	apiSt.TotalRequests = addNonNegativeInt64(apiSt.TotalRequests, 1)
 	if detail.Failed {
 		apiSt.FailureCount = addNonNegativeInt64(apiSt.FailureCount, 1)
@@ -4532,7 +4538,6 @@ func (s *RequestStatistics) updateAPIStatsWithAccounting(apiSt *apiStats, model 
 		detail.eventRef = &dashboardEventRef{}
 	}
 	modelSt.appendDetail(detail, archived)
-	return totals
 }
 
 func incrementAPISourceStats(apiSt *apiStats, detail RequestDetail, totals detailTotals) {
@@ -4599,6 +4604,10 @@ func decrementAPISourceStats(apiSt *apiStats, detail RequestDetail, totals detai
 }
 
 func (s *RequestStatistics) incrementModelSummaryStatsLocked(modelName string, detail RequestDetail, totals detailTotals) {
+	s.incrementModelSummaryStatsWithCostLocked(modelName, detail, totals, s.detailCostLocked(modelName, detail, totals))
+}
+
+func (s *RequestStatistics) incrementModelSummaryStatsWithCostLocked(modelName string, detail RequestDetail, totals detailTotals, cost float64) {
 	if s.modelSummaryStats == nil {
 		s.modelSummaryStats = make(map[string]*ModelStat)
 	}
@@ -4622,7 +4631,7 @@ func (s *RequestStatistics) incrementModelSummaryStatsLocked(modelName string, d
 	modelStat.latencySum = addNonNegativeInt64(modelStat.latencySum, totals.latencySum)
 	modelStat.latencyN = addNonNegativeInt64(modelStat.latencyN, totals.latencyN)
 	modelStat.providerStats = incrementModelProviderStats(modelStat.providerStats, detail.Provider, detail.Failed, totals)
-	modelStat.EstimatedCost = addNonNegativeCost(modelStat.EstimatedCost, s.detailCostLocked(modelName, detail, totals))
+	modelStat.EstimatedCost = addNonNegativeCost(modelStat.EstimatedCost, cost)
 }
 
 func (s *RequestStatistics) decrementModelSummaryStatsLocked(modelName string, detail RequestDetail, totals detailTotals) {
@@ -4652,6 +4661,10 @@ func (s *RequestStatistics) decrementModelSummaryStatsLocked(modelName string, d
 }
 
 func (s *RequestStatistics) incrementSummaryDimensionStatsLocked(modelName string, detail RequestDetail, totals detailTotals) {
+	s.incrementSummaryDimensionStatsWithCostLocked(modelName, detail, totals, s.detailCostLocked(modelName, detail, totals))
+}
+
+func (s *RequestStatistics) incrementSummaryDimensionStatsWithCostLocked(modelName string, detail RequestDetail, totals detailTotals, cost float64) {
 	if s.sourceStats == nil {
 		s.sourceStats = make(map[string]*sourceStatAccumulator)
 	}
@@ -4721,7 +4734,7 @@ func (s *RequestStatistics) incrementSummaryDimensionStatsLocked(modelName strin
 	clientAgg.stat.CachedTokens = addNonNegativeInt64(clientAgg.stat.CachedTokens, totals.cachedTokens)
 	clientAgg.stat.CacheWriteTokens = addNonNegativeInt64(clientAgg.stat.CacheWriteTokens, totals.cacheWriteTokens)
 	clientAgg.stat.ReasoningTokens = addNonNegativeInt64(clientAgg.stat.ReasoningTokens, totals.reasoningTokens)
-	clientAgg.stat.EstimatedCost = addNonNegativeCost(clientAgg.stat.EstimatedCost, s.detailCostLocked(modelName, detail, totals))
+	clientAgg.stat.EstimatedCost = addNonNegativeCost(clientAgg.stat.EstimatedCost, cost)
 
 	clientModel, ok := clientAgg.models[modelName]
 	if !ok {
@@ -4741,7 +4754,7 @@ func (s *RequestStatistics) incrementSummaryDimensionStatsLocked(modelName strin
 	clientModel.CacheWriteTokens = addNonNegativeInt64(clientModel.CacheWriteTokens, totals.cacheWriteTokens)
 	clientModel.ReasoningTokens = addNonNegativeInt64(clientModel.ReasoningTokens, totals.reasoningTokens)
 	clientModel.providerStats = incrementModelProviderStats(clientModel.providerStats, detail.Provider, detail.Failed, totals)
-	clientModel.EstimatedCost = addNonNegativeCost(clientModel.EstimatedCost, s.detailCostLocked(modelName, detail, totals))
+	clientModel.EstimatedCost = addNonNegativeCost(clientModel.EstimatedCost, cost)
 }
 
 func (s *RequestStatistics) decrementSummaryDimensionStatsLocked(modelName string, detail RequestDetail, totals detailTotals) {
@@ -4881,6 +4894,7 @@ func (s *RequestStatistics) trimModelDetailsLocked(model *modelStats) bool {
 	model.Details = model.Details[removed:]
 	if len(model.Details) == 0 {
 		model.Details = nil
+		model.detailStorage = nil
 	}
 	s.evictedTotal += int64(removed)
 	return true
@@ -4942,6 +4956,7 @@ func (s *RequestStatistics) pruneLocked(now time.Time, sortNeeded bool) {
 			modelSt.rebindEventRefs(0)
 			if len(details) == 0 {
 				modelSt.Details = nil
+				modelSt.detailStorage = nil
 			}
 			if s.trimModelDetailsLocked(modelSt) {
 				changed = true
@@ -5479,7 +5494,7 @@ func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, per
 
 				if s.recordDetailWithAccountingLocked(importAPIName, importModelName, detail, key, now, false, detailIndex >= len(modelSnapshot.Details)) {
 					if persist && s.storageEnabled {
-						persisted = append(persisted, persistedDetail{API: importAPIName, Model: importModelName, Detail: detail})
+						persisted = append(persisted, persistedDetail{API: importAPIName, Model: importModelName, Detail: detail, Archived: detailIndex >= len(modelSnapshot.Details)})
 					}
 					result.Added = addNonNegativeInt64(result.Added, 1)
 				}

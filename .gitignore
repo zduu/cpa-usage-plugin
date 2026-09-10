@@ -4,15 +4,35 @@
 *.dll
 *.h
 /go/cpa-usage-plugin
+/go/*.test
+/go/*.test.exe
+/tests/stock-host/stock-host
+/dist/
+/store-dist/
+/store-artifacts/
+/THIRD_PARTY_NOTICES.txt
+/usage-dashboard-zduu_*.zip
+/usage-dashboard-zduu-*.zip
+*.prof
+*.pprof
+/coverage.out
+/go/coverage.out
+/coverage/
 usage-statistics-prices.json
 data/usage-statistics-prices.json
+/data/
+/performance-data/
+/tests/performance/.work/
+/tests/performance/results/local/
 
 # 临时文件
 *.backup.*
 .DS_Store
 temp/
 .claude/
-
+__pycache__/
+*.pyc
+/tests/
 # IDE
 .idea/
 .vscode/

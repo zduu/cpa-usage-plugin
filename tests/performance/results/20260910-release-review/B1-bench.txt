@@ -1,0 +1,28 @@
+go1.26.6
+goos: darwin
+goarch: arm64
+pkg: github.com/zduu/cpa-usage-plugin
+cpu: Apple M1
+BenchmarkSummaryRange7d100k-8              	       6	  55169521 ns/op	  408232 B/op	    3479 allocs/op
+BenchmarkSummaryRange7d100k-8              	       6	  61015271 ns/op	  408152 B/op	    3478 allocs/op
+BenchmarkSummaryRange7d100k-8              	       6	  55408785 ns/op	  408192 B/op	    3478 allocs/op
+BenchmarkQueryEvents100k-8                 	     163	   2174809 ns/op	  479514 B/op	     659 allocs/op
+BenchmarkQueryEvents100k-8                 	     163	   2176541 ns/op	  479514 B/op	     659 allocs/op
+BenchmarkQueryEvents100k-8                 	     163	   2174279 ns/op	  479514 B/op	     659 allocs/op
+BenchmarkQueryEventsColdModelIndex100k-8   	      55	   5717789 ns/op	 2479608 B/op	     966 allocs/op
+BenchmarkQueryEventsColdModelIndex100k-8   	      62	   5749112 ns/op	 2478789 B/op	     915 allocs/op
+BenchmarkQueryEventsColdModelIndex100k-8   	      55	   5887546 ns/op	 2479609 B/op	     966 allocs/op
+BenchmarkQueryEventsCached100k-8           	    3253	    120066 ns/op	  233400 B/op	     502 allocs/op
+BenchmarkQueryEventsCached100k-8           	    3320	    116805 ns/op	  233400 B/op	     502 allocs/op
+BenchmarkQueryEventsCached100k-8           	    3205	    116947 ns/op	  233400 B/op	     502 allocs/op
+BenchmarkQueryAPIDetail100k-8              	      27	  12589384 ns/op	   78992 B/op	     262 allocs/op
+BenchmarkQueryAPIDetail100k-8              	      27	  12555951 ns/op	   78992 B/op	     262 allocs/op
+BenchmarkQueryAPIDetail100k-8              	      27	  12514969 ns/op	   78992 B/op	     262 allocs/op
+BenchmarkRecordRetainedHistory/models_1-8  	  155284	      2260 ns/op	    3101 B/op	       7 allocs/op
+BenchmarkRecordRetainedHistory/models_1-8  	  155469	      2262 ns/op	    3098 B/op	       7 allocs/op
+BenchmarkRecordRetainedHistory/models_1-8  	  153279	      2258 ns/op	    3119 B/op	       7 allocs/op
+BenchmarkRecordRetainedHistory/models_20-8 	  159753	      2189 ns/op	    3078 B/op	       7 allocs/op
+BenchmarkRecordRetainedHistory/models_20-8 	  159856	      2313 ns/op	    3076 B/op	       7 allocs/op
+BenchmarkRecordRetainedHistory/models_20-8 	  158940	      2192 ns/op	    3092 B/op	       7 allocs/op
+PASS
+ok  	github.com/zduu/cpa-usage-plugin	19.032s

@@ -170,9 +170,11 @@ jobs:
           LIB="usage-dashboard-zduu-${{ matrix.platform }}.${{ matrix.ext }}"
           mkdir -p store-artifacts
           cp "$LIB" "store-artifacts/usage-dashboard-zduu.${{ matrix.ext }}"
+          cp docs/third-party/sqlite-notices.md THIRD_PARTY_NOTICES.txt
+          cp THIRD_PARTY_NOTICES.txt store-artifacts/
           cd store-artifacts
           ZIP_FILE="usage-dashboard-zduu_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.zip"
-          zip "$ZIP_FILE" "usage-dashboard-zduu.${{ matrix.ext }}"
+          zip "$ZIP_FILE" "usage-dashboard-zduu.${{ matrix.ext }}" THIRD_PARTY_NOTICES.txt
           cd ..
           cp "store-artifacts/${ZIP_FILE}" .
 
@@ -180,7 +182,9 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: usage-dashboard-zduu-plugin-${{ matrix.platform }}
-          path: usage-dashboard-zduu-${{ matrix.platform }}.${{ matrix.ext }}
+          path: |
+            usage-dashboard-zduu-${{ matrix.platform }}.${{ matrix.ext }}
+            THIRD_PARTY_NOTICES.txt
           retention-days: 90
 
       - name: Upload store artifact
@@ -281,6 +285,7 @@ jobs:
             dist/usage-dashboard-zduu-darwin-amd64.dylib
             dist/usage-dashboard-zduu-darwin-arm64.dylib
             dist/usage-dashboard-zduu-windows-amd64.dll
+            dist/THIRD_PARTY_NOTICES.txt
             store-dist/usage-dashboard-zduu_*.zip
             store-dist/checksums.txt
           draft: false

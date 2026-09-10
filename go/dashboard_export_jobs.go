@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"math"
 	"net/http"
@@ -26,6 +27,7 @@ const (
 	dashboardExportJobMaxActive = 2
 	dashboardExportJobMaxStored = 16
 	dashboardExportJobPageSize  = 5000
+	dashboardExportChunkBytes   = 256 << 10
 )
 
 const (
@@ -101,6 +103,8 @@ type dashboardExportJobResponse struct {
 	BodyBytes    int    `json:"body_bytes,omitempty"`
 	ContentType  string `json:"content_type,omitempty"`
 	DownloadPath string `json:"download_path,omitempty"`
+	ETag         string `json:"etag,omitempty"`
+	ChunkSize    int    `json:"chunk_size,omitempty"`
 }
 
 type dashboardExportJobListResponse struct {
@@ -166,6 +170,9 @@ func handleDashboardEventsExportDownload(query map[string][]string) ([]byte, err
 		return dashboardExportJobJSON(http.StatusAccepted, dashboardExportJobSnapshot(job))
 	}
 
+	if queryBool(query, "chunk") {
+		return dashboardExportJobChunk(job, query)
+	}
 	body, err := os.ReadFile(job.FilePath)
 	if err != nil {
 		return dashboardExportJobJSON(http.StatusGone, dashboardExportJobErrorResponse{Error: "export job file is no longer available"})
@@ -176,6 +183,53 @@ func handleDashboardEventsExportDownload(query map[string][]string) ([]byte, err
 		Body:       body,
 	}
 	return okEnvelopeJSON(string(mustMarshal(resp)))
+}
+
+type dashboardExportChunk struct {
+	Offset   int64  `json:"offset"`
+	Total    int64  `json:"total"`
+	ETag     string `json:"etag"`
+	Checksum string `json:"checksum_crc32"`
+	Data     []byte `json:"data"`
+}
+
+// The management ABI encodes a whole response. A bounded chunk keeps file
+// download allocations independent of the final export size, including gzip.
+func dashboardExportJobChunk(job dashboardExportJob, query map[string][]string) ([]byte, error) {
+	if version := queryRawValue(query, "version"); version == "" || version != job.ETag {
+		return dashboardExportJobJSON(http.StatusPreconditionFailed, dashboardExportJobErrorResponse{Error: "export file version does not match"})
+	}
+	offset, err := strconv.ParseInt(queryRawValue(query, "offset"), 10, 64)
+	if err != nil || offset < 0 {
+		return dashboardExportJobJSON(http.StatusBadRequest, dashboardExportJobErrorResponse{Error: "invalid chunk offset"})
+	}
+	length := int64(dashboardExportChunkBytes)
+	if raw := queryRawValue(query, "length"); raw != "" {
+		length, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil || length <= 0 || length > dashboardExportChunkBytes {
+			return dashboardExportJobJSON(http.StatusBadRequest, dashboardExportJobErrorResponse{Error: "invalid chunk length"})
+		}
+	}
+	file, err := os.Open(job.FilePath)
+	if err != nil {
+		return dashboardExportJobJSON(http.StatusGone, dashboardExportJobErrorResponse{Error: "export job file is no longer available"})
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() != int64(job.BodyBytes) {
+		return dashboardExportJobJSON(http.StatusGone, dashboardExportJobErrorResponse{Error: "export job file changed"})
+	}
+	if offset > info.Size() || (offset == info.Size() && offset != 0) {
+		return dashboardExportJobJSON(http.StatusRequestedRangeNotSatisfiable, dashboardExportJobErrorResponse{Error: "chunk offset is outside the file"})
+	}
+	body := make([]byte, min(length, info.Size()-offset))
+	if _, err := file.ReadAt(body, offset); err != nil {
+		return dashboardExportJobJSON(http.StatusGone, dashboardExportJobErrorResponse{Error: "export job file is incomplete"})
+	}
+	return dashboardExportJobJSON(http.StatusOK, dashboardExportChunk{
+		Offset: offset, Total: info.Size(), ETag: job.ETag,
+		Checksum: fmt.Sprintf("%08x", crc32.ChecksumIEEE(body)), Data: body,
+	})
 }
 
 func (m *dashboardExportJobManager) create(params EventsQuery, opts dashboardEventsExportOptions) (dashboardExportJob, int, string) {
@@ -607,6 +661,8 @@ func dashboardExportJobSnapshot(job dashboardExportJob) dashboardExportJobRespon
 	}
 	if job.Status == dashboardExportJobSucceeded {
 		response.DownloadPath = "/dashboard-events-export-download?id=" + job.ID
+		response.ETag = job.ETag
+		response.ChunkSize = dashboardExportChunkBytes
 	}
 	return response
 }

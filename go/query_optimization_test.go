@@ -124,7 +124,7 @@ func TestAccountingExpiryReleasesBurstCapacity(t *testing.T) {
 	s.pruneLocked(now, true)
 	for _, api := range s.apis {
 		m := api.Models["model"]
-		if m == nil || len(m.Accounting) != 95 || cap(m.Accounting) != 95 || m.TotalRequests != 96 {
+		if m == nil || m.accounting.count != 95 || m.accounting.capacity() > accountingBlockRecords || m.TotalRequests != 96 {
 			t.Fatalf("expired ledger capacity/counters not compacted: %+v", m)
 		}
 		if len(m.accountingIdentities) != 1 || !s.nextDetailExpiry.Equal(now.Add(24*time.Hour)) {

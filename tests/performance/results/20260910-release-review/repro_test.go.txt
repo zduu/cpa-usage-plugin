@@ -1,0 +1,40 @@
+package main
+import (
+ "testing"
+ "os"
+ "path/filepath"
+ "encoding/json"
+ "time"
+)
+func TestAuditMalformedSnapshotPreserved(t *testing.T) {
+ for _, payload := range []string{`{"version":3,"generated_at":"2026-09-10T00:00:00Z","usage":{"total_requests":"99"}}`, `{"version":2,"generated_at":"2026-09-10T00:00:00Z","usage":{"total_requests":99}`} {
+  t.Run(payload[:12],func(t *testing.T){
+   dir := t.TempDir()
+   if err := os.WriteFile(storageSnapshotPath(dir), []byte(payload), 0600); err != nil {t.Fatal(err)}
+   s:=NewRequestStatistics()
+   s.Configure(runtimeConfig{StorageEnabled:true, StoragePath:dir,RetentionDays:30})
+   s.mu.RLock(); running:=s.storageWorkerRunning; lastError:=s.storageLastError; s.mu.RUnlock()
+   s.Close()
+   got,err:=os.ReadFile(storageSnapshotPath(dir));if err!=nil {t.Fatal(err)}
+   t.Logf("writer=%v lastError=%q preserved=%v",running,lastError,string(got)==payload)
+   if string(got)!=payload {t.Errorf("unreadable recovery snapshot overwritten on Close")}
+  })
+ }
+}
+func TestAuditArchivedImportJSONLParity(t *testing.T) {
+ s:=NewRequestStatistics()
+ now:=time.Now().Add(-time.Minute)
+ snapshot:=StatisticsSnapshot{APIs:make(map[string]APISnapshot)}
+ model:=ModelSnapshot{Accounting:[]RequestDetail{{Model:"audit-model",Provider:"openai",Timestamp:now,Tokens:TokenStats{InputTokens:10,TotalTokens:10}}}}
+ snapshot.APIs["openai"]=APISnapshot{Models:map[string]ModelSnapshot{"audit-model":model}}
+ s.mu.Lock();s.storageEnabled=true;result, persisted:=s.mergeSnapshotLocked(snapshot,true,time.Now());s.mu.Unlock()
+ if result.Added!=1 || len(persisted)!=1 {t.Fatalf("fixture: %+v persisted=%d",result,len(persisted))}
+ before:=s.QueryAllEvents(EventsQuery{}).Total
+ dir:=t.TempDir()
+ raw,err:=json.Marshal(persisted[0]);if err!=nil {t.Fatal(err)}
+ if err:=os.WriteFile(filepath.Join(dir,storageFileName(storageDate(time.Now()))),append(raw,byte(10)),0600);err!=nil {t.Fatal(err)}
+ restored:=NewRequestStatistics();restored.Configure(runtimeConfig{StorageEnabled:true,StoragePath:dir});defer restored.Close()
+ after:=restored.QueryAllEvents(EventsQuery{}).Total
+ t.Logf("visible events before=%d after JSONL replay=%d; totals before=%d after=%d",before,after,s.Snapshot().TotalRequests,restored.Snapshot().TotalRequests)
+ if before!=after {t.Errorf("JSONL replay promoted archived accounting into visible event history")}
+}

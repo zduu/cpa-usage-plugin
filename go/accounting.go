@@ -25,17 +25,22 @@ type accountingRecord struct {
 }
 
 func (m *modelStats) archiveDetail(d RequestDetail) {
+	m.accounting.append(m.accountingRecord(d))
+}
+
+func (m *modelStats) accountingRecord(d RequestDetail) accountingRecord {
 	key := accountingIdentity{d.Model, d.Provider, d.Source, d.AuthIndex, d.AuthID, d.AuthType, d.APIKey, d.APIKeyHash, d.BaseURL, d.RequestedModel, d.ExecutorType, d.Endpoint}
 	if m.accountingIdentities == nil {
 		m.accountingIdentities = make(map[accountingIdentity]*accountingIdentity)
 	}
 	identity := m.accountingIdentities[key]
 	if identity == nil {
-		identity = &key
+		identity = new(accountingIdentity)
+		*identity = key
 		m.accountingIdentities[key] = identity
 	}
-	m.Accounting = append(m.Accounting, accountingRecord{Correlation: cloneProtocolCorrelationMeta(d.Correlation), Timestamp: d.Timestamp, Identity: identity, Tokens: d.Tokens,
-		LatencyMs: d.LatencyMs, TTFTMs: d.TTFTMs, Failure: d.Failure, StatusCode: d.StatusCode, Failed: d.Failed, Synthetic: d.TimestampSynthetic})
+	return accountingRecord{Correlation: cloneProtocolCorrelationMeta(d.Correlation), Timestamp: d.Timestamp, Identity: identity, Tokens: d.Tokens,
+		LatencyMs: d.LatencyMs, TTFTMs: d.TTFTMs, Failure: d.Failure, StatusCode: d.StatusCode, Failed: d.Failed, Synthetic: d.TimestampSynthetic}
 }
 
 func (r accountingRecord) detail() RequestDetail {
@@ -60,7 +65,7 @@ func apiAccountingEvents(api string, a *apiStats) iter.Seq[dashboardEventDetail]
 					return
 				}
 			}
-			for _, r := range m.Accounting {
+			for r := range m.accounting.records() {
 				d := r.detail()
 				if !yield(dashboardEventDetail{detail: &d, upstreamAPI: api, modelName: name}) {
 					return
@@ -70,60 +75,51 @@ func apiAccountingEvents(api string, a *apiStats) iter.Seq[dashboardEventDetail]
 	}
 }
 
-func (m *modelStats) accountingCount() int { return len(m.Details) + len(m.Accounting) }
+func (m *modelStats) accountingCount() int { return len(m.Details) + m.accounting.count }
 
 func (m *modelStats) accountingDetailAt(i int) RequestDetail {
 	if i < len(m.Details) {
 		return m.Details[i]
 	}
-	return m.Accounting[i-len(m.Details)].detail()
+	return m.accounting.at(i - len(m.Details)).detail()
 }
 
 func (m *modelStats) accountingSnapshot() []RequestDetail {
-	if len(m.Accounting) == 0 {
+	if m.accounting.count == 0 {
 		return nil
 	}
-	result := make([]RequestDetail, len(m.Accounting))
-	for i, r := range m.Accounting {
-		result[i] = cloneRequestDetail(r.detail())
+	result := make([]RequestDetail, 0, m.accounting.count)
+	for r := range m.accounting.records() {
+		result = append(result, cloneRequestDetail(r.detail()))
 	}
 	return result
 }
 
 func (m *modelStats) pruneAccounting(s *RequestStatistics, api *apiStats, model string, cutoff time.Time) bool {
-	if cutoff.IsZero() || len(m.Accounting) == 0 {
+	if cutoff.IsZero() || m.accounting.count == 0 {
 		return false
 	}
-	kept := m.Accounting[:0]
-	for _, r := range m.Accounting {
+	kept := 0
+	for r := range m.accounting.records() {
 		if !r.Timestamp.IsZero() && r.Timestamp.Before(cutoff) {
 			s.decrementCounters(r.detail(), api, m, model)
 		} else {
-			kept = append(kept, r)
+			*m.accounting.at(kept) = r
+			kept++
 		}
 	}
-	changed := len(kept) != len(m.Accounting)
-	clear(m.Accounting[len(kept):])
-	// A past traffic burst must not keep an almost-empty ledger backing array
-	// resident for the entire retention period. Hysteresis avoids copying on
-	// every expiry; small arrays are left alone.
-	if changed && len(kept) > 0 && cap(kept) >= 1024 && len(kept) <= cap(kept)/4 {
-		compact := make([]accountingRecord, len(kept))
-		copy(compact, kept)
-		kept = compact
-	}
-	m.Accounting = kept
+	changed := kept != m.accounting.count
 	if changed {
+		m.accounting.truncate(kept)
 		m.accountingIdentities = make(map[accountingIdentity]*accountingIdentity)
-		for _, r := range kept {
+		for r := range m.accounting.records() {
 			m.accountingIdentities[*r.Identity] = r.Identity
 		}
 	}
-	if len(kept) == 0 {
-		m.Accounting = nil
+	if kept == 0 {
 		m.accountingIdentities = nil
 	}
-	for _, r := range kept {
+	for r := range m.accounting.records() {
 		expires := r.Timestamp.Add(s.retention)
 		if s.nextDetailExpiry.IsZero() || expires.Before(s.nextDetailExpiry) {
 			s.nextDetailExpiry = expires
@@ -149,10 +145,7 @@ func (m *modelStats) setAccountingDetailAt(i int, d RequestDetail) {
 		m.Details[i] = d
 		return
 	}
-	m.archiveDetail(d)
-	m.Accounting[i-len(m.Details)] = m.Accounting[len(m.Accounting)-1]
-	m.Accounting[len(m.Accounting)-1] = accountingRecord{}
-	m.Accounting = m.Accounting[:len(m.Accounting)-1]
+	*m.accounting.at(i - len(m.Details)) = m.accountingRecord(d)
 }
 
 func (m *modelStats) removeAccountingDetailAt(i int) {
@@ -163,13 +156,14 @@ func (m *modelStats) removeAccountingDetailAt(i int) {
 		copy(m.Details[i:], m.Details[i+1:])
 		m.Details[len(m.Details)-1] = RequestDetail{}
 		m.Details = m.Details[:len(m.Details)-1]
+		if len(m.Details) == 0 {
+			m.detailStorage = nil
+		}
 		m.rebindEventRefs(i)
 		return
 	}
 	i -= len(m.Details)
-	copy(m.Accounting[i:], m.Accounting[i+1:])
-	m.Accounting[len(m.Accounting)-1] = accountingRecord{}
-	m.Accounting = m.Accounting[:len(m.Accounting)-1]
+	m.accounting.remove(i)
 }
 
 func (m *modelStats) appendDetail(d RequestDetail, archived bool) {
@@ -184,8 +178,23 @@ func (m *modelStats) appendDetail(d RequestDetail, archived bool) {
 	if d.eventRef != nil {
 		d.eventRef.sequence = d.eventSequence
 	}
+	// Trimming advances Details through its allocation. Reclaim the cleared
+	// prefix once the tail fills instead of allocating/copying the full visible
+	// window again. The allocation budget is unchanged; all moved event refs
+	// are rebound below before any query can observe them.
+	rebased := false
+	if len(m.Details) == cap(m.Details) && len(m.detailStorage) > len(m.Details) {
+		length := len(m.Details)
+		copy(m.detailStorage, m.Details)
+		clear(m.detailStorage[length:])
+		m.Details = m.detailStorage[:length]
+		rebased = true
+	}
 	reallocated := len(m.Details) == cap(m.Details)
 	m.Details = append(m.Details, d)
+	if reallocated || m.detailStorage == nil {
+		m.detailStorage = m.Details[:cap(m.Details)]
+	}
 	last := len(m.Details) - 1
 	changedFrom := last
 	if last > 0 && m.Details[last-1].Timestamp.After(d.Timestamp) {
@@ -198,7 +207,7 @@ func (m *modelStats) appendDetail(d RequestDetail, archived bool) {
 		m.hasEventRefs = true
 		m.lastEventRef = d.eventRef
 	}
-	if reallocated {
+	if reallocated || rebased {
 		changedFrom = 0
 	}
 	m.rebindEventRefs(changedFrom)
