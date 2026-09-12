@@ -233,7 +233,7 @@ type modelStats struct {
 	nextEventSequence    int64
 	accounting           accountingBlocks
 	detailStorage        []RequestDetail
-	accountingIdentities map[accountingIdentity]*accountingIdentity
+	accountingIdentities accountingIdentityIndex
 	TotalRequests        int64
 	SuccessCount         int64
 	FailureCount         int64
@@ -1452,8 +1452,8 @@ func (w *storageWorkerState) writeSnapshot(s *RequestStatistics, now time.Time) 
 	if now.IsZero() {
 		now = time.Now()
 	}
-	snapshot := s.Snapshot()
-	if err := writeStorageSnapshotFile(w.cfg.dir, snapshot, now); err != nil {
+	snapshot := s.captureStorageSnapshot()
+	if err := writeStorageSnapshotViewFile(w.cfg.dir, snapshot, now); err != nil {
 		w.snapshotRetryAt = time.Now().Add(storageRetryDelay)
 		s.setStorageLastError(err)
 		return false
@@ -2734,7 +2734,7 @@ func (s *RequestStatistics) writeStorageSnapshotLocked(now time.Time) error {
 	if now.IsZero() {
 		now = time.Now()
 	}
-	if err := writeStorageSnapshotFile(s.storageDir, s.snapshotLocked(), now); err != nil {
+	if err := writeStorageSnapshotViewFile(s.storageDir, s.captureStorageSnapshotLocked(), now); err != nil {
 		return err
 	}
 	compacted, err := compactStorageShardsBeforeSnapshot(s.storageDir, now, s.storageLoadedPath)
@@ -5295,6 +5295,10 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 }
 
 func (s *RequestStatistics) snapshotLocked() StatisticsSnapshot {
+	return s.snapshotWithAccountingLocked(true)
+}
+
+func (s *RequestStatistics) snapshotWithAccountingLocked(includeAccounting bool) StatisticsSnapshot {
 	result := StatisticsSnapshot{}
 	result.TotalRequests = s.totalRequests
 	result.SuccessCount = s.successCount
@@ -5331,6 +5335,10 @@ func (s *RequestStatistics) snapshotLocked() StatisticsSnapshot {
 			for i, detail := range modelSt.Details {
 				details[i] = cloneRequestDetail(detail)
 			}
+			var accounting []RequestDetail
+			if includeAccounting {
+				accounting = modelSt.accountingSnapshot()
+			}
 			apiSnapshot.Models[modelName] = ModelSnapshot{
 				TotalRequests:    modelSt.TotalRequests,
 				SuccessCount:     modelSt.SuccessCount,
@@ -5343,7 +5351,7 @@ func (s *RequestStatistics) snapshotLocked() StatisticsSnapshot {
 				ReasoningTokens:  modelSt.ReasoningTokens,
 				Providers:        finalizedModelProviderStats(modelSt.providerStats, modelSt.TotalRequests, modelSt.SuccessCount, modelSt.FailureCount, modelSt.TotalTokens, modelSt.InputTokens, modelSt.OutputTokens, modelSt.CachedTokens, modelSt.CacheWriteTokens, modelSt.ReasoningTokens),
 				Details:          details,
-				Accounting:       modelSt.accountingSnapshot(),
+				Accounting:       accounting,
 			}
 			if modelSt.latencyN > 0 {
 				modelSnapshot := apiSnapshot.Models[modelName]

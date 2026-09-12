@@ -30,15 +30,7 @@ func (m *modelStats) archiveDetail(d RequestDetail) {
 
 func (m *modelStats) accountingRecord(d RequestDetail) accountingRecord {
 	key := accountingIdentity{d.Model, d.Provider, d.Source, d.AuthIndex, d.AuthID, d.AuthType, d.APIKey, d.APIKeyHash, d.BaseURL, d.RequestedModel, d.ExecutorType, d.Endpoint}
-	if m.accountingIdentities == nil {
-		m.accountingIdentities = make(map[accountingIdentity]*accountingIdentity)
-	}
-	identity := m.accountingIdentities[key]
-	if identity == nil {
-		identity = new(accountingIdentity)
-		*identity = key
-		m.accountingIdentities[key] = identity
-	}
+	identity := m.internAccountingIdentity(key)
 	return accountingRecord{Correlation: cloneProtocolCorrelationMeta(d.Correlation), Timestamp: d.Timestamp, Identity: identity, Tokens: d.Tokens,
 		LatencyMs: d.LatencyMs, TTFTMs: d.TTFTMs, Failure: d.Failure, StatusCode: d.StatusCode, Failed: d.Failed, Synthetic: d.TimestampSynthetic}
 }
@@ -99,21 +91,25 @@ func (m *modelStats) pruneAccounting(s *RequestStatistics, api *apiStats, model 
 	if cutoff.IsZero() || m.accounting.count == 0 {
 		return false
 	}
-	kept := 0
+	kept, scanned := 0, 0
 	for r := range m.accounting.records() {
 		if !r.Timestamp.IsZero() && r.Timestamp.Before(cutoff) {
 			s.decrementCounters(r.detail(), api, m, model)
 		} else {
-			*m.accounting.at(kept) = r
+			if kept != scanned {
+				*m.accounting.mutableAt(kept) = r
+			}
 			kept++
 		}
+		scanned++
 	}
 	changed := kept != m.accounting.count
 	if changed {
 		m.accounting.truncate(kept)
-		m.accountingIdentities = make(map[accountingIdentity]*accountingIdentity)
-		for r := range m.accounting.records() {
-			m.accountingIdentities[*r.Identity] = r.Identity
+		m.accountingIdentities = make(accountingIdentityIndex)
+		for i := 0; i < kept; i++ {
+			r := m.accounting.mutableAt(i)
+			r.Identity = m.internAccountingIdentity(*r.Identity)
 		}
 	}
 	if kept == 0 {
@@ -145,7 +141,7 @@ func (m *modelStats) setAccountingDetailAt(i int, d RequestDetail) {
 		m.Details[i] = d
 		return
 	}
-	*m.accounting.at(i - len(m.Details)) = m.accountingRecord(d)
+	*m.accounting.mutableAt(i - len(m.Details)) = m.accountingRecord(d)
 }
 
 func (m *modelStats) removeAccountingDetailAt(i int) {

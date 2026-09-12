@@ -19,7 +19,7 @@ import (
 
 const (
 	sqliteLedgerApplicationID = 0x43504155 // CPAU
-	sqliteLedgerSchemaVersion = 2
+	sqliteLedgerSchemaVersion = 3
 	sqliteLedgerBatchRecords  = 256
 	sqliteLedgerBatchBytes    = 8 << 20
 	sqliteLedgerRecordBytes   = 1 << 20
@@ -188,9 +188,9 @@ func (s *sqliteLedger) initialize(ctx context.Context) error {
 		if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA application_id=%d; PRAGMA user_version=%d", sqliteLedgerApplicationID, sqliteLedgerSchemaVersion)); err != nil {
 			return err
 		}
-	} else if appID == sqliteLedgerApplicationID && version == 1 {
-		// Version 2 only adds isolated migration staging. Existing request IDs,
-		// revisions and query generations must remain unchanged.
+	} else if appID == sqliteLedgerApplicationID && (version == 1 || version == 2) {
+		// Upgrade additive storage primitives without changing request IDs,
+		// revisions, generations or staged migration bytes.
 		if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version=%d", sqliteLedgerSchemaVersion)); err != nil {
 			return err
 		}
@@ -199,6 +199,11 @@ func (s *sqliteLedger) initialize(ctx context.Context) error {
 	}
 	if version < 2 {
 		if _, err := tx.ExecContext(ctx, sqliteMigrationStagingSchema); err != nil {
+			return err
+		}
+	}
+	if version < 3 {
+		if _, err := tx.ExecContext(ctx, sqliteLedgerStateSchema); err != nil {
 			return err
 		}
 	}
@@ -250,6 +255,13 @@ func (s *sqliteLedger) operationContext(parent context.Context, lifetime time.Du
 // deduplicate equal usage content. A caller resuming migration first reads its
 // cursor; a stale cursor or record revision aborts the whole batch.
 func (s *sqliteLedger) Apply(ctx context.Context, mutations []sqliteLedgerMutation, progress *sqliteLedgerProgress) (ids []int64, err error) {
+	return s.ApplyState(ctx, mutations, nil, progress)
+}
+
+// ApplyState commits request mutations, derived state and migration progress
+// in one generation. State values are opaque here: the runtime coordinator
+// owns aggregate/residual/config semantics and must supply version checks.
+func (s *sqliteLedger) ApplyState(ctx context.Context, mutations []sqliteLedgerMutation, states []sqliteLedgerStateMutation, progress *sqliteLedgerProgress) (ids []int64, err error) {
 	parent := ctx
 	defer func() {
 		if err != nil && parent.Err() != nil {
@@ -258,6 +270,10 @@ func (s *sqliteLedger) Apply(ctx context.Context, mutations []sqliteLedgerMutati
 	}()
 	if len(mutations) > sqliteLedgerBatchRecords {
 		return nil, errSQLiteLedgerBudget
+	}
+	stateBytes, err := validateSQLiteLedgerStates(states)
+	if err != nil {
+		return nil, err
 	}
 	ctx, cancel := s.operationContext(parent, 0)
 	defer cancel()
@@ -286,7 +302,7 @@ func (s *sqliteLedger) Apply(ctx context.Context, mutations []sqliteLedgerMutati
 			return nil, err
 		}
 	}
-	if len(mutations) == 0 && progress == nil {
+	if len(mutations) == 0 && len(states) == 0 && progress == nil {
 		return nil, nil
 	}
 	var revision int64
@@ -294,7 +310,10 @@ func (s *sqliteLedger) Apply(ctx context.Context, mutations []sqliteLedgerMutati
 		return nil, err
 	}
 	ids = make([]int64, 0, len(mutations))
-	bytes := 0
+	if err := applySQLiteLedgerStates(ctx, tx, revision, states); err != nil {
+		return nil, err
+	}
+	bytes := stateBytes
 	oldIdentities := make(map[int64]struct{})
 	for _, mutation := range mutations {
 		r := mutation.Record
