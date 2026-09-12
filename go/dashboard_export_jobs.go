@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"compress/gzip"
 	"context"
 	"crypto/rand"
@@ -28,6 +29,7 @@ const (
 	dashboardExportJobMaxStored = 16
 	dashboardExportJobPageSize  = 5000
 	dashboardExportChunkBytes   = 256 << 10
+	dashboardExportWriteBuffer  = 64 << 10
 )
 
 const (
@@ -90,6 +92,7 @@ type dashboardExportJobResponse struct {
 	Status       string `json:"status"`
 	Format       string `json:"format"`
 	Gzip         bool   `json:"gzip"`
+	JSONRows     bool   `json:"json_rows,omitempty"`
 	Limit        int    `json:"limit,omitempty"`
 	CreatedAt    string `json:"created_at"`
 	StartedAt    string `json:"started_at,omitempty"`
@@ -100,7 +103,7 @@ type dashboardExportJobResponse struct {
 	Exported     int    `json:"exported,omitempty"`
 	Truncated    bool   `json:"truncated,omitempty"`
 	RawBytes     int    `json:"raw_bytes,omitempty"`
-	BodyBytes    int    `json:"body_bytes,omitempty"`
+	BodyBytes    int    `json:"body_bytes"`
 	ContentType  string `json:"content_type,omitempty"`
 	DownloadPath string `json:"download_path,omitempty"`
 	ETag         string `json:"etag,omitempty"`
@@ -122,6 +125,7 @@ func newDashboardExportJobManager() *dashboardExportJobManager {
 func handleDashboardEventsExportJobCreate(query map[string][]string) ([]byte, error) {
 	params := normalizeEventsQuery(dashboardEventsQuery(query), false)
 	opts := dashboardEventsExportOptionsFromQuery(query)
+	opts.JSONRows = opts.Format == dashboardExportJSON && queryBool(query, "json_rows")
 	opts.Limit = effectiveDashboardExportLimit(opts.Limit, stats.ExportMaxRecords())
 	job, statusCode, message := dashboardExportJobs.create(params, opts)
 	if message != "" {
@@ -343,7 +347,10 @@ func encodeDashboardEventsExportFile(params EventsQuery, opts dashboardEventsExp
 	if err != nil {
 		return dashboardExportFileResult{}, err
 	}
-	bodyCounter := &countingWriter{w: file}
+	// JSON emits separators and individual rows. Coalesce those writes before
+	// reaching the filesystem, including the final gzip trailer.
+	buffered := bufio.NewWriterSize(file, dashboardExportWriteBuffer)
+	bodyCounter := &countingWriter{w: buffered}
 	rawWriter := io.Writer(bodyCounter)
 	var gzipWriter *gzip.Writer
 	if opts.Gzip {
@@ -357,6 +364,9 @@ func encodeDashboardEventsExportFile(params EventsQuery, opts dashboardEventsExp
 		if closeErr := gzipWriter.Close(); encodeErr == nil {
 			encodeErr = closeErr
 		}
+	}
+	if encodeErr == nil {
+		encodeErr = buffered.Flush()
 	}
 	if closeErr := file.Close(); encodeErr == nil {
 		encodeErr = closeErr
@@ -403,6 +413,9 @@ func encodeDashboardEventsExportPaged(writer io.Writer, params EventsQuery, opts
 }
 
 func encodeDashboardEventsJSONPaged(writer io.Writer, opts dashboardEventsExportOptions, firstPage EventsResult) (int, error) {
+	if opts.JSONRows {
+		return encodeDashboardEventsJSONArrayPaged(writer, opts, firstPage)
+	}
 	if _, err := io.WriteString(writer, `{"events":[`); err != nil {
 		return 0, err
 	}
@@ -440,6 +453,40 @@ func encodeDashboardEventsJSONPaged(writer io.Writer, opts dashboardEventsExport
 		return exported, err
 	}
 	return exported, nil
+}
+
+func encodeDashboardEventsJSONArrayPaged(writer io.Writer, opts dashboardEventsExportOptions, firstPage EventsResult) (int, error) {
+	if _, err := io.WriteString(writer, "["); err != nil {
+		return 0, err
+	}
+	first := true
+	exported, err := encodeDashboardEventsPaged(opts, firstPage, func(event RequestDetail) error {
+		separator := ",\n  "
+		if first {
+			separator = "\n  "
+			first = false
+		}
+		if _, err := io.WriteString(writer, separator); err != nil {
+			return err
+		}
+		// Format one record at a time, preserving the dashboard's readable
+		// array file and int64 values without a whole-file JavaScript parse.
+		raw, err := json.MarshalIndent(event, "  ", "  ")
+		if err != nil {
+			return err
+		}
+		_, err = writer.Write(raw)
+		return err
+	})
+	if err != nil {
+		return exported, err
+	}
+	ending := "\n]"
+	if first {
+		ending = "]"
+	}
+	_, err = io.WriteString(writer, ending)
+	return exported, err
 }
 
 func encodeDashboardEventsJSONLPaged(writer io.Writer, opts dashboardEventsExportOptions, firstPage EventsResult) (int, error) {
@@ -646,6 +693,7 @@ func dashboardExportJobSnapshot(job dashboardExportJob) dashboardExportJobRespon
 		Status:      job.Status,
 		Format:      string(job.Options.Format),
 		Gzip:        job.Options.Gzip,
+		JSONRows:    job.Options.JSONRows,
 		Limit:       job.Options.Limit,
 		CreatedAt:   formatExportJobTime(job.CreatedAt),
 		StartedAt:   formatExportJobTime(job.StartedAt),

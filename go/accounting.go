@@ -213,6 +213,27 @@ func (m *modelStats) appendDetail(d RequestDetail, archived bool) {
 	m.rebindEventRefs(changedFrom)
 }
 
+// Bulk import, a smaller detail limit or expiry can leave a tiny visible
+// window retaining a much larger allocation. Ordinary rolling eviction keeps
+// its reusable capacity; only substantial underuse triggers a bounded copy.
+func (m *modelStats) compactDetailStorage(previousCapacity int) {
+	if len(m.Details) == 0 {
+		m.Details, m.detailStorage = nil, nil
+		return
+	}
+	capacity := max(previousCapacity, len(m.detailStorage))
+	if capacity < 1024 || len(m.Details) > capacity/4 {
+		return
+	}
+	// Leave append headroom so the first new request does not immediately
+	// allocate and copy the window again.
+	details := make([]RequestDetail, len(m.Details), len(m.Details)+max(1, len(m.Details)/4))
+	copy(details, m.Details)
+	m.Details = details
+	m.detailStorage = details[:cap(details)]
+	m.rebindEventRefs(0)
+}
+
 func (m ModelSnapshot) accountingCount() int { return len(m.Details) + len(m.Accounting) }
 func (m ModelSnapshot) accountingDetailAt(i int) RequestDetail {
 	if i < len(m.Details) {

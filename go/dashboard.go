@@ -241,11 +241,15 @@ const (
 )
 
 type dashboardEventsExportOptions struct {
-	frozen *eventExportSnapshot
-	ctx    context.Context
-	Format dashboardExportFormat
-	Gzip   bool
-	Limit  int
+	// JSONRows is negotiated by background jobs only. Existing management
+	// exports retain their envelope; the dashboard can download its array file
+	// without decoding and re-encoding the entire export in JavaScript.
+	JSONRows bool
+	frozen   *eventExportSnapshot
+	ctx      context.Context
+	Format   dashboardExportFormat
+	Gzip     bool
+	Limit    int
 }
 
 func dashboardEventsExportOptionsFromQuery(query map[string][]string) dashboardEventsExportOptions {

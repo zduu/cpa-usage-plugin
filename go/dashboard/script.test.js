@@ -1175,6 +1175,60 @@ test('chunk export rejects corruption, missing bytes and changed versions and de
   }
 });
 
+test('CSV and JSON buttons download checked Blob parts without whole-file text or JSON conversion', async () => {
+  for (const kind of ['csv', 'json']) {
+    for (const api of [false, true]) {
+      const { context, document } = createDashboardHarness();
+      await waitFor(() => document.getElementById('apiSelect').value === 'openai');
+      const payload = kind === 'csv' ? 'model,tokens\n中文🙂,9007199254740993\n' : '[\n  {"model":"中文🙂","tokens":9007199254740993}\n]';
+      const bytes = Buffer.from(payload);
+      const job = { id: 'file', status: 'succeeded', format: kind, json_rows: kind === 'json',
+        body_bytes: bytes.length, chunk_size: 5, etag: 'immutable-file', total: 7, exported: 1, truncated: true,
+        content_type: kind === 'csv' ? 'text/csv; charset=utf-8' : 'application/json; charset=utf-8' };
+      const blobs = [];
+      let deleted = 0;
+      context.Blob = Blob;
+      context.TextDecoder = class { constructor() { throw new Error('file download must not decode text'); } };
+      context.URL.createObjectURL = (blob) => { blobs.push(blob); return 'blob:checked-file'; };
+      context.createExportJob = async (params) => {
+        assert.strictEqual(params.get('format'), kind);
+        if (kind === 'json') assert.strictEqual(params.get('json_rows'), 'true');
+        if (api) assert.ok(params.get('api'));
+        return job;
+      };
+      context.deleteExportJob = async () => { deleted++; };
+      context.fetchJsonPayload = async (url) => {
+        const query = new URL(url, 'http://test').searchParams;
+        const offset = Number(query.get('offset'));
+        const data = bytes.subarray(offset, offset + Number(query.get('length')));
+        return { offset, total: bytes.length, etag: job.etag, data: data.toString('base64'), checksum_crc32: context.exportChunkChecksum(data) };
+      };
+      const button = (api ? 'exportApi' : 'exportRows') + (kind === 'csv' ? 'Csv' : 'Json');
+      await document.getElementById(button).onclick();
+      assert.strictEqual(blobs.length, 1);
+      assert.ok(blobs[0] instanceof Blob);
+      assert.strictEqual(await blobs[0].text(), payload, 'bytes, UTF-8 boundaries and large integers must survive');
+      assert.strictEqual(deleted, 1);
+      assert.ok(document.body.children.some((el) => el.download && el.download.endsWith('.' + kind)));
+    }
+  }
+});
+
+test('a backend ignoring json_rows keeps the compatible text-envelope path', async () => {
+  const { context, document } = createDashboardHarness();
+  await waitFor(() => document.getElementById('apiSelect').value === 'openai');
+  const bytes = Buffer.from('{"events":[],"total":0}');
+  const job = { id: 'old-json', status: 'succeeded', format: 'json', body_bytes: bytes.length,
+    chunk_size: 256 * 1024, etag: 'old-envelope', content_type: 'application/json' };
+  context.createExportJob = async () => job;
+  context.deleteExportJob = async () => {};
+  context.fetchJsonPayload = async () => ({ offset: 0, total: bytes.length, etag: job.etag,
+    data: bytes.toString('base64'), checksum_crc32: context.exportChunkChecksum(bytes) });
+  const result = await context.fetchExportJobResult(new URLSearchParams({ json_rows: 'true' }), true);
+  assert.strictEqual(result.data, bytes.toString());
+  assert.strictEqual(result.headers['X-Total-Count'][0], '0');
+});
+
 test('dashboard bare model input can use a price-source value as an override starting point', async () => {
   const { context, document } = createDashboardHarness({
     prices: { 'gpt-4.1': { prompt: 1.25, completion: 10, cache: 0.125, cache_write: 1.5 } },
@@ -2577,4 +2631,24 @@ test('invalid weekday values reach the validator instead of being sanitized', as
     const normalized = context.normalizedRuleDays(context.ruleDaySet({ days: input }));
     assert.deepStrictEqual(Array.from(normalized), expected);
   });
+});
+
+test('negotiated JSON array survives whole-response download fallback', async () => {
+  for (const api of [false, true]) {
+    const { context, document } = createDashboardHarness();
+    await waitFor(() => document.getElementById('apiSelect').value === 'openai');
+    const payload = '[{"model":"中文🙂","tokens":9007199254740993}]';
+    const job = { id: 'array-fallback', status: 'succeeded', format: 'json', json_rows: true, content_type: 'application/json' };
+    const blobs = [];
+    let deleted = 0;
+    context.Blob = Blob;
+    context.URL.createObjectURL = (blob) => { blobs.push(blob); return 'blob:fallback'; };
+    context.createExportJob = async () => job;
+    context.deleteExportJob = async () => { deleted++; };
+    context.fetchTextPayloadWithMeta = async () => ({ data: payload, headers: {}, statusCode: 200 });
+    await document.getElementById(api ? 'exportApiJson' : 'exportRowsJson').onclick();
+    assert.strictEqual(blobs.length, 1);
+    assert.strictEqual(await blobs[0].text(), payload);
+    assert.strictEqual(deleted, 1);
+  }
 });

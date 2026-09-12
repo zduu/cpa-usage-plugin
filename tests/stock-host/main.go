@@ -33,9 +33,12 @@ import "C"
 import (
 	"encoding/json"
 	"fmt"
+	"hash/crc32"
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unsafe"
@@ -72,8 +75,8 @@ func check(err error) {
 }
 
 func main() {
-	if len(os.Args) != 2 {
-		panic("usage: go run . /absolute/path/to/plugin.so")
+	if len(os.Args) < 2 || len(os.Args) > 3 {
+		panic("usage: go run . /absolute/path/to/plugin.so [expected-version]")
 	}
 	path := C.CString(os.Args[1])
 	defer C.free(unsafe.Pointer(path))
@@ -86,7 +89,8 @@ func main() {
 		Capabilities map[string]bool
 	}
 	call("plugin.register", map[string]any{"config_yaml": []byte("exchange_rate_enabled: false\nmodels_dev_prices_enabled: false\n")}, &registration)
-	if registration.Metadata.Version != "2.6.4" || !registration.Capabilities["request_interceptor"] ||
+	if !regexp.MustCompile(`^\d+\.\d+\.\d+$`).MatchString(registration.Metadata.Version) ||
+		(len(os.Args) == 3 && registration.Metadata.Version != os.Args[2]) || !registration.Capabilities["request_interceptor"] ||
 		!registration.Capabilities["request_lifecycle_plugin"] || registration.Capabilities["response_interceptor"] ||
 		registration.Capabilities["response_stream_interceptor"] {
 		panic("incorrect registration")
@@ -184,5 +188,80 @@ func main() {
 	if missing.StatusCode != http.StatusNotFound {
 		panic("404 ABI response lost")
 	}
+	verifyExportChunks(len(paths))
 	fmt.Println("PASS: stock CPA v7.2.152 SDK -> shared-library ABI -> dashboard; 4 native records, paths, stream flags, cancellation, both callback orders, all/24h")
+}
+
+// Exercise the real ABI envelope and byte/base64 conversion, not a direct
+// call into the export encoder. Small chunks split JSON and UTF-8 boundaries.
+func verifyExportChunks(expected int) {
+	type exportJob struct {
+		ID, Status, ETag string
+		JSONRows         bool `json:"json_rows"`
+		BodyBytes        int  `json:"body_bytes"`
+		Exported         int
+	}
+	var response pluginapi.ManagementResponse
+	call("management.handle", pluginapi.ManagementRequest{Method: "POST", Path: "/dashboard-events-export-jobs",
+		Query: url.Values{"format": {"json"}, "json_rows": {"true"}}}, &response)
+	if response.StatusCode != http.StatusAccepted {
+		panic("export job was not accepted")
+	}
+	var job exportJob
+	check(json.Unmarshal(response.Body, &job))
+	if job.ID == "" {
+		panic("export job ID missing")
+	}
+	defer func() {
+		call("management.handle", pluginapi.ManagementRequest{Method: "DELETE", Path: "/dashboard-events-export-jobs", Query: url.Values{"id": {job.ID}}}, &response)
+		if response.StatusCode != http.StatusOK {
+			panic("export cleanup failed")
+		}
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for job.Status != "succeeded" {
+		if time.Now().After(deadline) || job.Status == "failed" {
+			panic("export job did not complete")
+		}
+		time.Sleep(10 * time.Millisecond)
+		call("management.handle", pluginapi.ManagementRequest{Method: "GET", Path: "/dashboard-events-export-jobs", Query: url.Values{"id": {job.ID}}}, &response)
+		if response.StatusCode != http.StatusOK {
+			panic("export polling failed")
+		}
+		check(json.Unmarshal(response.Body, &job))
+	}
+	if !job.JSONRows || job.Exported != expected || job.BodyBytes <= 0 {
+		panic("export negotiation or counters changed")
+	}
+	var body []byte
+	for offset := 0; offset < job.BodyBytes; {
+		query := url.Values{"id": {job.ID}, "chunk": {"1"}, "offset": {strconv.Itoa(offset)}, "length": {"37"}, "version": {job.ETag}}
+		call("management.handle", pluginapi.ManagementRequest{Method: "GET", Path: "/dashboard-events-export-download", Query: query}, &response)
+		if response.StatusCode != http.StatusOK {
+			panic("export chunk failed")
+		}
+		var chunk struct {
+			Offset, Total int
+			ETag          string
+			Checksum      string `json:"checksum_crc32"`
+			Data          []byte
+		}
+		check(json.Unmarshal(response.Body, &chunk))
+		if chunk.Offset != offset || chunk.Total != job.BodyBytes || chunk.ETag != job.ETag || len(chunk.Data) != min(37, job.BodyBytes-offset) || chunk.Checksum != fmt.Sprintf("%08x", crc32.ChecksumIEEE(chunk.Data)) {
+			panic("export chunk integrity failed")
+		}
+		body = append(body, chunk.Data...)
+		offset += len(chunk.Data)
+	}
+	var rows []json.RawMessage
+	check(json.Unmarshal(body, &rows))
+	if len(rows) != expected {
+		panic("array export lost records")
+	}
+	call("management.handle", pluginapi.ManagementRequest{Method: "GET", Path: "/dashboard-events-export-download",
+		Query: url.Values{"id": {job.ID}, "chunk": {"1"}, "offset": {"0"}, "version": {"wrong"}}}, &response)
+	if response.StatusCode != http.StatusPreconditionFailed {
+		panic("412 ABI response lost")
+	}
+	fmt.Println("PASS: negotiated JSON array, chunk offsets, file version, CRC32, record count and 412 through stock CPA ABI")
 }

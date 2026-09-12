@@ -1,0 +1,11 @@
+.git
+**/.DS_Store
+**/__pycache__
+go/*.test
+tests/performance/.work
+tests/performance/results
+docs
+*.so
+*.dylib
+*.dll
+*.zip

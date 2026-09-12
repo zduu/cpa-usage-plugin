@@ -452,7 +452,7 @@ curl "http://127.0.0.1:8317/v0/management/plugins/usage-dashboard-zduu/dashboard
   -o usage-events.jsonl.gz
 ```
 
-看板导出按钮默认使用后台导出任务，导出生成阶段会按页扫描并写入临时文件，避免长时间占用单个管理请求，也避免先构造完整事件数组。外部脚本也可以使用同一流程：
+看板导出按钮默认使用后台导出任务，导出生成阶段先冻结全部匹配事件及成本，再按页编码，并通过 64 KiB 缓冲写入临时文件，避免长时间占用单个管理请求。冻结副本的内存仍随匹配记录数增长。外部脚本也可以使用同一流程：
 
 ```bash
 # 创建后台导出任务，返回 id/status/download_path 等字段
@@ -473,7 +473,11 @@ curl -X DELETE "http://127.0.0.1:8317/v0/management/plugins/usage-dashboard-zduu
   -H 'x-management-key: <你的管理密钥>'
 ```
 
-后台导出任务与同步导出使用相同筛选参数、格式、gzip 和 `limit` 规则；插件最多同时运行 2 个后台导出任务，并保留最多 16 个任务元数据，超出时会返回 429，避免并发大导出压垮管理接口。受 CPA 管理响应协议限制，最终下载仍会把临时文件作为单个响应体返回。
+后台导出任务与同步导出使用相同筛选参数、格式、gzip 和 `limit` 规则；插件最多同时运行 2 个后台导出任务，并保留最多 16 个任务元数据，超出时会返回 429，避免并发大导出压垮管理接口。看板优先使用每块最多 256 KiB 的下载路径，逐块校验后以 Blob 保存，避免整份 JSON 解析和再编码；浏览器仍需容纳完整文件。旧整包下载接口继续可用，其 ABI 响应内存仍随文件大小增长。
+
+完成的任务返回 `etag`、`chunk_size`、`body_bytes`。分块下载请求为 `?id=<job_id>&chunk=1&offset=0&length=262144&version=<URL编码后的etag>`；响应包含 `offset`、`total`、`etag`、`checksum_crc32` 和 base64 编码的 `data`。校验数据长度、版本和 CRC32 后再前进 offset；重试使用相同 offset。错误版本返回 412，无效参数返回 400，越界返回 416，文件不可用返回 410。gzip 文件也支持按原始压缩字节分块读取。
+
+后台 JSON 任务可额外传 `json_rows=true` 请求可直接保存的 JSON 数组；只有任务响应确认 `json_rows: true` 时才能按数组处理。未协商的后台导出和同步导出保留原有 events 信封。内置看板自动协商，新前端遇到忽略此参数的旧后端时使用兼容路径。
 
 ### 健康检查
 
@@ -554,7 +558,7 @@ plugins:
 - `/health` 的 `storage.write_queue_length` 和 `storage.write_queue_capacity` 可观察后台写入队列积压；`storage.last_write_batch_records`、`storage.last_write_batch_duration_ms`、`storage.last_write_queue_wait_ms` 可观察最近 writer 批次规模、写入耗时和最长排队时长；`storage.write_batch_avg_duration_ms`、`storage.write_batch_p95_duration_ms`、`storage.write_batch_p99_duration_ms`、`storage.write_queue_wait_avg_ms`、`storage.write_queue_wait_p95_ms`、`storage.write_queue_wait_p99_ms` 和 `storage.write_pressure` 可观察持续磁盘压力与长尾抖动。看板底部出现"持久化排队中"或"持久化写入偏慢"时，说明磁盘写入速度短时间低于请求记录速度。
 - 如果已经有内存数据，建议先导出；开启持久化并重启后，再把导出的 JSON 导入一次，后续数据才会继续写入持久化文件。
 
-开发中候选的恢复保护：如果 `snapshot.json` 的版本不受支持或 `generated_at` 无效，插件会报告 `invalid storage snapshot header`，不加载该快照，也不对该目标启动 writer、自动清理分片或在关闭时覆盖快照。此时配置仍可能显示已开启持久化，但新增统计仅留在内存，不能视为已经落盘。请保留原目录，检查 `/health` 的存储错误；导出当前内存数据后，使用兼容版本或已验证的备份恢复，再重启核验。不要直接把未知快照版本号改小或删除旧分片来绕过错误。SQLite 迁移仍处于开发阶段，当前没有可启用的数据库后端配置。
+开发中候选的恢复保护：如果 `snapshot.json` 读取或解码失败（包括截断 JSON、字段类型错误），或者版本不受支持、`generated_at` 无效，插件会报告对应恢复错误，不加载该快照，也不对该目标启动 writer、自动清理分片或在关闭时覆盖快照。此时配置仍可能显示已开启持久化，但新增统计仅留在内存，不能视为已经落盘。请保留原目录，检查 `/health` 的存储错误；导出当前内存数据后，使用兼容版本或已验证的备份恢复，再重启核验。不要直接把未知快照版本号改小或删除旧分片来绕过错误。SQLite 迁移仍处于开发阶段，当前没有可启用的数据库后端配置。
 
 ## 8. 更新插件
 
@@ -669,3 +673,9 @@ CPA 主程序负责在请求完成后把 usage 记录下发给插件。CPA `v7.2
 - token 是否完整取决于上游返回的 usage 信息；CPA 主程序需向插件传递可解析的 usage 字段。SSE 中同一事件内的多条独立 `data:` JSON 行会分别解析，插件会选择信息最完整的 usage。
 - 实时请求不会被去重窗口合并；`max_details_per_model` 只裁剪请求明细，不会扣减总请求、token、成功率等累计统计。`retention_days` 超出窗口的记录会被淘汰并从窗口统计中扣除。
 - `api_key_hash_salt` 只影响新记录的 `api_key_hash`。留空时使用插件默认稳定 salt；填写后使用自定义稳定 salt。客户端 API 统计优先按 `api_key_hash` 聚合，缺失 hash 时再按脱敏后的 `api_key` 展示值聚合；hash 仅用于分组/排查，不能反推原始 key。导入已脱敏的旧导出数据时，插件会忽略外部实例生成的 hash，并按脱敏展示值作为兼容身份。同一脱敏显示值下存在多个不同 hash 时不会强行合并，避免把不同真实 key 混为一条。
+
+### 下一版本候选的升级与回退边界
+
+候选仍使用 JSONL 和 snapshot 持久化，SQLite 只是未接管运行时的基础实现，无需添加数据库配置。升级前停用插件并备份整个 `storage_path` 目录与模型价格文件，另保留一份 `/usage/export` 完整统计导出；事件导出不包含归档账本，不能替代完整备份。升级后核对总请求数、token、成本、可见明细数及 `/health` 存储错误。
+
+候选快照沿用 v2 编号，但增加了 `accounting` 语义。v2.6.4 不具备相同的逐请求历史账本语义；直接替换回旧插件不等于无损降级。回退应停用候选、保留候选目录及升级后的完整导出，再在独立目录恢复升级前备份和旧插件；这只能恢复升级前状态。升级后新增记录的无损回退转换尚未验收，不要让旧版覆盖唯一的候选数据目录。

@@ -33,6 +33,7 @@ temp/
 __pycache__/
 *.pyc
 /tests/
+/docs/issues
 # IDE
 .idea/
 .vscode/

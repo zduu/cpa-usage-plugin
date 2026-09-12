@@ -1783,7 +1783,7 @@ async function renderEvents() {
 
 const downloadBlobRevokeDelayMs = 60000;
 function download(name, text, type) {
-  const url = URL.createObjectURL(new Blob([text], { type }));
+  const url = URL.createObjectURL(text instanceof Blob ? text : new Blob([text], { type }));
   const a = document.createElement('a');
   a.href = url;
   a.download = name;
@@ -1827,16 +1827,21 @@ async function waitForExportJob(job) {
   throw new Error(t('export_job_timeout'));
 }
 
-async function fetchExportJobResult(params) {
+async function fetchExportJobResult(params, asFile = false) {
   const job = await createExportJob(params);
   if (!job || !job.id) throw new Error(t('export_no_id'));
   try {
     const completed = await waitForExportJob(job);
     const downloadPath = completed.download_path || ('dashboard-events-export-download?id=' + encodeURIComponent(job.id));
+    // A previous backend may ignore json_rows. Use the array file only
+    // after negotiation, on both chunked and whole-response downloads.
+    const fileReady = asFile && (completed.format === 'csv' || completed.json_rows === true);
     if (completed.chunk_size && completed.etag && !completed.gzip) {
-      return await fetchExportJobChunks(completed, downloadPath);
+      return await fetchExportJobChunks(completed, downloadPath, fileReady);
     }
-    return await fetchTextPayloadWithMeta(managementEndpoint(downloadPath), pluginFetchOptions({ cache: 'no-store' }));
+    const meta = await fetchTextPayloadWithMeta(managementEndpoint(downloadPath), pluginFetchOptions({ cache: 'no-store' }));
+    if (fileReady && !completed.gzip) meta.data = new Blob([meta.data], { type: completed.content_type });
+    return meta;
   } finally {
     await deleteExportJob(job.id);
   }
@@ -1853,12 +1858,12 @@ function exportChunkChecksum(bytes) {
   return ((crc ^ 0xffffffff) >>> 0).toString(16).padStart(8, '0');
 }
 
-async function fetchExportJobChunks(job, downloadPath) {
+async function fetchExportJobChunks(job, downloadPath, asFile = false) {
   const total = job.body_bytes;
   const size = Math.min(job.chunk_size, 256 * 1024);
   if (!Number.isSafeInteger(total) || total < 0 || !Number.isSafeInteger(size) || size <= 0) throw new Error(t('export_failed'));
   const parts = [];
-  const decoder = new TextDecoder('utf-8', { fatal: true });
+  const decoder = asFile ? null : new TextDecoder('utf-8', { fatal: true });
   let offset = 0;
   do {
     const length = Math.min(size, Math.max(1, total - offset));
@@ -1878,13 +1883,15 @@ async function fetchExportJobChunks(job, downloadPath) {
     if (!chunk || chunk.offset !== offset || chunk.total !== total || chunk.etag !== job.etag || typeof chunk.data !== 'string') throw new Error(t('export_failed'));
     const bytes = Uint8Array.from(atob(chunk.data), (value) => value.charCodeAt(0));
     if (bytes.length !== Math.min(length, total - offset) || exportChunkChecksum(bytes) !== chunk.checksum_crc32) throw new Error(t('export_failed'));
-    parts.push(decoder.decode(bytes, { stream: true }));
+    // Hand validated bytes to immutable Blob storage one chunk at a time.
+    // File downloads never retain the complete decoded string or JSON tree.
+    parts.push(asFile ? new Blob([bytes]) : decoder.decode(bytes, { stream: true }));
     offset += bytes.length;
   } while (offset < total);
-  parts.push(decoder.decode());
-  return { data: parts.join(''), statusCode: 200, headers: {
-    'Content-Type': [job.content_type], 'X-Total-Count': [String(job.total)],
-    'X-Exported-Count': [String(job.exported)], 'X-Export-Truncated': [String(!!job.truncated)],
+  if (decoder) parts.push(decoder.decode());
+  return { data: asFile ? new Blob(parts, { type: job.content_type }) : parts.join(''), statusCode: 200, headers: {
+    'Content-Type': [job.content_type], 'X-Total-Count': [String(job.total || 0)],
+    'X-Exported-Count': [String(job.exported || 0)], 'X-Export-Truncated': [String(!!job.truncated)],
   } };
 }
 
@@ -2277,13 +2284,19 @@ async function exportRows(kind) {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     if (kind === 'csv') {
       params.set('format', 'csv');
-      const meta = await fetchExportJobResult(params);
+      const meta = await fetchExportJobResult(params, true);
       notifyExportTruncated(exportTruncationFromHeaders(meta.headers));
       download('usage-events-' + stamp + '.csv', meta.data, 'text/csv;charset=utf-8');
       return;
     }
     params.set('format', 'json');
-    const meta = await fetchExportJobResult(params);
+    params.set('json_rows', 'true');
+    const meta = await fetchExportJobResult(params, true);
+    if (meta.data instanceof Blob) {
+      notifyExportTruncated(exportTruncationFromHeaders(meta.headers));
+      download('usage-events-' + stamp + '.json', meta.data, 'application/json;charset=utf-8');
+      return;
+    }
     const data = typeof meta.data === 'string' ? JSON.parse(meta.data || '{}') : meta.data;
     const rows = data.events || [];
     notifyExportTruncated({ truncated: !!data.truncated, total: data.total, exported: rows.length });
@@ -2306,13 +2319,19 @@ async function exportApiRows(kind) {
     const name = (friendlyApiName(selectedApi) || 'api').replace(/[\\/:*?"<>|\s]+/g, '-').slice(0, 80);
     if (kind === 'csv') {
       params.set('format', 'csv');
-      const meta = await fetchExportJobResult(params);
+      const meta = await fetchExportJobResult(params, true);
       notifyExportTruncated(exportTruncationFromHeaders(meta.headers));
       download('usage-api-' + name + '-' + stamp + '.csv', meta.data, 'text/csv;charset=utf-8');
       return;
     }
     params.set('format', 'json');
-    const meta = await fetchExportJobResult(params);
+    params.set('json_rows', 'true');
+    const meta = await fetchExportJobResult(params, true);
+    if (meta.data instanceof Blob) {
+      notifyExportTruncated(exportTruncationFromHeaders(meta.headers));
+      download('usage-api-' + name + '-' + stamp + '.json', meta.data, 'application/json;charset=utf-8');
+      return;
+    }
     const data = typeof meta.data === 'string' ? JSON.parse(meta.data || '{}') : meta.data;
     const rows = data.events || [];
     notifyExportTruncated({ truncated: !!data.truncated, total: data.total, exported: rows.length });

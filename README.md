@@ -2,7 +2,7 @@
 
 CPA 用量统计插件，用于在 CLIProxyAPI/CPA v7 插件系统中记录请求用量，并提供管理页面查看统计数据。
 
-当前代码版本：`2.6.4`。
+当前代码版本：`2.6.4`；下一版本开发中，尚未发布。候选版相对上一正式版的实测收益及验收缺口见[发布审查](docs/plans/release-readiness-20260912.md)。
 
 > **2.4.0 迁移提示**：插件 ID 已从 `usage-statistics` 改为 `usage-dashboard-zduu`，用于避开 CPA 官方商店中同 ID 插件造成的安装状态、配置和路由冲突。升级时必须先停用并删除旧插件，再安装新插件；历史统计数据路径保持不变。详细步骤见[部署文档的 2.3.4 → 2.4.0 迁移章节](docs/guides/cpa-usage.md#从-234-迁移到-240)。
 
@@ -32,7 +32,7 @@ CPA 用量统计插件，用于在 CLIProxyAPI/CPA v7 插件系统中记录请�
 - 默认使用内存统计；可通过 `storage_enabled` + `storage_path` 开启后台队列 JSONL 持久化，配合周期 snapshot、旧分片清理和可选 fsync 在重启或更新插件后恢复保留窗口内的统计。
 - 运行时元数据：页面可见当前保留策略、存储明细数、淘汰数、最近导入结果。
 - 健康检查端点 `/health` 可查看插件运行状态、顶层 `alerts` 告警、持久化状态、后台 writer 批次/滑动平均/p95/p99/压力指标、看板查询/缓存指标、条件请求命中率和事件导出压力指标。
-- 事件导出支持按筛选条件输出 JSON、CSV、JSONL，可通过 `gzip=1` 生成 gzip 文件内容，并用 `export_max_records`/`limit` 控制超大导出的返回行数；看板导出按钮默认使用后台导出任务，先冻结匹配的事件与成本，再分批写入临时文件，生成完成后再下载结果。
+- 事件导出支持按筛选条件输出 JSON、CSV、JSONL，可通过 `gzip=1` 生成 gzip 文件内容，并用 `export_max_records`/`limit` 控制超大导出的返回行数；看板导出按钮默认使用后台导出任务，先冻结匹配的事件与成本，再分批写入临时文件，生成完成后以最多 256 KiB 的分块下载并校验；看板直接保存文件字节，避免整份 JSON 解析和再编码。生成阶段仍需冻结全部匹配事件，浏览器仍需容纳完整下载文件。
 
 ## 界面示例
 
@@ -174,7 +174,7 @@ GET  /v0/management/plugins/usage-dashboard-zduu/health
 | `/dashboard-events` | GET | 事件查询，支持 `?limit=50&offset=0&range=24h&model=gpt-4&source=xxx&auth=xxx&api=xxx&client_api=xxx`；每条事件的可选 `api` 字段为完整上游接口分组键。 |
 | `/dashboard-events-export` | GET | 按筛选条件导出事件，默认 JSON；支持 `format=csv|jsonl`、`gzip=1` 和 `limit`，默认受 `export_max_records` 保护。`gzip=1` 返回 gzip 文件内容，不使用 `Content-Encoding`。 |
 | `/dashboard-events-export-jobs` | POST/GET/DELETE | 创建、查询或删除后台事件导出任务，参数与 `/dashboard-events-export` 一致。 |
-| `/dashboard-events-export-download` | GET | 下载已完成的后台事件导出任务结果，使用 `?id=<job_id>`。 |
+| `/dashboard-events-export-download` | GET | 下载已完成的后台事件导出任务结果，使用 `?id=<job_id>`；可协商分块下载，详见[部署文档](docs/guides/cpa-usage.md#按筛选导出事件)。 |
 | `/dashboard-api-detail` | GET | 单个上游接口详情，支持 `?api=xxx&range=24h&client_api=xxx`，返回模型分布、来源、错误统计和最近请求；最近请求携带完整上游接口 `api`，并在有数据时返回推理强度 `thinking`、请求端点 `endpoint` 和流式标记 `stream`。 |
 | `/dashboard-data` | GET | 兼容旧版，返回含全部 `details` 数组的完整数据。 |
 | `/health` | GET | 运行健康状态：`status`、`alerts`、`detail_count`、`evicted_total`、`total_requests`。 |

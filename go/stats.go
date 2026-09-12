@@ -354,6 +354,11 @@ func incrementModelProviderStats(stats map[string]*ModelProviderStat, provider s
 		stat = &ModelProviderStat{Provider: strings.TrimSpace(provider)}
 		stats[key] = stat
 	}
+	incrementModelProviderStat(stat, failed, totals)
+	return stats
+}
+
+func incrementModelProviderStat(stat *ModelProviderStat, failed bool, totals detailTotals) {
 	stat.TotalRequests = addNonNegativeInt64(stat.TotalRequests, 1)
 	if failed {
 		stat.FailureCount = addNonNegativeInt64(stat.FailureCount, 1)
@@ -366,7 +371,6 @@ func incrementModelProviderStats(stats map[string]*ModelProviderStat, provider s
 	stat.CachedTokens = addNonNegativeInt64(stat.CachedTokens, totals.cachedTokens)
 	stat.CacheWriteTokens = addNonNegativeInt64(stat.CacheWriteTokens, totals.cacheWriteTokens)
 	stat.ReasoningTokens = addNonNegativeInt64(stat.ReasoningTokens, totals.reasoningTokens)
-	return stats
 }
 
 func decrementModelProviderStats(stats map[string]*ModelProviderStat, provider string, failed bool, totals detailTotals) {
@@ -447,6 +451,12 @@ func finalizeModelStat(stat ModelStat) ModelStat {
 }
 
 func finalizeClientAPIModelStat(stat ClientAPIModelStat) ClientAPIModelStat {
+	if stat.providerStats == nil && stat.Providers != nil {
+		// Range queries own these exact provider counters. Adopt their slice
+		// instead of allocating a map and then another finalized slice.
+		sortRangeModelProviders(stat.Providers)
+		return stat
+	}
 	stat.Providers = finalizedModelProviderStats(stat.providerStats, stat.TotalRequests, stat.SuccessCount, stat.FailureCount, stat.TotalTokens, stat.InputTokens, stat.OutputTokens, stat.CachedTokens, stat.CacheWriteTokens, stat.ReasoningTokens)
 	stat.providerStats = nil
 	return stat
@@ -4883,6 +4893,7 @@ func (s *RequestStatistics) trimModelDetailsLocked(model *modelStats) bool {
 		return false
 	}
 	removed := len(model.Details) - s.maxDetailsPerModel
+	previousCapacity := cap(model.Details)
 	for _, d := range model.Details[:removed] {
 		model.archiveDetail(d)
 		if d.eventRef != nil {
@@ -4892,10 +4903,7 @@ func (s *RequestStatistics) trimModelDetailsLocked(model *modelStats) bool {
 	}
 	clear(model.Details[:removed])
 	model.Details = model.Details[removed:]
-	if len(model.Details) == 0 {
-		model.Details = nil
-		model.detailStorage = nil
-	}
+	model.compactDetailStorage(previousCapacity)
 	s.evictedTotal += int64(removed)
 	return true
 }
@@ -4960,6 +4968,8 @@ func (s *RequestStatistics) pruneLocked(now time.Time, sortNeeded bool) {
 			}
 			if s.trimModelDetailsLocked(modelSt) {
 				changed = true
+			} else {
+				modelSt.compactDetailStorage(cap(details))
 			}
 			if len(modelSt.Details) == 0 && modelSt.TotalRequests <= 0 {
 				delete(apiSt.Models, modelName)
@@ -6737,12 +6747,14 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Ti
 	var totalTokens, inputTokens, outputTokens, cachedTokens, cacheWriteTokens, reasoningTokens int64
 	var latencySum, latencyN int64
 
-	requestsByDay := make(map[summaryDayKey]int64)
-	requestsByHour := make(map[int]int64)
-	tokensByDay := make(map[summaryDayKey]int64)
-	tokensByHour := make(map[int]int64)
-	costByDay := make(map[summaryDayKey]float64)
-	costByHour := make(map[int]float64)
+	// Counters share the same time key. One day lookup and a fixed hour
+	// array avoid six independent maps for every retained request.
+	type timeTotals struct {
+		requests, tokens int64
+		cost             float64
+	}
+	days := make(map[summaryDayKey]timeTotals)
+	var hours [24]timeTotals
 
 	// Dimension aggregators
 	modelAgg := make(map[string]*ModelStat)
@@ -6792,12 +6804,15 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Ti
 				dayKey := newSummaryDayKey(detail.Timestamp)
 				hourKey := detail.Timestamp.Hour()
 				cost := pricer.cost(modelName, detail, totals)
-				requestsByDay[dayKey] = addNonNegativeInt64(requestsByDay[dayKey], 1)
-				requestsByHour[hourKey] = addNonNegativeInt64(requestsByHour[hourKey], 1)
-				tokensByDay[dayKey] = addNonNegativeInt64(tokensByDay[dayKey], totals.totalTokens)
-				tokensByHour[hourKey] = addNonNegativeInt64(tokensByHour[hourKey], totals.totalTokens)
-				costByDay[dayKey] = addNonNegativeCost(costByDay[dayKey], cost)
-				costByHour[hourKey] = addNonNegativeCost(costByHour[hourKey], cost)
+				day := days[dayKey]
+				day.requests = addNonNegativeInt64(day.requests, 1)
+				day.tokens = addNonNegativeInt64(day.tokens, totals.totalTokens)
+				day.cost = addNonNegativeCost(day.cost, cost)
+				days[dayKey] = day
+				hour := &hours[hourKey]
+				hour.requests = addNonNegativeInt64(hour.requests, 1)
+				hour.tokens = addNonNegativeInt64(hour.tokens, totals.totalTokens)
+				hour.cost = addNonNegativeCost(hour.cost, cost)
 
 				// Per-API aggregation
 				api := getOrCreateAPIRangeAgg(apiAgg, apiName)
@@ -7015,36 +7030,28 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Ti
 		}
 	}
 
-	// Time series
-	summary.Usage.RequestsByDay = make(map[string]int64, len(requestsByDay))
-	for k, v := range requestsByDay {
-		summary.Usage.RequestsByDay[k.String()] = v
+	// Preserve sparse hour maps, including explicit zero token/cost values
+	// for hours that contain requests. Calendar keys use each source timezone.
+	summary.Usage.RequestsByDay = make(map[string]int64, len(days))
+	summary.Usage.TokensByDay = make(map[string]int64, len(days))
+	summary.Usage.CostByDay = make(map[string]float64, len(days))
+	for key, totals := range days {
+		day := key.String()
+		summary.Usage.RequestsByDay[day] = totals.requests
+		summary.Usage.TokensByDay[day] = totals.tokens
+		summary.Usage.CostByDay[day] = totals.cost
 	}
 	summary.Usage.RequestsByHour = make(map[string]int64, 24)
-	for hour, v := range requestsByHour {
-		if hour >= 0 && hour < 24 {
-			summary.Usage.RequestsByHour[hourKeys[hour]] = v
-		}
-	}
-	summary.Usage.TokensByDay = make(map[string]int64, len(tokensByDay))
-	for k, v := range tokensByDay {
-		summary.Usage.TokensByDay[k.String()] = v
-	}
 	summary.Usage.TokensByHour = make(map[string]int64, 24)
-	for hour, v := range tokensByHour {
-		if hour >= 0 && hour < 24 {
-			summary.Usage.TokensByHour[hourKeys[hour]] = v
-		}
-	}
-	summary.Usage.CostByDay = make(map[string]float64, len(costByDay))
-	for k, v := range costByDay {
-		summary.Usage.CostByDay[k.String()] = v
-	}
 	summary.Usage.CostByHour = make(map[string]float64, 24)
-	for hour, v := range costByHour {
-		if hour >= 0 && hour < 24 {
-			summary.Usage.CostByHour[hourKeys[hour]] = v
+	for hour, totals := range hours {
+		if totals.requests == 0 {
+			continue
 		}
+		key := hourKeys[hour]
+		summary.Usage.RequestsByHour[key] = totals.requests
+		summary.Usage.TokensByHour[key] = totals.tokens
+		summary.Usage.CostByHour[key] = totals.cost
 	}
 
 	// Metadata (uses global counters, not range-scoped).
@@ -7174,7 +7181,7 @@ func rangeIncrementClientModel(client *clientAPIStatAccumulator, modelName strin
 	cm.CachedTokens = addNonNegativeInt64(cm.CachedTokens, totals.cachedTokens)
 	cm.CacheWriteTokens = addNonNegativeInt64(cm.CacheWriteTokens, totals.cacheWriteTokens)
 	cm.ReasoningTokens = addNonNegativeInt64(cm.ReasoningTokens, totals.reasoningTokens)
-	cm.providerStats = incrementModelProviderStats(cm.providerStats, detail.Provider, detail.Failed, totals)
+	incrementRangeClientProviders(cm, detail.Provider, detail.Failed, totals)
 }
 
 func detailModel(modelName string, detail RequestDetail) string {

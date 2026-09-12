@@ -79,3 +79,53 @@ func TestVisibleDetailStorageReuseKeepsIndexesAndExportSnapshots(t *testing.T) {
 		t.Fatalf("retention lost accounting: requests=%d details=%d", snapshot.TotalRequests, s.DetailCount())
 	}
 }
+
+func TestBulkDetailReductionReleasesCapacityAndRebindsEvents(t *testing.T) {
+	for _, expiry := range []bool{false, true} {
+		s := buildBenchmarkStats(16000)
+		now := time.Now()
+		frozen := s.captureEventExport(EventsQuery{}, 0, now)
+		original := cloneRequestDetails(frozen.result.Events)
+		_ = s.QueryEvents(EventsQuery{Limit: 100})
+		if expiry {
+			// Leave just the most recent 16 seconds: four rows in each model.
+			latest := now.Add(-100 * 24 * time.Hour)
+			for _, api := range s.apis {
+				for _, m := range api.Models {
+					if at := m.Details[len(m.Details)-1].Timestamp; at.After(latest) {
+						latest = at
+					}
+				}
+			}
+			s.retention = now.Sub(latest.Add(-15 * time.Second))
+		} else {
+			s.maxDetailsPerModel = 4
+		}
+		s.pruneLocked(now, true)
+		for _, api := range s.apis {
+			for _, m := range api.Models {
+				if len(m.Details) != 4 || cap(m.Details) > 5 || len(m.detailStorage) > 5 {
+					t.Fatalf("expiry=%t retained=%d capacity=%d storage=%d", expiry, len(m.Details), cap(m.Details), len(m.detailStorage))
+				}
+			}
+		}
+		got := s.QueryEventsAt(EventsQuery{Limit: 100}, now)
+		want := expectedVisibleEvents(s, EventsQuery{Limit: 100}, now)
+		for i := range got.Events {
+			got.Events[i].CostUSD = nil
+		}
+		if !reflect.DeepEqual(got.Events, want) {
+			t.Fatalf("expiry=%t compacted event references changed", expiry)
+		}
+		expected := int64(16000)
+		if expiry {
+			expected = 16
+		}
+		if s.totalRequests != expected || s.countAccountingLocked() != expected {
+			t.Fatalf("expiry=%t lost accounting: %d/%d", expiry, s.totalRequests, s.countAccountingLocked())
+		}
+		if !reflect.DeepEqual(frozen.result.Events, original) {
+			t.Fatal("compaction changed frozen export")
+		}
+	}
+}

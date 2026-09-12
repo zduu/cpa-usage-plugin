@@ -40,8 +40,9 @@ jobs:
         run: |
           cd go
           go build -buildmode=c-shared -buildvcs=false -trimpath -o "$RUNNER_TEMP/usage-dashboard-zduu.so" .
+          VERSION=$(sed -n 's/^const pluginVersion = "\([^"]*\)"/\1/p' register.go)
           cd ../tests/stock-host
-          go run . "$RUNNER_TEMP/usage-dashboard-zduu.so"
+          go run . "$RUNNER_TEMP/usage-dashboard-zduu.so" "$VERSION"
 
       - name: Run Go benchmarks
         run: cd go && go test -run '^$' -bench='Benchmark(RecordIncremental|Snapshot|SummaryWithoutDetails|QueryEvents|QueryAPIDetail)' -benchtime=100ms -count=1 ./...
