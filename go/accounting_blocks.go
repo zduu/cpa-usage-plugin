@@ -8,9 +8,10 @@ const accountingBlockRecords = 256
 // copies an entire retained history; small models grow their first block
 // gradually instead of reserving a full block for one archived request.
 type accountingBlocks struct {
-	blocks [][]accountingRecord
-	shared []bool // frozen snapshots may still reference these block arrays
-	count  int
+	rangeBlocks []rangeAggregateBlock
+	blocks      [][]accountingRecord
+	shared      []bool // frozen snapshots may still reference these block arrays
+	count       int
 }
 
 func (b *accountingBlocks) at(i int) *accountingRecord {
@@ -29,6 +30,9 @@ func (b *accountingBlocks) writableBlock(index int) []accountingRecord {
 }
 
 func (b *accountingBlocks) mutableAt(i int) *accountingRecord {
+	if group := i / rangeAggregateBlockRecords; group < len(b.rangeBlocks) {
+		b.rangeBlocks[group].invalidate()
+	}
 	return &b.writableBlock(i / accountingBlockRecords)[i%accountingBlockRecords]
 }
 
@@ -48,6 +52,9 @@ func (b *accountingBlocks) freeze() [][]accountingRecord {
 }
 
 func (b *accountingBlocks) append(record accountingRecord) {
+	if group := b.count / rangeAggregateBlockRecords; group < len(b.rangeBlocks) {
+		b.rangeBlocks[group].invalidate()
+	}
 	if len(b.blocks) == 0 {
 		b.blocks = append(b.blocks, make([]accountingRecord, 0, 1))
 	}
@@ -84,6 +91,7 @@ func (b *accountingBlocks) records() iter.Seq[accountingRecord] {
 // Used after in-place expiry compaction and repair. Clear only the retained
 // tail; whole discarded blocks can be released without touching their rows.
 func (b *accountingBlocks) truncate(count int) {
+	invalidateRangeBlocksFrom(b.rangeBlocks, count)
 	if count == 0 {
 		*b = accountingBlocks{}
 		return
@@ -99,6 +107,9 @@ func (b *accountingBlocks) truncate(count int) {
 		b.shared = b.shared[:blocks]
 	}
 	b.count = count
+	if groups := (count + rangeAggregateBlockRecords - 1) / rangeAggregateBlockRecords; groups < len(b.rangeBlocks) {
+		b.rangeBlocks = b.rangeBlocks[:groups]
+	}
 	if cap(b.blocks) >= 1024 && len(b.blocks) <= cap(b.blocks)/4 {
 		compact := make([][]accountingRecord, len(b.blocks))
 		copy(compact, b.blocks)

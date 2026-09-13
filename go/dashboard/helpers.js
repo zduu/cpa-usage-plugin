@@ -137,16 +137,9 @@ function healthColor(rate) { if (rate < 0) return ''; const stops = [[239, 68, 6
 function healthCellStyle(i, count, total, rate) { const rows = 7, cols = Math.ceil(count / rows), age = count - 1 - i, col = cols - Math.floor(age / rows), row = rows - (age % rows); return 'grid-column:' + col + ';grid-row:' + row + ';' + (total ? 'background:' + healthColor(rate) : '') }
 function timestampMs(value) { const ms = Date.parse(value); return Number.isFinite(ms) ? ms : 0 }
 function pluginEndpoint(path, pathname) {
-  const clean = String(path || '').replace(/^\/+/, '');
-  const current = String(pathname || (typeof location !== 'undefined' ? location.pathname : ''));
-  if (/\/management\.html\/?$/.test(current)) return '/v0/management/plugins/usage-dashboard-zduu/' + clean;
-  const resourceMarker = '/resource/plugins/usage-dashboard-zduu/';
-  const resourceIdx = current.indexOf(resourceMarker);
-  if (resourceIdx >= 0) return current.slice(0, resourceIdx + resourceMarker.length) + clean;
-  const managementMarker = '/management/plugins/usage-dashboard-zduu/';
-  const managementIdx = current.indexOf(managementMarker);
-  if (managementIdx >= 0) return current.slice(0, managementIdx + managementMarker.length) + clean;
-  return './' + clean;
+  // The resource namespace is public in stock CPA. Data requests, including
+  // compatibility fallbacks, must use the authenticated management namespace.
+  return managementEndpoint(path, pathname);
 }
 function managementEndpoint(path, pathname) {
   const clean = String(path || '').replace(/^\/+/, '');
@@ -194,23 +187,35 @@ function groupedRows(rows, keyFn, nameFn) {
   rows.forEach((d) => { const key = keyFn(d); const r = map.get(key) || { name: nameFn(d), requests: 0, success: 0, failure: 0, tokens: 0, cached: 0, reasoning: 0, cost: 0, latency: [], ttft: [] }; r.requests++; d.failed ? r.failure++ : r.success++; r.tokens += d.total_tokens; r.cached += d.cached_tokens; r.reasoning += d.reasoning_tokens; r.cost += d.cost; if (num(d.latency_ms) > 0) r.latency.push(num(d.latency_ms)); if (num(d.ttft_ms) > 0) r.ttft.push(num(d.ttft_ms)); map.set(key, r) });
   return [...map.values()].sort((a, b) => b.requests - a.requests);
 }
+function decodeBase64Bytes(value) {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  // TypedArray.from(string, mapper) first collects the string iterator into
+  // an intermediate list. Copy directly into the final byte buffer instead.
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
 function decodeManagementBody(body) {
   if (body == null) return '';
   if (Array.isArray(body)) return new TextDecoder().decode(Uint8Array.from(body));
   if (typeof body !== 'string') return JSON.stringify(body);
   try {
-    const binary = atob(body);
-    const bytes = Uint8Array.from(binary, (ch) => ch.charCodeAt(0));
-    return new TextDecoder().decode(bytes);
+    return new TextDecoder().decode(decodeBase64Bytes(body));
   } catch {
     return body;
   }
+}
+function pluginResponseError(message, statusCode, code) {
+  const error = new Error(message);
+  if (statusCode) error.statusCode = statusCode;
+  if (code) error.code = code;
+  return error;
 }
 function unwrapPluginPayloadWithMeta(payload) {
   const unwrapResponse = (value) => {
     if (value && typeof value === 'object' && typeof value.status_code === 'number' && Object.prototype.hasOwnProperty.call(value, 'body')) {
       const bodyText = decodeManagementBody(value.body);
-      if (value.status_code >= 400) throw new Error(bodyText || (t('request_failed_colon') + value.status_code));
+      if (value.status_code >= 400) throw pluginResponseError(bodyText || (t('request_failed_colon') + value.status_code), value.status_code);
       let body = bodyText;
       if (bodyText) {
         try { body = JSON.parse(bodyText) } catch {}
@@ -222,7 +227,7 @@ function unwrapPluginPayloadWithMeta(payload) {
   if (!payload || typeof payload !== 'object' || !Object.prototype.hasOwnProperty.call(payload, 'ok')) return unwrapResponse(payload);
   if (!payload.ok) {
     const message = payload.error && payload.error.message ? payload.error.message : t('request_failed');
-    throw new Error(message);
+    throw pluginResponseError(message, 0, payload.error && payload.error.code);
   }
   let result = payload.result;
   if (typeof result === 'string') {
@@ -231,6 +236,62 @@ function unwrapPluginPayloadWithMeta(payload) {
   return unwrapResponse(result);
 }
 function unwrapPluginPayload(payload) { return unwrapPluginPayloadWithMeta(payload).data }
+
+// Input has already been JSON.parse-validated. Keep the exact source of a
+// top-level field so object-valued ABI envelopes never round int64 numbers
+// through JSON.stringify. Pick the last duplicate key, like JSON.parse.
+function jsonFieldText(text, name) {
+  let i = text.indexOf('{') + 1;
+  let found = '';
+  while (i > 0 && i < text.length) {
+    while (/\s/.test(text[i])) i++;
+    if (text[i] !== '"') break;
+    const keyStart = i++;
+    while (i < text.length) {
+      if (text[i] === '\\') { i += 2; continue; }
+      if (text[i++] === '"') break;
+    }
+    const key = JSON.parse(text.slice(keyStart, i));
+    while (/\s/.test(text[i])) i++;
+    i++; // colon
+    while (/\s/.test(text[i])) i++;
+    const start = i;
+    let depth = 0, quoted = false;
+    for (; i < text.length; i++) {
+      const char = text[i];
+      if (quoted) {
+        if (char === '\\') i++;
+        else if (char === '"') quoted = false;
+      } else if (char === '"') quoted = true;
+      else if (char === '{' || char === '[') depth++;
+      else if (char === '}' || char === ']') {
+        if (depth === 0) break;
+        depth--;
+      } else if (char === ',' && depth === 0) break;
+    }
+    if (key === name) found = text.slice(start, i).trimEnd();
+    if (text[i] !== ',') break;
+    i++;
+  }
+  return found;
+}
+
+function unwrapPluginTextWithMeta(text) {
+  let value;
+  try { value = JSON.parse(text) } catch { return { data: text, statusCode: 200, headers: {} } }
+  if (value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, 'ok')) {
+    if (!value.ok) throw pluginResponseError(value.error && value.error.message || t('request_failed'), 0, value.error && value.error.code);
+    text = typeof value.result === 'string' ? value.result : jsonFieldText(text, 'result');
+    try { value = JSON.parse(text) } catch { return { data: text, statusCode: 200, headers: {} } }
+  }
+  if (value && typeof value === 'object' && typeof value.status_code === 'number' && Object.prototype.hasOwnProperty.call(value, 'body')) {
+    const body = value.body;
+    text = body && typeof body === 'object' && !Array.isArray(body) ? jsonFieldText(text, 'body') : decodeManagementBody(body);
+    if (value.status_code >= 400) throw pluginResponseError(text || (t('request_failed_colon') + value.status_code), value.status_code);
+    return { data: text, statusCode: value.status_code, headers: value.headers || {} };
+  }
+  return { data: value == null ? '' : (typeof value === 'string' ? value : text), statusCode: 200, headers: {} };
+}
 async function fetchAllEventPages(fetchPage, baseParams, pageLimit) {
   const limit = Math.max(1, num(pageLimit) || 500);
   const params = new URLSearchParams(baseParams || '');
@@ -293,5 +354,5 @@ function hourBucketValue(values, hour) {
 
 // Export for Node.js test environment
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { esc, num, compact, pct, formatMs, formatDurationAndTTFT, formatUsd, formatMoney, providerUsesExclusiveCache, usesExclusiveCacheInput, totalTokens, uncachedInputTokens, priceForModel, cacheTokenTotal, cacheReadTokens, tokenCost, detailCost, aggregateCost, looksLikeKey, looksLikeCredentialId, isCredentialMarker, isCredentialLabel, trimCredentialSuffix, sourceLabel, sourceKey, friendlyApiName, clientApiLabel, clientApiGroupKey, avg, bucketSeries, hourFromTimestamp, dashboardCurrentHour, orderedRecentHours, healthColor, healthCellStyle, timestampMs, pluginEndpoint, managementEndpoint, decodeManagementStorage, parseManagementStorage, currentManagementKey, groupedRows, decodeManagementBody, unwrapPluginPayloadWithMeta, unwrapPluginPayload, fetchAllEventPages, cacheRate, costPerMillion, hourBucketValue };
+  module.exports = { esc, num, compact, pct, formatMs, formatDurationAndTTFT, formatUsd, formatMoney, providerUsesExclusiveCache, usesExclusiveCacheInput, totalTokens, uncachedInputTokens, priceForModel, cacheTokenTotal, cacheReadTokens, tokenCost, detailCost, aggregateCost, looksLikeKey, looksLikeCredentialId, isCredentialMarker, isCredentialLabel, trimCredentialSuffix, sourceLabel, sourceKey, friendlyApiName, clientApiLabel, clientApiGroupKey, avg, bucketSeries, hourFromTimestamp, dashboardCurrentHour, orderedRecentHours, healthColor, healthCellStyle, timestampMs, pluginEndpoint, managementEndpoint, decodeManagementStorage, parseManagementStorage, currentManagementKey, groupedRows, decodeBase64Bytes, decodeManagementBody, unwrapPluginPayloadWithMeta, unwrapPluginPayload, fetchAllEventPages, cacheRate, costPerMillion, hourBucketValue };
 }

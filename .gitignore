@@ -24,6 +24,7 @@ data/usage-statistics-prices.json
 /performance-data/
 /tests/performance/.work/
 /tests/performance/results/local/
+/docs/validation/
 
 # 临时文件
 *.backup.*
@@ -33,7 +34,10 @@ temp/
 __pycache__/
 *.pyc
 /tests/
-docs/plans/
+docs/plans/*
+!docs/plans/storage-stage-20260913/
+docs/plans/storage-stage-20260913/*
+!docs/plans/storage-stage-20260913/README.md
 /docs/issues
 # IDE
 .idea/

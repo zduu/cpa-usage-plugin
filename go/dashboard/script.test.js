@@ -3,6 +3,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const { gzipSync } = require('node:zlib');
 
 class FakeElement {
   constructor(id) {
@@ -1175,6 +1176,29 @@ test('chunk export rejects corruption, missing bytes and changed versions and de
   }
 });
 
+test('chunk export uses an opaque version after stock CPA escapes ETag quotes', async () => {
+  for (const chunkVersion of ['a'.repeat(64), 'another-file', undefined]) {
+    const { context, document } = createDashboardHarness();
+    await waitFor(() => document.getElementById('apiSelect').value === 'openai');
+    const job = { id: 'transport-version', status: 'succeeded', body_bytes: 2, chunk_size: 2,
+      etag: 'W/&#34;file-version&#34;', version: 'a'.repeat(64) };
+    let removed = 0;
+    context.createExportJob = async () => job;
+    context.deleteExportJob = async () => { removed++; };
+    context.fetchJsonPayload = async (url) => {
+      assert.strictEqual(new URL(url, 'http://test.local').searchParams.get('version'), job.version);
+      return { offset: 0, total: 2, etag: job.etag, version: chunkVersion, data: 'W10=', checksum_crc32: context.exportChunkChecksum(Buffer.from('[]')) };
+    };
+    if (chunkVersion === job.version) {
+      const result = await context.fetchExportJobResult(new URLSearchParams(), true);
+      assert.strictEqual(result.data, '[]');
+    } else {
+      await assert.rejects(context.fetchExportJobResult(new URLSearchParams()));
+    }
+    assert.strictEqual(removed, 1);
+  }
+});
+
 test('CSV and JSON buttons download checked Blob parts without whole-file text or JSON conversion', async () => {
   for (const kind of ['csv', 'json']) {
     for (const api of [false, true]) {
@@ -2139,7 +2163,7 @@ test('dashboard detail refresh sends conditional requests for events and api det
   assert.match(document.getElementById('apiDetail').innerHTML, /最近请求/);
 });
 
-test('model price settings are loaded and saved through backend API', async () => {
+test('resource dashboard data and model prices use authenticated management routes', async () => {
   const { document, fetchRequests } = createDashboardHarness({
     pathname: '/v0/resource/plugins/usage-dashboard-zduu/dashboard',
     managementKey: 'test-management-key',
@@ -2166,6 +2190,12 @@ test('model price settings are loaded and saved through backend API', async () =
     price: { prompt: 1.25, completion: 10, cache: 1.25, cache_write: 0 },
   });
   assert.match(document.getElementById('priceList').innerHTML, /gpt-5/);
+  assert.ok(fetchRequests.some(req => req.url.includes('dashboard-summary')));
+  assert.ok(fetchRequests.some(req => req.url.includes('dashboard-events?')));
+  for (const req of fetchRequests) {
+    assert.match(req.url, /^\/v0\/management\/plugins\/usage-dashboard-zduu\//);
+    assert.strictEqual(req.options.headers.Authorization, 'Bearer test-management-key');
+  }
 });
 
 test('event list is not implicitly filtered by selected upstream API', async () => {
@@ -2650,5 +2680,314 @@ test('negotiated JSON array survives whole-response download fallback', async ()
     assert.strictEqual(blobs.length, 1);
     assert.strictEqual(await blobs[0].text(), payload);
     assert.strictEqual(deleted, 1);
+  }
+});
+
+test('full usage backup keeps large integers on an older backend', async () => {
+  const { context, document } = createDashboardHarness();
+  await waitFor(() => document.getElementById('apiSelect').value === 'openai');
+  const payload = '{"version":1,"detail_count":1,"usage":{"total_tokens":9007199254740993,"apis":{"中文🙂":{"models":{}}}}}';
+  const blobs = [];
+  context.Blob = Blob;
+  context.URL.createObjectURL = blob => { blobs.push(blob); return 'blob:usage-backup'; };
+  context.fetch = async url => String(url).includes('usage/export-jobs')
+    ? { ok: false, status: 404, text: async () => 'not found' }
+    : { ok: true, status: 200, text: async () => payload };
+  await document.getElementById('exportBtn').onclick();
+  assert.strictEqual(blobs.length, 1);
+  assert.ok((await blobs[0].text()).includes('9007199254740993'), 'full usage backup rounded an int64');
+});
+
+test('legacy full backup retains exact JSON through every supported ABI envelope', async () => {
+  const { context, document } = createDashboardHarness();
+  await waitFor(() => document.getElementById('apiSelect').value === 'openai');
+  context.Blob = Blob;
+  context.atob = atob; // Match strict browser base64 handling, including raw JSON bodies.
+  const payload = '{ "version": 1, "usage": { "total_tokens": 9007199254740993, "value": "中文🙂, \\\" } ], : ", "nested": [{"result":0}] } }';
+  const response = '{"status_code":200,"headers":{"Content-Type":["application/json"]},"body":' + payload + '}';
+  const variants = [
+    payload,
+    response,
+    JSON.stringify({ status_code: 200, body: payload }),
+    JSON.stringify({ status_code: 200, body: Buffer.from(payload).toString('base64') }),
+    JSON.stringify({ status_code: 200, body: Array.from(Buffer.from(payload)) }),
+    '{"ok":true,"result":' + payload + '}',
+    JSON.stringify({ ok: true, result: payload }),
+    '{"ok":true,"result":' + response + '}',
+    JSON.stringify({ ok: true, result: response }),
+    '{"ok":true,"result":{"wrong":1},"nested":{"result":0},"\\u0072esult":' + payload + '}',
+  ];
+  for (const [index, raw] of variants.entries()) {
+    const calls = [];
+    context.fetch = async (url, options) => {
+      calls.push([String(url), options.method || 'GET']);
+      return String(url).includes('usage/export-jobs')
+        ? { ok: false, status: [404, 405, 501][index % 3], text: async () => 'not supported' }
+        : { ok: true, status: 200, text: async () => raw };
+    };
+    const file = await context.fetchUsageExportFile();
+    assert.ok(file instanceof Blob);
+    assert.strictEqual(await file.text(), payload, 'envelope ' + index + ' altered JSON bytes');
+    assert.strictEqual(calls.length, 2);
+    assert.strictEqual(calls[0][1], 'POST');
+    assert.strictEqual(calls[1][1], 'GET');
+  }
+});
+
+test('full usage backup streams authenticated Blob chunks and restores the button', async () => {
+  const { context, document } = createDashboardHarness({ managementKey: 'synthetic-backup-key', pathname: '/v0/resource/plugins/usage-dashboard-zduu/dashboard' });
+  await waitFor(() => document.getElementById('apiSelect').value === 'openai');
+  const payload = '{"version":1,"detail_count":123,"usage":{"total_tokens":9007199254740993,"source":"中文🙂"}}';
+  const bytes = Buffer.from(payload);
+  const job = { id: 'full-backup', kind: 'usage', status: 'succeeded', format: 'json', content_type: 'application/json',
+    body_bytes: bytes.length, chunk_size: 7, version: 'f'.repeat(64), total: 123, exported: 123 };
+  let creates = 0, polls = 0, deletes = 0, injected = 0;
+  const offsets = [], blobs = [];
+  context.Blob = Blob;
+  context.TextDecoder = class { constructor() { throw new Error('chunked backup must not decode a complete file'); } };
+  context.delay = async () => {};
+  context.URL.createObjectURL = blob => { blobs.push(blob); return 'blob:full-backup'; };
+  context.fetchJsonPayload = async (url, options) => {
+    assert.strictEqual(options.headers.Authorization, 'Bearer synthetic-backup-key');
+    const parsed = new URL(url, 'http://test.local');
+    assert.ok(parsed.pathname.startsWith('/v0/management/plugins/usage-dashboard-zduu/usage/'));
+    if (parsed.pathname.endsWith('/export-jobs')) {
+      if (options.method === 'POST') { creates++; return { ...job, status: 'queued' }; }
+      assert.strictEqual(parsed.searchParams.get('id'), job.id);
+      if (options.method === 'DELETE') { deletes++; return {}; }
+      polls++;
+      return job;
+    }
+    assert.ok(parsed.pathname.endsWith('/export-download'));
+    const offset = Number(parsed.searchParams.get('offset'));
+    offsets.push(offset);
+    assert.strictEqual(parsed.searchParams.get('version'), job.version);
+    if (!injected++) throw new Error('transient read failure');
+    const data = bytes.subarray(offset, offset + Number(parsed.searchParams.get('length')));
+    return { offset, total: bytes.length, version: job.version, data: data.toString('base64'), checksum_crc32: context.exportChunkChecksum(data) };
+  };
+  const button = document.getElementById('exportBtn');
+  const pending = button.onclick();
+  assert.strictEqual(button.disabled, true);
+  await button.onclick();
+  await pending;
+  assert.strictEqual(button.disabled, false);
+  assert.strictEqual(creates, 1);
+  assert.strictEqual(polls, 1);
+  assert.strictEqual(deletes, 1);
+  assert.deepStrictEqual(offsets.slice(0, 2), [0, 0]);
+  assert.strictEqual(blobs.length, 1);
+  assert.strictEqual(await blobs[0].text(), payload);
+  assert.ok(document.body.children.some(el => /^usage-export-.*\.json$/.test(el.download)));
+});
+
+test('full backup does not fall back on auth, resource, server or transport failures', async () => {
+  const { context, document } = createDashboardHarness();
+  await waitFor(() => document.getElementById('apiSelect').value === 'openai');
+  const failures = [
+    ...[401, 403, 429, 500, 503].map(status => ({ ok: false, status, body: 'request failed' })),
+    { ok: false, status: 503, body: JSON.stringify({ error: { code: 'not_found', message: 'masked server failure' } }) },
+    { ok: true, status: 200, body: JSON.stringify({ status_code: 429, body: 'too many jobs' }) },
+    { ok: true, status: 200, body: JSON.stringify({ ok: false, error: { code: 'internal', message: 'failed' } }) },
+    { network: true },
+  ];
+  for (const failure of failures) {
+    const calls = [];
+    context.fetch = async url => {
+      calls.push(String(url));
+      if (failure.network) throw new Error('offline');
+      return { ok: failure.ok, status: failure.status, text: async () => failure.body };
+    };
+    await assert.rejects(context.fetchUsageExportFile());
+    assert.strictEqual(calls.length, 1, 'a failed new endpoint must not trigger a different backup');
+  }
+});
+
+test('full backup negotiates gzip and saves lossless JSON through native decompression streams', async () => {
+  const { context, document } = createDashboardHarness({ managementKey: 'synthetic-gzip-key' });
+  await waitFor(() => document.getElementById('apiSelect').value === 'openai');
+  context.Blob = Blob;
+  context.DecompressionStream = DecompressionStream;
+  context.TextDecoder = class { constructor() { throw new Error('backup must not decode whole-file text'); } };
+  const payload = '{"version":1,"usage":{"total_tokens":9007199254740993,"source":"' + '中文🙂'.repeat(12000) + '"}}';
+  const raw = Buffer.from(payload), compressed = gzipSync(raw);
+  const job = { id: 'compressed-backup', kind: 'usage', status: 'succeeded', format: 'json', gzip: true,
+    content_type: 'application/json', body_bytes: compressed.length, raw_bytes: raw.length,
+    chunk_size: 13, version: 'c'.repeat(64) };
+  let creates = 0, deletes = 0, chunks = 0;
+  context.fetchJsonPayload = async (url, options) => {
+    assert.strictEqual(options.headers.Authorization, 'Bearer synthetic-gzip-key');
+    const parsed = new URL(url, 'http://test.local');
+    if (options.method === 'DELETE') { deletes++; return {}; }
+    if (options.method === 'POST') {
+      creates++;
+      assert.strictEqual(parsed.searchParams.get('gzip'), '1');
+      return job;
+    }
+    chunks++;
+    const offset = Number(parsed.searchParams.get('offset'));
+    const data = compressed.subarray(offset, offset + Number(parsed.searchParams.get('length')));
+    return { offset, total: compressed.length, version: job.version, data: data.toString('base64'), checksum_crc32: context.exportChunkChecksum(data) };
+  };
+  const file = await context.fetchUsageExportFile();
+  assert.ok(file instanceof Blob);
+  assert.strictEqual(await file.text(), payload);
+  assert.strictEqual(file.size, raw.length);
+  assert.strictEqual(file.type, 'application/json');
+  assert.strictEqual(creates, 1);
+  assert.strictEqual(deletes, 1);
+  assert.ok(chunks > 2);
+});
+
+test('full backup rejects corrupt gzip and wrong decoded lengths without a legacy retry', async () => {
+  const { context, document } = createDashboardHarness();
+  await waitFor(() => document.getElementById('apiSelect').value === 'openai');
+  context.Blob = Blob;
+  context.DecompressionStream = DecompressionStream;
+  const raw = Buffer.from('{"version":1,"usage":{"source":"中文🙂"}}'), compressed = gzipSync(raw);
+  const corrupt = Buffer.from(compressed);
+  corrupt[corrupt.length - 8] ^= 1;
+  const cases = [
+    { data: corrupt }, { data: compressed.subarray(0, compressed.length - 1) },
+    { data: Buffer.concat([compressed, Buffer.from('trailing garbage')]) },
+    ...[raw.length - 1, raw.length + 1, 0, -1, undefined, '100', 1.5, Number.MAX_SAFE_INTEGER + 1].map(rawBytes => ({ rawBytes })),
+  ];
+  for (const variant of cases) {
+    const data = variant.data || compressed;
+    const job = { id: 'bad-gzip', kind: 'usage', status: 'succeeded', format: 'json', gzip: true,
+      content_type: 'application/json', body_bytes: data.length,
+      raw_bytes: Object.hasOwn(variant, 'rawBytes') ? variant.rawBytes : raw.length,
+      chunk_size: 256, version: 'c'.repeat(64) };
+    let deletes = 0, legacy = 0;
+    context.fetchJsonPayload = async (_url, options) => {
+      if (options.method === 'DELETE') { deletes++; return {}; }
+      if (options.method === 'POST') return job;
+      return { offset: 0, total: data.length, version: job.version, data: data.toString('base64'), checksum_crc32: context.exportChunkChecksum(data) };
+    };
+    context.fetchTextPayloadWithMeta = async () => { legacy++; throw new Error('unexpected legacy retry'); };
+    await assert.rejects(context.fetchUsageExportFile());
+    assert.strictEqual(deletes, 1);
+    assert.strictEqual(legacy, 0);
+  }
+});
+
+test('full backup stays uncompressed when gzip streams cannot be constructed', async () => {
+  const { context, document } = createDashboardHarness();
+  await waitFor(() => document.getElementById('apiSelect').value === 'openai');
+  context.Blob = Blob;
+  context.DecompressionStream = class { constructor() { throw new TypeError('gzip unavailable'); } };
+  const bytes = Buffer.from('{"version":1,"usage":{}}');
+  const job = { id: 'plain-backup', kind: 'usage', status: 'succeeded', format: 'json',
+    content_type: 'application/json', body_bytes: bytes.length, chunk_size: 256, version: 'd'.repeat(64) };
+  let creates = 0;
+  context.fetchJsonPayload = async (url, options) => {
+    if (options.method === 'DELETE') return {};
+    if (options.method === 'POST') {
+      creates++;
+      assert.strictEqual(new URL(url, 'http://test.local').searchParams.has('gzip'), false);
+      return job;
+    }
+    return { offset: 0, total: bytes.length, version: job.version, data: bytes.toString('base64'), checksum_crc32: context.exportChunkChecksum(bytes) };
+  };
+  assert.strictEqual(await (await context.fetchUsageExportFile()).text(), bytes.toString());
+  assert.strictEqual(creates, 1);
+});
+
+test('backup decompression cancels and releases a stream before retaining excess decoded bytes', async () => {
+  const { context, document } = createDashboardHarness();
+  await waitFor(() => document.getElementById('apiSelect').value === 'openai');
+  context.Blob = Blob;
+  let reads = 0, canceled = 0, released = 0;
+  const reader = {
+    async read() { reads++; return { done: false, value: Buffer.alloc(10) }; },
+    async cancel() { canceled++; },
+    releaseLock() { released++; },
+  };
+  const decompressor = {};
+  const file = { stream: () => ({ pipeThrough(value) {
+    assert.strictEqual(value, decompressor);
+    return { getReader: () => reader };
+  } }) };
+  await assert.rejects(context.decompressUsageExportFile(file, 5, decompressor));
+  assert.strictEqual(reads, 1);
+  assert.strictEqual(canceled, 1);
+  assert.strictEqual(released, 1);
+});
+
+test('base64 chunks avoid collecting a string iterator through TypedArray.from', async () => {
+  const { context, document } = createDashboardHarness();
+  await waitFor(() => document.getElementById('apiSelect').value === 'openai');
+  context.Uint8Array = class extends Uint8Array {
+    static from() { throw new Error('must not allocate an intermediate iterator list'); }
+  };
+  const bytes = Buffer.from(Array.from({ length: 256 * 1024 }, (_, i) => i & 255));
+  assert.deepStrictEqual(Buffer.from(context.decodeBase64Bytes(bytes.toString('base64'))), bytes);
+});
+
+test('full backup rejects event jobs, partial negotiation and changed poll identities', async () => {
+  const { context, document } = createDashboardHarness();
+  await waitFor(() => document.getElementById('apiSelect').value === 'openai');
+  const ready = { id: 'backup', kind: 'usage', status: 'succeeded', format: 'json', version: 'a'.repeat(64), chunk_size: 256, body_bytes: 2 };
+  context.delay = async () => {};
+  for (const change of [{ kind: 'events' }, { kind: undefined }, { format: 'csv' }, { json_rows: true },
+    { gzip: true }, { truncated: true }, { version: '' }, { chunk_size: 0 }, { status: 'failed', error: 'disk full' }]) {
+    let deleted = 0, downloaded = 0;
+    context.fetchJsonPayload = async (url, options) => {
+      if (options.method === 'DELETE') { deleted++; return {}; }
+      if (String(url).includes('export-download')) { downloaded++; throw new Error('wrong download'); }
+      return { ...ready, ...change };
+    };
+    await assert.rejects(context.fetchUsageExportFile());
+    assert.strictEqual(deleted, 1);
+    assert.strictEqual(downloaded, 0);
+  }
+  for (const polled of [{ ...ready, id: 'different' }, { ...ready, kind: 'events' }]) {
+    let deleted = 0;
+    context.fetchJsonPayload = async (_url, options) => {
+      if (options.method === 'DELETE') { deleted++; return {}; }
+      return options.method === 'POST' ? { ...ready, status: 'running' } : polled;
+    };
+    await assert.rejects(context.fetchUsageExportFile());
+    assert.strictEqual(deleted, 1);
+  }
+});
+
+test('full backup cleans up corrupt downloads and restores its button after failure', async () => {
+  const { context, document } = createDashboardHarness();
+  await waitFor(() => document.getElementById('apiSelect').value === 'openai');
+  let deleted = 0, legacy = 0;
+  const job = { id: 'corrupt-backup', kind: 'usage', status: 'succeeded', format: 'json', version: 'a'.repeat(64), chunk_size: 2, body_bytes: 2 };
+  context.fetchJsonPayload = async (url, options) => {
+    if (options.method === 'DELETE') { deleted++; return {}; }
+    if (String(url).includes('export-download')) return { offset: 0, total: 2, version: job.version, data: 'e30=', checksum_crc32: '00000000' };
+    return job;
+  };
+  context.fetchTextPayloadWithMeta = async () => { legacy++; return { data: '{}' }; };
+  await assert.rejects(context.fetchUsageExportFile());
+  assert.strictEqual(deleted, 1);
+  assert.strictEqual(legacy, 0);
+  context.fetchUsageExportFile = async () => { throw new Error('failed'); };
+  await document.getElementById('exportBtn').onclick();
+  assert.strictEqual(document.getElementById('exportBtn').disabled, false);
+});
+
+test('full backup handles old not-found envelopes but rejects invalid fallback documents', async () => {
+  const { context, document } = createDashboardHarness();
+  await waitFor(() => document.getElementById('apiSelect').value === 'openai');
+  context.Blob = Blob;
+  context.atob = atob;
+  const payload = '{"version":1,"usage":{"total_tokens":9007199254740993}}';
+  for (const raw of [payload, 'null', '<html>not a backup</html>', '{"version":1,"events":[]}', '{"version":2,"usage":{}}',
+    JSON.stringify({ status_code: 403, body: Buffer.from('denied').toString('base64') }),
+    JSON.stringify({ ok: false, error: { code: 'internal', message: 'failed' } })]) {
+    const calls = [];
+    context.fetch = async url => {
+      calls.push(String(url));
+      const body = String(url).includes('export-jobs') ? JSON.stringify({ ok: false, error: { code: 'not_found', message: 'no endpoint' } }) : raw;
+      return { ok: true, status: 200, text: async () => body };
+    };
+    if (raw === payload) assert.strictEqual(await (await context.fetchUsageExportFile()).text(), payload);
+    else await assert.rejects(context.fetchUsageExportFile());
+    assert.strictEqual(calls.length, 2);
   }
 });

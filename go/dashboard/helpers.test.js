@@ -460,7 +460,7 @@ test('pluginEndpoint builds management URLs from plugin resource paths', () => {
   );
   assert.strictEqual(
     helpers.pluginEndpoint('usage/import', '/v0/resource/plugins/usage-dashboard-zduu/dashboard'),
-    '/v0/resource/plugins/usage-dashboard-zduu/usage/import'
+    '/v0/management/plugins/usage-dashboard-zduu/usage/import'
   );
   assert.strictEqual(
     helpers.managementEndpoint('usage/import', '/v0/resource/plugins/usage-dashboard-zduu/dashboard'),
@@ -529,6 +529,14 @@ test('groupedRows groups by key', () => {
 test('unwrapPluginPayload returns direct payload unchanged', () => {
   const payload = { added: 2, skipped: 1 };
   assert.deepStrictEqual(helpers.unwrapPluginPayload(payload), payload);
+});
+
+test('base64 byte decoding preserves binary values, empty input and strict atob errors', () => {
+  const bytes = Buffer.from(Array.from({ length: 256 * 1024 }, (_, i) => i & 255));
+  assert.deepStrictEqual(Buffer.from(helpers.decodeBase64Bytes(bytes.toString('base64'))), bytes);
+  assert.strictEqual(helpers.decodeBase64Bytes('').length, 0);
+  assert.deepStrictEqual(Buffer.from(helpers.decodeBase64Bytes(' Y Q == \n')), Buffer.from('a'));
+  assert.throws(() => helpers.decodeBase64Bytes('not base64!'));
 });
 
 test('unwrapPluginPayload throws plugin envelope errors', () => {

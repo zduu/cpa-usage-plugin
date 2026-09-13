@@ -24,6 +24,7 @@ type sqliteMigrationItem struct {
 	// null events preserve empty containers and duplicate-member ordering.
 	Path       []string
 	Kind       string // object, array, end, value, null, invalid
+	Scope      string // Typed container or atomic value; map keys are never scopes.
 	Start, End int64  // Byte offsets in the original source (end is exclusive).
 	Value      json.RawMessage
 }
@@ -107,11 +108,13 @@ func scanSQLiteMigrationJSONL(ctx context.Context, reader io.Reader, consume fun
 			if len(bytes.TrimSpace(raw)) > 0 {
 				var record persistedDetail
 				decodeErr := json.Unmarshal(raw, &record)
-				item := sqliteMigrationItem{Path: []string{strconv.FormatInt(line, 10)}, Kind: "value", Start: start, End: offset, Value: raw}
+				item := sqliteMigrationItem{Path: []string{strconv.FormatInt(line, 10)}, Kind: "value", Scope: "request", Start: start, End: offset, Value: raw}
 				if decodeErr != nil || strings.TrimSpace(record.API) == "" {
 					item.Kind = "invalid"
+					item.Scope = "invalid"
 					result.Invalid++
 				} else if record.MetadataOnly {
+					item.Scope = "metadata"
 					result.Metadata++
 				} else {
 					result.Requests++
@@ -138,11 +141,11 @@ type sqliteSnapshotParser struct {
 	generatedAt string
 }
 
-func (p *sqliteSnapshotParser) emit(path []string, kind string, start int64, value json.RawMessage) error {
+func (p *sqliteSnapshotParser) emit(path []string, kind, scope string, start int64, value json.RawMessage) error {
 	if err := p.ctx.Err(); err != nil {
 		return err
 	}
-	return p.consume(sqliteMigrationItem{Path: append([]string(nil), path...), Kind: kind, Start: start, End: p.decoder.InputOffset(), Value: value})
+	return p.consume(sqliteMigrationItem{Path: append([]string(nil), path...), Kind: kind, Scope: scope, Start: start, End: p.decoder.InputOffset(), Value: value})
 }
 
 func (p *sqliteSnapshotParser) object(path []string, scope string) error {
@@ -152,13 +155,13 @@ func (p *sqliteSnapshotParser) object(path []string, scope string) error {
 		return err
 	}
 	if token == nil {
-		return p.emit(path, "null", p.decoder.InputOffset()-4, nil)
+		return p.emit(path, "null", scope, p.decoder.InputOffset()-4, nil)
 	}
 	if token != json.Delim('{') {
 		return fmt.Errorf("expected %s object at byte %d", scope, start)
 	}
 	start = p.decoder.InputOffset() - 1
-	if err := p.emit(path, "object", start, nil); err != nil {
+	if err := p.emit(path, "object", scope, start, nil); err != nil {
 		return err
 	}
 	for p.decoder.More() {
@@ -221,7 +224,7 @@ func (p *sqliteSnapshotParser) object(path []string, scope string) error {
 	if token, err := p.decoder.Token(); err != nil || token != json.Delim('}') {
 		return fmt.Errorf("invalid snapshot object end at byte %d: %v", p.decoder.InputOffset(), err)
 	}
-	return p.emit(path, "end", start, nil)
+	return p.emit(path, "end", scope, start, nil)
 }
 
 func sqliteMigrationCountField(field string) bool {
@@ -256,13 +259,13 @@ func (p *sqliteSnapshotParser) array(path []string, kind string) error {
 		return err
 	}
 	if token == nil {
-		return p.emit(path, "null", p.decoder.InputOffset()-4, nil)
+		return p.emit(path, "null", kind, p.decoder.InputOffset()-4, nil)
 	}
 	if token != json.Delim('[') {
 		return fmt.Errorf("expected snapshot array at byte %d", start)
 	}
 	start = p.decoder.InputOffset() - 1
-	if err := p.emit(path, "array", start, nil); err != nil {
+	if err := p.emit(path, "array", kind, start, nil); err != nil {
 		return err
 	}
 	for index := int64(0); p.decoder.More(); index++ {
@@ -274,7 +277,7 @@ func (p *sqliteSnapshotParser) array(path []string, kind string) error {
 	if token, err := p.decoder.Token(); err != nil || token != json.Delim(']') {
 		return fmt.Errorf("invalid snapshot array end at byte %d: %v", p.decoder.InputOffset(), err)
 	}
-	return p.emit(path, "end", start, nil)
+	return p.emit(path, "end", kind, start, nil)
 }
 
 func (p *sqliteSnapshotParser) value(path []string, kind string) error {
@@ -314,7 +317,7 @@ func (p *sqliteSnapshotParser) value(path []string, kind string) error {
 	if err := json.Unmarshal(raw, target); err != nil {
 		return fmt.Errorf("decode snapshot %s at byte %d: %w", kind, start, err)
 	}
-	return p.emit(path, "value", start, raw)
+	return p.emit(path, "value", kind, start, raw)
 }
 
 func (p *sqliteSnapshotParser) skipValue(depth int) error {

@@ -394,6 +394,10 @@ pluginhost: plugin registered plugin_id=usage-dashboard-zduu plugin_name=用量�
 
 ## 6. 管理 API 使用
 
+候选修复了一处资源路由鉴权问题：stock CPA 的 `/v0/resource/plugins/` 是匿名资源入口，并不验证管理密钥。插件现在只在此入口提供静态 `/dashboard` 页面，统计、事件、价格、健康状态、备份及任务接口全部使用下列 `/v0/management/plugins/` 路径；旧资源数据别名不再注册，处理器也会拒绝宿主缓存的旧别名，即使请求自行附带 Authorization 头也不例外。看板会自动切换到管理路径，升级后应刷新页面；调用旧资源数据别名的外部脚本须同步调整。
+
+旧版本不能仅依靠管理密钥或 `remote-management.allow-remote` 保护已公开的资源数据别名。修复尚未发布或部署；使用旧版本且 CPA 入口可被不可信方访问时，应先在网关/网络层限制访问。本文不表示已经修改任何现有部署。
+
 以下端点可通过管理 API 调用（需要管理密钥）：
 
 ### 获取摘要（推荐日常使用）
@@ -473,9 +477,9 @@ curl -X DELETE "http://127.0.0.1:8317/v0/management/plugins/usage-dashboard-zduu
   -H 'x-management-key: <你的管理密钥>'
 ```
 
-后台导出任务与同步导出使用相同筛选参数、格式、gzip 和 `limit` 规则；插件最多同时运行 2 个后台导出任务，并保留最多 16 个任务元数据，超出时会返回 429，避免并发大导出压垮管理接口。看板优先使用每块最多 256 KiB 的下载路径，逐块校验后以 Blob 保存，避免整份 JSON 解析和再编码；浏览器仍需容纳完整文件。旧整包下载接口继续可用，其 ABI 响应内存仍随文件大小增长。
+后台事件导出任务与同步事件导出使用相同筛选参数、格式、gzip 和 `limit` 规则；它与完整用量备份共享最多 2 个活动任务和 16 个保留任务，超出时返回 429。看板优先使用每块最多 256 KiB 的下载路径，逐块校验后以 Blob 保存，避免整份 JSON 解析和再编码；浏览器仍需容纳完整文件。旧整包下载接口继续可用，其 ABI 响应内存仍随文件大小增长。
 
-完成的任务返回 `etag`、`chunk_size`、`body_bytes`。分块下载请求为 `?id=<job_id>&chunk=1&offset=0&length=262144&version=<URL编码后的etag>`；响应包含 `offset`、`total`、`etag`、`checksum_crc32` 和 base64 编码的 `data`。校验数据长度、版本和 CRC32 后再前进 offset；重试使用相同 offset。错误版本返回 412，无效参数返回 400，越界返回 416，文件不可用返回 410。gzip 文件也支持按原始压缩字节分块读取。
+完成的任务返回 `kind`、`version`、`etag`、`chunk_size`、`body_bytes`。分块下载请求为 `?id=<job_id>&chunk=1&offset=0&length=262144&version=<version>`；响应包含 `offset`、`total`、`version`、`etag`、`checksum_crc32` 和 base64 编码的 `data`。优先使用 64 字符十六进制 `version`，避免宿主 HTML 转义影响 ETag；旧客户端回传原始或一次 HTML 转义的 ETag 仍受支持。校验数据长度、版本和 CRC32 后再前进 offset；重试使用相同 offset。错误版本返回 412，无效参数返回 400，越界返回 416，文件不可用返回 410，任务不存在或类型不匹配返回 404。gzip 文件也支持按原始压缩字节分块读取。
 
 后台 JSON 任务可额外传 `json_rows=true` 请求可直接保存的 JSON 数组；只有任务响应确认 `json_rows: true` 时才能按数组处理。未协商的后台导出和同步导出保留原有 events 信封。内置看板自动协商，新前端遇到忽略此参数的旧后端时使用兼容路径。
 
@@ -486,11 +490,30 @@ curl http://127.0.0.1:8317/v0/management/plugins/usage-dashboard-zduu/health \
   -H 'x-management-key: <你的管理密钥>'
 ```
 
-`dashboard-events-export` 和后台导出任务默认最多返回 `export_max_records` 条明细，也可以用 `limit` 为单次导出指定更小上限；JSON 响应会带 `truncated`，CSV/JSONL 响应头会带 `X-Total-Count`、`X-Exported-Count` 和 `X-Export-Truncated`。需要完全不限制时可配置 `export_max_records: 0`，但超大导出会增加 CPA 管理接口内存和响应体压力。
+`dashboard-events-export` 和后台事件导出任务默认最多返回 `export_max_records` 条明细，也可以用 `limit` 为单次导出指定更小上限；JSON 响应会带 `truncated`，CSV/JSONL 响应头会带 `X-Total-Count`、`X-Exported-Count` 和 `X-Export-Truncated`。需要完全不限制时可配置 `export_max_records: 0`，但超大导出会增加 CPA 管理接口内存和响应体压力。完整用量备份不受这些限制。
 
 顶层 `status` 会在无告警时为 `ok`，存在持久化写入压力、持久化错误、最近导出截断、最近导出耗时超过 5 秒、writer p99 写入/排队超过 1 秒，或条件请求样本不少于 20 次且 304 命中率低于 20% 时变为 `warn`/`error`，并在 `alerts` 中返回结构化 `severity`、`code` 和 `message`，便于外部监控直接告警。`storage` 字段会返回持久化状态、后台写入队列长度、最近 writer 批次指标、writer 滑动平均、p95/p99 长尾指标和 `write_pressure`、最近和累计清理旧分片数量、待 flush/sync/snapshot 记录数和最近错误；`runtime` 字段会返回摘要缓存命中/未命中、事件缓存命中/未命中、事件索引条目数、条件请求 304 命中率、事件导出请求数/gzip 数/截断数/最近耗时/响应大小，以及最近 summary/events/api-detail 查询耗时，便于观察看板压力、筛选性能和大导出压力。
 
 ### 数据导出
+
+开发中候选的看板“导出”按钮使用完整用量备份任务，文件仍为 `usage-export-<时间>.json` 和 v1 `ExportPayload`：包含 `detail_count`、配置摘要、完整 `usage` 聚合、可见 `details` 和归档 `accounting`，不受当前页面筛选或 `export_max_records` 限制。`detail_count` 只计真实保留记录，不把没有逐请求信息的历史聚合残差算作记录。
+
+浏览器支持原生 gzip 解压流和 `Blob.stream()` 时，看板自动请求压缩备份，仍按最多 256 KiB 的压缩字节分块、验证版本/长度/CRC32，再流式解压到 Blob 并核对 `raw_bytes`，最终保存普通 JSON，不生成 `.gz` 文件。压缩损坏、解压字节数不符都会报错并清理任务，不会改走旧接口。旧浏览器继续使用未压缩分块；没有增大单块上限或并发下载数。压缩会增加文件生成 CPU，但减少传输字节和管理请求次数；浏览器仍需容纳压缩文件及解压后的完整 Blob，不能视为恒定内存下载。
+
+自动化脚本可通过以下接口创建和轮询任务，确认 `kind: "usage"`、`status: "succeeded"` 后，使用上文同样的分块协议读取 `/usage/export-download`，最后 DELETE 任务。`gzip=1` 可生成压缩 JSON；其他格式返回 400。
+
+```text
+POST   /v0/management/plugins/usage-dashboard-zduu/usage/export-jobs
+GET    /v0/management/plugins/usage-dashboard-zduu/usage/export-jobs?id=<job_id>
+GET    /v0/management/plugins/usage-dashboard-zduu/usage/export-download?id=<job_id>&chunk=1&offset=0&length=262144&version=<version>
+DELETE /v0/management/plugins/usage-dashboard-zduu/usage/export-jobs?id=<job_id>
+```
+
+以上接口均需管理鉴权。事件和备份任务的列表、删除、下载按类型隔离，但共享容量；完成任务逻辑有效期 15 分钟，访问任务管理器时惰性回收，正常关闭时清理。建议下载后主动删除，避免保留不再需要的临时文件。
+
+生成时在同一把锁内修复可确认的旧兜底重复、捕获计数/配置，并冻结账本块；归档逐条编码，不展开成完整明细数组。可见明细和聚合仍会复制，冻结块仍可能因并发修改保留旧版本，不能视为恒定内存备份。该文件沿用原有用量导入契约，不包含独立模型价格文件，`config` 也不会在导入时自动应用。升级前仍须单独备份存储目录及价格文件。
+
+旧整包接口保持可用；其完整快照及 ABI 响应仍有随数据量增长的内存开销。新页面仅在新任务端点不受支持时回退，并保存原始 JSON 文本以避免再次舍入大整数；鉴权、容量、网络、任务失败或校验错误不会触发回退。旧宿主若已在发送前修改数值，客户端无法恢复丢失的精度。
 
 ```bash
 curl http://127.0.0.1:8317/v0/management/plugins/usage-dashboard-zduu/usage/export \
@@ -508,6 +531,8 @@ curl -X POST http://127.0.0.1:8317/v0/management/plugins/usage-dashboard-zduu/us
 
 导入响应包含 `added`（新增条数）、`skipped`（去重跳过）、`ignored_by_retention`（超出保留窗口忽略）。导入去重会区分上游分组、模型、时间、来源、上游凭证、客户端 API 身份、延迟、TTFT、失败状态码、错误文本和 token 统计，避免不同客户端 API key 或不同失败结果的同形请求被误合并。
 同时包含 `input_records`（输入记录数）、`accepted_records`（被处理记录数）、`rejected_records`（校验拒绝数）、`total_requests` 和 `failed_requests`，便于核对导入结果。
+
+候选修复了同一实例回导备份时客户端 hash 被提前清除导致重复入账的问题：先检查包含导出 hash 的既有完整去重指纹，匹配时跳过；未匹配的新记录继续按原有跨实例导入规则规范化身份，不仅凭 hash 或脱敏显示值跳过请求。当前导入仍是整包解析，单文件 50 MiB、最多 200000 条记录；分块上传和更大备份的分批原子恢复尚未完成，导出成功不表示任意大小文件都能通过此旧导入接口恢复。
 
 ## 7. 数据持久化（可选）
 

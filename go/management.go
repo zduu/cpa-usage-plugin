@@ -41,6 +41,13 @@ func handleManagement(requestBody []byte) ([]byte, error) {
 	// "/dashboard" never accidentally matches "/dashboard-summary" etc., and
 	// route ordering no longer affects dispatch.
 	tail := pathTail(req.Path)
+	// Stock CPA resource routes deliberately bypass management authentication.
+	// Only the static bootstrap page belongs there. Also reject stale resource
+	// registrations retained by a host across a plugin upgrade; a supplied
+	// Authorization header on this path has not been verified by the host.
+	if strings.Contains(req.Path, "/resource/plugins/") && (req.Method != "GET" || tail != "dashboard") {
+		return dashboardExportJobJSON(http.StatusNotFound, dashboardExportJobErrorResponse{Error: "endpoint not found"})
+	}
 	switch {
 	case req.Method == "GET" && tail == "dashboard":
 		return handleDashboardPage(req.Headers)
@@ -68,6 +75,17 @@ func handleManagement(requestBody []byte) ([]byte, error) {
 		return handlePutModelPrice(req.Body)
 	case req.Method == "DELETE" && tail == "model-prices":
 		return handleDeleteModelPrice(req.Query)
+	case tail == "export-jobs" && strings.Contains(req.Path, "/usage/"):
+		switch req.Method {
+		case "POST":
+			return handleUsageExportJobCreate(req.Query)
+		case "GET":
+			return handleExportJobStatus(req.Query, dashboardExportKindUsage)
+		case "DELETE":
+			return handleExportJobDelete(req.Query, dashboardExportKindUsage)
+		}
+	case req.Method == "GET" && tail == "export-download" && strings.Contains(req.Path, "/usage/"):
+		return handleExportDownload(req.Query, dashboardExportKindUsage)
 	case req.Method == "GET" && tail == "export" && strings.Contains(req.Path, "/usage/"):
 		return handleExportUsage()
 	case req.Method == "POST" && tail == "import" && strings.Contains(req.Path, "/usage/"):
@@ -111,6 +129,26 @@ func handleManagementRegister() ([]byte, error) {
 				Method:      "POST",
 				Path:        pluginPath + "/usage/import",
 				Description: "导入用量统计数据。",
+			},
+			{
+				Method:      "POST",
+				Path:        pluginPath + "/usage/export-jobs",
+				Description: "创建完整用量备份任务（包含归档账本）。",
+			},
+			{
+				Method:      "GET",
+				Path:        pluginPath + "/usage/export-jobs",
+				Description: "查询完整用量备份任务状态。",
+			},
+			{
+				Method:      "DELETE",
+				Path:        pluginPath + "/usage/export-jobs",
+				Description: "取消或删除完整用量备份任务及临时文件。",
+			},
+			{
+				Method:      "GET",
+				Path:        pluginPath + "/usage/export-download",
+				Description: "下载完整用量备份，支持有校验的分块传输。",
 			},
 			{
 				Method:      "GET",
@@ -178,50 +216,6 @@ func handleManagementRegister() ([]byte, error) {
 				Path:        "/dashboard",
 				Menu:        "用量统计",
 				Description: "请求、token 和模型用量统计。",
-			},
-			{
-				Path:        "/dashboard-data",
-				Description: "用量统计看板数据（兼容旧版，含全部细节）。",
-			},
-			{
-				Path:        "/dashboard-summary",
-				Description: "用量统计看板摘要数据（不含请求明细）。",
-			},
-			{
-				Path:        "/dashboard-events",
-				Description: "用量统计请求事件明细（分页）。",
-			},
-			{
-				Path:        "/dashboard-events-export",
-				Description: "筛选后的请求事件明细导出数据，支持 JSON、CSV、JSONL、gzip 和上限保护。",
-			},
-			{
-				Path:        "/dashboard-events-export-jobs",
-				Description: "后台事件导出任务状态。",
-			},
-			{
-				Path:        "/dashboard-events-export-download",
-				Description: "后台事件导出任务结果下载。",
-			},
-			{
-				Path:        "/dashboard-api-detail",
-				Description: "单个上游接口聚合详情。",
-			},
-			{
-				Path:        "/model-prices",
-				Description: "全局模型价格表。",
-			},
-			{
-				Path:        "/usage/export",
-				Description: "用量统计导出数据。",
-			},
-			{
-				Path:        "/usage/import",
-				Description: "用量统计导入数据。",
-			},
-			{
-				Path:        "/health",
-				Description: "插件运行健康状态。",
 			},
 		},
 	}
@@ -513,7 +507,6 @@ func handleImportUsage(body []byte) ([]byte, error) {
 	}
 
 	result := stats.MergeSnapshot(importPayload.Usage)
-	snapshot := stats.Snapshot()
 
 	responseData := ImportResponse{
 		InputRecords:       recordCount,
@@ -522,12 +515,14 @@ func handleImportUsage(body []byte) ([]byte, error) {
 		Added:              result.Added,
 		Skipped:            result.Skipped,
 		IgnoredByRetention: result.IgnoredByRetention,
-		TotalRequests:      snapshot.TotalRequests,
-		FailedRequests:     snapshot.FailureCount,
 	}
 
-	// Track last import result
+	// Read the counter pair and publish the import result under one lock.
+	// A full snapshot would clone all retained details and archived history
+	// just to retrieve these two scalar values.
 	stats.mu.Lock()
+	responseData.TotalRequests = stats.totalRequests
+	responseData.FailedRequests = stats.failureCount
 	stats.lastImportResult = &responseData
 	stats.invalidateSummaryLocked()
 	stats.mu.Unlock()

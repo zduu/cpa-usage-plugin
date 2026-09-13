@@ -5,6 +5,7 @@
 - [guides/cpa-usage.md](guides/cpa-usage.md): 安装、配置、部署和更新说明
 - [releases/changelog.md](releases/changelog.md): `v2` 起的正式发布说明
 - [releases/v1-history.md](releases/v1-history.md): `v1` 历史标签归档
+- [releases/next-version-validation.md](releases/next-version-validation.md): 查询优化、完整备份、匿名资源鉴权修复、真实 CPA/浏览器证据与 G01–G08 发布缺口
 - [plans/single-container-performance-checklist.tmp.md](plans/single-container-performance-checklist.tmp.md): 全面优化总计划（临时），统一实施顺序、资源预算、兼容契约与 G01–G08 验收门槛
 - [plans/low-resource-storage-checklist.md](plans/low-resource-storage-checklist.md): SQLite 存储专项，包含后端设计、迁移、备份恢复与平台交付
 - [plans/additional-improvements.tmp.md](plans/additional-improvements.tmp.md): 非数据库优化专项（临时），包含查询、内存、计价、传输、前端与运行诊断

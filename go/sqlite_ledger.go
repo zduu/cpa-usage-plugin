@@ -19,7 +19,7 @@ import (
 
 const (
 	sqliteLedgerApplicationID = 0x43504155 // CPAU
-	sqliteLedgerSchemaVersion = 3
+	sqliteLedgerSchemaVersion = 4
 	sqliteLedgerBatchRecords  = 256
 	sqliteLedgerBatchBytes    = 8 << 20
 	sqliteLedgerRecordBytes   = 1 << 20
@@ -188,7 +188,7 @@ func (s *sqliteLedger) initialize(ctx context.Context) error {
 		if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA application_id=%d; PRAGMA user_version=%d", sqliteLedgerApplicationID, sqliteLedgerSchemaVersion)); err != nil {
 			return err
 		}
-	} else if appID == sqliteLedgerApplicationID && (version == 1 || version == 2) {
+	} else if appID == sqliteLedgerApplicationID && version >= 1 && version < sqliteLedgerSchemaVersion {
 		// Upgrade additive storage primitives without changing request IDs,
 		// revisions, generations or staged migration bytes.
 		if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version=%d", sqliteLedgerSchemaVersion)); err != nil {
@@ -204,6 +204,11 @@ func (s *sqliteLedger) initialize(ctx context.Context) error {
 	}
 	if version < 3 {
 		if _, err := tx.ExecContext(ctx, sqliteLedgerStateSchema); err != nil {
+			return err
+		}
+	}
+	if version < 4 {
+		if _, err := tx.ExecContext(ctx, sqliteMigrationProjectionSchema); err != nil {
 			return err
 		}
 	}

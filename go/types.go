@@ -784,6 +784,13 @@ type RuntimeStatus struct {
 	SummaryCacheValid          bool                                `json:"summary_cache_valid"`
 	SummaryCacheHits           int64                               `json:"summary_cache_hits,omitempty"`
 	SummaryCacheMisses         int64                               `json:"summary_cache_misses,omitempty"`
+	RangeCacheEntries          int                                 `json:"range_cache_entries,omitempty"`
+	RangeCacheEstimatedBytes   int64                               `json:"range_cache_estimated_bytes,omitempty"`
+	RangeCacheBudgetBytes      int64                               `json:"range_cache_budget_bytes"`
+	RangeCacheHits             int64                               `json:"range_cache_hits,omitempty"`
+	RangeCacheMisses           int64                               `json:"range_cache_misses,omitempty"`
+	RangeCacheEvictions        int64                               `json:"range_cache_evictions,omitempty"`
+	RangeScannedRecords        int64                               `json:"range_scanned_records,omitempty"`
 	LastSummaryDurationMs      float64                             `json:"last_summary_duration_ms,omitempty"`
 	EventCacheEntries          int                                 `json:"event_cache_entries,omitempty"`
 	EventCacheHits             int64                               `json:"event_cache_hits,omitempty"`

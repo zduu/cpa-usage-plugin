@@ -136,6 +136,10 @@ func (m ModelSnapshot) accountingDetails() []RequestDetail {
 // Combined indexes keep archived records addressable during repair and replay.
 func (m *modelStats) setAccountingDetailAt(i int, d RequestDetail) {
 	if i < len(m.Details) {
+		if !m.Details[i].Timestamp.Equal(d.Timestamp) {
+			m.rangeDetailOrderKnown = false
+		}
+		m.invalidateRangeDetailsFrom(i)
 		d.eventRef = m.Details[i].eventRef
 		d.eventSequence = m.Details[i].eventSequence
 		m.Details[i] = d
@@ -146,6 +150,7 @@ func (m *modelStats) setAccountingDetailAt(i int, d RequestDetail) {
 
 func (m *modelStats) removeAccountingDetailAt(i int) {
 	if i < len(m.Details) {
+		m.invalidateRangeDetailsFrom(i)
 		if ref := m.Details[i].eventRef; ref != nil {
 			ref.detail = nil
 		}
@@ -206,6 +211,7 @@ func (m *modelStats) appendDetail(d RequestDetail, archived bool) {
 	if reallocated || rebased {
 		changedFrom = 0
 	}
+	m.invalidateRangeDetailsFrom(changedFrom)
 	m.rebindEventRefs(changedFrom)
 }
 
@@ -214,6 +220,8 @@ func (m *modelStats) appendDetail(d RequestDetail, archived bool) {
 // its reusable capacity; only substantial underuse triggers a bounded copy.
 func (m *modelStats) compactDetailStorage(previousCapacity int) {
 	if len(m.Details) == 0 {
+		invalidateRangeBlocksFrom(m.rangeDetailBlocks, 0)
+		m.rangeDetailBlocks = nil
 		m.Details, m.detailStorage = nil, nil
 		return
 	}
@@ -221,6 +229,8 @@ func (m *modelStats) compactDetailStorage(previousCapacity int) {
 	if capacity < 1024 || len(m.Details) > capacity/4 {
 		return
 	}
+	invalidateRangeBlocksFrom(m.rangeDetailBlocks, 0)
+	m.rangeDetailBlocks = nil
 	// Leave append headroom so the first new request does not immediately
 	// allocate and copy the window again.
 	details := make([]RequestDetail, len(m.Details), len(m.Details)+max(1, len(m.Details)/4))

@@ -2,7 +2,7 @@
 
 CPA 用量统计插件，用于在 CLIProxyAPI/CPA v7 插件系统中记录请求用量，并提供管理页面查看统计数据。
 
-当前代码版本：`2.6.4`；下一版本开发中，尚未发布。候选版相对上一正式版的实测收益及验收缺口见[发布审查](docs/plans/release-readiness-20260912.md)，最新快照内存优化和真实浏览器验证见[存储与浏览器验收](docs/plans/storage-stage-20260913/README.md)。
+当前代码版本：`2.6.4`；下一版本开发中，尚未发布。最新查询与完整备份优化、真实 CPA/浏览器验证及发布缺口见[下一版本验收](docs/releases/next-version-validation.md)；前一阶段的快照和 SQLite 基础层记录见[存储与浏览器验收](docs/plans/storage-stage-20260913/README.md)。
 
 > **2.4.0 迁移提示**：插件 ID 已从 `usage-statistics` 改为 `usage-dashboard-zduu`，用于避开 CPA 官方商店中同 ID 插件造成的安装状态、配置和路由冲突。升级时必须先停用并删除旧插件，再安装新插件；历史统计数据路径保持不变。详细步骤见[部署文档的 2.3.4 → 2.4.0 迁移章节](docs/guides/cpa-usage.md#从-234-迁移到-240)。
 
@@ -16,11 +16,13 @@ CPA 用量统计插件，用于在 CLIProxyAPI/CPA v7 插件系统中记录请�
 - API 详细统计支持主动选择脱敏后的客户端 API key，并联动筛选上游接口统计、上游接口详情、模型统计、请求事件明细和用量趋势；默认仍展示当前时间范围内的全量数据。
 - 上游接口详情的最近请求展示推理强度、请求端点和生成速度；流式请求按首个 token 后的生成时长计算速度，非流式请求按完整响应耗时计算。
 - 用量计数仅使用 CPA 原生 usage 上报，关闭实时响应兜底和流式拦截。`v2.6.4` 通过宿主已有的请求拦截/完成回调补齐端点和流式标记，不需要修改或重编译 CPA。并发关联有歧义时保留未知值；兼容范围与缓存边界见 [部署文档](docs/guides/cpa-usage.md#cpa-版本兼容与统计兜底)。旧版兜底记录仍支持历史去重修复。
-- 轻量级首屏摘要：看板数据不含请求明细，首包体积不随记录数增长。
+- 轻量级首屏摘要：首包不包含逐请求明细；分组维度数量仍会影响响应体积。
 - 请求事件明细支持按模型、来源、凭证、时间范围筛选，页面以滚动表格展示；来源列显示完整上游接口标识，便于区分同一 Codex、Claude 等提供商下的不同上游凭证。
 - 服务健康网格按 15 分钟展示最近 7 天状态，鼠标悬停显示窗口信息。
 - 用量趋势图支持切换每日成本、请求数、token 和平均 RPM，并提示近期用量突增或下降。
 - 支持导入/导出统计数据，导出包含版本、插件版本、明细数和配置摘要；导入返回输入/接收/拒绝/新增/跳过/过期忽略明细。
+- 完整用量备份冻结账本分块、可见明细和聚合，后台逐条写出 v1 JSON，再校验分块下载；支持原生解压流的浏览器自动压缩传输，仍保存普通 JSON。不受事件筛选或导出条数上限限制，保留大整数精度。与事件导出共享 2 个活动/16 个保留任务；旧整包接口继续兼容。
+- 开发中候选修复了匿名资源数据访问：只公开静态看板，数据接口统一走管理鉴权；旧资源别名不再提供数据。修复尚未发布或部署，旧版本访问限制与迁移说明见[管理 API 安全边界](docs/guides/cpa-usage.md#6-管理-api-使用)。
 - API key 只保存脱敏显示值和分组 hash；导入旧数据时会兼容无 hash 记录，但同一脱敏显示值下存在多个不同 hash 时不会强行合并，避免混淆不同真实 key。
 - 支持后端全局模型价格表并分别按输入、输出、缓存读取、缓存写入 token 估算成本，跨设备打开看板可见同一份最新价格；手动价格可用 `provider/modelname` 区分同名上游模型，裸模型名作为所有上游的回退。
 - 模型价格默认保存到 `data/usage-statistics-prices.json`，与推荐的持久化数据目录一起保留；使用默认路径且新文件不存在时，启动会自动迁移旧版本根目录的 `usage-statistics-prices.json`。显式配置旧路径或其他自定义路径时，继续在指定位置读写。
@@ -146,6 +148,10 @@ cpa-usage-plugin/
 ```text
 GET  /v0/management/plugins/usage-dashboard-zduu/usage
 GET  /v0/management/plugins/usage-dashboard-zduu/usage/export
+POST /v0/management/plugins/usage-dashboard-zduu/usage/export-jobs
+GET  /v0/management/plugins/usage-dashboard-zduu/usage/export-jobs
+DELETE /v0/management/plugins/usage-dashboard-zduu/usage/export-jobs
+GET  /v0/management/plugins/usage-dashboard-zduu/usage/export-download
 POST /v0/management/plugins/usage-dashboard-zduu/usage/import
 GET  /v0/management/plugins/usage-dashboard-zduu/model-prices
 PUT  /v0/management/plugins/usage-dashboard-zduu/model-prices
@@ -168,6 +174,8 @@ GET  /v0/management/plugins/usage-dashboard-zduu/health
 |------|------|------|
 | `/usage` | GET | 获取完整统计数据（含明细）。 |
 | `/usage/export` | GET | 导出全量统计数据（JSON），包含 `version`、`plugin`、`detail_count`、`config` 和 `usage`。 |
+| `/usage/export-jobs` | POST/GET/DELETE | 创建、查询或删除完整用量备份任务，`kind: usage`；支持 JSON 和 `gzip=1`，忽略事件筛选及条数限制。 |
+| `/usage/export-download` | GET | 下载完整用量备份，支持与事件任务相同的版本/CRC32 分块校验；不是筛选事件数组。 |
 | `/usage/import` | POST | 导入统计数据，返回 `input_records`/`accepted_records`/`rejected_records`/`added`/`skipped`/`ignored_by_retention`。 |
 | `/model-prices` | GET/PUT/DELETE | 获取、新增/更新、删除全局模型价格表。 |
 | `/dashboard-summary` | GET | **推荐** — 轻量看板摘要，不含请求明细，含预计算健康网格/来源/客户端 API/模型聚合和 `_meta` 元数据；可传 `client_api` 使用摘要返回的不可逆 selector 筛选。 |

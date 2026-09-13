@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/crc32"
+	"html"
 	"io"
 	"math"
 	"net/http"
@@ -37,6 +38,8 @@ const (
 	dashboardExportJobRunning   = "running"
 	dashboardExportJobSucceeded = "succeeded"
 	dashboardExportJobFailed    = "failed"
+	dashboardExportKindEvents   = "events"
+	dashboardExportKindUsage    = "usage"
 )
 
 var dashboardExportJobs = newDashboardExportJobManager()
@@ -53,6 +56,7 @@ type dashboardExportJob struct {
 	cancel      context.CancelFunc
 	ctx         context.Context
 	ID          string
+	Kind        string
 	Status      string
 	Params      EventsQuery
 	Options     dashboardEventsExportOptions
@@ -89,6 +93,7 @@ type countingWriter struct {
 
 type dashboardExportJobResponse struct {
 	ID           string `json:"id"`
+	Kind         string `json:"kind"`
 	Status       string `json:"status"`
 	Format       string `json:"format"`
 	Gzip         bool   `json:"gzip"`
@@ -107,6 +112,7 @@ type dashboardExportJobResponse struct {
 	ContentType  string `json:"content_type,omitempty"`
 	DownloadPath string `json:"download_path,omitempty"`
 	ETag         string `json:"etag,omitempty"`
+	Version      string `json:"version,omitempty"`
 	ChunkSize    int    `json:"chunk_size,omitempty"`
 }
 
@@ -135,35 +141,47 @@ func handleDashboardEventsExportJobCreate(query map[string][]string) ([]byte, er
 }
 
 func handleDashboardEventsExportJobStatus(query map[string][]string) ([]byte, error) {
+	return handleExportJobStatus(query, dashboardExportKindEvents)
+}
+
+func handleExportJobStatus(query map[string][]string, kind string) ([]byte, error) {
 	id := dashboardExportJobID(query)
 	if id == "" {
-		return dashboardExportJobJSON(http.StatusOK, dashboardExportJobListResponse{Jobs: dashboardExportJobs.list()})
+		return dashboardExportJobJSON(http.StatusOK, dashboardExportJobListResponse{Jobs: dashboardExportJobs.list(kind)})
 	}
 	job, ok := dashboardExportJobs.get(id)
-	if !ok {
+	if !ok || dashboardExportJobKind(job) != kind {
 		return dashboardExportJobJSON(http.StatusNotFound, dashboardExportJobErrorResponse{Error: "export job not found"})
 	}
 	return dashboardExportJobJSON(http.StatusOK, dashboardExportJobSnapshot(job))
 }
 
 func handleDashboardEventsExportJobDelete(query map[string][]string) ([]byte, error) {
+	return handleExportJobDelete(query, dashboardExportKindEvents)
+}
+
+func handleExportJobDelete(query map[string][]string, kind string) ([]byte, error) {
 	id := dashboardExportJobID(query)
 	if id == "" {
 		return dashboardExportJobJSON(http.StatusBadRequest, dashboardExportJobErrorResponse{Error: "missing export job id"})
 	}
-	if !dashboardExportJobs.delete(id) {
+	if !dashboardExportJobs.deleteKind(id, kind) {
 		return dashboardExportJobJSON(http.StatusNotFound, dashboardExportJobErrorResponse{Error: "export job not found"})
 	}
 	return dashboardExportJobJSON(http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 func handleDashboardEventsExportDownload(query map[string][]string) ([]byte, error) {
+	return handleExportDownload(query, dashboardExportKindEvents)
+}
+
+func handleExportDownload(query map[string][]string, kind string) ([]byte, error) {
 	id := dashboardExportJobID(query)
 	if id == "" {
 		return dashboardExportJobJSON(http.StatusBadRequest, dashboardExportJobErrorResponse{Error: "missing export job id"})
 	}
 	job, ok := dashboardExportJobs.get(id)
-	if !ok {
+	if !ok || dashboardExportJobKind(job) != kind {
 		return dashboardExportJobJSON(http.StatusNotFound, dashboardExportJobErrorResponse{Error: "export job not found"})
 	}
 	switch job.Status {
@@ -193,6 +211,7 @@ type dashboardExportChunk struct {
 	Offset   int64  `json:"offset"`
 	Total    int64  `json:"total"`
 	ETag     string `json:"etag"`
+	Version  string `json:"version"`
 	Checksum string `json:"checksum_crc32"`
 	Data     []byte `json:"data"`
 }
@@ -200,7 +219,11 @@ type dashboardExportChunk struct {
 // The management ABI encodes a whole response. A bounded chunk keeps file
 // download allocations independent of the final export size, including gzip.
 func dashboardExportJobChunk(job dashboardExportJob, query map[string][]string) ([]byte, error) {
-	if version := queryRawValue(query, "version"); version == "" || version != job.ETag {
+	version := queryRawValue(query, "version")
+	// Stock CPA HTML-escapes strings inside management JSON, including an
+	// ETag's quotes. New clients use the transport-safe token; older clients
+	// can return either exact representation of the same immutable ETag.
+	if version == "" || (version != dashboardExportJobVersion(job) && version != job.ETag && version != html.EscapeString(job.ETag)) {
 		return dashboardExportJobJSON(http.StatusPreconditionFailed, dashboardExportJobErrorResponse{Error: "export file version does not match"})
 	}
 	offset, err := strconv.ParseInt(queryRawValue(query, "offset"), 10, 64)
@@ -231,12 +254,24 @@ func dashboardExportJobChunk(job dashboardExportJob, query map[string][]string) 
 		return dashboardExportJobJSON(http.StatusGone, dashboardExportJobErrorResponse{Error: "export job file is incomplete"})
 	}
 	return dashboardExportJobJSON(http.StatusOK, dashboardExportChunk{
-		Offset: offset, Total: info.Size(), ETag: job.ETag,
+		Offset: offset, Total: info.Size(), ETag: job.ETag, Version: dashboardExportJobVersion(job),
 		Checksum: fmt.Sprintf("%08x", crc32.ChecksumIEEE(body)), Data: body,
 	})
 }
 
+func dashboardExportJobVersion(job dashboardExportJob) string {
+	if job.ETag == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(job.ETag))
+	return hex.EncodeToString(sum[:])
+}
+
 func (m *dashboardExportJobManager) create(params EventsQuery, opts dashboardEventsExportOptions) (dashboardExportJob, int, string) {
+	return m.createKind(dashboardExportKindEvents, params, opts)
+}
+
+func (m *dashboardExportJobManager) createKind(kind string, params EventsQuery, opts dashboardEventsExportOptions) (dashboardExportJob, int, string) {
 	now := time.Now()
 	m.mu.Lock()
 	m.cleanupLocked(now)
@@ -255,10 +290,11 @@ func (m *dashboardExportJobManager) create(params EventsQuery, opts dashboardEve
 
 	id := newDashboardExportJobID()
 	ctx, cancel := context.WithCancel(context.Background())
-	filePath := filepath.Join(os.TempDir(), "cpa-usage-events-export-"+id)
+	filePath := filepath.Join(os.TempDir(), "cpa-usage-"+kind+"-export-"+id)
 	job := &dashboardExportJob{
 		ctx: ctx, cancel: cancel,
 		ID:         id,
+		Kind:       kind,
 		Status:     dashboardExportJobQueued,
 		Params:     params,
 		Options:    opts,
@@ -291,6 +327,7 @@ func (m *dashboardExportJobManager) run(id string, params EventsQuery, opts dash
 	}
 	job.Status, job.StartedAt = dashboardExportJobRunning, startedAt
 	opts.ctx = job.ctx
+	kind := dashboardExportJobKind(*job)
 	snapshotAt := job.SnapshotAt
 	m.mu.Unlock()
 	succeeded := false
@@ -301,13 +338,19 @@ func (m *dashboardExportJobManager) run(id string, params EventsQuery, opts dash
 			_ = os.Remove(filePath)
 		}
 	}()
-	encoded, err := encodeDashboardEventsExportFile(params, opts, tmpPath, snapshotAt)
+	var encoded dashboardExportFileResult
+	var err error
+	if kind == dashboardExportKindUsage {
+		encoded, err = encodeUsageExportFile(opts, tmpPath)
+	} else {
+		encoded, err = encodeDashboardEventsExportFile(params, opts, tmpPath, snapshotAt)
+	}
 	if err != nil {
 		_ = os.Remove(tmpPath)
 		m.fail(id, err)
 		return
 	}
-	sum, err := fileSHA256(tmpPath)
+	sum, err := fileSHA256Context(opts.ctx, tmpPath)
 	if err != nil {
 		_ = os.Remove(tmpPath)
 		m.fail(id, err)
@@ -329,7 +372,9 @@ func (m *dashboardExportJobManager) run(id string, params EventsQuery, opts dash
 	}
 	succeeded = true
 	finishedAt := time.Now()
-	stats.RecordEventsExportSummary(string(opts.Format), opts.Gzip, encoded.Total, encoded.Exported, encoded.Truncated, encoded.RawBytes, encoded.BodyBytes, finishedAt.Sub(startedAt))
+	if kind == dashboardExportKindEvents {
+		stats.RecordEventsExportSummary(string(opts.Format), opts.Gzip, encoded.Total, encoded.Exported, encoded.Truncated, encoded.RawBytes, encoded.BodyBytes, finishedAt.Sub(startedAt))
+	}
 	job.Status = dashboardExportJobSucceeded
 	job.FinishedAt = finishedAt
 	job.ExpiresAt = finishedAt.Add(dashboardExportJobTTL)
@@ -339,10 +384,19 @@ func (m *dashboardExportJobManager) run(id string, params EventsQuery, opts dash
 	job.RawBytes = encoded.RawBytes
 	job.BodyBytes = encoded.BodyBytes
 	job.ContentType = encoded.ContentType
-	job.ETag = `W/"events-export-job-` + hex.EncodeToString(sum[:]) + `"`
+	job.ETag = `W/"` + kind + `-export-job-` + hex.EncodeToString(sum[:]) + `"`
 }
 
 func encodeDashboardEventsExportFile(params EventsQuery, opts dashboardEventsExportOptions, filePath string, snapshotAt time.Time) (dashboardExportFileResult, error) {
+	return encodeDashboardExportFile(opts, filePath, func(writer io.Writer) (dashboardExportFileResult, error) {
+		return encodeDashboardEventsExportPaged(writer, params, opts, snapshotAt)
+	})
+}
+
+func encodeDashboardExportFile(opts dashboardEventsExportOptions, filePath string, encode func(io.Writer) (dashboardExportFileResult, error)) (dashboardExportFileResult, error) {
+	if opts.ctx != nil && opts.ctx.Err() != nil {
+		return dashboardExportFileResult{}, opts.ctx.Err()
+	}
 	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
 		return dashboardExportFileResult{}, err
@@ -359,7 +413,7 @@ func encodeDashboardEventsExportFile(params EventsQuery, opts dashboardEventsExp
 	}
 	rawCounter := &countingWriter{w: rawWriter}
 
-	result, encodeErr := encodeDashboardEventsExportPaged(rawCounter, params, opts, snapshotAt)
+	result, encodeErr := encode(rawCounter)
 	if gzipWriter != nil {
 		if closeErr := gzipWriter.Close(); encodeErr == nil {
 			encodeErr = closeErr
@@ -372,6 +426,7 @@ func encodeDashboardEventsExportFile(params EventsQuery, opts dashboardEventsExp
 		encodeErr = closeErr
 	}
 	if encodeErr != nil {
+		_ = os.Remove(filePath)
 		return dashboardExportFileResult{}, encodeErr
 	}
 	result.RawBytes = rawCounter.n
@@ -610,14 +665,16 @@ func (m *dashboardExportJobManager) get(id string) (dashboardExportJob, bool) {
 	return *job, true
 }
 
-func (m *dashboardExportJobManager) list() []dashboardExportJobResponse {
+func (m *dashboardExportJobManager) list(kind string) []dashboardExportJobResponse {
 	now := time.Now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.cleanupLocked(now)
 	jobs := make([]dashboardExportJob, 0, len(m.jobs))
 	for _, job := range m.jobs {
-		jobs = append(jobs, *job)
+		if dashboardExportJobKind(*job) == kind {
+			jobs = append(jobs, *job)
+		}
 	}
 	sort.Slice(jobs, func(i, j int) bool {
 		return jobs[i].CreatedAt.After(jobs[j].CreatedAt)
@@ -630,10 +687,14 @@ func (m *dashboardExportJobManager) list() []dashboardExportJobResponse {
 }
 
 func (m *dashboardExportJobManager) delete(id string) bool {
+	return m.deleteKind(id, dashboardExportKindEvents)
+}
+
+func (m *dashboardExportJobManager) deleteKind(id, kind string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	job, ok := m.jobs[id]
-	if !ok {
+	if !ok || dashboardExportJobKind(*job) != kind {
 		return false
 	}
 	delete(m.jobs, id)
@@ -690,6 +751,7 @@ func (m *dashboardExportJobManager) cleanupLocked(now time.Time) {
 func dashboardExportJobSnapshot(job dashboardExportJob) dashboardExportJobResponse {
 	response := dashboardExportJobResponse{
 		ID:          job.ID,
+		Kind:        dashboardExportJobKind(job),
 		Status:      job.Status,
 		Format:      string(job.Options.Format),
 		Gzip:        job.Options.Gzip,
@@ -709,10 +771,21 @@ func dashboardExportJobSnapshot(job dashboardExportJob) dashboardExportJobRespon
 	}
 	if job.Status == dashboardExportJobSucceeded {
 		response.DownloadPath = "/dashboard-events-export-download?id=" + job.ID
+		if dashboardExportJobKind(job) == dashboardExportKindUsage {
+			response.DownloadPath = "/usage/export-download?id=" + job.ID
+		}
 		response.ETag = job.ETag
+		response.Version = dashboardExportJobVersion(job)
 		response.ChunkSize = dashboardExportChunkBytes
 	}
 	return response
+}
+
+func dashboardExportJobKind(job dashboardExportJob) string {
+	if job.Kind == "" {
+		return dashboardExportKindEvents
+	}
+	return job.Kind
 }
 
 func dashboardExportJobDownloadHeaders(job dashboardExportJob) map[string][]string {
@@ -720,7 +793,11 @@ func dashboardExportJobDownloadHeaders(job dashboardExportJob) map[string][]stri
 	headers["X-Total-Count"] = []string{strconv.Itoa(job.Total)}
 	headers["X-Exported-Count"] = []string{strconv.Itoa(job.Exported)}
 	headers["X-Export-Truncated"] = []string{strconv.FormatBool(job.Truncated)}
-	headers["Content-Disposition"] = []string{fmt.Sprintf(`attachment; filename="usage-events-%s.%s"`, job.ID, dashboardExportJobFileExtension(job.Options))}
+	prefix := "usage-events-"
+	if dashboardExportJobKind(job) == dashboardExportKindUsage {
+		prefix = "usage-export-"
+	}
+	headers["Content-Disposition"] = []string{fmt.Sprintf(`attachment; filename="%s%s.%s"`, prefix, job.ID, dashboardExportJobFileExtension(job.Options))}
 	return headers
 }
 
@@ -784,15 +861,18 @@ func (w *countingWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-func fileSHA256(path string) ([32]byte, error) {
+func fileSHA256Context(ctx context.Context, path string) ([32]byte, error) {
 	var sum [32]byte
+	if err := ctx.Err(); err != nil {
+		return sum, err
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return sum, err
 	}
 	defer file.Close()
 	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
+	if _, err := io.Copy(&exportContextWriter{ctx: ctx, writer: hash}, file); err != nil {
 		return sum, err
 	}
 	copy(sum[:], hash.Sum(nil))

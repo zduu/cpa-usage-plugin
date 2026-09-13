@@ -5,10 +5,12 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"hash/crc32"
+	"html"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -76,6 +78,38 @@ func TestExportChunksRoundTripAndVersionChecks(t *testing.T) {
 		raw, _ := dashboardExportJobChunk(job, query)
 		if response := decodeManagementResponse(t, raw, nil); response.StatusCode != http.StatusGone {
 			t.Fatalf("deleted file download status=%d", response.StatusCode)
+		}
+	}
+}
+
+func TestExportChunkVersionSurvivesStockCPAHTMLSanitization(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "export")
+	if err := os.WriteFile(path, []byte("[]"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	job := dashboardExportJob{ID: "transport-version", Status: dashboardExportJobSucceeded, FilePath: path, BodyBytes: 2, ETag: `W/"events-export-job-0123456789abcdef"`}
+	snapshot := dashboardExportJobSnapshot(job)
+	if len(snapshot.Version) != 64 || strings.ContainsAny(snapshot.Version, `&<>"'`) || html.EscapeString(snapshot.Version) != snapshot.Version {
+		t.Fatalf("version token is not transport-safe: %q", snapshot.Version)
+	}
+	for _, version := range []string{snapshot.Version, job.ETag, html.EscapeString(job.ETag)} {
+		raw, err := dashboardExportJobChunk(job, map[string][]string{"offset": {"0"}, "version": {version}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var chunk dashboardExportChunk
+		response := decodeManagementResponse(t, raw, &chunk)
+		if response.StatusCode != http.StatusOK || chunk.Version != snapshot.Version || string(chunk.Data) != "[]" {
+			t.Fatalf("version %q did not round trip: status=%d chunk=%+v", version, response.StatusCode, chunk)
+		}
+	}
+	for _, version := range []string{"", "wrong-version", snapshot.Version + "0", html.EscapeString(html.EscapeString(job.ETag))} {
+		raw, err := dashboardExportJobChunk(job, map[string][]string{"offset": {"0"}, "version": {version}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response := decodeManagementResponse(t, raw, nil); response.StatusCode != http.StatusPreconditionFailed {
+			t.Fatalf("mismatched version %q accepted with status %d", version, response.StatusCode)
 		}
 	}
 }

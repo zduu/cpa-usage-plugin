@@ -352,13 +352,13 @@ async function fetchJsonPayloadWithMeta(url, options) {
   let payload = null;
   if (text) {
     try { payload = JSON.parse(text) } catch {
-      if (!response.ok) throw new Error(text);
+      if (!response.ok) throw pluginResponseError(text, response.status);
       throw new Error(t('response_not_json'));
     }
   }
   if (!response.ok) {
     const message = payload && payload.error && payload.error.message ? payload.error.message : (text || (t('request_failed_colon') + response.status));
-    throw new Error(message);
+    throw pluginResponseError(message, response.status, payload && payload.error && payload.error.code);
   }
   const meta = unwrapPluginPayloadWithMeta(payload);
   meta.headers = Object.assign({}, meta.headers || {});
@@ -380,14 +380,9 @@ async function fetchTextPayload(url, options) {
 async function fetchTextPayloadWithMeta(url, options) {
   const response = await fetch(url, options);
   const text = await response.text();
-  if (!response.ok) throw new Error(text || (t('request_failed_colon') + response.status));
+  if (!response.ok) throw pluginResponseError(text || (t('request_failed_colon') + response.status), response.status);
   if (!text) return { data: '', statusCode: response.status || 200, headers: {} };
-  let payload = null;
-  try { payload = JSON.parse(text) } catch { return { data: text, statusCode: response.status || 200, headers: {} } }
-  const meta = unwrapPluginPayloadWithMeta(payload);
-  if (meta.data == null) meta.data = '';
-  meta.data = typeof meta.data === 'string' ? meta.data : JSON.stringify(meta.data);
-  return meta;
+  return unwrapPluginTextWithMeta(text);
 }
 
 function cacheConditionalPayload(cacheKey, value) {
@@ -1806,23 +1801,24 @@ async function createExportJob(params) {
   return fetchJsonPayload(managementEndpoint('dashboard-events-export-jobs') + '?' + params.toString(), pluginFetchOptions({ method: 'POST', cache: 'no-store' }));
 }
 
-async function getExportJob(id) {
-  return fetchJsonPayload(managementEndpoint('dashboard-events-export-jobs?id=' + encodeURIComponent(id)), pluginFetchOptions({ cache: 'no-store' }));
+async function getExportJob(id, path = 'dashboard-events-export-jobs') {
+  return fetchJsonPayload(managementEndpoint(path + '?id=' + encodeURIComponent(id)), pluginFetchOptions({ cache: 'no-store' }));
 }
 
-async function deleteExportJob(id) {
+async function deleteExportJob(id, path = 'dashboard-events-export-jobs') {
   try {
-    await fetchJsonPayload(managementEndpoint('dashboard-events-export-jobs?id=' + encodeURIComponent(id)), pluginFetchOptions({ method: 'DELETE', cache: 'no-store' }));
+    await fetchJsonPayload(managementEndpoint(path + '?id=' + encodeURIComponent(id)), pluginFetchOptions({ method: 'DELETE', cache: 'no-store' }));
   } catch {}
 }
 
-async function waitForExportJob(job) {
+async function waitForExportJob(job, path = 'dashboard-events-export-jobs', kind = '') {
   let current = job;
   for (let i = 0; i < 120; i++) {
+    if (kind && (!current || current.id !== job.id || current.kind !== kind)) throw new Error(t('export_failed'));
     if (current && current.status === 'succeeded') return current;
     if (current && current.status === 'failed') throw new Error(current.error || t('export_job_failed'));
     await delay(i < 10 ? 250 : 1000);
-    current = await getExportJob(job.id);
+    current = await getExportJob(job.id, path);
   }
   throw new Error(t('export_job_timeout'));
 }
@@ -1836,7 +1832,7 @@ async function fetchExportJobResult(params, asFile = false) {
     // A previous backend may ignore json_rows. Use the array file only
     // after negotiation, on both chunked and whole-response downloads.
     const fileReady = asFile && (completed.format === 'csv' || completed.json_rows === true);
-    if (completed.chunk_size && completed.etag && !completed.gzip) {
+    if (completed.chunk_size && (completed.version || completed.etag) && !completed.gzip) {
       return await fetchExportJobChunks(completed, downloadPath, fileReady);
     }
     const meta = await fetchTextPayloadWithMeta(managementEndpoint(downloadPath), pluginFetchOptions({ cache: 'no-store' }));
@@ -1844,6 +1840,61 @@ async function fetchExportJobResult(params, asFile = false) {
     return meta;
   } finally {
     await deleteExportJob(job.id);
+  }
+}
+
+async function fetchUsageExportFile() {
+  const path = 'usage/export-jobs';
+  const decompressor = createUsageExportDecompressor();
+  let job;
+  try {
+    job = await fetchJsonPayload(managementEndpoint(path) + (decompressor ? '?gzip=1' : ''), pluginFetchOptions({ method: 'POST', cache: 'no-store' }));
+  } catch (error) {
+    // Only unsupported endpoints may use the old whole-response route.
+    // Authentication, backpressure, transport and job failures stay failures.
+    const unsupported = [404, 405, 501].includes(error.statusCode) || (!error.statusCode && error.code === 'not_found');
+    if (!unsupported) throw error;
+    const meta = await fetchTextPayloadWithMeta(pluginEndpoint('usage/export'), pluginFetchOptions({ cache: 'no-store' }));
+    const payload = JSON.parse(meta.data);
+    if (!payload || payload.version !== 1 || !payload.usage || typeof payload.usage !== 'object' || Array.isArray(payload.usage)) throw new Error(t('export_failed'));
+    return new Blob([meta.data], { type: 'application/json;charset=utf-8' });
+  }
+  if (!job || typeof job.id !== 'string' || !job.id) throw new Error(t('export_no_id'));
+  try {
+    const completed = await waitForExportJob(job, path, 'usage');
+    if (completed.format !== 'json' || completed.json_rows || completed.truncated || !completed.chunk_size || !completed.version) throw new Error(t('export_failed'));
+    if (completed.gzip && (completed.gzip !== true || !decompressor || !Number.isSafeInteger(completed.raw_bytes) || completed.raw_bytes < 0)) throw new Error(t('export_failed'));
+    const result = await fetchExportJobChunks(completed, 'usage/export-download?id=' + encodeURIComponent(job.id), true);
+    return completed.gzip ? await decompressUsageExportFile(result.data, completed.raw_bytes, decompressor) : result.data;
+  } finally {
+    await deleteExportJob(job.id, path);
+  }
+}
+
+function createUsageExportDecompressor() {
+  if (typeof DecompressionStream !== 'function' || typeof Blob.prototype.stream !== 'function') return null;
+  try { return new DecompressionStream('gzip'); } catch { return null; }
+}
+
+async function decompressUsageExportFile(file, expectedBytes, decompressor) {
+  // Keep both transport and decoded data in Blob storage; never materialize
+  // the complete JSON as a JavaScript string, object tree or ArrayBuffer.
+  const reader = file.stream().pipeThrough(decompressor).getReader();
+  const parts = [];
+  let decodedBytes = 0, finished = false;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) { finished = true; break; }
+      decodedBytes += value.byteLength;
+      if (decodedBytes > expectedBytes) throw new Error(t('export_failed'));
+      parts.push(new Blob([value]));
+    }
+    if (decodedBytes !== expectedBytes) throw new Error(t('export_failed'));
+    return new Blob(parts, { type: file.type });
+  } finally {
+    if (!finished) await reader.cancel().catch(() => {});
+    reader.releaseLock();
   }
 }
 
@@ -1861,13 +1912,14 @@ function exportChunkChecksum(bytes) {
 async function fetchExportJobChunks(job, downloadPath, asFile = false) {
   const total = job.body_bytes;
   const size = Math.min(job.chunk_size, 256 * 1024);
-  if (!Number.isSafeInteger(total) || total < 0 || !Number.isSafeInteger(size) || size <= 0) throw new Error(t('export_failed'));
+  const version = job.version || job.etag;
+  if (!Number.isSafeInteger(total) || total < 0 || !Number.isSafeInteger(size) || size <= 0 || typeof version !== 'string' || !version) throw new Error(t('export_failed'));
   const parts = [];
   const decoder = asFile ? null : new TextDecoder('utf-8', { fatal: true });
   let offset = 0;
   do {
     const length = Math.min(size, Math.max(1, total - offset));
-    const params = new URLSearchParams({ chunk: '1', offset: String(offset), length: String(length), version: job.etag });
+    const params = new URLSearchParams({ chunk: '1', offset: String(offset), length: String(length), version });
     const url = managementEndpoint(downloadPath) + (downloadPath.includes('?') ? '&' : '?') + params.toString();
     let chunk;
     // Retry the same immutable file range; never advance on a failed read.
@@ -1880,8 +1932,8 @@ async function fetchExportJobChunks(job, downloadPath, asFile = false) {
         await delay(250 * (attempt + 1));
       }
     }
-    if (!chunk || chunk.offset !== offset || chunk.total !== total || chunk.etag !== job.etag || typeof chunk.data !== 'string') throw new Error(t('export_failed'));
-    const bytes = Uint8Array.from(atob(chunk.data), (value) => value.charCodeAt(0));
+    if (!chunk || chunk.offset !== offset || chunk.total !== total || (job.version ? chunk.version !== version : chunk.etag !== version) || typeof chunk.data !== 'string') throw new Error(t('export_failed'));
+    const bytes = decodeBase64Bytes(chunk.data);
     if (bytes.length !== Math.min(length, total - offset) || exportChunkChecksum(bytes) !== chunk.checksum_crc32) throw new Error(t('export_failed'));
     // Hand validated bytes to immutable Blob storage one chunk at a time.
     // File downloads never retain the complete decoded string or JSON tree.
@@ -2578,10 +2630,13 @@ $('eventsNext').onclick = async () => { const data = normalizeEventsPayload(even
 $('exportRowsCsv').onclick = () => exportRows('csv'); $('exportRowsJson').onclick = () => exportRows('json');
 $('exportApiCsv').onclick = () => exportApiRows('csv'); $('exportApiJson').onclick = () => exportApiRows('json');
 $('exportBtn').onclick = async () => {
+  if ($('exportBtn').disabled) return;
+  $('exportBtn').disabled = true;
   try {
-    const data = await fetchJsonPayload(pluginEndpoint('usage/export'), pluginFetchOptions({ cache: 'no-store' }));
-    download('usage-export-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json', JSON.stringify(data, null, 2), 'application/json;charset=utf-8');
+    const file = await fetchUsageExportFile();
+    download('usage-export-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json', file, 'application/json;charset=utf-8');
   } catch (e) { alert(t('export_failed_msg') + (e && e.message ? e.message : t('unknown_error'))) }
+  finally { $('exportBtn').disabled = false; }
 };
 $('importBtn').onclick = () => $('importFile').click();
 $('importFile').onchange = async (e) => {

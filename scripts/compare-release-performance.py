@@ -15,11 +15,13 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import time
 
 BENCHMARKS = (
     "Benchmark(SummaryWithoutDetails100k|SummaryRange7d100k|QueryEvents100k|"
     "QueryEventsColdModelIndex100k|QueryEventsCached100k|QueryAPIDetail100k|"
-    "RecordRetainedHistory|PerformanceMixed|ReleaseExportFile)$"
+    "RecordRetainedHistory|PerformanceMixed|ReleaseExportFile|"
+    "RangeSummaryBlockCache|APIDetailBlockCache|ImportResponseRetainedHistory|UsageExportPipeline)$"
 )
 
 
@@ -29,6 +31,7 @@ def main():
     parser.add_argument("--refs", nargs="+", default=["v2.6.4", "967915b"])
     parser.add_argument("--count", type=int, default=3)
     parser.add_argument("--benchtime", default="300ms")
+    parser.add_argument("--validate", action="store_true", help="archive full candidate regression logs before benchmarking")
     args = parser.parse_args()
     if args.count < 3:
         parser.error("at least three samples are required")
@@ -52,11 +55,30 @@ def main():
                 raw = subprocess.check_output(["git", "archive", commit, "go"], cwd=root)
                 with tarfile.open(fileobj=io.BytesIO(raw)) as archive:
                     archive.extractall(dest, filter="data")
-                for fixture in ["performance_workload_test.go", "release_export_benchmark_test.go"]:
+                for fixture in ["performance_workload_test.go", "release_export_benchmark_test.go", "import_response_test.go"]:
                     shutil.copy2(candidate / fixture, dest / "go" / fixture)
                 revisions.append((name, ref, commit, dest / "go"))
             head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
             revisions.append(("candidate", "working-copy", head, candidate))
+            if args.validate:
+                metadata["validation"] = {}
+                checks = [
+                    ("go-race", ["go", "test", "-race", "-count=1", "./..."], candidate),
+                    ("purego-race", ["go", "test", "-race", "-tags", "sqlite_purego", "-count=1", "./..."], candidate),
+                    ("go-vet", ["go", "vet", "./..."], candidate),
+                    ("js-tests", ["node", "--test", "dashboard/helpers.test.js", "dashboard/script.test.js"], candidate),
+                    ("release-updater", ["python3", "tests/update_latest_release_test.py"], root),
+                ]
+                for name, cmd, cwd in checks:
+                    print(f"Validating {name}", flush=True)
+                    started = time.monotonic()
+                    log_path = output / ("validation-" + name + ".txt")
+                    with log_path.open("w") as stream:
+                        result = subprocess.run(cmd, cwd=cwd, env=env, stdout=stream, stderr=subprocess.STDOUT)
+                    metadata["validation"][name] = {"command": cmd, "exit_code": result.returncode,
+                                                       "duration_seconds": time.monotonic() - started,
+                                                       "log_sha256": hashlib.sha256(log_path.read_bytes()).hexdigest()}
+                    result.check_returncode()
             for name, ref, commit, source in revisions:
                 metadata["sources"][name] = {"ref": ref, "commit": commit, "sha256": {
                     str(p.relative_to(source)): hashlib.sha256(p.read_bytes()).hexdigest()

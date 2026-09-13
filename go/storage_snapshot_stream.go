@@ -72,6 +72,16 @@ func (view storageSnapshotView) write(w io.Writer, now time.Time) error {
 	if _, err := io.WriteString(w, `,"usage":`); err != nil {
 		return err
 	}
+	if err := view.writeUsage(w); err != nil {
+		return err
+	}
+	_, err := io.WriteString(w, "}")
+	return err
+}
+
+// Shared by storage v2 snapshots and the public v1 usage backup. Neither
+// caller expands the archived ledger or buffers the complete JSON document.
+func (view storageSnapshotView) writeUsage(w io.Writer) error {
 	if err := writeJSONObjectPrefix(w, storageUsageHeader{StatisticsSnapshot: &view.metadata}); err != nil {
 		return err
 	}
@@ -161,7 +171,7 @@ func (view storageSnapshotView) write(w io.Writer, now time.Time) error {
 			return err
 		}
 	}
-	_, err := io.WriteString(w, "}}}")
+	_, err := io.WriteString(w, "}}")
 	return err
 }
 

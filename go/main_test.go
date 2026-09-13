@@ -4287,7 +4287,7 @@ func TestRegisterResponseExposesUpdateConfigFields(t *testing.T) {
 	}
 }
 
-func TestManagementRegisterIncludesImportExportResources(t *testing.T) {
+func TestManagementRegisterOnlyExposesDashboardResource(t *testing.T) {
 	raw, err := handleManagementRegister()
 	if err != nil {
 		t.Fatalf("handleManagementRegister() error = %v", err)
@@ -4308,13 +4308,17 @@ func TestManagementRegisterIncludesImportExportResources(t *testing.T) {
 			t.Fatalf("management route still uses another plugin id: %#v", route)
 		}
 	}
-	resources := make(map[string]bool)
-	for _, resource := range result.Resources {
-		resources[resource.Path] = true
+	if len(result.Resources) != 1 || result.Resources[0].Path != "/dashboard" {
+		t.Fatalf("anonymous resources must contain only the static dashboard: %#v", result.Resources)
 	}
-	for _, path := range []string{"/usage/export", "/usage/import", "/dashboard-events-export-jobs", "/dashboard-events-export-download"} {
-		if !resources[path] {
-			t.Fatalf("management resources missing %s: %#v", path, result.Resources)
+	routes := make(map[string]bool)
+	for _, route := range result.Routes {
+		routes[route.Method+" "+route.Path] = true
+	}
+	for _, route := range []string{"GET /usage/export", "POST /usage/import", "GET /dashboard-events-export-jobs", "GET /dashboard-events-export-download", "POST /usage/export-jobs", "GET /usage/export-download"} {
+		method, path, _ := strings.Cut(route, " ")
+		if !routes[method+" /plugins/"+pluginID+path] {
+			t.Fatalf("authenticated management route missing: %s", route)
 		}
 	}
 }

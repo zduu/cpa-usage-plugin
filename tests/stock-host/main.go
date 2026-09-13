@@ -95,6 +95,22 @@ func main() {
 		registration.Capabilities["response_stream_interceptor"] {
 		panic("incorrect registration")
 	}
+	var managementRegistration struct {
+		Resources []struct{ Path string }
+	}
+	call("management.register", map[string]any{}, &managementRegistration)
+	if len(managementRegistration.Resources) != 1 || managementRegistration.Resources[0].Path != "/dashboard" {
+		panic("sensitive data registered as anonymous resources")
+	}
+	for _, endpoint := range []string{"dashboard-summary", "usage/export", "usage/export-jobs", "usage/export-download"} {
+		var response pluginapi.ManagementResponse
+		call("management.handle", pluginapi.ManagementRequest{Method: "GET", Path: "/v0/resource/plugins/usage-dashboard-zduu/" + endpoint,
+			Headers: http.Header{"Authorization": {"Bearer synthetic-unverified-header"}}}, &response)
+		if response.StatusCode != http.StatusNotFound {
+			panic("stale anonymous resource route still exposes data")
+		}
+	}
+	fmt.Println("PASS: only the static dashboard is public; stale resource data routes are rejected through stock CPA ABI")
 	paths := []string{"/v1/responses", "/v1/chat/completions", "/v1/messages", "/v1beta/models/gemini:streamGenerateContent"}
 	for i, endpoint := range paths {
 		id := fmt.Sprintf("request-%d", i)
@@ -195,15 +211,26 @@ func main() {
 // Exercise the real ABI envelope and byte/base64 conversion, not a direct
 // call into the export encoder. Small chunks split JSON and UTF-8 boundaries.
 func verifyExportChunks(expected int) {
+	for _, kind := range []string{"events", "usage"} {
+		verifyExportChunksForKind(expected, kind)
+	}
+}
+
+func verifyExportChunksForKind(expected int, kind string) {
+	jobPath, downloadPath := "/dashboard-events-export-jobs", "/dashboard-events-export-download"
+	query := url.Values{"format": {"json"}, "json_rows": {"true"}}
+	if kind == "usage" {
+		jobPath, downloadPath = "/usage/export-jobs", "/usage/export-download"
+		query = url.Values{"limit": {"1"}, "model": {"not-a-model"}}
+	}
 	type exportJob struct {
-		ID, Status, ETag string
-		JSONRows         bool `json:"json_rows"`
-		BodyBytes        int  `json:"body_bytes"`
-		Exported         int
+		ID, Kind, Status, ETag, Version string
+		JSONRows                        bool `json:"json_rows"`
+		BodyBytes                       int  `json:"body_bytes"`
+		Exported                        int
 	}
 	var response pluginapi.ManagementResponse
-	call("management.handle", pluginapi.ManagementRequest{Method: "POST", Path: "/dashboard-events-export-jobs",
-		Query: url.Values{"format": {"json"}, "json_rows": {"true"}}}, &response)
+	call("management.handle", pluginapi.ManagementRequest{Method: "POST", Path: jobPath, Query: query}, &response)
 	if response.StatusCode != http.StatusAccepted {
 		panic("export job was not accepted")
 	}
@@ -213,7 +240,7 @@ func verifyExportChunks(expected int) {
 		panic("export job ID missing")
 	}
 	defer func() {
-		call("management.handle", pluginapi.ManagementRequest{Method: "DELETE", Path: "/dashboard-events-export-jobs", Query: url.Values{"id": {job.ID}}}, &response)
+		call("management.handle", pluginapi.ManagementRequest{Method: "DELETE", Path: jobPath, Query: url.Values{"id": {job.ID}}}, &response)
 		if response.StatusCode != http.StatusOK {
 			panic("export cleanup failed")
 		}
@@ -224,44 +251,67 @@ func verifyExportChunks(expected int) {
 			panic("export job did not complete")
 		}
 		time.Sleep(10 * time.Millisecond)
-		call("management.handle", pluginapi.ManagementRequest{Method: "GET", Path: "/dashboard-events-export-jobs", Query: url.Values{"id": {job.ID}}}, &response)
+		call("management.handle", pluginapi.ManagementRequest{Method: "GET", Path: jobPath, Query: url.Values{"id": {job.ID}}}, &response)
 		if response.StatusCode != http.StatusOK {
 			panic("export polling failed")
 		}
 		check(json.Unmarshal(response.Body, &job))
 	}
-	if !job.JSONRows || job.Exported != expected || job.BodyBytes <= 0 {
+	if job.Kind != kind || job.JSONRows != (kind == "events") || len(job.Version) != 64 || job.Exported != expected || job.BodyBytes <= 0 {
 		panic("export negotiation or counters changed")
 	}
 	var body []byte
 	for offset := 0; offset < job.BodyBytes; {
-		query := url.Values{"id": {job.ID}, "chunk": {"1"}, "offset": {strconv.Itoa(offset)}, "length": {"37"}, "version": {job.ETag}}
-		call("management.handle", pluginapi.ManagementRequest{Method: "GET", Path: "/dashboard-events-export-download", Query: query}, &response)
+		query := url.Values{"id": {job.ID}, "chunk": {"1"}, "offset": {strconv.Itoa(offset)}, "length": {"37"}, "version": {job.Version}}
+		call("management.handle", pluginapi.ManagementRequest{Method: "GET", Path: downloadPath, Query: query}, &response)
 		if response.StatusCode != http.StatusOK {
 			panic("export chunk failed")
 		}
 		var chunk struct {
 			Offset, Total int
-			ETag          string
+			ETag, Version string
 			Checksum      string `json:"checksum_crc32"`
 			Data          []byte
 		}
 		check(json.Unmarshal(response.Body, &chunk))
-		if chunk.Offset != offset || chunk.Total != job.BodyBytes || chunk.ETag != job.ETag || len(chunk.Data) != min(37, job.BodyBytes-offset) || chunk.Checksum != fmt.Sprintf("%08x", crc32.ChecksumIEEE(chunk.Data)) {
+		if chunk.Offset != offset || chunk.Total != job.BodyBytes || chunk.ETag != job.ETag || chunk.Version != job.Version || len(chunk.Data) != min(37, job.BodyBytes-offset) || chunk.Checksum != fmt.Sprintf("%08x", crc32.ChecksumIEEE(chunk.Data)) {
 			panic("export chunk integrity failed")
 		}
 		body = append(body, chunk.Data...)
 		offset += len(chunk.Data)
 	}
-	var rows []json.RawMessage
-	check(json.Unmarshal(body, &rows))
-	if len(rows) != expected {
-		panic("array export lost records")
+	if kind == "events" {
+		var rows []json.RawMessage
+		check(json.Unmarshal(body, &rows))
+		if len(rows) != expected {
+			panic("array export lost records")
+		}
+	} else {
+		var backup struct {
+			Version     int
+			DetailCount int `json:"detail_count"`
+			Usage       struct {
+				TotalRequests int `json:"total_requests"`
+				APIs          map[string]struct {
+					Models map[string]struct{ Details, Accounting []json.RawMessage }
+				}
+			}
+		}
+		check(json.Unmarshal(body, &backup))
+		count := 0
+		for _, api := range backup.Usage.APIs {
+			for _, model := range api.Models {
+				count += len(model.Details) + len(model.Accounting)
+			}
+		}
+		if backup.Version != 1 || backup.DetailCount != expected || backup.Usage.TotalRequests != expected || count != expected {
+			panic("full usage backup changed its contract or applied event filters")
+		}
 	}
-	call("management.handle", pluginapi.ManagementRequest{Method: "GET", Path: "/dashboard-events-export-download",
+	call("management.handle", pluginapi.ManagementRequest{Method: "GET", Path: downloadPath,
 		Query: url.Values{"id": {job.ID}, "chunk": {"1"}, "offset": {"0"}, "version": {"wrong"}}}, &response)
 	if response.StatusCode != http.StatusPreconditionFailed {
 		panic("412 ABI response lost")
 	}
-	fmt.Println("PASS: negotiated JSON array, chunk offsets, file version, CRC32, record count and 412 through stock CPA ABI")
+	fmt.Printf("PASS: %s export, chunk offsets, opaque file version, CRC32, record count and 412 through stock CPA ABI\n", kind)
 }
