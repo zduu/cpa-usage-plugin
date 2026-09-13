@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 )
 
@@ -31,6 +32,9 @@ func (s *sqliteLedger) WithMigrationSnapshotCatalog(parent context.Context, path
 		return err
 	}
 	catalog, err := readSQLiteSnapshotCatalog(ctx, s.reader, source.Source)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errSQLiteSnapshotCatalogIncomplete
+	}
 	if err != nil {
 		return err
 	}
@@ -40,6 +44,7 @@ func (s *sqliteLedger) WithMigrationSnapshotCatalog(parent context.Context, path
 	if !sqliteSnapshotCatalogMatches(catalog, projection, catalog.clock) {
 		return errSQLiteLedgerConflict
 	}
+	catalog.GeneratedAt = projection.Result.GeneratedAt
 	// Revalidate the effective projection prefix as well as the raw source.
 	// This completed-catalog path performs no writes or generation changes.
 	if _, err := s.CatalogMigrationSnapshot(ctx, source.Source, catalog.Now); err != nil {

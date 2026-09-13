@@ -106,14 +106,15 @@ type sqliteMigrationSnapshotCatalog struct {
 	Root, Events        int64
 	Version             int
 	Now                 time.Time
-	Complete            bool // Accounting scan only; NEVER backend activation.
+	GeneratedAt         time.Time // Checked against the effective source header.
+	Complete            bool      // Accounting scan only; NEVER backend activation.
 	clock, prefix       []byte
 }
 
 func readSQLiteSnapshotCatalog(ctx context.Context, db sqliteProjectionQueryRower, source string) (c sqliteMigrationSnapshotCatalog, err error) {
 	c.Source = source
 	var format int
-	err = db.QueryRowContext(ctx, `SELECT format,fingerprint,root,version,
+	err = db.QueryRowContext(ctx, `SELECT format,CASE WHEN length(CAST(fingerprint AS BLOB))=64 THEN fingerprint ELSE NULL END,root,version,
  CASE WHEN length(CAST(clock AS BLOB))<=4096 THEN clock ELSE NULL END,events,
  CASE WHEN length(CAST(prefix AS BLOB))=32 THEN prefix ELSE NULL END,complete
  FROM migration_snapshot_catalogs WHERE source=?`, source).Scan(&format, &c.Fingerprint, &c.Root, &c.Version, &c.clock, &c.Events, &c.prefix, &c.Complete)
@@ -153,6 +154,9 @@ func (s *sqliteLedger) snapshotCatalogSource(ctx context.Context, path string) (
 	if err == nil && (!source.Ready || !found || !projection.Complete || projection.Format != sqliteProjectionFormat) {
 		err = errSQLiteProjectionIncomplete
 	}
+	if err == nil && (projection.Result.Version < 0 || projection.Result.Version > currentStorageSnapshotVersion) {
+		err = errSQLiteSnapshotCatalogCorrupt
+	}
 	return source, projection, err
 }
 
@@ -175,13 +179,14 @@ func (s *sqliteLedger) initializeSnapshotCatalog(ctx context.Context, source sql
 		if !sqliteSnapshotCatalogMatches(c, p, clock) {
 			return c, errSQLiteLedgerConflict
 		}
+		c.GeneratedAt = p.Result.GeneratedAt
 		return c, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return c, err
 	}
 	c = sqliteMigrationSnapshotCatalog{Source: source.Source, Fingerprint: source.Fingerprint, Root: p.Root,
-		Version: p.Result.Version, Now: now, clock: clock, prefix: sha256.New().Sum(nil)}
+		Version: p.Result.Version, Now: now, GeneratedAt: p.Result.GeneratedAt, clock: clock, prefix: sha256.New().Sum(nil)}
 	if err := checkSnapshotCatalogProjection(ctx, tx, source, c); err != nil {
 		return c, err
 	}
@@ -257,16 +262,18 @@ func (s *sqliteLedger) CatalogMigrationSnapshot(parent context.Context, path str
 }
 
 type sqliteSnapshotCatalogBuilder struct {
-	s            *sqliteLedger
-	ctx          context.Context
-	source       sqliteMigrationSource
-	catalog      sqliteMigrationSnapshotCatalog
-	tx           *sql.Tx
-	groups       map[int64]*sqliteMigrationSnapshotGroup
-	providers    map[sqliteSnapshotProviderKey]*sqliteMigrationSnapshotProvider
-	prefix       hash.Hash
-	events, work int64
-	api, model   int64
+	s               *sqliteLedger
+	ctx             context.Context
+	source          sqliteMigrationSource
+	catalog         sqliteMigrationSnapshotCatalog
+	tx              *sql.Tx
+	groups          map[int64]*sqliteMigrationSnapshotGroup
+	providers       map[sqliteSnapshotProviderKey]*sqliteMigrationSnapshotProvider
+	prefix          hash.Hash
+	events, work    int64
+	api, model      int64
+	headerVersion   int
+	headerGenerated string
 }
 
 type sqliteSnapshotProviderKey struct {
@@ -345,6 +352,31 @@ func (b *sqliteSnapshotCatalogBuilder) consume(item sqliteMigrationProjectedItem
 	}
 	if item.NodeID <= 0 {
 		return errSQLiteSnapshotCatalogCorrupt
+	}
+	if item.Kind == "value" && len(item.Path) == 1 {
+		switch item.Scope {
+		case "version":
+			value, ok := item.Value.(int)
+			if !ok {
+				return errSQLiteSnapshotCatalogCorrupt
+			}
+			b.headerVersion = value
+		case "generated_at":
+			value, ok := item.Value.(string)
+			if !ok {
+				return errSQLiteSnapshotCatalogCorrupt
+			}
+			b.headerGenerated = value
+		}
+	}
+	if item.Scope == "snapshot" && item.Kind == "end" {
+		generated, err := validateStorageSnapshotHeader(b.headerVersion, b.headerGenerated)
+		if err != nil {
+			return err
+		}
+		if b.headerVersion != b.catalog.Version || !generated.Equal(b.catalog.GeneratedAt) {
+			return errSQLiteLedgerConflict
+		}
 	}
 	// Maintain only the two active ancestor IDs, even while replaying a
 	// committed prefix. No high-cardinality path-to-ID map is needed.
@@ -686,7 +718,7 @@ func readSnapshotCatalogGroup(ctx context.Context, db sqliteProjectionQueryRower
 	var raw, checksum []byte
 	var parent sql.NullInt64
 	var scope string
-	err = db.QueryRowContext(ctx, `SELECT parent,scope,
+	err = db.QueryRowContext(ctx, `SELECT parent,CASE WHEN scope IN ('usage','api','model') THEN scope ELSE NULL END,
  CASE WHEN length(CAST(payload AS BLOB))<=1048576 THEN payload ELSE NULL END,
  CASE WHEN length(CAST(checksum AS BLOB))=32 THEN checksum ELSE NULL END
  FROM migration_snapshot_groups WHERE source=? AND node=?`, source, node).Scan(&parent, &scope, &raw, &checksum)

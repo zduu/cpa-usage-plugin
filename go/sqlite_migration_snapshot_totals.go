@@ -4,8 +4,6 @@ package main
 // reducers retain the original aggregate basis as well as the surviving
 // detail totals; a residual is never represented by a fabricated request.
 
-import "strings"
-
 type sqliteSnapshotTotals struct {
 	TotalRequests, SuccessCount, FailureCount int64
 	TotalTokens, InputTokens, OutputTokens    int64
@@ -199,11 +197,4 @@ func (p sqliteMigrationSnapshotProvider) residual() *ModelProviderStat {
 	key := modelProviderStatsKey(p.Snapshot.Provider)
 	used := map[string]*ModelProviderStat{key: &p.Details}
 	return residualModelProviderStats([]ModelProviderStat{p.Snapshot}, used)[key]
-}
-
-func sqliteSnapshotGroupName(scope, name string) string {
-	if scope == "model" {
-		return normalizeModelName(name)
-	}
-	return strings.TrimSpace(name)
 }

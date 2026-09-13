@@ -23,6 +23,24 @@ func writeSQLiteMigrationSource(t *testing.T, payload []byte) string {
 	return path
 }
 
+func projectionSnapshotJSON(body string) string {
+	return `{"version":2,"generated_at":"2026-09-13T08:00:00+08:00",` + body + `}`
+}
+
+func projectionModelJSON(body string) string {
+	return projectionSnapshotJSON(`"usage":{"apis":{"API":{"models":{"M":{` + body + `}}}}}`)
+}
+
+// Simulate the actual older schema in upgrade tests, not a newer database with
+// only its version number changed. All paths here are test-owned databases.
+func dropSQLiteProjectionSchemaForTest(t *testing.T, s *sqliteLedger) {
+	t.Helper()
+	if _, err := s.writer.Exec(`DROP TABLE migration_projection_values; DROP TABLE migration_projection_edges;
+ DROP TABLE migration_projections; DROP TABLE migration_projection_nodes;`); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func assertSQLiteStagedBytes(t *testing.T, s *sqliteLedger, path string, want []byte) {
 	t.Helper()
 	err := s.WithStagedSource(context.Background(), path, func(r io.Reader) error {
