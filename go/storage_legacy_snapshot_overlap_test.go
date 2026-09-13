@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -33,18 +35,6 @@ func legacySnapshotFixture(t *testing.T, maxDetails int, requests int, base time
 	if err := json.Unmarshal(raw, &persisted); err != nil {
 		t.Fatal(err)
 	}
-	stripped := 0
-	for apiName, apiSnapshot := range persisted.Usage.APIs {
-		for modelName, modelSnapshot := range apiSnapshot.Models {
-			stripped += len(modelSnapshot.Accounting)
-			modelSnapshot.Accounting = nil
-			apiSnapshot.Models[modelName] = modelSnapshot
-		}
-		persisted.Usage.APIs[apiName] = apiSnapshot
-	}
-	if stripped == 0 {
-		t.Fatal("fixture did not exercise the legacy snapshot shape")
-	}
 	if !generatedAt.IsZero() {
 		persisted.GeneratedAt = generatedAt.UTC().Format(time.RFC3339)
 	}
@@ -55,7 +45,41 @@ func legacySnapshotFixture(t *testing.T, maxDetails int, requests int, base time
 	if err := os.WriteFile(storageSnapshotPath(dir), legacy, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if stripSnapshotAccounting(t, dir) == 0 {
+		t.Fatal("fixture did not exercise the legacy snapshot shape")
+	}
 	return dir
+}
+
+// stripSnapshotAccounting 去掉模型快照里的逐请求账本,把候选写出的快照还原成 v2.6.4
+// 及更早版本的文件形态:只有被明细上限截断后的可见明细。
+func stripSnapshotAccounting(t *testing.T, dir string) int {
+	t.Helper()
+	raw, err := os.ReadFile(storageSnapshotPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted persistedStorageSnapshot
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	stripped := 0
+	for apiName, apiSnapshot := range persisted.Usage.APIs {
+		for modelName, modelSnapshot := range apiSnapshot.Models {
+			stripped += len(modelSnapshot.Accounting)
+			modelSnapshot.Accounting = nil
+			apiSnapshot.Models[modelName] = modelSnapshot
+		}
+		persisted.Usage.APIs[apiName] = apiSnapshot
+	}
+	legacy, err := json.Marshal(persisted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(storageSnapshotPath(dir), legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return stripped
 }
 
 func legacySnapshotDir(t *testing.T, maxDetails int, requests int) string {
@@ -202,6 +226,58 @@ func TestStorageLegacySnapshotResidualSurvivesOlderHistory(t *testing.T) {
 	if snapshot := again.Snapshot(); snapshot.TotalRequests != 4 || snapshot.InputTokens != 40 {
 		t.Fatalf("older history broke residual absorption: requests=%d input=%d, want 4/40",
 			snapshot.TotalRequests, snapshot.InputTokens)
+	}
+}
+
+// 随机化对照:旧版快照记了多少条请求,升级恢复后累计值就必须还是多少,重复重启也不变。
+// 明细上限、保留窗口、模型数量、请求条数和时间戳分布逐轮变化,用来逼出「只在某种组合下
+// 才成立」的假设——上一轮就是被这种组合推翻过一次。
+func TestStorageLegacySnapshotUpgradePreservesTotals(t *testing.T) {
+	for seed := 0; seed < 32; seed++ {
+		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
+			rng := rand.New(rand.NewSource(int64(seed)))
+			dir := t.TempDir()
+			maxDetails := 1 + rng.Intn(4)
+			models := 1 + rng.Intn(3)
+			retentionDays := []int{1, 7, 30}[rng.Intn(3)]
+			// 每条模型至少制造一条被截断的请求,再追加若干条随机冗余。
+			records := maxDetails*models + 1 + rng.Intn(6)
+
+			seedStats := NewRequestStatistics()
+			seedStats.Configure(runtimeConfig{StorageEnabled: true, StoragePath: dir,
+				MaxDetailsPerModel: maxDetails, RetentionDays: retentionDays})
+			// 全部请求都落在最近 13 小时内,即使保留窗口设为 1 天也不会踩到保留边界,
+			// 这样累计值的对照只反映重放语义,不掺入裁剪时点差异。
+			anchor := time.Now().Add(-time.Duration(rng.Intn(30)) * time.Minute)
+			for i := 0; i < records; i++ {
+				seedStats.Record(UsageRecord{
+					Provider: "test", Model: fmt.Sprintf("model-%d", i%models),
+					RequestedAt: anchor.Add(-time.Duration(rng.Intn(12*60)) * time.Minute),
+					Detail:      UsageDetail{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+				})
+			}
+			want := seedStats.Snapshot()
+			if want.TotalRequests != int64(records) {
+				t.Fatalf("fixture lost records before the upgrade: got %d, want %d", want.TotalRequests, records)
+			}
+			seedStats.Close()
+			stripSnapshotAccounting(t, dir)
+
+			upgraded := openStorageDir(t, dir, maxDetails)
+			got := upgraded.Snapshot()
+			if got.TotalRequests != want.TotalRequests || got.InputTokens != want.InputTokens || got.TotalTokens != want.TotalTokens {
+				t.Fatalf("upgrade changed totals: requests=%d/%d input=%d/%d tokens=%d/%d",
+					got.TotalRequests, want.TotalRequests, got.InputTokens, want.InputTokens, got.TotalTokens, want.TotalTokens)
+			}
+			upgraded.Close()
+
+			restarted := openStorageDir(t, dir, maxDetails)
+			defer restarted.Close()
+			if again := restarted.Snapshot(); again.TotalRequests != want.TotalRequests || again.InputTokens != want.InputTokens {
+				t.Fatalf("restart changed totals: requests=%d/%d input=%d/%d",
+					again.TotalRequests, want.TotalRequests, again.InputTokens, want.InputTokens)
+			}
+		})
 	}
 }
 
