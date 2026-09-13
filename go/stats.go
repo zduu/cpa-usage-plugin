@@ -6226,19 +6226,6 @@ func modelPriceLookupKeys(modelName, provider string) []string {
 	return keys
 }
 
-func modelPriceCaseInsensitive(prices map[string]ModelPrice, model string) (ModelPrice, bool) {
-	norm := normalizeModelPriceKey(model)
-	if norm == "" || len(prices) == 0 {
-		return ModelPrice{}, false
-	}
-	for key, price := range prices {
-		if normalizeModelPriceKey(key) == norm {
-			return price, true
-		}
-	}
-	return ModelPrice{}, false
-}
-
 func summarySourceKey(detail RequestDetail) string {
 	source := detail.Source
 	if source == "" || looksLikeCredentialID(source) || looksLikeSecretKey(source) {
@@ -7518,17 +7505,6 @@ func cloneRequestDetails(details []RequestDetail) []RequestDetail {
 	cloned := make([]RequestDetail, len(details))
 	for i, detail := range details {
 		cloned[i] = cloneRequestDetail(detail)
-	}
-	return cloned
-}
-
-func cloneHeaders(headers map[string][]string) map[string][]string {
-	if headers == nil {
-		return nil
-	}
-	cloned := make(map[string][]string, len(headers))
-	for key, values := range headers {
-		cloned[key] = append([]string(nil), values...)
 	}
 	return cloned
 }

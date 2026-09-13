@@ -882,18 +882,6 @@ func buildProtocolTokenShapes(e protocolTokenEvidence, family string, role proto
 	return shapes
 }
 
-func protocolObservationPartitionKey(observation protocolCorrelationObservation) string {
-	status := observation.StatusCode
-	if !observation.Failed || status < 0 {
-		status = 0
-	}
-	return strings.Join([]string{
-		strings.ToLower(strings.TrimSpace(observation.RequestedModel)),
-		strings.ToLower(strings.TrimSpace(observation.ClientIdentity)),
-		strconv.FormatBool(observation.Failed), strconv.Itoa(status),
-	}, "\x00")
-}
-
 func protocolObservationPartitionKeys(observation protocolCorrelationObservation) []string {
 	base := []string{
 		strings.ToLower(strings.TrimSpace(observation.RequestedModel)),
@@ -947,17 +935,6 @@ func detailProtocolCorrelationKey(modelName string, detail RequestDetail) string
 		return ""
 	}
 	return keys[0]
-}
-
-func protocolCorrelationKey(model, clientIdentity string, failed bool, statusCode int, tokens ...int64) string {
-	parts := []string{
-		strings.ToLower(strings.TrimSpace(model)), strings.ToLower(strings.TrimSpace(clientIdentity)),
-		strconv.FormatBool(failed), strconv.Itoa(statusCode),
-	}
-	for _, value := range tokens {
-		parts = append(parts, strconv.FormatInt(value, 10))
-	}
-	return strings.Join(parts, "\x00")
 }
 
 func protocolUsageCompletionDistance(fallback, native UsageRecord) (time.Duration, bool) {
@@ -1063,140 +1040,6 @@ type protocolFallbackDetailPair struct {
 	fallback protocolFallbackDetailRef
 	native   protocolFallbackDetailRef
 	distance time.Duration
-}
-
-func pairProtocolFallbackDetailsLegacy(refs []protocolFallbackDetailRef) []protocolFallbackDetailPair {
-	byKeyFallback := make(map[string][]int)
-	byKeyNative := make(map[string][]int)
-	for i, ref := range refs {
-		key := detailProtocolCorrelationKey(ref.modelName, ref.detail)
-		if key == "" {
-			continue
-		}
-		switch {
-		case isAnonymousProtocolFallbackDetail(ref.detail):
-			byKeyFallback[key] = append(byKeyFallback[key], i)
-		case isNativeProtocolCorrelationDetail(ref.detail):
-			byKeyNative[key] = append(byKeyNative[key], i)
-		}
-	}
-
-	refLess := func(left, right int, completion bool) bool {
-		leftAt := refs[left].detail.Timestamp
-		rightAt := refs[right].detail.Timestamp
-		if completion {
-			leftAt = leftAt.Add(time.Duration(refs[left].detail.LatencyMs) * time.Millisecond)
-			rightAt = rightAt.Add(time.Duration(refs[right].detail.LatencyMs) * time.Millisecond)
-		}
-		if !leftAt.Equal(rightAt) {
-			return leftAt.Before(rightAt)
-		}
-		if refs[left].apiName != refs[right].apiName {
-			return refs[left].apiName < refs[right].apiName
-		}
-		if refs[left].modelName != refs[right].modelName {
-			return refs[left].modelName < refs[right].modelName
-		}
-		return refs[left].index < refs[right].index
-	}
-	pairs := make([]protocolFallbackDetailPair, 0)
-	for key, fallbacks := range byKeyFallback {
-		natives := byKeyNative[key]
-		if len(natives) == 0 {
-			continue
-		}
-		sort.SliceStable(fallbacks, func(i, j int) bool { return refLess(fallbacks[i], fallbacks[j], false) })
-		sort.SliceStable(natives, func(i, j int) bool { return refLess(natives[i], natives[j], true) })
-
-		// 每条 fallback 的可配 native,按完成时刻距离升序。窗口取**该 native 自己**
-		// 的(随 latency 变化),与实时路径 protocolUsageCompletionDistance 同口径。
-		candidates := make([][]protocolFallbackCandidate, len(fallbacks))
-		for fallbackPos, fallbackIdx := range fallbacks {
-			fallbackRef := refs[fallbackIdx]
-			if fallbackRef.detail.Timestamp.IsZero() {
-				continue
-			}
-			for nativePos, nativeIdx := range natives {
-				nativeRef := refs[nativeIdx]
-				if nativeRef.detail.Timestamp.IsZero() {
-					continue
-				}
-				latency := time.Duration(nativeRef.detail.LatencyMs) * time.Millisecond
-				distance := fallbackRef.detail.Timestamp.Sub(nativeRef.detail.Timestamp.Add(latency))
-				if distance < 0 {
-					distance = -distance
-				}
-				if distance > protocolFallbackTolerance(latency) {
-					continue
-				}
-				if !protocolEndpointsCompatible(fallbackRef.detail.Endpoint, nativeRef.detail.Endpoint) {
-					continue
-				}
-				if !protocolCacheReadsCompatible(normalizedCacheReadTokens(fallbackRef.detail.Tokens), normalizedCacheReadTokens(nativeRef.detail.Tokens)) {
-					continue
-				}
-				candidates[fallbackPos] = append(candidates[fallbackPos], protocolFallbackCandidate{nativePos: nativePos, distance: distance})
-			}
-			sort.SliceStable(candidates[fallbackPos], func(i, j int) bool {
-				if candidates[fallbackPos][i].distance != candidates[fallbackPos][j].distance {
-					return candidates[fallbackPos][i].distance < candidates[fallbackPos][j].distance
-				}
-				return candidates[fallbackPos][i].nativePos < candidates[fallbackPos][j].nativePos
-			})
-		}
-
-		// 增广路匹配(Kuhn)。贪心「各挑最近的」不保证最大匹配:F1 抢走 N1 之后
-		// F2 可能谁都够不着,而 F1→N2 / F2→N1 本来成立——结果就是一条本该被消掉的
-		// 重复记录留在看板上。候选按距离升序,所以在最大匹配的前提下仍优先配最近的。
-		matchedBy := make([]int, len(natives))
-		for i := range matchedBy {
-			matchedBy[i] = -1
-		}
-		var augment func(fallbackPos int, visited []bool) bool
-		augment = func(fallbackPos int, visited []bool) bool {
-			for _, candidate := range candidates[fallbackPos] {
-				if visited[candidate.nativePos] {
-					continue
-				}
-				visited[candidate.nativePos] = true
-				if matchedBy[candidate.nativePos] == -1 || augment(matchedBy[candidate.nativePos], visited) {
-					matchedBy[candidate.nativePos] = fallbackPos
-					return true
-				}
-			}
-			return false
-		}
-		for fallbackPos := range fallbacks {
-			augment(fallbackPos, make([]bool, len(natives)))
-		}
-
-		matchedNative := make([]int, len(fallbacks))
-		for i := range matchedNative {
-			matchedNative[i] = -1
-		}
-		for nativePos, fallbackPos := range matchedBy {
-			if fallbackPos >= 0 {
-				matchedNative[fallbackPos] = nativePos
-			}
-		}
-		// 按 fallback 排序顺序输出,结果不依赖 map 遍历顺序。
-		for fallbackPos, nativePos := range matchedNative {
-			if nativePos < 0 {
-				continue
-			}
-			distance := time.Duration(0)
-			for _, candidate := range candidates[fallbackPos] {
-				if candidate.nativePos == nativePos {
-					distance = candidate.distance
-					break
-				}
-			}
-			pairs = append(pairs, protocolFallbackDetailPair{
-				fallback: refs[fallbacks[fallbackPos]], native: refs[natives[nativePos]], distance: distance,
-			})
-		}
-	}
-	return pairs
 }
 
 type protocolFallbackCandidate struct {
