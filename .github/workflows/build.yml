@@ -174,14 +174,29 @@ jobs:
           cd go
           notices="../THIRD_PARTY_NOTICES.txt"
           printf '# Third-party notices\n\n' > "$notices"
+          # modernc.org/sqlite is imported only by the sqlite_purego file, so a
+          # default build never fetches its sources and `go list -m {{.Dir}}`
+          # would be empty. Download both explicitly before reading licences.
+          go mod download github.com/mattn/go-sqlite3 modernc.org/sqlite
           for module in github.com/mattn/go-sqlite3 modernc.org/sqlite; do
             dir="$(go list -m -f '{{.Dir}}' "$module")"
+            if [ -z "$dir" ] || [ ! -d "$dir" ]; then
+              echo "cannot locate sources for $module (dir='$dir')" >&2
+              exit 1
+            fi
             version="$(go list -m -f '{{.Version}}' "$module")"
             printf '## %s %s\n\n' "$module" "$version" >> "$notices"
-            for file in "$dir"/LICENSE*; do
+            found=0
+            for file in "$dir"/LICENSE* "$dir"/COPYING* "$dir"/NOTICE*; do
+              [ -f "$file" ] || continue
+              found=1
               cat "$file" >> "$notices"
               printf '\n' >> "$notices"
             done
+            if [ "$found" -eq 0 ]; then
+              echo "no licence file found for $module in $dir" >&2
+              exit 1
+            fi
           done
           test -s "$notices"
           grep -q 'Permission is hereby granted' "$notices"
