@@ -1,22 +1,24 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
 )
 
-// legacySnapshotDir 生成一个 v2.6.4 形态的存储目录:快照只保存被明细上限截断后的可见
+// legacySnapshotFixture 生成一个 v2.6.4 形态的存储目录:快照只保存被明细上限截断后的可见
 // 明细,超出上限的请求只体现在汇总计数里(模型快照没有 accounting),而当天 JSONL 仍然
-// 包含全部请求。这正是从旧版升级时重放会重复入账的现场。
-func legacySnapshotDir(t *testing.T, maxDetails int, requests int) string {
+// 包含全部请求。这正是从旧版升级时重放会重复入账的现场。base 决定请求时间;generatedAt
+// 非零时改写快照生成时间,用于让多个日分片落在重放窗口内。
+func legacySnapshotFixture(t *testing.T, maxDetails int, requests int, base time.Time, generatedAt time.Time) string {
 	t.Helper()
 	dir := t.TempDir()
 	seed := NewRequestStatistics()
 	seed.Configure(runtimeConfig{StorageEnabled: true, StoragePath: dir, MaxDetailsPerModel: maxDetails, RetentionDays: 30})
-	base := time.Now().Add(-time.Hour)
 	for i := 0; i < requests; i++ {
 		seed.Record(UsageRecord{Provider: "test", Model: "legacy-model", RequestedAt: base.Add(time.Duration(i) * time.Minute),
 			Detail: UsageDetail{InputTokens: 10, OutputTokens: 5, TotalTokens: 15}})
@@ -43,6 +45,9 @@ func legacySnapshotDir(t *testing.T, maxDetails int, requests int) string {
 	if stripped == 0 {
 		t.Fatal("fixture did not exercise the legacy snapshot shape")
 	}
+	if !generatedAt.IsZero() {
+		persisted.GeneratedAt = generatedAt.UTC().Format(time.RFC3339)
+	}
 	legacy, err := json.Marshal(persisted)
 	if err != nil {
 		t.Fatal(err)
@@ -51,6 +56,70 @@ func legacySnapshotDir(t *testing.T, maxDetails int, requests int) string {
 		t.Fatal(err)
 	}
 	return dir
+}
+
+func legacySnapshotDir(t *testing.T, maxDetails int, requests int) string {
+	t.Helper()
+	return legacySnapshotFixture(t, maxDetails, requests, time.Now().Add(-time.Hour), time.Time{})
+}
+
+// appendStorageRecord 把一条记录追加到指定日期的分片,用于构造跨日重放现场。接口分组
+// 与模型沿用已有分片里的取值,保证重放时能和快照里的分组对上。
+func appendStorageRecord(t *testing.T, dir string, at time.Time, requestedAt time.Time) {
+	t.Helper()
+	shard := filepath.Join(dir, storageFileName(storageDate(at)))
+	existing, err := os.ReadFile(shard)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	var template persistedDetail
+	if len(existing) > 0 {
+		firstLine, _, _ := bytes.Cut(existing, []byte("\n"))
+		if err := json.Unmarshal(firstLine, &template); err != nil {
+			t.Fatal(err)
+		}
+	}
+	record := persistedDetail{
+		API:   firstNonEmpty(template.API, "test"),
+		Model: firstNonEmpty(template.Model, "legacy-model"),
+		Detail: RequestDetail{
+			Model: firstNonEmpty(template.Detail.Model, "legacy-model"), Provider: firstNonEmpty(template.Detail.Provider, "test"),
+			Timestamp: requestedAt,
+			Tokens:    TokenStats{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+		},
+	}
+	line, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(shard, append(existing, append(line, '\n')...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// 重放窗口跨多个日分片时,吸收索引按文件重置,但残差额度仍保证被截断的旧记录只被吸收
+// 一次,而快照之后写入的新记录照常入账。
+func TestStorageLegacySnapshotResidualSpansShards(t *testing.T) {
+	now := time.Now()
+	// 固定在「昨天 00:00 UTC」这条日界上,保证快照日、旧分片日期与新记录日期三者
+	// 的关系与运行时刻无关。
+	base := now.UTC().Truncate(24 * time.Hour).Add(-24 * time.Hour)
+	snapshotAt := base.Add(23 * time.Hour)
+	dir := legacySnapshotFixture(t, 2, 3, base, snapshotAt)
+
+	// 旧记录本来写在"今天"的分片里,改成"昨天";再为"今天"写入快照之后的新记录。
+	if err := os.Rename(filepath.Join(dir, storageFileName(storageDate(now))),
+		filepath.Join(dir, storageFileName(storageDate(base)))); err != nil {
+		t.Fatal(err)
+	}
+	appendStorageRecord(t, dir, now, now)
+
+	s := openStorageDir(t, dir, 2)
+	defer s.Close()
+	if snapshot := s.Snapshot(); snapshot.TotalRequests != 4 || snapshot.InputTokens != 40 {
+		t.Fatalf("cross-shard replay miscounted: requests=%d input=%d, want 4/40",
+			snapshot.TotalRequests, snapshot.InputTokens)
+	}
 }
 
 func openStorageDir(t *testing.T, dir string, maxDetails int) *RequestStatistics {
