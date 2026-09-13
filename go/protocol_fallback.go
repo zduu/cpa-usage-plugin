@@ -1808,6 +1808,7 @@ func (s *RequestStatistics) ReconciledSnapshot() (StatisticsSnapshot, int64) {
 		return StatisticsSnapshot{}, 0
 	}
 	s.mu.Lock()
+	s.pruneExpiredLocked(time.Now())
 	if s.protocolFallbackReconcileDirty {
 		s.reconcileRecordedProtocolFallbacksLocked(time.Now())
 	}

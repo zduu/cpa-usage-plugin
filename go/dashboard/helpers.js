@@ -170,14 +170,18 @@ function parseManagementStorage(value, host, userAgent) {
   try { return JSON.parse(decoded) } catch { return decoded }
 }
 function currentManagementKey(storage, host, userAgent) {
-  const store = storage || (typeof localStorage !== 'undefined' ? localStorage : null);
+  let store;
+  try { store = storage || (typeof localStorage !== 'undefined' ? localStorage : null); } catch (_) { return ''; }
   if (!store || typeof store.getItem !== 'function') return '';
   const currentHost = host || (typeof location !== 'undefined' ? location.host : '');
   const currentUA = userAgent || (typeof navigator !== 'undefined' ? navigator.userAgent : '');
-  const auth = parseManagementStorage(store.getItem('cli-proxy-auth'), currentHost, currentUA);
+  const read = (name) => {
+    try { return parseManagementStorage(store.getItem(name), currentHost, currentUA); } catch (_) { return null; }
+  };
+  const auth = read('cli-proxy-auth');
   const key = auth && typeof auth === 'object' ? ((auth.state && auth.state.managementKey) || auth.managementKey || '') : '';
   if (typeof key === 'string' && key.trim()) return key.trim();
-  const legacy = parseManagementStorage(store.getItem('managementKey'), currentHost, currentUA);
+  const legacy = read('managementKey');
   if (typeof legacy === 'string') return legacy.trim();
   if (legacy && typeof legacy === 'object') return String((legacy.state && legacy.state.managementKey) || legacy.managementKey || '').trim();
   return '';

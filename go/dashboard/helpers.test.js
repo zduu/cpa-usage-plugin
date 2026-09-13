@@ -510,6 +510,15 @@ test('currentManagementKey decodes obfuscated management center storage', () => 
   assert.strictEqual(helpers.currentManagementKey(storage, host, ua), 'sk-obfuscated');
 });
 
+test('currentManagementKey tolerates unavailable or corrupt storage', () => {
+  assert.strictEqual(helpers.currentManagementKey({ getItem() { throw new Error('storage denied'); } }), '');
+  assert.strictEqual(helpers.currentManagementKey({ getItem() { return 'enc::v1::!invalid'; } }), '');
+  const storage = {
+    getItem(key) { return key === 'cli-proxy-auth' ? 'enc::v1::!invalid' : JSON.stringify('sk-legacy'); }
+  };
+  assert.strictEqual(helpers.currentManagementKey(storage), 'sk-legacy');
+});
+
 test('groupedRows groups by key', () => {
   const rows = [
     { model: 'gpt-4', total_tokens: 100, cached_tokens: 0, reasoning_tokens: 0, cost: 0.5, failed: false, latency_ms: 200, ttft_ms: 50 },

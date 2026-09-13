@@ -443,7 +443,15 @@ func encodeDashboardEventsExportPaged(writer io.Writer, params EventsQuery, opts
 	}
 	contentType := dashboardExportContentType(opts.Format)
 	// Freeze event values and computed prices before writing any page.
-	opts.frozen = stats.captureEventExport(params, opts.Limit, snapshotAt)
+	ctx := opts.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	frozen, err := stats.captureEventExportContext(ctx, params, opts.Limit, snapshotAt)
+	if err != nil {
+		return dashboardExportFileResult{}, err
+	}
+	opts.frozen = frozen
 	firstPage := opts.frozen.page(0, dashboardExportJobPageSize)
 	result := dashboardExportFileResult{
 		Total:       firstPage.Total,
@@ -591,10 +599,18 @@ func encodeDashboardEventsPaged(opts dashboardEventsExportOptions, firstPage Eve
 type eventExportSnapshot struct{ result EventsResult }
 
 func (s *RequestStatistics) captureEventExport(params EventsQuery, limit int, at time.Time) *eventExportSnapshot {
-	result := s.QueryExportEventsPage(params, 0, math.MaxInt, limit, at, nil)
+	frozen, _ := s.captureEventExportContext(context.Background(), params, limit, at)
+	return frozen
+}
+
+func (s *RequestStatistics) captureEventExportContext(ctx context.Context, params EventsQuery, limit int, at time.Time) (*eventExportSnapshot, error) {
+	result, err := s.queryExportEventsPageContext(ctx, params, 0, math.MaxInt, limit, at, nil)
+	if err != nil {
+		return nil, err
+	}
 	// QueryExportEventsPage already deep-clones records under the statistics
 	// lock and freezes their costs. A second clone doubles snapshot allocations.
-	return &eventExportSnapshot{result: result}
+	return &eventExportSnapshot{result: result}, nil
 }
 
 func (s *eventExportSnapshot) page(offset, size int) EventsResult {

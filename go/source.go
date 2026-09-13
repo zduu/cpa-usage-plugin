@@ -605,6 +605,11 @@ const redactedMarker = "******"
 // length. Match the value itself, preserving whitespace and surrounding JSON.
 var credentialTextPattern = regexp.MustCompile(`(?i)(\b(?:bearer|basic)[ \t]+|\b(?:authorization|proxy-authorization|x-api-key|api-key)["']?[ \t]*:[ \t]*["']?)([^\s,;"'<>}]+)`)
 
+// Parameter names establish the credential context, including short and
+// vendor-neutral keys. Match every occurrence without consuming JSON quotes
+// or the following query parameter.
+var credentialQueryPattern = regexp.MustCompile(`(?i)(\b(?:key|token|api_key|apikey)(?:=|[ \t]*%3d[ \t]*))([^\s&,;#"'<>}\]]+)`)
+
 func redactSensitiveText(value string) string {
 	if value == "" {
 		return ""
@@ -623,12 +628,7 @@ func redactSensitiveText(value string) string {
 		return parts[1] + redactedMarker
 	})
 
-	value = redactQueryParam(value, "key")
-	value = redactQueryParam(value, "token")
-	value = redactQueryParam(value, "api_key")
-	value = redactQueryParam(value, "apikey")
-
-	return value
+	return credentialQueryPattern.ReplaceAllString(value, "${1}"+redactedMarker)
 }
 
 func redactKeyPrefix(s, prefix string) string {
@@ -657,45 +657,6 @@ var credentialSchemePattern = regexp.MustCompile(`(?i)(\b(?:bearer|basic)[ \t]+)
 
 func redactCredentialSchemes(s string) string {
 	return credentialSchemePattern.ReplaceAllString(s, "${1}"+redactedMarker)
-}
-
-func redactQueryParam(s, param string) string {
-	prefixes := []string{param + "=", param + " %3D ", param + "%3D"}
-	for _, prefix := range prefixes {
-		idx := strings.Index(s, prefix)
-		if idx < 0 {
-			continue
-		}
-		afterIdx := idx + len(prefix)
-		rest := s[afterIdx:]
-		end := strings.IndexAny(rest, " &;\n\r")
-		var value string
-		if end < 0 {
-			value = rest
-		} else {
-			value = rest[:end]
-		}
-		if len(value) > 0 && looksLikeSecretToken(value) {
-			s = s[:afterIdx] + redactedMarker + s[afterIdx+len(value):]
-		}
-	}
-	return s
-}
-
-func looksLikeSecretToken(s string) bool {
-	s = strings.TrimSpace(s)
-	if len(s) < 8 {
-		return false
-	}
-	for _, p := range []string{"sk-", "AIza", "hf_", "pk_", "rk_"} {
-		if strings.HasPrefix(s, p) {
-			return true
-		}
-	}
-	if len(s) >= 32 && !strings.Contains(s, " ") {
-		return true
-	}
-	return false
 }
 
 func maskToken(token string) string {

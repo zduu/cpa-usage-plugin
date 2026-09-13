@@ -33,7 +33,7 @@ type usageExportHeader struct {
 }
 
 func (s *RequestStatistics) captureUsageExport(ctx context.Context) (usageExportView, error) {
-	if err := s.lockUsageExportSnapshot(ctx); err != nil {
+	if err := s.lockExportSnapshot(ctx); err != nil {
 		return usageExportView{}, err
 	}
 	defer s.mu.Unlock()
@@ -41,6 +41,7 @@ func (s *RequestStatistics) captureUsageExport(ctx context.Context) (usageExport
 		return usageExportView{}, err
 	}
 	now := time.Now()
+	s.pruneExpiredLocked(now)
 	if s.protocolFallbackReconcileDirty {
 		s.reconcileRecordedProtocolFallbacksLocked(now)
 	}
@@ -58,11 +59,15 @@ func (s *RequestStatistics) captureUsageExport(ctx context.Context) (usageExport
 }
 
 // A large import or snapshot can hold the statistics lock for a while. A
-// canceled backup must release its worker slot without waiting for that work.
+// canceled export must release its worker slot without waiting for that work.
 // The normal uncontended path acquires the lock once, without a timer.
-func (s *RequestStatistics) lockUsageExportSnapshot(ctx context.Context) error {
+func (s *RequestStatistics) lockExportSnapshot(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if ctx.Done() == nil {
+		s.mu.Lock()
+		return nil
 	}
 	if s.mu.TryLock() {
 		return nil

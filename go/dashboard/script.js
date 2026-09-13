@@ -909,6 +909,9 @@ function filterPriceReferenceOptions(options, query) {
 }
 
 function closePriceReferenceOptions() {
+  priceSearchSeq++;
+  if (priceSearchTimer) clearTimeout(priceSearchTimer);
+  priceSearchTimer = null;
   const input = $('priceReferenceModel');
   const list = $('priceReferenceOptions');
   priceReferenceActiveIndex = -1;
@@ -1066,6 +1069,13 @@ function syncPriceFormForModel(model) {
   fillPriceForm(model);
 }
 
+function priceInputValue(input, fallback = 0) {
+  const value = String(input.value).trim();
+  const price = value === '' ? fallback : Number(value);
+  if ((input.validity && input.validity.badInput) || !Number.isFinite(price) || price < 0) throw new Error(t('time_rule_err_price'));
+  return price;
+}
+
 function newTimeRule() { return { id: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : 'rule-' + Date.now() + '-' + Math.random().toString(16).slice(2), name: '', start: '00:00', end: '01:00', days: [] }; }
 // 0 = 周日 … 6 = 周六,与后端 time.Weekday 和 JS Date#getDay 一致。展示顺序从
 // 周一开始,符合中文习惯;空列表表示每天,也是旧价格文件的语义。
@@ -1149,7 +1159,7 @@ function renderTimeRules() {
     '<button class="btn danger timeRuleRemove" type="button" data-rule-remove="' + i + '" aria-label="' + esc(timeRuleRemoveLabel(model, r, i)) + '">×</button>' +
     timeRuleDaysHtml(r, i) + '</div>').join('');
   if (typeof editor.querySelectorAll !== 'function') return;
-  editor.querySelectorAll('[data-rule-field]').forEach((input) => input.oninput = () => { const row = input.closest('[data-rule-index]'); const rule = timeRules[Number(row.dataset.ruleIndex)]; const field = input.dataset.ruleField; rule[field] = input.value; });
+  editor.querySelectorAll('[data-rule-field]').forEach((input) => input.oninput = () => { const row = input.closest('[data-rule-index]'); const rule = timeRules[Number(row.dataset.ruleIndex)]; const field = input.dataset.ruleField; rule[field] = input.validity && input.validity.badInput ? NaN : input.value; });
   editor.querySelectorAll('[data-rule-remove]').forEach((button) => button.onclick = () => { timeRules.splice(Number(button.dataset.ruleRemove), 1); renderTimeRules(); });
   editor.querySelectorAll('[data-day-preset]').forEach((button) => button.onclick = () => {
     const index = Number(button.dataset.ruleIndex);
@@ -1188,7 +1198,7 @@ function serializedTimeRules() {
       const days = normalizedRuleDays(ruleDaySet(r));
       if (days.length) out.days = days;
     }
-    ['prompt','completion','cache','cache_write'].forEach((key) => { if (r[key] !== '' && r[key] != null) out[key] = num(r[key]); });
+    ['prompt','completion','cache','cache_write'].forEach((key) => { if (r[key] !== '' && r[key] != null) out[key] = Number(r[key]); });
     return out;
   });
 }
@@ -2096,17 +2106,16 @@ function coalesceLegacyHashlessClientApiStats(rows) {
   rows.forEach((row, index) => {
     const label = String((row && row.api_key) || '').trim();
     if (!label || !label.includes('******')) return;
-    const group = byLabel.get(label) || { indices: [], hashes: new Set(), hasHashless: false };
+    const group = byLabel.get(label) || { indices: [], hashes: new Set() };
     group.indices.push(index);
     const hash = String((row && row.api_key_hash) || '').trim();
     if (hash) group.hashes.add(hash);
-    else group.hasHashless = true;
     byLabel.set(label, group);
   });
   const removed = new Set();
   byLabel.forEach((group) => {
     if (group.indices.length < 2) return;
-    if (group.hashes.size > 1 && !group.hasHashless) return;
+    if (group.hashes.size > 1) return;
     let targetIndex = group.indices[0];
     group.indices.slice(1).forEach((index) => {
       if (num(rows[index] && rows[index].total_requests) > num(rows[targetIndex] && rows[targetIndex].total_requests)) {
@@ -2233,7 +2242,9 @@ function buildSummaryFromFullUsage(data, rangeKey) {
     const apiModelRows = new Map();
     Object.entries(a.models || {}).forEach(([model, m]) => {
       const modelRow = makeCounterRow(model);
-      (m.details || []).forEach((d) => {
+      // Archived accounting is disjoint from visible details and still belongs
+      // to range totals, health and client/source aggregates.
+      [m.details, m.accounting].forEach((records) => (records || []).forEach((d) => {
         d.model = rangeScoped ? detailModelName(model, d) : (d.model || model);
         healthDetails.push(d);
         if (!detailMatchesRange(d, cutoffMs)) return;
@@ -2269,7 +2280,7 @@ function buildSummaryFromFullUsage(data, rangeKey) {
         addDetailToCounter(clientModel, d);
         clientRow.modelMap.set(d.model, clientModel);
         clientAgg.set(clientKey, clientRow);
-      });
+      }));
       if (rangeScoped) return;
       applySnapshotCounter(modelRow, m);
       applySnapshotProviders(modelRow, m);
@@ -2481,7 +2492,7 @@ async function load(options) {
     let filteredResult = null;
     if (selectedClientApi) filteredResult = await refreshFilteredSummary();
     if (requestSeq !== summaryLoadSeq) return;
-    if (summaryResult.notModified && !forceDetails && (!selectedClientApi || (filteredResult && filteredResult.notModified))) {
+    if (summaryResult.notModified && previousSummary === summaryData && updatedState.type === 'success' && currentRange === selectedRange && !forceDetails && (!selectedClientApi || (filteredResult && filteredResult.notModified))) {
       currentRange = selectedRange;
       pollFailures = 0;
       schedulePoll(pollDelay());
@@ -2538,8 +2549,14 @@ function handleVisibilityChange() {
 }
 
 // Event bindings
-$('range').value = localStorage.getItem(rangeKey) || '24h';
-$('range').onchange = () => { eventsOffset = 0; localStorage.setItem(rangeKey, $('range').value); load({ forceDetails: true }) };
+let savedRange = '';
+try { savedRange = localStorage.getItem(rangeKey) || ''; } catch (_) {}
+$('range').value = ['all', '7h', '24h', '7d'].includes(savedRange) ? savedRange : '24h';
+$('range').onchange = () => {
+  eventsOffset = 0;
+  try { localStorage.setItem(rangeKey, $('range').value); } catch (_) {}
+  load({ forceDetails: true });
+};
 if ($('currencyUSD')) $('currencyUSD').onclick = () => chooseCurrency('USD');
 if ($('currencyCNY')) $('currencyCNY').onclick = () => chooseCurrency('CNY');
 $('refreshBtn').onclick = () => load({ forceDetails: true });
@@ -2553,8 +2570,8 @@ $('priceSettings').ontoggle = async () => {
 };
 $('savePrice').onclick = async () => {
   const m = $('priceModel').value.trim(); if (!m) return;
-  const prompt = num($('pricePrompt').value), completion = num($('priceCompletion').value), cache = $('priceCache').value === '' ? prompt : num($('priceCache').value), cacheWrite = $('priceCacheWrite').value === '' ? 0 : num($('priceCacheWrite').value);
   try {
+    const prompt = priceInputValue($('pricePrompt')), completion = priceInputValue($('priceCompletion')), cache = priceInputValue($('priceCache'), prompt), cacheWrite = priceInputValue($('priceCacheWrite'));
     const rules = serializedTimeRules();
     validateTimeRulesClient(rules);
     const price = { prompt, completion, cache, cache_write: cacheWrite };
@@ -2583,6 +2600,8 @@ $('priceReferenceModel').oninput = () => {
   if (priceSearchTimer) clearTimeout(priceSearchTimer);
   const seq = ++priceSearchSeq;
   priceSearchTimer = setTimeout(async () => {
+    if (seq !== priceSearchSeq) return;
+    priceSearchTimer = null;
     try {
       const data = await fetchModelPrices(query);
       if (seq !== priceSearchSeq) return;

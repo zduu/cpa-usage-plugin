@@ -478,18 +478,20 @@ func TestClientAPIFilterChangesDashboardETags(t *testing.T) {
 	}
 }
 
-func TestCoalesceMaskedClientAPIStatsMergesImportedHashlessGroupWithHistoricalHashes(t *testing.T) {
+func TestCoalesceMaskedClientAPIStatsKeepsAmbiguousHashlessGroupSeparate(t *testing.T) {
 	rows := coalesceMaskedClientAPIStats([]ClientAPIStat{
 		{APIKey: "sk******xx", APIKeyHash: strings.Repeat("a", 56), TotalRequests: 1, TotalTokens: 120},
 		{APIKey: "sk******xx", APIKeyHash: strings.Repeat("b", 56), TotalRequests: 1, TotalTokens: 60},
 		{APIKey: "sk******xx", TotalRequests: 1, TotalTokens: 40},
 	})
 
-	if len(rows) != 1 {
-		t.Fatalf("client api stats len = %d, want imported masked group merged: %#v", len(rows), rows)
+	if len(rows) != 3 {
+		t.Fatalf("client api stats len = %d, want three distinct identities: %#v", len(rows), rows)
 	}
-	if rows[0].APIKey != "sk******xx" || rows[0].APIKeyHash != "" || rows[0].TotalRequests != 3 || rows[0].TotalTokens != 220 {
-		t.Fatalf("client api stat = %#v, want merged hashless identity totals 3/220", rows[0])
+	for i, tokens := range []int64{120, 60, 40} {
+		if rows[i].TotalRequests != 1 || rows[i].TotalTokens != tokens {
+			t.Fatalf("identity %d was incorrectly coalesced: %#v", i, rows[i])
+		}
 	}
 }
 
@@ -557,7 +559,7 @@ func TestDashboardSummaryMergesLegacyHashlessClientAPIKeyWithUniqueCurrentHash(t
 	assertMerged("range", stats.SummaryWithoutDetailsForRange("24h"))
 }
 
-func TestDashboardSummaryMergesCrossDeploymentHashlessClientAPIKeyWithHashVariants(t *testing.T) {
+func TestDashboardSummaryKeepsAmbiguousClientAPIKeysAndFiltersDisjoint(t *testing.T) {
 	stats := NewRequestStatistics()
 	stats.Configure(runtimeConfig{MaxDetailsPerModel: 100, DedupWindowMinutes: 0, RetentionDays: 0})
 	when := time.Now().Add(-time.Hour)
@@ -598,20 +600,37 @@ func TestDashboardSummaryMergesCrossDeploymentHashlessClientAPIKeyWithHashVarian
 		t.Fatalf("merge result = %#v, want one added legacy record", result)
 	}
 
-	summary := stats.SummaryWithoutDetails()
-	if len(summary.ClientAPIStats) != 1 {
-		t.Fatalf("client api stats len = %d, want cross-deployment masked key merged: %#v", len(summary.ClientAPIStats), summary.ClientAPIStats)
-	}
-	got := summary.ClientAPIStats[0]
-	if got.APIKey != "sk******xx" || got.APIKeyHash != "" || got.TotalRequests != 3 || got.TotalTokens != 220 {
-		t.Fatalf("client api stat = %#v, want merged cross-deployment totals 3/220", got)
-	}
-	if len(got.Models) != 1 || got.Models[0].TotalRequests != 3 || got.Models[0].TotalTokens != 220 {
-		t.Fatalf("client api model stats = %#v, want merged cross-deployment model totals", got.Models)
+	for _, rangeKey := range []string{"all", "24h"} {
+		summary := stats.SummaryWithoutDetailsForRange(rangeKey)
+		if len(summary.ClientAPIStats) != 3 {
+			t.Fatalf("%s client api stats len = %d, want separate identities: %#v", rangeKey, len(summary.ClientAPIStats), summary.ClientAPIStats)
+		}
+		var total int64
+		for _, group := range summary.ClientAPIStats {
+			if group.TotalRequests != 1 || len(group.Models) != 1 || group.Models[0].TotalRequests != 1 {
+				t.Fatalf("client api group was incorrectly coalesced: %#v", group)
+			}
+			filtered := stats.SummaryWithoutDetailsForRangeAndClientAPIAt(rangeKey, group.Selector, time.Now())
+			if filtered.Usage.TotalRequests != group.TotalRequests || filtered.Usage.TotalTokens != group.TotalTokens {
+				t.Fatalf("selector %s mixes identities: %#v", group.Selector, filtered.Usage)
+			}
+			events := stats.QueryEvents(EventsQuery{Range: rangeKey, ClientAPI: group.Selector})
+			if events.Total != 1 || len(events.Events) != 1 || events.Events[0].APIKeyHash != group.APIKeyHash {
+				t.Fatalf("selector %s mixes event identities: %#v", group.Selector, events)
+			}
+			api := stats.QueryAPIDetailForClientAPIAt("openai", rangeKey, group.Selector, 20, 20, time.Now())
+			if api.Summary.TotalRequests != 1 || api.Summary.TotalTokens != group.TotalTokens {
+				t.Fatalf("selector %s mixes API detail identities: %#v", group.Selector, api)
+			}
+			total += group.TotalTokens
+		}
+		if total != 220 {
+			t.Fatalf("%s grouped tokens = %d, want 220", rangeKey, total)
+		}
 	}
 }
 
-func TestCoalesceMaskedClientAPIStatsMergesRealCrossDeploymentShape(t *testing.T) {
+func TestCoalesceMaskedClientAPIStatsKeepsAmbiguousCrossDeploymentShape(t *testing.T) {
 	requestCounts := []int64{6563, 61, 11, 5, 3, 1}
 	rows := make([]ClientAPIStat, 0, len(requestCounts))
 	for i, count := range requestCounts {
@@ -635,14 +654,13 @@ func TestCoalesceMaskedClientAPIStatsMergesRealCrossDeploymentShape(t *testing.T
 	}
 
 	got := coalesceMaskedClientAPIStats(rows)
-	if len(got) != 1 {
-		t.Fatalf("client api stats len = %d, want real cross-deployment rows merged: %#v", len(got), got)
+	if len(got) != len(requestCounts) {
+		t.Fatalf("client api stats len = %d, want separate cross-deployment identities: %#v", len(got), got)
 	}
-	if got[0].APIKey != "sk******zy" || got[0].APIKeyHash != "" || got[0].TotalRequests != 6644 || got[0].TotalTokens != 66440 {
-		t.Fatalf("client api stat = %#v, want merged real totals 6644/66440", got[0])
-	}
-	if len(got[0].Models) != 1 || got[0].Models[0].TotalRequests != 6644 || got[0].Models[0].TotalTokens != 66440 {
-		t.Fatalf("client api model stats = %#v, want merged real model totals", got[0].Models)
+	for i, count := range requestCounts {
+		if got[i].TotalRequests != count || got[i].TotalTokens != count*10 || len(got[i].Models) != 1 || got[i].Models[0].TotalRequests != count {
+			t.Fatalf("identity %d was incorrectly coalesced: %#v", i, got[i])
+		}
 	}
 }
 

@@ -4,16 +4,58 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
 func reviewRecord(at time.Time) UsageRecord {
 	return UsageRecord{Provider: "openai", Model: "review-model", RequestedAt: at, Detail: UsageDetail{InputTokens: 10, TotalTokens: 10}}
+}
+
+func TestConfigureDurationOverflowIgnored(t *testing.T) {
+	cases := []struct {
+		name  string
+		unit  time.Duration
+		patch func(int) runtimeConfigPatch
+		get   func(*RequestStatistics) time.Duration
+	}{
+		{"retention", 24 * time.Hour, func(v int) runtimeConfigPatch { return runtimeConfigPatch{RetentionDays: &v} }, func(s *RequestStatistics) time.Duration { return s.retention }},
+		{"dedup", time.Minute, func(v int) runtimeConfigPatch { return runtimeConfigPatch{DedupWindowMinutes: &v} }, func(s *RequestStatistics) time.Duration { return s.dedupWindow }},
+		{"flush", time.Second, func(v int) runtimeConfigPatch { return runtimeConfigPatch{StorageFlushSeconds: &v} }, func(s *RequestStatistics) time.Duration { return s.storageFlush }},
+		{"snapshot", time.Second, func(v int) runtimeConfigPatch { return runtimeConfigPatch{StorageSnapshotSeconds: &v} }, func(s *RequestStatistics) time.Duration { return s.storageSnapshotInterval }},
+		{"sync", time.Second, func(v int) runtimeConfigPatch { return runtimeConfigPatch{StorageSyncSeconds: &v} }, func(s *RequestStatistics) time.Duration { return s.storageSyncInterval }},
+		{"prices", time.Second, func(v int) runtimeConfigPatch { return runtimeConfigPatch{ModelsDevRefreshSeconds: &v} }, func(s *RequestStatistics) time.Duration { return s.modelsDevRefresh }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			limit := int64(math.MaxInt64) / int64(tc.unit)
+			maxInt := int(^uint(0) >> 1)
+			if limit >= int64(maxInt) {
+				t.Skip("all nonnegative ints fit this duration unit")
+			}
+			s := NewRequestStatistics()
+			s.Configure(runtimeConfig{PriceStoragePath: filepath.Join(t.TempDir(), "prices.json")})
+			defer s.Close()
+			s.ConfigurePatch(tc.patch(int(limit)))
+			want := time.Duration(limit) * tc.unit
+			if got := tc.get(s); got != want {
+				t.Fatalf("largest valid duration = %s, want %s", got, want)
+			}
+			for _, invalid := range []int{int(limit + 1), maxInt, -1} {
+				s.ConfigurePatch(tc.patch(invalid))
+				if got := tc.get(s); got != want {
+					t.Errorf("invalid value %d changed duration to %s, want %s", invalid, got, want)
+				}
+			}
+		})
+	}
 }
 
 func TestReviewRestartAfterTrimming(t *testing.T) {
@@ -394,3 +436,220 @@ func TestReviewExportCancellationWhileWriting(t *testing.T) {
 type reviewCancelWriter struct{ cancel context.CancelFunc }
 
 func (w *reviewCancelWriter) Write(p []byte) (int, error) { w.cancel(); return len(p), nil }
+
+func TestNonStorageReconfigureKeepsOneWriter(t *testing.T) {
+	cfg := runtimeConfig{
+		StorageEnabled: true, StoragePath: filepath.Join(t.TempDir(), "usage.jsonl"),
+		MaxDetailsPerModel: 10, RetentionDays: 30,
+		PriceStoragePath: filepath.Join(t.TempDir(), "prices.json"),
+	}
+	s := NewRequestStatistics()
+	s.Configure(cfg)
+	t.Cleanup(s.Close)
+	s.Record(reviewRecord(time.Now().Add(-time.Minute)))
+	s.storageControlMu.Lock()
+	originalStop, originalDone := s.storageStop, s.storageDone
+	s.storageControlMu.Unlock()
+
+	s.ConfigurePatch(runtimeConfigPatch{ExportMaxRecords: intPtr(7)})
+	s.storageControlMu.Lock()
+	currentDone := s.storageDone
+	s.storageControlMu.Unlock()
+	if currentDone != originalDone {
+		// Clean up an orphan from the faulty implementation as well as the
+		// tracked worker, so a failing regression test does not leak writers.
+		select {
+		case <-originalDone:
+		default:
+			close(originalStop)
+			<-originalDone
+		}
+		t.Error("non-storage configuration replaced the writer without preserving its lifecycle")
+	}
+	if got := s.ExportMaxRecords(); got != 7 {
+		t.Fatalf("export limit = %d, want 7", got)
+	}
+	s.Record(reviewRecord(time.Now()))
+	s.Close()
+	select {
+	case <-originalDone:
+	default:
+		t.Fatal("original writer survived Close")
+	}
+	restored := NewRequestStatistics()
+	restored.Configure(cfg)
+	defer restored.Close()
+	if got := restored.Snapshot(); got.TotalRequests != 2 || got.TotalTokens != 20 {
+		t.Fatalf("configuration change lost persisted usage: %+v", got)
+	}
+}
+
+func TestConcurrentStorageReconfigurePreservesUsage(t *testing.T) {
+	cfg := runtimeConfig{
+		StorageEnabled: true, StoragePath: filepath.Join(t.TempDir(), "usage.jsonl"),
+		MaxDetailsPerModel: 3, RetentionDays: 30,
+		PriceStoragePath: filepath.Join(t.TempDir(), "prices.json"),
+	}
+	s := NewRequestStatistics()
+	s.Configure(cfg)
+	t.Cleanup(s.Close)
+	base := time.Now().Add(-time.Minute)
+	const writers, records = 3, 4
+	var wg sync.WaitGroup
+	for writer := 0; writer < writers; writer++ {
+		wg.Go(func() {
+			for record := 0; record < records; record++ {
+				s.ConfigurePatch(runtimeConfigPatch{StorageFlushSeconds: intPtr(writer + 1)})
+				s.Record(reviewRecord(base.Add(time.Duration(writer*records+record) * time.Second)))
+			}
+		})
+	}
+	wg.Wait()
+	s.Close()
+	restored := NewRequestStatistics()
+	restored.Configure(cfg)
+	defer restored.Close()
+	if got := restored.Snapshot(); got.TotalRequests != writers*records || got.TotalTokens != 10*writers*records {
+		t.Fatalf("concurrent configuration changes corrupted persisted usage: %+v", got)
+	}
+}
+
+func TestIdleReadsExpireUsage(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		read func(*RequestStatistics, time.Time) int64
+	}{
+		{"summary", func(s *RequestStatistics, now time.Time) int64 {
+			return s.SummaryWithoutDetailsAt(now).Usage.TotalRequests
+		}},
+		{"range-summary", func(s *RequestStatistics, now time.Time) int64 {
+			return s.SummaryWithoutDetailsForRangeAt("7d", now).Usage.TotalRequests
+		}},
+		{"api-detail", func(s *RequestStatistics, now time.Time) int64 {
+			return s.QueryAPIDetailAt("openai", "all", 10, 10, now).Summary.TotalRequests
+		}},
+		{"events", func(s *RequestStatistics, now time.Time) int64 {
+			return int64(s.QueryEventsAt(EventsQuery{}, now).Total)
+		}},
+		{"event-export", func(s *RequestStatistics, now time.Time) int64 {
+			return int64(s.QueryExportEventsAt(EventsQuery{}, 0, now).Total)
+		}},
+		{"frozen-event-export", func(s *RequestStatistics, now time.Time) int64 {
+			return int64(s.captureEventExport(EventsQuery{}, 0, now).result.Total)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewRequestStatistics()
+			s.Configure(runtimeConfig{MaxDetailsPerModel: 10, RetentionDays: 1, PriceStoragePath: filepath.Join(t.TempDir(), "prices.json")})
+			now := time.Now()
+			s.Record(reviewRecord(now.Add(-23 * time.Hour)))
+			s.Record(reviewRecord(now))
+			if got := tc.read(s, now); got != 2 {
+				t.Fatalf("before expiry = %d, want 2", got)
+			}
+			if got := tc.read(s, now.Add(2*time.Hour)); got != 1 {
+				t.Fatalf("idle read retained expired usage: got %d, want 1", got)
+			}
+		})
+	}
+}
+
+// Populate state as of an earlier time, then let public methods read it at the
+// real clock. No sleeps or direct pruning hide the idle-expiry transition.
+func idleExpiredStatistics() (*RequestStatistics, time.Time) {
+	s := NewRequestStatistics()
+	s.retention = time.Hour
+	now := time.Now()
+	before := now.Add(-2 * time.Hour)
+	for _, at := range []time.Time{before, now} {
+		detail := requestDetailFromUsageRecord(reviewRecord(at), at, headerWhitelist{})
+		s.recordDetailLocked("openai", "review-model", detail, requestDedupKey{}, before, false)
+	}
+	return s, before
+}
+
+func TestIdleSnapshotsAndCountsExpireUsage(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		read func(*RequestStatistics) int64
+	}{
+		{"snapshot", func(s *RequestStatistics) int64 { return s.Snapshot().TotalRequests }},
+		{"detail-count", func(s *RequestStatistics) int64 { return s.DetailCount() }},
+		{"storage-snapshot", func(s *RequestStatistics) int64 { return s.captureStorageSnapshot().metadata.TotalRequests }},
+		{"legacy-export", func(s *RequestStatistics) int64 {
+			snapshot, count := s.ReconciledSnapshot()
+			if count != snapshot.TotalRequests {
+				t.Errorf("backup count = %d, total requests = %d", count, snapshot.TotalRequests)
+			}
+			return count
+		}},
+		{"usage-backup", func(s *RequestStatistics) int64 {
+			view, err := s.captureUsageExport(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if view.header.DetailCount != view.usage.metadata.TotalRequests {
+				t.Errorf("backup count = %d, total requests = %d", view.header.DetailCount, view.usage.metadata.TotalRequests)
+			}
+			return view.header.DetailCount
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := idleExpiredStatistics()
+			if got := tc.read(s); got != 1 {
+				t.Fatalf("idle read retained expired usage: got %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestIdleExpiryInvalidatesConditionalRequests(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		etag   func(time.Time) string
+		handle func(map[string][]string, map[string][]string) ([]byte, error)
+	}{
+		{"events", func(at time.Time) string { return dashboardEventsETag(EventsQuery{Limit: 50, API: "openai"}, at) }, handleDashboardEvents},
+		{"event-export", func(at time.Time) string {
+			return dashboardEventsExportETag(EventsQuery{API: "openai"}, dashboardEventsExportOptions{Format: dashboardExportJSON, Limit: defaultExportMaxRecords}, at)
+		}, handleDashboardEventsExport},
+		{"api-detail", func(at time.Time) string { return dashboardAPIDetailETag("openai", "", 0, 0, at) }, handleDashboardAPIDetail},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			previous := stats
+			s, before := idleExpiredStatistics()
+			stats = s
+			t.Cleanup(func() { stats = previous })
+			etag := tc.etag(before)
+			raw, err := tc.handle(map[string][]string{"api": {"openai"}}, map[string][]string{"If-None-Match": {etag}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var env envelope
+			var response ManagementResponse
+			if err := json.Unmarshal(raw, &env); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(env.Result, &response); err != nil {
+				t.Fatal(err)
+			}
+			if response.StatusCode != http.StatusOK || response.Headers["ETag"][0] == etag {
+				t.Fatalf("expired usage reused its validator: status=%d etag=%v", response.StatusCode, response.Headers["ETag"])
+			}
+		})
+	}
+}
+
+func TestIdleSummaryExpiresArchivedUsage(t *testing.T) {
+	s := NewRequestStatistics()
+	s.Configure(runtimeConfig{MaxDetailsPerModel: 1, RetentionDays: 1, PriceStoragePath: filepath.Join(t.TempDir(), "prices.json")})
+	now := time.Now()
+	s.Record(reviewRecord(now.Add(-23 * time.Hour)))
+	s.Record(reviewRecord(now))
+	if got := s.SummaryWithoutDetailsAt(now); got.Usage.TotalRequests != 2 {
+		t.Fatalf("before expiry: %+v", got.Usage)
+	}
+	if got := s.SummaryWithoutDetailsAt(now.Add(2 * time.Hour)); got.Usage.TotalRequests != 1 || got.Usage.TotalTokens != 10 {
+		t.Fatalf("idle summary retained expired accounting: %+v", got.Usage)
+	}
+}

@@ -29,6 +29,10 @@ import (
 
 type RequestStatistics struct {
 	mu sync.RWMutex
+	// A configuration change stops workers before taking mu. Serialize the
+	// complete transition so another change or Close cannot replace a worker
+	// between its stop and restart.
+	configMu sync.Mutex
 
 	storageControlMu sync.Mutex
 	storageEnqueueWG sync.WaitGroup
@@ -666,6 +670,8 @@ func (s *RequestStatistics) ConfigurePatch(cfg runtimeConfigPatch) {
 	if s == nil {
 		return
 	}
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
 	storageConfigTouched := cfg.StorageEnabled != nil ||
 		cfg.StoragePath != nil ||
 		cfg.StorageFlushSeconds != nil ||
@@ -691,11 +697,11 @@ func (s *RequestStatistics) ConfigurePatch(cfg runtimeConfigPatch) {
 	if cfg.MaxDetailsPerModel != nil && *cfg.MaxDetailsPerModel >= 0 {
 		s.maxDetailsPerModel = *cfg.MaxDetailsPerModel
 	}
-	if cfg.RetentionDays != nil && *cfg.RetentionDays >= 0 {
-		s.retention = time.Duration(*cfg.RetentionDays) * 24 * time.Hour
+	if duration, ok := configDuration(cfg.RetentionDays, 24*time.Hour); ok {
+		s.retention = duration
 	}
-	if cfg.DedupWindowMinutes != nil && *cfg.DedupWindowMinutes >= 0 {
-		s.dedupWindow = time.Duration(*cfg.DedupWindowMinutes) * time.Minute
+	if duration, ok := configDuration(cfg.DedupWindowMinutes, time.Minute); ok {
+		s.dedupWindow = duration
 	}
 	if cfg.LogResponseHeaders != nil {
 		s.logResponseHeaders = parseHeaderWhitelist(*cfg.LogResponseHeaders)
@@ -710,17 +716,17 @@ func (s *RequestStatistics) ConfigurePatch(cfg runtimeConfigPatch) {
 	if cfg.StoragePath != nil && strings.TrimSpace(*cfg.StoragePath) != "" {
 		s.storagePath = strings.TrimSpace(*cfg.StoragePath)
 	}
-	if cfg.StorageFlushSeconds != nil && *cfg.StorageFlushSeconds > 0 {
-		s.storageFlush = time.Duration(*cfg.StorageFlushSeconds) * time.Second
+	if duration, ok := configDuration(cfg.StorageFlushSeconds, time.Second); ok && duration > 0 {
+		s.storageFlush = duration
 	}
-	if cfg.StorageSnapshotSeconds != nil && *cfg.StorageSnapshotSeconds >= 0 {
-		s.storageSnapshotInterval = time.Duration(*cfg.StorageSnapshotSeconds) * time.Second
+	if duration, ok := configDuration(cfg.StorageSnapshotSeconds, time.Second); ok {
+		s.storageSnapshotInterval = duration
 	}
 	if cfg.StorageSnapshotRecordInterval != nil && *cfg.StorageSnapshotRecordInterval >= 0 {
 		s.storageSnapshotRecordInterval = *cfg.StorageSnapshotRecordInterval
 	}
-	if cfg.StorageSyncSeconds != nil && *cfg.StorageSyncSeconds >= 0 {
-		s.storageSyncInterval = time.Duration(*cfg.StorageSyncSeconds) * time.Second
+	if duration, ok := configDuration(cfg.StorageSyncSeconds, time.Second); ok {
+		s.storageSyncInterval = duration
 	}
 	if cfg.StorageSyncRecordInterval != nil && *cfg.StorageSyncRecordInterval >= 0 {
 		s.storageSyncRecordInterval = *cfg.StorageSyncRecordInterval
@@ -736,8 +742,8 @@ func (s *RequestStatistics) ConfigurePatch(cfg runtimeConfigPatch) {
 	if cfg.ModelsDevPricesURL != nil && strings.TrimSpace(*cfg.ModelsDevPricesURL) != "" {
 		s.modelsDevPricesURL = strings.TrimSpace(*cfg.ModelsDevPricesURL)
 	}
-	if cfg.ModelsDevRefreshSeconds != nil && *cfg.ModelsDevRefreshSeconds > 0 {
-		s.modelsDevRefresh = time.Duration(*cfg.ModelsDevRefreshSeconds) * time.Second
+	if duration, ok := configDuration(cfg.ModelsDevRefreshSeconds, time.Second); ok && duration > 0 {
+		s.modelsDevRefresh = duration
 	}
 	if cfg.ClaudeCacheRepairEnabled != nil {
 		s.claudeCacheRepairEnabled = *cfg.ClaudeCacheRepairEnabled
@@ -795,7 +801,9 @@ func (s *RequestStatistics) ConfigurePatch(cfg runtimeConfigPatch) {
 	}
 	s.configureModelsDevPriceWorkerLocked()
 	s.configureExchangeRateWorkerLocked()
-	s.configureStorageLocked()
+	if storageConfigTouched {
+		s.configureStorageLocked()
+	}
 	// 修复开关可能刚由热重载打开:存储装载(冷恢复或合并)完成后统一对当前
 	// 内存明细执行一次历史缓存修复,置于价格加载与成本序列重建之前,保证
 	// 货币序列从修复后的 token 序列重建。开关关闭时该调用为空操作。
@@ -805,6 +813,15 @@ func (s *RequestStatistics) ConfigurePatch(cfg runtimeConfigPatch) {
 	s.pruneLocked(time.Now(), true)
 	s.rebuildSeenLocked(time.Now())
 	s.invalidateSummaryLocked()
+}
+
+// Reject overflowing duration values like other invalid configuration values;
+// wrapping them can silently disable retention or turn worker intervals negative.
+func configDuration(value *int, unit time.Duration) (time.Duration, bool) {
+	if value == nil || *value < 0 || int64(*value) > math.MaxInt64/int64(unit) {
+		return 0, false
+	}
+	return time.Duration(*value) * unit, true
 }
 
 func intPtr(value int) *int {
@@ -2749,6 +2766,7 @@ func (s *RequestStatistics) writeStorageSnapshotLocked(now time.Time) error {
 	if now.IsZero() {
 		now = time.Now()
 	}
+	s.pruneExpiredLocked(now)
 	if err := writeStorageSnapshotViewFile(s.storageDir, s.captureStorageSnapshotLocked(), now); err != nil {
 		return err
 	}
@@ -3939,6 +3957,15 @@ func (s *RequestStatistics) loadModelPricesLocked() {
 	if s.priceStorageLoadedPath == abs {
 		return
 	}
+	previousVersion := s.priceVersion
+	defer func() {
+		// A failed initial read can recover during a later price API request.
+		// Publish the new price table and its derived usage costs together.
+		if s.priceVersion != previousVersion {
+			s.rebuildCostSeriesLocked()
+			s.invalidateCachedResponsesLocked()
+		}
+	}()
 	raw, err := os.ReadFile(abs)
 	loadedFromLegacy := false
 	if errors.Is(err, os.ErrNotExist) && legacyAbs != "" && legacyAbs != abs {
@@ -4424,6 +4451,7 @@ func (s *RequestStatistics) QueryModelPrices(scope, query string, limit, offset 
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.pruneExpiredLocked(time.Now())
 	s.loadModelPricesLocked()
 	response := s.modelPricesResponseLocked()
 	// The used-price representation depends on modelSummaryStats, which is
@@ -5036,6 +5064,15 @@ func (s *RequestStatistics) trimModelDetailsLocked(model *modelStats) bool {
 	return true
 }
 
+// Idle traffic must not keep expired usage visible indefinitely. Query paths
+// check the next known expiry before reading cached responses; ordinary reads
+// do not scan history until a retained record has actually expired.
+func (s *RequestStatistics) pruneExpiredLocked(now time.Time) {
+	if s.retention > 0 && !s.nextDetailExpiry.IsZero() && now.After(s.nextDetailExpiry) {
+		s.pruneLocked(now, false)
+	}
+}
+
 func (s *RequestStatistics) pruneLocked(now time.Time, sortNeeded bool) {
 	if s == nil {
 		return
@@ -5424,8 +5461,9 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 		return result
 	}
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneExpiredLocked(time.Now())
 	return s.snapshotLocked()
 }
 
@@ -6480,6 +6518,7 @@ func (s *RequestStatistics) SummaryWithoutDetailsAt(now time.Time) DashboardSumm
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.pruneExpiredLocked(now)
 
 	if s.summaryCacheValid && s.summaryCacheVersion == s.summaryVersion && s.summaryCacheWindow.Equal(healthWindow) {
 		s.summaryCacheHits++
@@ -6528,6 +6567,7 @@ func (s *RequestStatistics) SummaryWithoutDetailsForRangeAndClientAPIAt(rangeKey
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.pruneExpiredLocked(now)
 
 	if s.summaryRangeCache == nil {
 		s.summaryRangeCache = make(map[string]DashboardSummary)
@@ -7059,8 +7099,25 @@ func clientAPIStatsFromAccumulatorValues(accumulators []*clientAPIStatAccumulato
 		stats = append(stats, stat)
 	}
 	stats = coalesceMaskedClientAPIStats(stats)
+	labelCounts := make(map[string]int, len(stats))
+	for _, stat := range stats {
+		labelCounts[strings.TrimSpace(stat.APIKey)]++
+	}
 	for i := range stats {
-		stats[i].Selector = clientAPISelectorForStat(stats[i])
+		selector := clientAPISelectorForStat(stats[i])
+		if labelCounts[strings.TrimSpace(stats[i].APIKey)] > 1 {
+			// These labels still represent distinct identities after coalescing.
+			// Exact selectors prevent the ambiguous hashless row from appearing
+			// in every hashed group's filtered totals. Keep old h/m selectors
+			// readable for clients that saved a previously coalesced selection.
+			switch selector[0] {
+			case 'h':
+				selector = "x" + selector[1:]
+			case 'm':
+				selector = "l" + selector[1:]
+			}
+		}
+		stats[i].Selector = selector
 	}
 	sortClientAPIStats(stats)
 	return stats
@@ -7091,20 +7148,20 @@ func parseClientAPISelector(value string) (clientAPISelector, bool) {
 		return clientAPISelector{kind: 'u'}, true
 	}
 	parts := strings.Split(value, ".")
-	if len(parts) == 2 && parts[0] == "m" {
+	if len(parts) == 2 && (parts[0] == "m" || parts[0] == "l") {
 		label, err := base64.RawURLEncoding.DecodeString(parts[1])
 		if err != nil || strings.TrimSpace(string(label)) == "" {
 			return clientAPISelector{}, false
 		}
-		return clientAPISelector{kind: 'm', label: strings.TrimSpace(string(label))}, true
+		return clientAPISelector{kind: parts[0][0], label: strings.TrimSpace(string(label))}, true
 	}
-	if len(parts) == 3 && parts[0] == "h" {
+	if len(parts) == 3 && (parts[0] == "h" || parts[0] == "x") {
 		hash := strings.TrimSpace(parts[1])
 		label, err := base64.RawURLEncoding.DecodeString(parts[2])
 		if err != nil || hash == "" || strings.TrimSpace(string(label)) == "" {
 			return clientAPISelector{}, false
 		}
-		return clientAPISelector{kind: 'h', hash: hash, label: strings.TrimSpace(string(label))}, true
+		return clientAPISelector{kind: parts[0][0], hash: hash, label: strings.TrimSpace(string(label))}, true
 	}
 	return clientAPISelector{}, false
 }
@@ -7124,6 +7181,10 @@ func clientAPISelectorMatchesDetail(value string, detail RequestDetail) bool {
 		return label == "" && hash == ""
 	case 'm':
 		return label == selector.label
+	case 'l':
+		return hash == "" && label == selector.label
+	case 'x':
+		return hash == selector.hash
 	case 'h':
 		return hash == selector.hash || hash == "" && label == selector.label
 	default:
@@ -7157,9 +7218,8 @@ func coalesceMaskedClientAPIStats(stats []ClientAPIStat) []ClientAPIStat {
 		return stats
 	}
 	type labelGroups struct {
-		indices     []int
-		hashes      map[string]bool
-		hasHashless bool
+		indices []int
+		hashes  map[string]bool
 	}
 	byLabel := make(map[string]*labelGroups)
 	for i := range stats {
@@ -7175,8 +7235,6 @@ func coalesceMaskedClientAPIStats(stats []ClientAPIStat) []ClientAPIStat {
 		group.indices = append(group.indices, i)
 		if hash := strings.TrimSpace(stats[i].APIKeyHash); hash != "" {
 			group.hashes[hash] = true
-		} else {
-			group.hasHashless = true
 		}
 	}
 	removed := make(map[int]bool)
@@ -7184,7 +7242,7 @@ func coalesceMaskedClientAPIStats(stats []ClientAPIStat) []ClientAPIStat {
 		if len(group.indices) < 2 {
 			continue
 		}
-		if len(group.hashes) > 1 && !group.hasHashless {
+		if len(group.hashes) > 1 {
 			continue
 		}
 		target := clientAPIStatsMergeTarget(stats, group.indices)
@@ -7254,6 +7312,7 @@ func mergeClientAPIStat(dst *ClientAPIStat, src ClientAPIStat) {
 	dst.CachedTokens = addNonNegativeInt64(dst.CachedTokens, src.CachedTokens)
 	dst.CacheWriteTokens = addNonNegativeInt64(dst.CacheWriteTokens, src.CacheWriteTokens)
 	dst.ReasoningTokens = addNonNegativeInt64(dst.ReasoningTokens, src.ReasoningTokens)
+	dst.EstimatedCost = addNonNegativeCost(dst.EstimatedCost, src.EstimatedCost)
 
 	models := make(map[string]*ClientAPIModelStat, len(dst.Models)+len(src.Models))
 	for _, model := range dst.Models {
@@ -7292,6 +7351,7 @@ func mergeClientAPIModelStat(dst *ClientAPIModelStat, src ClientAPIModelStat) {
 	dst.CachedTokens = addNonNegativeInt64(dst.CachedTokens, src.CachedTokens)
 	dst.CacheWriteTokens = addNonNegativeInt64(dst.CacheWriteTokens, src.CacheWriteTokens)
 	dst.ReasoningTokens = addNonNegativeInt64(dst.ReasoningTokens, src.ReasoningTokens)
+	dst.EstimatedCost = addNonNegativeCost(dst.EstimatedCost, src.EstimatedCost)
 	dst.Providers = mergeFinalizedProviderStats(dst.Providers, src.Providers)
 }
 
@@ -7900,8 +7960,13 @@ func (s *RequestStatistics) QueryExportEventsAt(params EventsQuery, maxRecords i
 // background exports do not shift when new requests arrive while paging.
 // pricing 冻结该次导出使用的价格表;传 nil 表示按当前价格计价。
 func (s *RequestStatistics) QueryExportEventsPage(params EventsQuery, offset int, pageLimit int, maxRecords int, snapshotAt time.Time, pricing *pricingSnapshot) EventsResult {
+	result, _ := s.queryExportEventsPageContext(context.Background(), params, offset, pageLimit, maxRecords, snapshotAt, pricing)
+	return result
+}
+
+func (s *RequestStatistics) queryExportEventsPageContext(ctx context.Context, params EventsQuery, offset int, pageLimit int, maxRecords int, snapshotAt time.Time, pricing *pricingSnapshot) (EventsResult, error) {
 	if s == nil {
-		return EventsResult{}
+		return EventsResult{}, nil
 	}
 	if offset < 0 {
 		offset = 0
@@ -7915,15 +7980,24 @@ func (s *RequestStatistics) QueryExportEventsPage(params EventsQuery, offset int
 		snapshotAt = startedAt
 	}
 
-	s.mu.Lock()
+	if err := s.lockExportSnapshot(ctx); err != nil {
+		return EventsResult{}, err
+	}
 	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return EventsResult{}, err
+	}
+	s.pruneExpiredLocked(snapshotAt)
 
 	cutoff := dashboardRangeCutoff(params.Range, snapshotAt)
 	index := s.dashboardEventQueryIndexLocked(params)
 	capacity := min(exportPageEventCapacity(pageLimit, offset, maxRecords), len(index))
 	events := make([]RequestDetail, 0, capacity)
 	total := 0
-	for _, dm := range index {
+	for i, dm := range index {
+		if i%256 == 0 && ctx.Err() != nil {
+			return EventsResult{}, ctx.Err()
+		}
 		d := dm.detailPointer()
 		if d == nil {
 			continue
@@ -7970,7 +8044,7 @@ func (s *RequestStatistics) QueryExportEventsPage(params EventsQuery, offset int
 	}
 	s.lastEventsQueryDuration = time.Since(startedAt)
 	s.lastEventsQueryTotal = total
-	return result
+	return result, ctx.Err()
 }
 
 func exportPageEventCapacity(pageLimit int, offset int, maxRecords int) int {
@@ -8018,6 +8092,7 @@ func (s *RequestStatistics) queryEventsAt(params EventsQuery, paginate bool, exp
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.pruneExpiredLocked(now)
 	finish := func(result EventsResult) EventsResult {
 		s.attachEventCostsLocked(result.Events)
 		result.dashboardVersion = s.summaryVersion
@@ -8204,6 +8279,7 @@ func (s *RequestStatistics) QueryAPIDetailForClientAPIAt(api string, rangeKey st
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.pruneExpiredLocked(now)
 	generatedAt := s.dashboardQueryGeneratedAtLocked(rangeKey, now).UTC().Format(time.RFC3339)
 	result.GeneratedAt = generatedAt
 	finish := func(result APIDetailResponse) APIDetailResponse {
@@ -8353,8 +8429,9 @@ func (s *RequestStatistics) DetailCount() int64 {
 	if s == nil {
 		return 0
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneExpiredLocked(time.Now())
 	return s.countDetailsLocked()
 }
 
@@ -8368,11 +8445,16 @@ func (s *RequestStatistics) EvictedTotal() int64 {
 }
 
 func (s *RequestStatistics) DashboardVersion() uint64 {
+	return s.dashboardVersionAt(time.Now())
+}
+
+func (s *RequestStatistics) dashboardVersionAt(now time.Time) uint64 {
 	if s == nil {
 		return 0
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneExpiredLocked(now)
 	return s.summaryVersion
 }
 
@@ -8389,6 +8471,8 @@ func (s *RequestStatistics) Close() {
 	if s == nil {
 		return
 	}
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
 	s.stopStorageWorker()
 	s.stopModelsDevPriceWorker()
 	s.stopExchangeRateWorker()

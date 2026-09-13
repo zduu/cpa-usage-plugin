@@ -21,6 +21,7 @@ type storageSnapshotView struct {
 func (s *RequestStatistics) captureStorageSnapshot() storageSnapshotView {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.pruneExpiredLocked(time.Now())
 	return s.captureStorageSnapshotLocked()
 }
 

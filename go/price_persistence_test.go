@@ -5,7 +5,72 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestRecoveredPriceFileRepricesCachedUsage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "prices.json")
+	if err := os.WriteFile(path, []byte(`{"prices":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := NewRequestStatistics()
+	s.Configure(runtimeConfig{PriceStoragePath: path})
+	now := time.Now()
+	s.Record(UsageRecord{Provider: "openai", Model: "model", RequestedAt: now, Detail: UsageDetail{InputTokens: 1000000}})
+	if got := s.SummaryWithoutDetailsAt(now).Usage.TotalCost; got != 0 {
+		t.Fatalf("cost before price recovery = %g", got)
+	}
+	s.SummaryWithoutDetailsForRangeAt("24h", now)
+	version := s.DashboardVersion()
+	if err := os.WriteFile(path, []byte(`{"prices":{"model":{"prompt":3}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.ModelPrices().Prices["model"].Prompt; got != 3 {
+		t.Fatalf("recovered price = %g, want 3", got)
+	}
+	if got := s.SummaryWithoutDetailsAt(now).Usage.TotalCost; got != 3 {
+		t.Errorf("cached total after price recovery = %g, want 3", got)
+	}
+	if got := s.SummaryWithoutDetailsForRangeAt("24h", now).Usage.TotalCost; got != 3 {
+		t.Errorf("cached range cost after price recovery = %g, want 3", got)
+	}
+	if s.DashboardVersion() == version {
+		t.Error("price recovery did not invalidate conditional responses")
+	}
+}
+
+func TestCoalescedLegacyClientPreservesTimeBasedCosts(t *testing.T) {
+	s := NewRequestStatistics()
+	s.Configure(runtimeConfig{MaxDetailsPerModel: 1, RetentionDays: 30, PriceStoragePath: filepath.Join(t.TempDir(), "prices.json")})
+	defer s.Close()
+	prompt := 5.0
+	if _, err := s.UpsertModelPrice("model", ModelPrice{Prompt: 2, TimeRules: []ModelPriceRule{{Name: "early", Start: "00:00", End: "01:00", Prompt: &prompt}}}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	legacy := RequestDetail{Model: "model", Provider: "openai", APIKey: "sk******xx", Timestamp: now.Add(-2 * time.Minute), Tokens: TokenStats{InputTokens: 1000000, TotalTokens: 1000000}}
+	result := s.MergeSnapshot(StatisticsSnapshot{APIs: map[string]APISnapshot{
+		"openai": {Models: map[string]ModelSnapshot{"model": {Details: []RequestDetail{legacy}}}},
+	}})
+	if result.Added != 1 {
+		t.Fatalf("imported legacy row: %+v", result)
+	}
+	s.Record(UsageRecord{Provider: "openai", Model: "model", APIKey: "sk-client-0000xx", RequestedAt: now.Add(-time.Minute), Detail: UsageDetail{InputTokens: 1000000}})
+	for _, rangeKey := range []string{"all", "24h"} {
+		summary := s.SummaryWithoutDetailsForRangeAt(rangeKey, now)
+		if len(summary.ClientAPIStats) != 1 || summary.Usage.TotalRequests != 2 || summary.Usage.TotalCost <= 0 {
+			t.Fatalf("%s summary: %+v", rangeKey, summary)
+		}
+		client := summary.ClientAPIStats[0]
+		if client.EstimatedCost != summary.Usage.TotalCost || len(client.Models) != 1 || client.Models[0].EstimatedCost != summary.Usage.TotalCost {
+			t.Errorf("%s coalesced client lost part of the %g cost: %+v", rangeKey, summary.Usage.TotalCost, client)
+		}
+		filtered := s.SummaryWithoutDetailsForRangeAndClientAPIAt(rangeKey, client.Selector, now)
+		if filtered.Usage.TotalCost != summary.Usage.TotalCost {
+			t.Errorf("%s selected cost = %g, want %g", rangeKey, filtered.Usage.TotalCost, summary.Usage.TotalCost)
+		}
+	}
+}
 
 func TestModelPricesUseStableDataPathAcrossReload(t *testing.T) {
 	t.Chdir(t.TempDir())

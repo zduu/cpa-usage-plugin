@@ -1524,7 +1524,7 @@ func TestPendingInterceptorMetadataEnrichesLaterNativeUsage(t *testing.T) {
 }
 
 func TestReplayStorageAppliesMetadataOnlyUpdate(t *testing.T) {
-	requestedAt := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	requestedAt := time.Now().Add(-time.Minute).UTC()
 	base := RequestDetail{
 		Model:      "gpt-5.5",
 		Timestamp:  requestedAt,
@@ -1570,7 +1570,7 @@ func TestReplayStorageAppliesMetadataOnlyUpdate(t *testing.T) {
 }
 
 func TestReplayStorageAppliesMetadataOnlyUpdateBeforeBaseDetail(t *testing.T) {
-	requestedAt := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	requestedAt := time.Now().Add(-time.Minute).UTC()
 	base := RequestDetail{
 		Model:      "gpt-5.5",
 		Timestamp:  requestedAt,
@@ -5468,6 +5468,20 @@ func TestRedactSensitiveText_PreservesNormalText(t *testing.T) {
 func TestRedactSensitiveText_EmptyString(t *testing.T) {
 	if redactSensitiveText("") != "" {
 		t.Error("empty input should return empty string")
+	}
+}
+
+func TestRedactSensitiveText_QueryCredentials(t *testing.T) {
+	for _, tc := range []struct{ input, want string }{
+		{`?token=first-secret&token=second-secret&code=bad`, `?token=******&token=******&code=bad`},
+		{`?API_KEY=short&KEY=another&code=bad`, `?API_KEY=******&KEY=******&code=bad`},
+		{`{"error":"https://example.test/?api_key=secret","code":"bad"}`, `{"error":"https://example.test/?api_key=******","code":"bad"}`},
+		{`token%3dsecret token%3Dsecond`, `token%3d****** token%3D******`},
+		{`?monkey=banana&token_count=123`, `?monkey=banana&token_count=123`},
+	} {
+		if got := redactSensitiveText(tc.input); got != tc.want {
+			t.Errorf("redaction = %q, want %q", got, tc.want)
+		}
 	}
 }
 

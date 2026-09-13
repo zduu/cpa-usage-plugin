@@ -77,7 +77,7 @@ func handleDashboardSummary(query map[string][]string, headers map[string][]stri
 	clientAPI := queryRawValue(query, "client_api")
 	compactHealth := queryBool(query, "compact_health")
 	now := time.Now()
-	etag := dashboardSummaryETagForClientAPIRepresentation(now, rangeKey, clientAPI, stats.DashboardVersion(), compactHealth)
+	etag := dashboardSummaryETagForClientAPIRepresentation(now, rangeKey, clientAPI, stats.dashboardVersionAt(now), compactHealth)
 	if dashboardConditionalMatch("dashboard-summary", headers, etag) {
 		return dashboardNotModified(etag)
 	}
@@ -107,7 +107,7 @@ func dashboardSummaryETagForVersion(now time.Time, rangeKey string, version uint
 }
 
 func dashboardSummaryETagForClientAPI(now time.Time, rangeKey string, clientAPI string) string {
-	return dashboardSummaryETagForClientAPIVersion(now, rangeKey, clientAPI, stats.DashboardVersion())
+	return dashboardSummaryETagForClientAPIVersion(now, rangeKey, clientAPI, stats.dashboardVersionAt(now))
 }
 
 func dashboardSummaryETagForClientAPIVersion(now time.Time, rangeKey string, clientAPI string, version uint64) string {
@@ -212,7 +212,7 @@ func handleDashboardEvents(query map[string][]string, headers map[string][]strin
 }
 
 func dashboardEventsETag(params EventsQuery, now time.Time) string {
-	return dashboardEventsETagForVersion(params, now, stats.DashboardVersion())
+	return dashboardEventsETagForVersion(params, now, stats.dashboardVersionAt(now))
 }
 
 func dashboardEventsETagForVersion(params EventsQuery, now time.Time, version uint64) string {
@@ -342,7 +342,7 @@ func effectiveDashboardExportLimit(requestLimit int, configuredLimit int) int {
 }
 
 func dashboardEventsExportETag(params EventsQuery, opts dashboardEventsExportOptions, now time.Time) string {
-	return dashboardEventsExportETagForVersion(params, opts, now, stats.DashboardVersion())
+	return dashboardEventsExportETagForVersion(params, opts, now, stats.dashboardVersionAt(now))
 }
 
 func dashboardEventsExportETagForVersion(params EventsQuery, opts dashboardEventsExportOptions, now time.Time, version uint64) string {
@@ -565,7 +565,7 @@ func dashboardAPIDetailETagForVersion(api string, rangeKey string, recentLimit i
 }
 
 func dashboardAPIDetailETagForClientAPI(api string, rangeKey string, clientAPI string, recentLimit int, errorLimit int, now time.Time) string {
-	return dashboardAPIDetailETagForClientAPIVersion(api, rangeKey, clientAPI, recentLimit, errorLimit, now, stats.DashboardVersion())
+	return dashboardAPIDetailETagForClientAPIVersion(api, rangeKey, clientAPI, recentLimit, errorLimit, now, stats.dashboardVersionAt(now))
 }
 
 func dashboardAPIDetailETagForClientAPIVersion(api string, rangeKey string, clientAPI string, recentLimit int, errorLimit int, now time.Time, version uint64) string {

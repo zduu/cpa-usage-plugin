@@ -155,7 +155,12 @@ func TestEventQueriesDoNotShareMutableRecords(t *testing.T) {
 // query cache and index. Ties within a model retain insertion order; cross-model
 // ties must be deterministic so rebuilding an index cannot shift pagination.
 func expectedVisibleEvents(s *RequestStatistics, query EventsQuery, now time.Time) []RequestDetail {
-	snapshot := s.Snapshot()
+	// Compare the same logical instant as QueryEventsAt, including at an
+	// expiry boundary; Snapshot() intentionally advances to the real clock.
+	s.mu.Lock()
+	s.pruneExpiredLocked(now)
+	snapshot := s.snapshotLocked()
+	s.mu.Unlock()
 	var events []RequestDetail
 	for api, data := range snapshot.APIs {
 		if query.API != "" && query.API != api {

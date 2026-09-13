@@ -94,8 +94,28 @@ const root = path.resolve(__dirname, '..');
       const response = await fetch('dashboard-events-export-jobs');
       return (await response.json()).jobs.length === 0;
     });
+
+    // Privacy settings can throw while accessing localStorage itself, before
+    // getItem runs. Verify the real browser still loads and changes range.
+    const blockedContext = await browser.newContext();
+    try {
+      await blockedContext.addInitScript(() => {
+        Object.defineProperty(window, 'localStorage', {
+          get() { throw new DOMException('Storage is disabled', 'SecurityError'); },
+        });
+      });
+      const blockedPage = await blockedContext.newPage();
+      blockedPage.setDefaultTimeout(20000);
+      blockedPage.on('pageerror', error => errors.push(error.message));
+      await blockedPage.goto(base);
+      await blockedPage.waitForFunction(() => document.querySelector('#totalRequests').textContent.replace(/\D/g, '') === '12000');
+      assert.equal(await blockedPage.inputValue('#range'), '24h');
+      const changedRange = blockedPage.waitForResponse(response => response.url().includes('dashboard-summary?range=7d'));
+      await blockedPage.selectOption('#range', '7d');
+      assert.equal((await changedRange).status(), 200);
+    } finally { await blockedContext.close(); }
     assert.deepEqual(errors, []);
-    console.log(JSON.stringify({ browser: browser.version(), records: 12000, filteredRecords: 4000, firstRenderMs, initialHeap, sampledPeakHeap, finalHeap: await heap(), chunkRequests, injectedFailures: 1, downloads, pageErrors: errors }, null, 2));
+    console.log(JSON.stringify({ browser: browser.version(), records: 12000, filteredRecords: 4000, firstRenderMs, initialHeap, sampledPeakHeap, finalHeap: await heap(), chunkRequests, injectedFailures: 1, blockedStorage: 'passed', downloads, pageErrors: errors }, null, 2));
   } finally {
     if (browser) await browser.close();
     if (base) await fetch(new URL('/__stop', base), { method: 'POST' }).catch(() => {});

@@ -116,6 +116,9 @@ func (m *modelStats) pruneAccounting(s *RequestStatistics, api *apiStats, model 
 		m.accountingIdentities = nil
 	}
 	for r := range m.accounting.records() {
+		if r.Timestamp.IsZero() {
+			continue
+		}
 		expires := r.Timestamp.Add(s.retention)
 		if s.nextDetailExpiry.IsZero() || expires.Before(s.nextDetailExpiry) {
 			s.nextDetailExpiry = expires

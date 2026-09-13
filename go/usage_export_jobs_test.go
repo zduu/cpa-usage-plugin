@@ -418,7 +418,13 @@ func TestUsageExportJobsShareCapacityAndCancelQueuedWork(t *testing.T) {
 	}
 }
 
-func TestUsageBackupCancellationDoesNotWaitForStatisticsLock(t *testing.T) {
+func TestExportCancellationDoesNotWaitForStatisticsLock(t *testing.T) {
+	for _, kind := range []string{dashboardExportKindUsage, dashboardExportKindEvents} {
+		t.Run(kind, func(t *testing.T) { testExportCancellationDoesNotWaitForStatisticsLock(t, kind) })
+	}
+}
+
+func testExportCancellationDoesNotWaitForStatisticsLock(t *testing.T, kind string) {
 	previous := stats
 	stats = NewRequestStatistics()
 	m := newDashboardExportJobManager()
@@ -431,7 +437,7 @@ func TestUsageBackupCancellationDoesNotWaitForStatisticsLock(t *testing.T) {
 		m.close()
 		stats = previous
 	}()
-	job, status, message := m.createKind(dashboardExportKindUsage, EventsQuery{}, dashboardEventsExportOptions{Format: dashboardExportJSON})
+	job, status, message := m.createKind(kind, EventsQuery{}, dashboardEventsExportOptions{Format: dashboardExportJSON})
 	if status != 202 {
 		t.Fatalf("create: %d %s", status, message)
 	}
@@ -439,7 +445,7 @@ func TestUsageBackupCancellationDoesNotWaitForStatisticsLock(t *testing.T) {
 		current, _ := m.get(job.ID)
 		return current.Status == dashboardExportJobRunning
 	})
-	if !m.deleteKind(job.ID, dashboardExportKindUsage) {
+	if !m.deleteKind(job.ID, kind) {
 		t.Fatal("delete failed")
 	}
 	finished := make(chan struct{})
@@ -450,11 +456,11 @@ func TestUsageBackupCancellationDoesNotWaitForStatisticsLock(t *testing.T) {
 		stats.mu.Unlock()
 		locked = false
 		<-finished
-		t.Fatal("canceled backup worker remained blocked on the statistics lock")
+		t.Fatal("canceled export worker remained blocked on the statistics lock")
 	}
 	for _, file := range []string{job.FilePath, job.FilePath + ".tmp"} {
 		if _, err := os.Stat(file); !os.IsNotExist(err) {
-			t.Fatal("canceled backup retained a file")
+			t.Fatal("canceled export retained a file")
 		}
 	}
 }

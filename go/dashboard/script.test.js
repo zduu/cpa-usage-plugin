@@ -640,6 +640,9 @@ function createDashboardHarness(options = {}) {
     return 'blob:fake';
   };
   context.URL.revokeObjectURL = () => {};
+  if (options.denyStorageReads) localStorage.getItem = () => { throw new Error('storage denied'); };
+  if (options.denyStorageWrites) localStorage.setItem = () => { throw new Error('storage denied'); };
+  if (options.denyStorageAccess) Object.defineProperty(context, 'localStorage', { get() { throw new Error('storage denied'); } });
 
   vm.createContext(context);
   const i18n = fs.readFileSync(path.join(__dirname, 'i18n.js'), 'utf8');
@@ -676,6 +679,40 @@ async function waitFor(fn) {
   }
   throw new Error('condition not met');
 }
+
+test('dashboard loads and changes range when browser storage is unavailable', async () => {
+  for (const denied of ['denyStorageReads', 'denyStorageWrites', 'denyStorageAccess']) {
+    const { document, fetchCalls } = createDashboardHarness({ [denied]: true });
+    await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-events?')));
+    const range = document.getElementById('range');
+    assert.strictEqual(range.value, '24h');
+    range.value = '7d';
+    assert.doesNotThrow(() => range.onchange());
+    await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-summary?range=7d')));
+  }
+});
+
+test('invalid price inputs are rejected before saving instead of becoming free prices', async () => {
+  const { context, document, fetchRequests, downloads } = createDashboardHarness();
+  await waitFor(() => document.getElementById('apiSelect').value === 'openai');
+  document.getElementById('priceModel').value = 'model';
+  const input = document.getElementById('pricePrompt');
+  for (const value of ['invalid', '1e999', '-1']) {
+    input.value = value;
+    await document.getElementById('savePrice').onclick();
+    assert.ok(!fetchRequests.some((r) => r.options.method === 'PUT'), value);
+  }
+  input.value = '';
+  input.validity = { badInput: true };
+  await document.getElementById('savePrice').onclick();
+  assert.ok(!fetchRequests.some((r) => r.options.method === 'PUT'));
+  assert.strictEqual(downloads.filter((d) => d.alert).length, 4);
+  for (const value of ['invalid', '1e999', NaN, Infinity]) {
+    vm.runInContext('timeRules = [{ name: "rule", start: "00:00", end: "01:00" }]', context);
+    vm.runInContext('timeRules[0]', context).prompt = value;
+    assert.throws(() => context.validateTimeRulesClient(context.serializedTimeRules()), /价格|prices/);
+  }
+});
 
 async function openPriceSettings(document) {
   const settings = document.getElementById('priceSettings');
@@ -941,7 +978,7 @@ test('dashboard fallback merges legacy hashless client API stats into a unique h
   assert.strictEqual(rows[0].models[0].total_requests, 2);
 });
 
-test('dashboard fallback merges imported hashless client API group with historical hashes', () => {
+test('dashboard fallback keeps ambiguous imported hashless client API groups separate', () => {
   const { context } = createDashboardHarness();
   const rows = context.coalesceLegacyHashlessClientApiStats([
     { api_key: 'sk******xx', api_key_hash: '', total_requests: 1, total_tokens: 40, models: [] },
@@ -949,10 +986,10 @@ test('dashboard fallback merges imported hashless client API group with historic
     { api_key: 'sk******xx', api_key_hash: 'hash-b', total_requests: 1, total_tokens: 60, models: [] },
   ]);
 
-  assert.strictEqual(rows.length, 1);
+  assert.strictEqual(rows.length, 3);
   assert.strictEqual(rows[0].api_key_hash, '');
-  assert.strictEqual(rows[0].total_requests, 3);
-  assert.strictEqual(rows[0].total_tokens, 220);
+  assert.deepStrictEqual(rows.map((row) => row.total_requests), [1, 1, 1]);
+  assert.deepStrictEqual(rows.map((row) => row.total_tokens), [40, 120, 60]);
 });
 
 test('dashboard fallback keeps different live hashes separate without an imported hashless group', () => {
@@ -1366,6 +1403,28 @@ test('dashboard saves provider-scoped model prices as provider/modelname keys', 
     price: { prompt: 7, completion: 21, cache: 0.7, cache_write: 1.4 },
   });
   assert.match(document.getElementById('priceList').innerHTML, /openrouter\/gpt-4\.1/);
+});
+
+test('closing price lookup discards pending search results', async () => {
+  for (const action of ['Escape', 'Tab', 'select']) {
+    const { context, document } = createDashboardHarness();
+    await waitFor(() => document.getElementById('apiSelect').value === 'openai');
+    await openPriceSettings(document);
+    let runSearch, resolveSearch;
+    context.setTimeout = (fn, delay) => { if (delay === 180) runSearch = fn; return 100; };
+    context.fetchModelPrices = () => new Promise((resolve) => { resolveSearch = resolve; });
+    const input = document.getElementById('priceReferenceModel');
+    input.value = 'gpt';
+    input.oninput();
+    const pending = runSearch();
+    if (action === 'select') context.selectPriceReferenceModel('gpt-4.1');
+    else input.onkeydown({ key: action, preventDefault() {} });
+    assert.strictEqual(document.getElementById('priceReferenceOptions').hidden, true);
+    resolveSearch({ prices: { stale: { prompt: 9 } }, manual_prices: {} });
+    await pending;
+    assert.strictEqual(document.getElementById('priceReferenceOptions').hidden, true, action);
+    assert.ok(!Array.from(context.priceReferenceOptions()).includes('stale'), action);
+  }
 });
 
 test('price lookup shows the bare manual fallback used by a provider-scoped model', async () => {
@@ -1924,6 +1983,27 @@ test('dashboard summary polling treats empty 200 with matching etag as cached 30
   assert.ok(!document.getElementById('eventsCount').textContent.includes('共 0 条'));
 });
 
+test('dashboard renders cached summary when recovering from fallback or errors with 304', async () => {
+  for (const failFallback of [false, true]) {
+    const { context, document } = createDashboardHarness({ dashboardEtags: true });
+    await waitFor(() => document.getElementById('apiDetail').innerHTML.includes('deepseek-v4-flash-free'));
+    const fetch = context.fetch;
+    let failing = true;
+    context.fetch = (url, options) => {
+      if (failing && (url.includes('dashboard-summary') || (failFallback && url.includes('dashboard-data')))) {
+        return Promise.reject(new Error('temporarily unavailable'));
+      }
+      return fetch(url, options);
+    };
+    await context.load();
+    assert.match(document.getElementById('updated').textContent, failFallback ? /temporarily unavailable/ : /兼容模式/);
+    failing = false;
+    await context.load();
+    assert.strictEqual(document.getElementById('totalRequests').textContent, '1,200');
+    assert.doesNotMatch(document.getElementById('updated').textContent, /兼容模式|temporarily unavailable/);
+  }
+});
+
 test('dashboard api detail refresh keeps cached content while loading', async () => {
   const { context, document } = createDashboardHarness();
 
@@ -2044,6 +2124,36 @@ test('dashboard fallback aggregates cache reads with v2 semantics', () => {
   assert.strictEqual(model.providers[0].cached_tokens, 40);
   context.cacheModelRow = model;
   assert.ok(Math.abs(vm.runInContext('cacheRate(cacheModelRow)', context) - (40 / 102 * 100)) < 1e-9);
+});
+
+test('dashboard fallback includes archived accounting in ranges and detail-derived aggregates', () => {
+  const { context } = createDashboardHarness();
+  const now = Date.now();
+  const detail = (hours, failed) => ({
+    timestamp: new Date(now - hours * 3600000).toISOString(),
+    provider: 'openai', model: 'gpt-4.1', api_key: 'sk-******test', api_key_hash: 'test-hash',
+    failed, latency_ms: 100, tokens: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+  });
+  const snapshot = {
+    total_requests: 3, success_count: 2, failure_count: 1, total_tokens: 45,
+    input_tokens: 30, output_tokens: 15,
+  };
+  const data = {
+    generated_at: new Date(now).toISOString(),
+    usage: { ...snapshot, apis: { openai: { ...snapshot, models: {
+      'gpt-4.1': { ...snapshot, details: [detail(1, false)], accounting: [detail(2, true), detail(48, false)] },
+    } } } },
+  };
+  for (const range of ['24h', 'all']) {
+    const result = context.buildSummaryFromFullUsage(data, range);
+    const count = range === '24h' ? 2 : 3;
+    assert.strictEqual(result.usage.total_requests, count, range);
+    assert.strictEqual(result.usage.total_tokens, count * 15, range);
+    assert.strictEqual(result.model_stats[0].total_requests, count, range);
+    assert.strictEqual(result.source_stats[0].total_requests, count, range);
+    assert.strictEqual(result.client_api_stats[0].total_requests, count, range);
+    assert.strictEqual(result.health_grid.reduce((total, cell) => total + cell.total, 0), 3, range);
+  }
 });
 
 test('dashboard fallback range uses detail model instead of outer alias key', async () => {
