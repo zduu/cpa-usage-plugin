@@ -19,10 +19,10 @@ import (
 
 const (
 	sqliteLedgerApplicationID = 0x43504155 // CPAU
-	sqliteLedgerSchemaVersion = 4
+	sqliteLedgerSchemaVersion = 7
 	sqliteLedgerBatchRecords  = 256
 	sqliteLedgerBatchBytes    = 8 << 20
-	sqliteLedgerRecordBytes   = 1 << 20
+	sqliteLedgerRecordBytes   = 1 << 20 // Inline envelope/keys/state, not a spilled request limit.
 	sqliteLedgerPageRecords   = 512
 	sqliteLedgerReadLifetime  = 30 * time.Second
 )
@@ -212,6 +212,30 @@ func (s *sqliteLedger) initialize(ctx context.Context) error {
 			return err
 		}
 	}
+	if version == 4 {
+		// Schema 4 projections predate prefix verification. Preserve their
+		// bytes/nodes, but format 1 checkpoints must be reverified and rebuilt
+		// before use by the format 2 projector. Authority is unchanged.
+		if _, err := tx.ExecContext(ctx, sqliteMigrationProjectionPrefixSchema); err != nil {
+			return err
+		}
+	}
+	if version < 6 {
+		if err := initializeSQLiteLedgerValues(ctx, tx); err != nil {
+			return err
+		}
+	}
+	if err := validateSQLiteLedgerValues(ctx, tx); err != nil {
+		return err
+	}
+	if version < 7 {
+		if _, err := tx.ExecContext(ctx, sqliteMigrationSnapshotSchema); err != nil {
+			return err
+		}
+	}
+	if err := validateSQLiteSnapshotSchema(ctx, tx); err != nil {
+		return err
+	}
 	var generation int64
 	if err := tx.QueryRowContext(ctx, "SELECT generation FROM ledger_meta WHERE singleton=1").Scan(&generation); err != nil {
 		return err
@@ -266,7 +290,22 @@ func (s *sqliteLedger) Apply(ctx context.Context, mutations []sqliteLedgerMutati
 // ApplyState commits request mutations, derived state and migration progress
 // in one generation. State values are opaque here: the runtime coordinator
 // owns aggregate/residual/config semantics and must supply version checks.
+// Its existing per-record budget remains a contract for bounded callers;
+// migration of larger legacy records must explicitly use ApplyLargeState.
 func (s *sqliteLedger) ApplyState(ctx context.Context, mutations []sqliteLedgerMutation, states []sqliteLedgerStateMutation, progress *sqliteLedgerProgress) (ids []int64, err error) {
+	return s.applyState(ctx, mutations, states, progress, false)
+}
+
+// ApplyLargeState permits large legacy values without changing the bounded
+// Apply/ApplyState contract. One oversized request may exceed the ordinary
+// batch byte budget; its chunks, state and cursor commit in the SAME
+// transaction. Multi-record batches remain bounded and must be split by the
+// caller. Memory/work still depend on the largest request, not a hard RSS cap.
+func (s *sqliteLedger) ApplyLargeState(ctx context.Context, mutations []sqliteLedgerMutation, states []sqliteLedgerStateMutation, progress *sqliteLedgerProgress) (ids []int64, err error) {
+	return s.applyState(ctx, mutations, states, progress, true)
+}
+
+func (s *sqliteLedger) applyState(ctx context.Context, mutations []sqliteLedgerMutation, states []sqliteLedgerStateMutation, progress *sqliteLedgerProgress, allowLarge bool) (ids []int64, err error) {
 	parent := ctx
 	defer func() {
 		if err != nil && parent.Err() != nil {
@@ -318,8 +357,9 @@ func (s *sqliteLedger) ApplyState(ctx context.Context, mutations []sqliteLedgerM
 	if err := applySQLiteLedgerStates(ctx, tx, revision, states); err != nil {
 		return nil, err
 	}
-	bytes := stateBytes
+	bytes := int64(stateBytes)
 	oldIdentities := make(map[int64]struct{})
+	oldValues := make(map[int64]struct{})
 	for _, mutation := range mutations {
 		r := mutation.Record
 		if r.ID < 0 || (r.ID == 0 && mutation.Delete) || (r.ID != 0 && r.Revision <= 0) {
@@ -327,13 +367,17 @@ func (s *sqliteLedger) ApplyState(ctx context.Context, mutations []sqliteLedgerM
 		}
 		if r.ID != 0 {
 			var identityID int64
-			if err := tx.QueryRowContext(ctx, "SELECT identity_id FROM ledger_records WHERE id=? AND revision=?", r.ID, r.Revision).Scan(&identityID); err != nil {
+			var valueID sql.NullInt64
+			if err := tx.QueryRowContext(ctx, "SELECT identity_id,payload_value FROM ledger_records WHERE id=? AND revision=?", r.ID, r.Revision).Scan(&identityID, &valueID); err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
 					return nil, errSQLiteLedgerConflict
 				}
 				return nil, err
 			}
 			oldIdentities[identityID] = struct{}{}
+			if valueID.Valid {
+				oldValues[valueID.Int64] = struct{}{}
+			}
 		}
 		if mutation.Delete {
 			result, err := tx.ExecContext(ctx, "DELETE FROM ledger_records WHERE id=? AND revision=?", r.ID, r.Revision)
@@ -343,26 +387,53 @@ func (s *sqliteLedger) ApplyState(ctx context.Context, mutations []sqliteLedgerM
 			ids = append(ids, r.ID)
 			continue
 		}
-		identity, payload, err := encodeSQLiteLedgerRecord(r)
+		encodingBudget := int64(sqliteLedgerRecordBytes)
+		if allowLarge {
+			encodingBudget = 0
+		}
+		if len(mutations) > 1 {
+			remaining := sqliteLedgerBatchBytes - bytes
+			if remaining <= 0 {
+				return nil, errSQLiteLedgerBudget
+			}
+			if encodingBudget == 0 || remaining < encodingBudget {
+				encodingBudget = remaining
+			}
+		}
+		identity, payload, err := encodeSQLiteLedgerRecord(r, encodingBudget)
 		if err != nil {
 			return nil, err
 		}
 		zone, offset := r.Detail.Timestamp.Zone()
-		recordBytes := len(identity) + len(payload) + len(r.API) + len(r.Model) + len(zone)
-		bytes += recordBytes
-		if recordBytes > sqliteLedgerRecordBytes || bytes > sqliteLedgerBatchBytes {
+		recordBytes, valid := sqliteLedgerCombinedBytes(int64(len(identity)), int64(len(payload)), int64(len(r.API)), int64(len(r.Model)), int64(len(zone)))
+		if !valid || (!allowLarge && recordBytes > sqliteLedgerRecordBytes) {
 			return nil, errSQLiteLedgerBudget
 		}
-		if _, err := tx.ExecContext(ctx, "INSERT INTO ledger_identities(payload) VALUES(?) ON CONFLICT(payload) DO NOTHING", identity); err != nil {
+		bytes, valid = sqliteLedgerCombinedBytes(bytes, recordBytes)
+		if !valid || (bytes > sqliteLedgerBatchBytes && !(allowLarge && len(mutations) == 1 && recordBytes > sqliteLedgerBatchBytes)) {
+			return nil, errSQLiteLedgerBudget
+		}
+		identity, identityValue, err := storeSQLiteLedgerValue(ctx, tx, "identity", identity)
+		if err != nil {
+			return nil, err
+		}
+		payload, payloadValue, err := storeSQLiteLedgerValue(ctx, tx, "request", payload)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT INTO ledger_identities(payload,payload_value) VALUES(?,?) ON CONFLICT(payload) DO NOTHING", identity, identityValue); err != nil {
 			return nil, err
 		}
 		var identityID int64
-		if err := tx.QueryRowContext(ctx, "SELECT id FROM ledger_identities WHERE payload=?", identity).Scan(&identityID); err != nil {
+		if err := tx.QueryRowContext(ctx, "SELECT id FROM ledger_identities WHERE payload=? AND payload_value IS ?", identity, identityValue).Scan(&identityID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil, errSQLiteLedgerValueCorrupt
+			}
 			return nil, err
 		}
-		args := []any{revision, identityID, r.API, r.Model, r.Detail.Timestamp.Unix(), r.Detail.Timestamp.Nanosecond(), zone, offset, r.Detail.Timestamp.IsZero(), r.Archived, payload}
+		args := []any{revision, identityID, r.API, r.Model, r.Detail.Timestamp.Unix(), r.Detail.Timestamp.Nanosecond(), zone, offset, r.Detail.Timestamp.IsZero(), r.Archived, payload, payloadValue}
 		if r.ID == 0 {
-			result, err := tx.ExecContext(ctx, "INSERT INTO ledger_records(revision,identity_id,api,model_group,seconds,nanos,zone,utc_offset,zero_time,archived,payload) VALUES(?,?,?,?,?,?,?,?,?,?,?)", args...)
+			result, err := tx.ExecContext(ctx, "INSERT INTO ledger_records(revision,identity_id,api,model_group,seconds,nanos,zone,utc_offset,zero_time,archived,payload,payload_value) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", args...)
 			if err != nil {
 				return nil, err
 			}
@@ -372,7 +443,7 @@ func (s *sqliteLedger) ApplyState(ctx context.Context, mutations []sqliteLedgerM
 			}
 		} else {
 			args = append(args, r.ID, r.Revision)
-			result, err := tx.ExecContext(ctx, "UPDATE ledger_records SET revision=?,identity_id=?,api=?,model_group=?,seconds=?,nanos=?,zone=?,utc_offset=?,zero_time=?,archived=?,payload=? WHERE id=? AND revision=?", args...)
+			result, err := tx.ExecContext(ctx, "UPDATE ledger_records SET revision=?,identity_id=?,api=?,model_group=?,seconds=?,nanos=?,zone=?,utc_offset=?,zero_time=?,archived=?,payload=?,payload_value=? WHERE id=? AND revision=?", args...)
 			if err := sqliteRequireChanged(result, err); err != nil {
 				return nil, err
 			}
@@ -382,7 +453,18 @@ func (s *sqliteLedger) ApplyState(ctx context.Context, mutations []sqliteLedgerM
 	// Only examine identities touched by this bounded batch. A full dictionary
 	// sweep on every write would recreate the history-dependent hot path.
 	for identityID := range oldIdentities {
-		if _, err := tx.ExecContext(ctx, "DELETE FROM ledger_identities WHERE id=? AND NOT EXISTS(SELECT 1 FROM ledger_records WHERE identity_id=?)", identityID, identityID); err != nil {
+		var valueID sql.NullInt64
+		err := tx.QueryRowContext(ctx, `DELETE FROM ledger_identities WHERE id=?
+ AND NOT EXISTS(SELECT 1 FROM ledger_records WHERE identity_id=?) RETURNING payload_value`, identityID, identityID).Scan(&valueID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+		if err == nil && valueID.Valid {
+			oldValues[valueID.Int64] = struct{}{}
+		}
+	}
+	for valueID := range oldValues {
+		if err := removeUnusedSQLiteLedgerValue(ctx, tx, valueID); err != nil {
 			return nil, err
 		}
 	}
@@ -409,7 +491,7 @@ func sqliteRequireChanged(result sql.Result, err error) error {
 	return nil
 }
 
-func encodeSQLiteLedgerRecord(r sqliteLedgerRecord) ([]byte, []byte, error) {
+func encodeSQLiteLedgerRecord(r sqliteLedgerRecord, encodingBudget int64) ([]byte, []byte, error) {
 	d := r.Detail
 	if year := d.Timestamp.Year(); year < 0 || year > 9999 {
 		return nil, nil, errors.New("sqlite timestamp is outside the supported JSON year range")
@@ -419,9 +501,14 @@ func encodeSQLiteLedgerRecord(r sqliteLedgerRecord) ([]byte, []byte, error) {
 		// Use exactly the memory ledger's field-retention contract.
 		d = (accountingRecord{Identity: &fields, Timestamp: d.Timestamp, Correlation: d.Correlation, Tokens: d.Tokens, LatencyMs: d.LatencyMs, TTFTMs: d.TTFTMs, Failure: d.Failure, StatusCode: d.StatusCode, Failed: d.Failed, Synthetic: d.TimestampSynthetic}).detail()
 	}
-	// Bound the encoder's input before it allocates an escaped JSON buffer.
-	// The exact encoded byte limit is checked by Apply as well.
+	// Sort keys stay inline until a lossless oversized-key ordering policy is
+	// implemented. Large request/identity fields are not silently truncated.
 	zone, _ := d.Timestamp.Zone()
+	if len(r.API) > sqliteLedgerRecordBytes || len(r.Model) > sqliteLedgerRecordBytes-len(r.API) || len(zone) > sqliteLedgerRecordBytes-len(r.API)-len(r.Model) {
+		return nil, nil, errSQLiteLedgerBudget
+	}
+	// A multi-record batch also bounds the encoder's input before allocating
+	// escaped JSON. A single large record is deliberately allowed through.
 	minimum := len(r.API) + len(r.Model) + len(zone) + len(d.Model) + len(d.Provider) + len(d.Source) + len(d.AuthIndex) + len(d.AuthID) + len(d.AuthType) + len(d.APIKey) + len(d.APIKeyHash) + len(d.BaseURL) + len(d.RequestedModel) + len(d.ExecutorType) + len(d.Endpoint) + len(d.Failure)
 	minimum += len(d.Thinking.Intensity) + len(d.Thinking.Mode) + len(d.Thinking.Level)
 	if d.Correlation != nil {
@@ -433,7 +520,7 @@ func encodeSQLiteLedgerRecord(r sqliteLedgerRecord) ([]byte, []byte, error) {
 			minimum += len(value) + 2
 		}
 	}
-	if minimum > sqliteLedgerRecordBytes {
+	if encodingBudget > 0 && int64(minimum) > encodingBudget {
 		return nil, nil, errSQLiteLedgerBudget
 	}
 	identity, err := json.Marshal(sqliteLedgerIdentity{Fields: fields})
@@ -570,8 +657,21 @@ func sqliteLedgerPageQuery(query sqliteLedgerQuery, after *sqliteLedgerRecord, l
 		args = append(args, -after.Detail.Timestamp.Unix(), -int64(after.Detail.Timestamp.Nanosecond()), after.API, after.Model, after.ID)
 	}
 	args = append(args, limit)
-	return `SELECT r.id,r.revision,r.api,r.model_group,r.seconds,r.nanos,r.zone,r.utc_offset,r.zero_time,r.archived,i.payload,r.payload
- FROM ledger_records r JOIN ledger_identities i ON i.id=r.identity_id WHERE ` + strings.Join(where, " AND ") + ` ORDER BY r.sort_seconds,r.sort_nanos,r.api,r.model_group,r.id LIMIT ?`, args, nil
+	// CASE guards driver copies, including with the comparison-only pure-Go
+	// driver. Large values are only markers here; preflight their logical size
+	// before deciding whether the page has room to decode another record.
+	return fmt.Sprintf(`SELECT r.id,r.revision,
+ CASE WHEN length(CAST(r.api AS BLOB))<=%d THEN r.api ELSE NULL END,
+ CASE WHEN length(CAST(r.model_group AS BLOB))<=%d THEN r.model_group ELSE NULL END,
+ r.seconds,r.nanos,
+ CASE WHEN length(CAST(r.zone AS BLOB))<=%d THEN r.zone ELSE NULL END,
+ r.utc_offset,r.zero_time,r.archived,
+ CASE WHEN length(CAST(i.payload AS BLOB))<=%d THEN i.payload ELSE NULL END,
+ CASE WHEN length(CAST(r.payload AS BLOB))<=%d THEN r.payload ELSE NULL END,
+ i.payload_value,iv.size,r.payload_value,rv.size
+ FROM ledger_records r LEFT JOIN ledger_identities i ON i.id=r.identity_id
+ LEFT JOIN ledger_values iv ON iv.id=i.payload_value
+ LEFT JOIN ledger_values rv ON rv.id=r.payload_value WHERE `, sqliteLedgerRecordBytes, sqliteLedgerRecordBytes, sqliteLedgerRecordBytes, sqliteLedgerRecordBytes, sqliteLedgerRecordBytes) + strings.Join(where, " AND ") + ` ORDER BY r.sort_seconds,r.sort_nanos,r.api,r.model_group,r.id LIMIT ?`, args, nil
 }
 
 func (v *sqliteLedgerView) readPage(statement string, args []any) ([]sqliteLedgerRecord, error) {
@@ -583,40 +683,86 @@ func (v *sqliteLedgerView) readPage(statement string, args []any) ([]sqliteLedge
 		return nil, err
 	}
 	defer rows.Close()
-	result := make([]sqliteLedgerRecord, 0, args[len(args)-1].(int))
-	bytes := 0
-	for rows.Next() {
-		var record sqliteLedgerRecord
-		var seconds, nanos int64
-		var offset int
-		var zone string
-		var zero bool
-		var identity, payload []byte
-		if err := rows.Scan(&record.ID, &record.Revision, &record.API, &record.Model, &seconds, &nanos, &zone, &offset, &zero, &record.Archived, &identity, &payload); err != nil {
-			return nil, err
-		}
-		recordBytes := len(identity) + len(payload) + len(record.API) + len(record.Model) + len(zone)
-		bytes += recordBytes
-		if bytes > sqliteLedgerBatchBytes && len(result) > 0 {
-			break // The next page resumes after the last returned record.
-		}
-		if recordBytes > sqliteLedgerRecordBytes {
-			return nil, errSQLiteLedgerBudget
-		}
+	type pendingRecord struct {
+		index                       int
+		identity, payload           []byte
+		identityValue, payloadValue sql.NullInt64
+		identitySize, payloadSize   sql.NullInt64
+	}
+	decode := func(record *sqliteLedgerRecord, next pendingRecord) error {
+		stamp := record.Detail.Timestamp
 		var id sqliteLedgerIdentity
-		if err := json.Unmarshal(identity, &id); err != nil {
-			return nil, err
+		if err := decodeSQLiteLedgerValue(v.ctx, v.tx, next.identity, next.identityValue, next.identitySize, "identity", &id); err != nil {
+			return err
 		}
-		if err := json.Unmarshal(payload, &record.Detail); err != nil {
-			return nil, err
+		if err := decodeSQLiteLedgerValue(v.ctx, v.tx, next.payload, next.payloadValue, next.payloadSize, "request", &record.Detail); err != nil {
+			return err
 		}
 		d, f := &record.Detail, id.Fields
 		d.Model, d.Provider, d.Source, d.AuthIndex, d.AuthID, d.AuthType = f.Model, f.Provider, f.Source, f.AuthIndex, f.AuthID, f.AuthType
 		d.APIKey, d.APIKeyHash, d.BaseURL, d.RequestedModel, d.ExecutorType, d.Endpoint = f.APIKey, f.APIKeyHash, f.BaseURL, f.RequestedModel, f.ExecutorType, f.Endpoint
-		if !zero {
-			d.Timestamp = time.Unix(seconds, nanos).In(time.FixedZone(zone, offset))
-		}
-		result = append(result, record)
+		d.Timestamp = stamp
+		return nil
 	}
-	return result, rows.Err()
+	result := make([]sqliteLedgerRecord, 0, args[len(args)-1].(int))
+	var pending []pendingRecord
+	bytes := int64(0)
+	for rows.Next() {
+		next := pendingRecord{index: len(result)}
+		result = append(result, sqliteLedgerRecord{})
+		record := &result[next.index]
+		var seconds, nanos int64
+		var offset int
+		var api, model, zone sql.NullString
+		var zero bool
+		if err := rows.Scan(&record.ID, &record.Revision, &api, &model, &seconds, &nanos, &zone, &offset, &zero, &record.Archived, &next.identity, &next.payload, &next.identityValue, &next.identitySize, &next.payloadValue, &next.payloadSize); err != nil {
+			return nil, err
+		}
+		if !api.Valid || !model.Valid || !zone.Valid || len(api.String)+len(model.String)+len(zone.String) > sqliteLedgerRecordBytes {
+			return nil, errSQLiteLedgerBudget
+		}
+		identityBytes, err := validateSQLiteLedgerValueReference(next.identity, next.identityValue, next.identitySize)
+		if err != nil {
+			return nil, err
+		}
+		payloadBytes, err := validateSQLiteLedgerValueReference(next.payload, next.payloadValue, next.payloadSize)
+		if err != nil {
+			return nil, err
+		}
+		recordBytes, valid := sqliteLedgerCombinedBytes(identityBytes, payloadBytes, int64(len(api.String)), int64(len(model.String)), int64(len(zone.String)))
+		if !valid {
+			return nil, errSQLiteLedgerValueCorrupt
+		}
+		if next.index > 0 && recordBytes > int64(sqliteLedgerBatchBytes)-bytes {
+			result = result[:next.index]
+			break // Do not materialize the next large value before paging.
+		}
+		bytes += recordBytes
+		record.API, record.Model = api.String, model.String
+		if !zero {
+			record.Detail.Timestamp = time.Unix(seconds, nanos).In(time.FixedZone(zone.String, offset))
+		}
+		if next.identityValue.Valid || next.payloadValue.Valid {
+			pending = append(pending, next)
+		} else if err := decode(record, next); err != nil {
+			// Inline JSON needs no nested SQL query, so do not retain a second
+			// page of record headers/raw values for the common small path.
+			return nil, err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for _, next := range pending {
+		if err := decode(&result[next.index], next); err != nil {
+			return nil, err
+		}
+	}
+	if err := v.contextError(); err != nil {
+		return nil, err
+	}
+	return result, nil
 }

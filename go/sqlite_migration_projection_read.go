@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"strconv"
 )
 
@@ -19,9 +21,13 @@ const sqliteProjectionPageBytes = 256 << 10
 // Container/null events distinguish nil maps/slices from empty ones. Consumers
 // must stage derived output until the entire walk returns successfully.
 type sqliteMigrationProjectedItem struct {
+	NodeID      int64
 	Path        []string
 	Kind, Scope string
 	Value       any
+	// Filled only for semantic analysis. This binds ordered, verified source
+	// fragments without re-encoding a potentially large request.
+	ValueDigest [sha256.Size]byte
 }
 
 type sqliteProjectionNode struct {
@@ -41,11 +47,15 @@ type sqliteProjectionFragment struct {
 }
 
 type sqliteProjectionReader struct {
-	s      *sqliteLedger
-	ctx    context.Context
-	source sqliteMigrationSource
-	chunk  []byte
+	s       *sqliteLedger
+	ctx     context.Context
+	source  sqliteMigrationSource
+	chunk   []byte
 	chunkAt int64
+	// One bounded page of single-fragment leaves. Duplicate-array elements
+	// with multiple fragments use the paged merge path instead.
+	singleValues map[int64]sqliteProjectionFragment
+	valueHasher  hash.Hash
 }
 
 // WalkMigrationProjection reads the effective typed source with keyset pages.
@@ -69,6 +79,10 @@ func (s *sqliteLedger) WalkMigrationProjection(parent context.Context, path stri
 	}
 	ctx, cancel := s.operationContext(parent, 0)
 	defer cancel()
+	return s.walkMigrationProjection(ctx, path, consume, false)
+}
+
+func (s *sqliteLedger) walkMigrationProjection(ctx context.Context, path string, consume func(sqliteMigrationProjectedItem) error, valueDigests bool) (result sqliteMigrationParseResult, err error) {
 	path, err = canonicalSQLiteMigrationPath(path)
 	if err != nil {
 		return result, err
@@ -81,7 +95,7 @@ func (s *sqliteLedger) WalkMigrationProjection(parent context.Context, path stri
 	if err != nil {
 		return result, err
 	}
-	if !source.Ready || !found || !p.Complete {
+	if !source.Ready || !found || !p.Complete || p.Format != sqliteProjectionFormat {
 		return result, errSQLiteProjectionIncomplete
 	}
 	// Recheck the whole immutable source before exposing values, including
@@ -91,6 +105,9 @@ func (s *sqliteLedger) WalkMigrationProjection(parent context.Context, path stri
 		return result, err
 	}
 	r := sqliteProjectionReader{s: s, ctx: ctx, source: source, chunkAt: -1}
+	if valueDigests {
+		r.valueHasher = sha256.New()
+	}
 	var root sqliteProjectionNode
 	var owner string
 	err = s.reader.QueryRowContext(ctx, "SELECT source,id,kind,scope,length FROM migration_projection_nodes WHERE id=?", p.Root).Scan(&owner, &root.ID, &root.Kind, &root.Scope, &root.Length)
@@ -113,27 +130,27 @@ func (r *sqliteProjectionReader) walk(node sqliteProjectionNode, path []string, 
 	if len(path) > sqliteProjectionMaxDepth {
 		return errors.New("sqlite migration projection depth exceeds schema")
 	}
-	emit := func(kind string, value any) error {
+	emit := func(kind string, value any, digest [sha256.Size]byte) error {
 		if err := r.ctx.Err(); err != nil {
 			return err
 		}
-		return consume(sqliteMigrationProjectedItem{Path: append([]string(nil), path...), Kind: kind, Scope: node.Scope, Value: value})
+		return consume(sqliteMigrationProjectedItem{NodeID: node.ID, Path: append([]string(nil), path...), Kind: kind, Scope: node.Scope, Value: value, ValueDigest: digest})
 	}
 	switch node.Kind {
 	case "value", "invalid":
-		value, err := r.decodeValue(node)
+		value, digest, err := r.decodeValue(node)
 		if err != nil {
 			return err
 		}
-		return emit(node.Kind, value)
+		return emit(node.Kind, value, digest)
 	case "null":
-		return emit("null", nil)
+		return emit("null", nil, [sha256.Size]byte{})
 	case "object", "array":
 	default:
 		return errors.New("invalid sqlite migration projection node kind")
 	}
 	if node.Scope != "jsonl" {
-		if err := emit(node.Kind, nil); err != nil {
+		if err := emit(node.Kind, nil, [sha256.Size]byte{}); err != nil {
 			return err
 		}
 	}
@@ -146,6 +163,9 @@ func (r *sqliteProjectionReader) walk(node sqliteProjectionNode, path []string, 
 		}
 		if len(page) == 0 {
 			break
+		}
+		if err := r.preloadSingleValues(page); err != nil {
+			return err
 		}
 		for _, edge := range page {
 			if node.Kind == "array" {
@@ -168,30 +188,71 @@ func (r *sqliteProjectionReader) walk(node sqliteProjectionNode, path []string, 
 	if node.Scope == "jsonl" {
 		return nil
 	}
-	return emit("end", nil)
+	return emit("end", nil, [sha256.Size]byte{})
+}
+
+// Avoid one SQL query (and database/sql cancellation goroutine) per record.
+// Most leaves have exactly one source fragment. Fetch at most one page plus
+// a lookahead row, and cache ONLY groups whose completeness is established.
+// Reused slice elements can have arbitrarily many fragments; never accumulate
+// such a group just to fill this optimization cache.
+func (r *sqliteProjectionReader) preloadSingleValues(edges []sqliteProjectionEdge) error {
+	var args []any
+	query := "SELECT node,event,start,finish,checksum FROM migration_projection_values WHERE node IN ("
+	for _, edge := range edges {
+		if edge.Node.Kind != "value" && edge.Node.Kind != "invalid" {
+			continue
+		}
+		if len(args) > 0 {
+			query += ","
+		}
+		query += "?"
+		args = append(args, edge.Node.ID)
+	}
+	if len(args) < 2 {
+		return nil
+	}
+	cache := make(map[int64]sqliteProjectionFragment, len(args))
+	query += ") ORDER BY node,event LIMIT ?"
+	args = append(args, sqliteProjectionPageNodes+1)
+	rows, err := r.s.reader.QueryContext(r.ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var previous int64
+	var first sqliteProjectionFragment
+	var inGroup, scanned int
+	for rows.Next() {
+		var node int64
+		var fragment sqliteProjectionFragment
+		if err := rows.Scan(&node, &fragment.Event, &fragment.Start, &fragment.End, &fragment.Checksum); err != nil {
+			return err
+		}
+		if node != previous {
+			if inGroup == 1 {
+				cache[previous] = first
+			}
+			previous, first, inGroup = node, fragment, 0
+		}
+		if fragment.Event <= 0 || fragment.Start < 0 || fragment.End <= fragment.Start || fragment.End > r.source.Size || len(fragment.Checksum) != sha256.Size {
+			return errors.New("invalid sqlite migration projection prefetched fragment")
+		}
+		inGroup++
+		scanned++
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if scanned < sqliteProjectionPageNodes+1 && inGroup == 1 {
+		cache[previous] = first
+	}
+	r.singleValues = cache
+	return nil
 }
 
 func (r *sqliteProjectionReader) children(parent sqliteProjectionNode, after *sqliteProjectionEdge) ([]sqliteProjectionEdge, error) {
-	query := `SELECT e.name,e.position,n.source,n.id,n.kind,n.scope,n.length FROM migration_projection_edges e
- JOIN migration_projection_nodes n ON n.id=e.child WHERE e.parent=?`
-	args := []any{parent.ID}
-	if parent.Kind == "array" {
-		query += " AND e.position>=0 AND e.position<?"
-		args = append(args, parent.Length)
-		if after != nil {
-			query += " AND e.position>?"
-			args = append(args, after.Position)
-		}
-		query += " ORDER BY e.position"
-	} else {
-		if after != nil {
-			query += " AND e.name>?"
-			args = append(args, []byte(after.Name))
-		}
-		query += " ORDER BY e.name"
-	}
-	query += " LIMIT ?"
-	args = append(args, sqliteProjectionPageNodes)
+	query, args := sqliteProjectionChildrenQuery(parent, after)
 	rows, err := r.s.reader.QueryContext(r.ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -217,6 +278,33 @@ func (r *sqliteProjectionReader) children(parent sqliteProjectionNode, after *sq
 	return page, rows.Err()
 }
 
+func sqliteProjectionChildrenQuery(parent sqliteProjectionNode, after *sqliteProjectionEdge) (string, []any) {
+	query := `SELECT e.name,e.position,n.source,n.id,n.kind,n.scope,n.length FROM migration_projection_edges e
+ JOIN migration_projection_nodes n ON n.id=e.child WHERE e.parent=?`
+	args := []any{parent.ID}
+	if parent.Kind == "array" {
+		position := int64(-1)
+		if after != nil {
+			position = after.Position
+		}
+		// Exactly one lower bound. With a partial index and both >=0 and
+		// >cursor, SQLite may seek to ZERO and post-filter every prior row on
+		// every page, despite EXPLAIN QUERY PLAN reporting an index SEARCH.
+		query += " AND e.position>? AND e.position<?"
+		args = append(args, position, parent.Length)
+		query += " ORDER BY e.position"
+	} else {
+		if after != nil {
+			query += " AND e.name>?"
+			args = append(args, []byte(after.Name))
+		}
+		query += " ORDER BY e.name"
+	}
+	query += " LIMIT ?"
+	args = append(args, sqliteProjectionPageNodes)
+	return query, args
+}
+
 func (r *sqliteProjectionReader) fragments(node, after int64) ([]sqliteProjectionFragment, error) {
 	rows, err := r.s.reader.QueryContext(r.ctx, `SELECT event,start,finish,checksum FROM migration_projection_values
  WHERE node=? AND event>? ORDER BY event LIMIT ?`, node, after, sqliteProjectionPageNodes)
@@ -239,7 +327,10 @@ func (r *sqliteProjectionReader) fragments(node, after int64) ([]sqliteProjectio
 	return result, rows.Err()
 }
 
-func (r *sqliteProjectionReader) decodeValue(node sqliteProjectionNode) (any, error) {
+func (r *sqliteProjectionReader) decodeValue(node sqliteProjectionNode) (value any, digest [sha256.Size]byte, err error) {
+	if r.valueHasher != nil {
+		r.valueHasher.Reset()
+	}
 	var target any
 	switch node.Scope {
 	case "detail":
@@ -260,57 +351,80 @@ func (r *sqliteProjectionReader) decodeValue(node sqliteProjectionNode) (any, er
 		target = new(string)
 	case "invalid":
 	default:
-		return nil, fmt.Errorf("invalid sqlite migration projection value scope %q", node.Scope)
+		return nil, digest, fmt.Errorf("invalid sqlite migration projection value scope %q", node.Scope)
 	}
 	var last, values int64
 	var invalid json.RawMessage
-	for {
-		page, err := r.fragments(node.ID, last)
+	decode := func(fragment sqliteProjectionFragment) error {
+		raw, err := r.readFragment(fragment)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		for _, fragment := range page {
-			raw, err := r.readFragment(fragment)
+		if node.Kind == "invalid" {
+			invalid = append(json.RawMessage(nil), raw...)
+		} else if err := json.Unmarshal(raw, target); err != nil {
+			return err
+		}
+		if r.valueHasher != nil {
+			var coordinates [24]byte
+			binary.BigEndian.PutUint64(coordinates[:8], uint64(fragment.Event))
+			binary.BigEndian.PutUint64(coordinates[8:16], uint64(fragment.Start))
+			binary.BigEndian.PutUint64(coordinates[16:], uint64(fragment.End))
+			_, _ = r.valueHasher.Write(coordinates[:])
+			_, _ = r.valueHasher.Write(fragment.Checksum)
+		}
+		values++
+		last = fragment.Event
+		return nil
+	}
+	if fragment, found := r.singleValues[node.ID]; found {
+		if err := decode(fragment); err != nil {
+			return nil, digest, err
+		}
+	} else {
+		for {
+			page, err := r.fragments(node.ID, last)
 			if err != nil {
-				return nil, err
+				return nil, digest, err
 			}
-			if node.Kind == "invalid" {
-				invalid = append(json.RawMessage(nil), raw...)
-			} else if err := json.Unmarshal(raw, target); err != nil {
-				return nil, err
+			for _, fragment := range page {
+				if err := decode(fragment); err != nil {
+					return nil, digest, err
+				}
 			}
-			values++
-			last = fragment.Event
-		}
-		if len(page) < sqliteProjectionPageNodes {
-			break
+			if len(page) < sqliteProjectionPageNodes {
+				break
+			}
 		}
 	}
 	if values == 0 || (node.Kind == "invalid" && values != 1) {
-		return nil, errors.New("sqlite migration projection value has invalid fragment count")
+		return nil, digest, errors.New("sqlite migration projection value has invalid fragment count")
+	}
+	if r.valueHasher != nil {
+		r.valueHasher.Sum(digest[:0])
 	}
 	// Applying successive fragments to ONE typed value also preserves nested
 	// struct/map/null semantics in reused slice elements. Hidden old tail
 	// elements remain on disk until the slice is explicitly cleared.
 	switch value := target.(type) {
 	case *RequestDetail:
-		return *value, nil
+		return *value, digest, nil
 	case *ModelProviderStat:
-		return *value, nil
+		return *value, digest, nil
 	case *TimeSeriesTokenStat:
-		return *value, nil
+		return *value, digest, nil
 	case *persistedDetail:
-		return *value, nil
+		return *value, digest, nil
 	case *int64:
-		return *value, nil
+		return *value, digest, nil
 	case *float64:
-		return *value, nil
+		return *value, digest, nil
 	case *int:
-		return *value, nil
+		return *value, digest, nil
 	case *string:
-		return *value, nil
+		return *value, digest, nil
 	}
-	return invalid, nil
+	return invalid, digest, nil
 }
 
 func (r *sqliteProjectionReader) stagedChunk(position int64) ([]byte, error) {
@@ -333,7 +447,7 @@ func (r *sqliteProjectionReader) stagedChunk(position int64) ([]byte, error) {
 
 func (r *sqliteProjectionReader) readFragment(fragment sqliteProjectionFragment) ([]byte, error) {
 	length := fragment.End - fragment.Start
-	if length <= 0 || int64(int(length)) != length {
+	if fragment.Start < 0 || fragment.End > r.source.Size || length <= 0 || int64(int(length)) != length {
 		return nil, errors.New("sqlite migration projection value size is not representable")
 	}
 	startChunk := fragment.Start / sqliteMigrationChunkBytes * sqliteMigrationChunkBytes

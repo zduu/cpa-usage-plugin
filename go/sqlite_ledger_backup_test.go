@@ -38,7 +38,7 @@ func TestSQLiteBackupIncludesWALAndAtomicState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if backup.Generation != 5 || backup.Schema != 3 || backup.Bytes == 0 {
+	if backup.Generation != 5 || backup.Schema != sqliteLedgerSchemaVersion || backup.Bytes == 0 {
 		t.Fatalf("backup: %+v", backup)
 	}
 	if _, err := verifySQLiteLedgerBackup(ctx, dir); err != nil {
@@ -91,6 +91,66 @@ func TestSQLiteBackupIncludesWALAndAtomicState(t *testing.T) {
 	again, err := verifySQLiteLedgerBackup(ctx, dir)
 	if err != nil || again.SHA256 != backup.SHA256 {
 		t.Fatal("restore changed backup")
+	}
+}
+
+func TestSQLiteBackupPreviousSchemaCanStillRestore(t *testing.T) {
+	for _, schema := range []int{3, 4} {
+		t.Run(fmt.Sprint(schema), func(t *testing.T) {
+			s, _ := testSQLiteLedger(t)
+			ctx := context.Background()
+			if _, err := s.ApplyState(ctx, []sqliteLedgerMutation{{Record: sqliteTestRecord(1)}}, []sqliteLedgerStateMutation{{Name: "old-state", Value: []byte("keep")}}, nil); err != nil {
+				t.Fatal(err)
+			}
+			path := writeSQLiteMigrationSource(t, []byte(projectionModelJSON(`"details":[{}]`)))
+			if _, err := s.StageSource(ctx, path, "snapshot"); err != nil {
+				t.Fatal(err)
+			}
+			if schema == 3 {
+				dropSQLiteProjectionSchemaForTest(t, s)
+			} else {
+				if _, err := s.ProjectMigrationSource(ctx, path); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.writer.Exec(`ALTER TABLE migration_projections DROP COLUMN prefix; UPDATE migration_projections SET format=1;
+ DROP INDEX migration_projection_array; CREATE INDEX migration_projection_array ON migration_projection_edges(parent,position) WHERE position>=0;`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := s.writer.Exec(fmt.Sprintf("PRAGMA user_version=%d", schema)); err != nil {
+				t.Fatal(err)
+			}
+			directory := filepath.Join(t.TempDir(), "previous-backup")
+			backup, err := s.Backup(ctx, directory)
+			if err != nil || backup.Schema != schema {
+				t.Fatalf("previous backup schema rejected: %+v %v", backup, err)
+			}
+			destination := filepath.Join(t.TempDir(), "restored.sqlite")
+			if err := restoreSQLiteLedgerBackup(ctx, directory, destination); err != nil {
+				t.Fatal(err)
+			}
+			restored, err := openSQLiteLedger(ctx, destination)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer restored.Close()
+			if p, err := restored.ProjectMigrationSource(ctx, path); err != nil || !p.Complete {
+				t.Fatalf("restored old staging cannot be projected: %+v %v", p, err)
+			}
+			v, err := restored.ReadView(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer v.Close()
+			state, found, err := v.State("old-state")
+			if err != nil || !found || string(state.Value) != "keep" || v.Generation != 1 || len(sqliteReadAll(t, v, sqliteLedgerQuery{}, 1)) != 1 {
+				t.Fatal("restoring/upgrading old backup changed authority")
+			}
+			again, err := verifySQLiteLedgerBackup(ctx, directory)
+			if err != nil || again.Schema != schema || again.SHA256 != backup.SHA256 {
+				t.Fatal("opening restored copy changed the old backup")
+			}
+		})
 	}
 }
 

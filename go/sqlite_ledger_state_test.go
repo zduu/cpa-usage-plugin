@@ -85,6 +85,7 @@ func TestSQLiteStateUpgradeEmptyDeleteAndValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	dropSQLiteProjectionSchemaForTest(t, s)
 	if _, err = s.writer.Exec("DROP TABLE ledger_state; PRAGMA user_version=2"); err != nil {
 		t.Fatal(err)
 	}

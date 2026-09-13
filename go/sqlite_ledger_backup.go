@@ -200,7 +200,11 @@ func inspectSQLiteBackupDatabase(ctx context.Context, path string) (backup sqlit
 	if err = db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&backup.Schema); err != nil {
 		return backup, err
 	}
-	if backup.ApplicationID != sqliteLedgerApplicationID || backup.Schema != sqliteLedgerSchemaVersion {
+	// Backup format 1 was introduced with schema 3. Additive ledger upgrades
+	// must not make those existing backups unrestorable; opening the restored
+	// inactive copy performs the normal schema upgrade. Future schemas and
+	// schemas predating the backup contract are still rejected.
+	if backup.ApplicationID != sqliteLedgerApplicationID || backup.Schema < 3 || backup.Schema > sqliteLedgerSchemaVersion {
 		return backup, errors.New("unsupported sqlite backup application/schema")
 	}
 	if err = db.QueryRowContext(ctx, "SELECT generation FROM ledger_meta WHERE singleton=1").Scan(&backup.Generation); err != nil {

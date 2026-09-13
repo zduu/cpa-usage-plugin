@@ -2340,6 +2340,14 @@ func (s *RequestStatistics) addStorageSnapshotResidualModelLocked(apiName, model
 }
 
 func normalizeStorageSnapshotDetail(modelName string, detail RequestDetail, now time.Time) RequestDetail {
+	detail = normalizeStorageSnapshotDetailFields(modelName, detail, now)
+	// Native records seed fallback attribution after a restart. Isolated
+	// migration analysis deliberately does not perform this live side effect.
+	authIndexes.Learn(detail.AuthID, detail.AuthIndex)
+	return normalizeStoredClientAPIIdentity(detail)
+}
+
+func normalizeStorageSnapshotDetailFields(modelName string, detail RequestDetail, now time.Time) RequestDetail {
 	detail.Model = normalizeDetailModelName(modelName, detail.Model)
 	detail.CostUSD = nil
 	if detail.Timestamp.IsZero() {
@@ -2354,11 +2362,7 @@ func normalizeStorageSnapshotDetail(modelName string, detail RequestDetail, now 
 	}
 	detail.Tokens.TotalTokens = detailTotalTokensForRequest(detail)
 	detail.Source = cleanImportedDetailSource(detail)
-	// Restored details from native records carry the CPA auth index for their
-	// auth ID; seed the learner so fallback records grouped after a restart
-	// land in the same credential group.
-	authIndexes.Learn(detail.AuthID, detail.AuthIndex)
-	return normalizeStoredClientAPIIdentity(detail)
+	return detail
 }
 
 func normalizeDetailModelName(fallback string, model string) string {
@@ -2484,7 +2488,13 @@ func restoredLatencyAggregate(avgLatencyMs float64, requestCount int64) (int64, 
 	if !(avgLatencyMs > 0) || requestCount <= 0 {
 		return 0, 0
 	}
-	return int64(math.Round(avgLatencyMs * float64(requestCount))), requestCount
+	sum := math.Round(avgLatencyMs * float64(requestCount))
+	// Out-of-range float-to-int conversion is architecture dependent. A
+	// positive legacy average must not wrap to a negative sum on amd64.
+	if sum >= float64(math.MaxInt64) {
+		return math.MaxInt64, requestCount
+	}
+	return int64(sum), requestCount
 }
 
 func restoreAPIAggregatesFromModels(apiSt *apiStats) {

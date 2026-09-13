@@ -220,6 +220,7 @@ func TestSQLiteMigrationSchemaUpgradePreservesLedger(t *testing.T) {
 	want := sqliteReadAll(t, v, sqliteLedgerQuery{}, 10)
 	wantGeneration := v.Generation
 	v.Close()
+	dropSQLiteProjectionSchemaForTest(t, s)
 	if _, err := s.writer.Exec("DROP TABLE migration_chunks; DROP TABLE migration_sources; PRAGMA user_version=1"); err != nil {
 		t.Fatal(err)
 	}

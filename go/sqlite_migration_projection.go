@@ -9,47 +9,51 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"strconv"
 	"strings"
 )
 
 const (
-	sqliteProjectionFormat      = 1
+	sqliteProjectionFormat      = 2
 	sqliteProjectionBatchEvents = 256
 	sqliteProjectionBatchBytes  = 2 << 20
 	sqliteProjectionMaxDepth    = 8
 )
 
 var errSQLiteProjectionIncomplete = errors.New("sqlite migration projection is not complete")
+var errSQLiteProjectionPrefix = errors.New("sqlite migration projection prefix changed")
 
 const sqliteMigrationProjectionSchema = `
-CREATE TABLE migration_projection_nodes (
+CREATE TABLE IF NOT EXISTS migration_projection_nodes (
  id INTEGER PRIMARY KEY AUTOINCREMENT,
  source TEXT NOT NULL REFERENCES migration_sources(source),
  kind TEXT NOT NULL CHECK(kind IN ('object','array','value','null','invalid')),
  scope TEXT NOT NULL, length INTEGER NOT NULL DEFAULT 0 CHECK(length>=0)
 );
-CREATE TABLE migration_projections (
+CREATE TABLE IF NOT EXISTS migration_projections (
  source TEXT PRIMARY KEY REFERENCES migration_sources(source),
  format INTEGER NOT NULL, fingerprint TEXT NOT NULL,
  root INTEGER NOT NULL REFERENCES migration_projection_nodes(id),
  events INTEGER NOT NULL CHECK(events>=0),
+ prefix BLOB NOT NULL CHECK(length(prefix)=32),
  stack BLOB NOT NULL CHECK(length(stack)<=4096),
  complete INTEGER NOT NULL CHECK(complete IN (0,1)),
  result BLOB NOT NULL CHECK(length(result)<=4096)
 ) WITHOUT ROWID;
-CREATE TABLE migration_projection_edges (
+CREATE TABLE IF NOT EXISTS migration_projection_edges (
  parent INTEGER NOT NULL REFERENCES migration_projection_nodes(id),
  name BLOB NOT NULL, position INTEGER NOT NULL CHECK(position>=-1),
  child INTEGER NOT NULL REFERENCES migration_projection_nodes(id),
  PRIMARY KEY(parent,name)
 ) WITHOUT ROWID;
-CREATE INDEX migration_projection_array ON migration_projection_edges(parent,position) WHERE position>=0;
-CREATE TABLE migration_projection_values (
+CREATE INDEX IF NOT EXISTS migration_projection_array ON migration_projection_edges(parent,position,child);
+CREATE TABLE IF NOT EXISTS migration_projection_values (
  node INTEGER NOT NULL REFERENCES migration_projection_nodes(id),
  event INTEGER NOT NULL CHECK(event>0),
  start INTEGER NOT NULL CHECK(start>=0), finish INTEGER NOT NULL CHECK(finish>start),
@@ -57,6 +61,12 @@ CREATE TABLE migration_projection_values (
  PRIMARY KEY(node,event)
 ) WITHOUT ROWID;
 `
+
+const sqliteMigrationProjectionPrefixSchema = `ALTER TABLE migration_projections ADD COLUMN prefix BLOB NOT NULL
+ DEFAULT X'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+ CHECK(length(prefix)=32);
+DROP INDEX migration_projection_array;
+CREATE INDEX migration_projection_array ON migration_projection_edges(parent,position,child);`
 
 type sqliteMigrationProjection struct {
 	Source, Fingerprint string
@@ -75,6 +85,7 @@ type sqliteProjectionFrame struct {
 type sqliteProjectionCheckpoint struct {
 	sqliteMigrationProjection
 	Format int
+	Prefix []byte
 	Stack  []sqliteProjectionFrame
 }
 
@@ -85,18 +96,18 @@ type sqliteProjectionQueryRower interface {
 func readSQLiteProjectionCheckpoint(ctx context.Context, db sqliteProjectionQueryRower, source sqliteMigrationSource) (p sqliteProjectionCheckpoint, found bool, err error) {
 	p.Source = source.Source
 	var stack, result []byte
-	err = db.QueryRowContext(ctx, `SELECT format,fingerprint,root,events,stack,complete,result
- FROM migration_projections WHERE source=?`, source.Source).Scan(&p.Format, &p.Fingerprint, &p.Root, &p.Events, &stack, &p.Complete, &result)
+	err = db.QueryRowContext(ctx, `SELECT format,fingerprint,root,events,prefix,stack,complete,result
+ FROM migration_projections WHERE source=?`, source.Source).Scan(&p.Format, &p.Fingerprint, &p.Root, &p.Events, &p.Prefix, &stack, &p.Complete, &result)
 	if errors.Is(err, sql.ErrNoRows) {
 		return p, false, nil
 	}
 	if err != nil {
 		return p, false, err
 	}
-	if p.Format != sqliteProjectionFormat || p.Fingerprint != source.Fingerprint || p.Root <= 0 || p.Events < 0 || p.Events > source.Size {
+	if (p.Format != 1 && p.Format != sqliteProjectionFormat) || p.Fingerprint != source.Fingerprint || p.Root <= 0 || p.Events < 0 || p.Events > source.Size {
 		return p, false, errSQLiteLedgerConflict
 	}
-	if len(stack) > 4096 || len(result) > 4096 {
+	if len(stack) > 4096 || len(result) > 4096 || len(p.Prefix) != sha256.Size {
 		return p, false, errors.New("sqlite migration projection checkpoint exceeds limit")
 	}
 	if err = json.Unmarshal(stack, &p.Stack); err != nil {
@@ -109,7 +120,7 @@ func readSQLiteProjectionCheckpoint(ctx context.Context, db sqliteProjectionQuer
 		return p, false, errors.New("invalid sqlite migration projection stack")
 	}
 	for _, frame := range p.Stack {
-		if frame.ID <= 0 || (frame.Kind != "array" && frame.Kind != "object") || frame.Length < 0 || frame.Length > source.Size+1 {
+		if frame.ID <= 0 || (frame.Kind != "array" && frame.Kind != "object") || frame.Length < 0 || frame.Length-1 > source.Size {
 			return p, false, errors.New("invalid sqlite migration projection frame")
 		}
 	}
@@ -140,6 +151,7 @@ func (s *sqliteLedger) initializeMigrationProjection(ctx context.Context, source
 		return p, err
 	}
 	p.Format, p.Fingerprint = sqliteProjectionFormat, source.Fingerprint
+	p.Prefix = sha256.New().Sum(nil)
 	if source.Format == "jsonl" {
 		p.Stack = []sqliteProjectionFrame{{ID: p.Root, Kind: kind, Scope: scope}}
 	}
@@ -147,7 +159,8 @@ func (s *sqliteLedger) initializeMigrationProjection(ctx context.Context, source
 	if err != nil {
 		return p, err
 	}
-	if _, err = tx.ExecContext(ctx, "INSERT INTO migration_projections VALUES(?,?,?,?,0,?,0,?)", source.Source, p.Format, source.Fingerprint, p.Root, stack, []byte(`{}`)); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO migration_projections(source,format,fingerprint,root,events,prefix,stack,complete,result)
+ VALUES(?,?,?,?,0,?,?,0,?)`, source.Source, p.Format, source.Fingerprint, p.Root, p.Prefix, stack, []byte(`{}`)); err != nil {
 		return p, err
 	}
 	return p, tx.Commit()
@@ -171,6 +184,10 @@ func (s *sqliteLedger) ProjectMigrationSource(parent context.Context, path strin
 	}()
 	ctx, cancel := s.operationContext(parent, 0)
 	defer cancel()
+	return s.projectMigrationSource(ctx, path, true)
+}
+
+func (s *sqliteLedger) projectMigrationSource(ctx context.Context, path string, canRestart bool) (projection sqliteMigrationProjection, err error) {
 	path, err = canonicalSQLiteMigrationPath(path)
 	if err != nil {
 		return projection, err
@@ -186,15 +203,28 @@ func (s *sqliteLedger) ProjectMigrationSource(parent context.Context, path strin
 	if err != nil {
 		return projection, err
 	}
+	if p.Format != sqliteProjectionFormat {
+		if err := s.verifyProjectionSource(ctx, path); err != nil {
+			return p.sqliteMigrationProjection, err
+		}
+		if err := s.restartMigrationProjection(ctx, source, p); err != nil {
+			return p.sqliteMigrationProjection, err
+		}
+		return s.projectMigrationSource(ctx, path, false)
+	}
 	if p.Complete {
 		return p.sqliteMigrationProjection, s.verifyProjectionSource(ctx, path)
 	}
-	b := sqliteProjectionBuilder{s: s, ctx: ctx, source: source, checkpoint: p, events: p.Events, frames: append([]sqliteProjectionFrame(nil), p.Stack...)}
+	b := sqliteProjectionBuilder{s: s, ctx: ctx, source: source, checkpoint: p, events: p.Events, frames: append([]sqliteProjectionFrame(nil), p.Stack...), signature: &sqliteProjectionSignature{Hash: sha256.New()}}
 	defer b.rollback()
 	var scanned int64
 	result, err := s.ScanMigrationSource(ctx, path, func(item sqliteMigrationItem) error {
 		scanned++
+		hashSQLiteProjectionItem(b.signature, item)
 		if scanned <= p.Events {
+			if scanned == p.Events && !bytes.Equal(b.signature.Sum(nil), p.Prefix) {
+				return errSQLiteProjectionPrefix
+			}
 			return nil
 		}
 		if err := b.apply(item); err != nil {
@@ -213,6 +243,20 @@ func (s *sqliteLedger) ProjectMigrationSource(parent context.Context, path strin
 		}
 		return nil
 	})
+	if errors.Is(err, errSQLiteProjectionPrefix) && canRestart {
+		b.rollback()
+		// An interrupted scan might have committed corrupt staged bytes before
+		// reaching the final source checksum. Only rebuild after the CURRENT
+		// whole source matches its original fingerprint. Detach the incomplete
+		// root atomically; no original bytes or authority are erased.
+		if verifyErr := s.verifyProjectionSource(ctx, path); verifyErr != nil {
+			return b.checkpoint.sqliteMigrationProjection, verifyErr
+		}
+		if resetErr := s.restartMigrationProjection(ctx, source, p); resetErr != nil {
+			return b.checkpoint.sqliteMigrationProjection, resetErr
+		}
+		return s.projectMigrationSource(ctx, path, false)
+	}
 	if err != nil {
 		return b.checkpoint.sqliteMigrationProjection, err
 	}
@@ -225,6 +269,90 @@ func (s *sqliteLedger) ProjectMigrationSource(parent context.Context, path strin
 		return b.checkpoint.sqliteMigrationProjection, err
 	}
 	return b.checkpoint.sqliteMigrationProjection, nil
+}
+
+type sqliteProjectionSignature struct {
+	hash.Hash
+	// Only the current path, not an unbounded identity dictionary. Hashing a
+	// megabyte-long model key again for each of its records would turn source-
+	// linear migration into records * key-length work.
+	path [sqliteProjectionMaxDepth]struct {
+		value string
+		sum   [sha256.Size]byte
+		valid bool
+	}
+}
+
+func hashSQLiteProjectionItem(signature *sqliteProjectionSignature, item sqliteMigrationItem) {
+	var number [8]byte
+	writeNumber := func(value int64) {
+		binary.LittleEndian.PutUint64(number[:], uint64(value))
+		_, _ = signature.Write(number[:])
+	}
+	writeString := func(value string) {
+		writeNumber(int64(len(value)))
+		_, _ = io.WriteString(signature, value)
+	}
+	writeString(item.Kind)
+	writeString(item.Scope)
+	writeNumber(item.Start)
+	writeNumber(item.End)
+	writeNumber(int64(len(item.Path)))
+	for index, component := range item.Path {
+		var sum [sha256.Size]byte
+		if index < len(signature.path) {
+			cached := &signature.path[index]
+			if !cached.valid || cached.value != component {
+				cached.sum = sha256.Sum256([]byte(component))
+				cached.valid = true
+			}
+			// Adopt the current backing string even when equal; subsequent
+			// equality checks on this long key can then use pointer identity.
+			cached.value, sum = component, cached.sum
+		} else {
+			sum = sha256.Sum256([]byte(component))
+		}
+		_, _ = signature.Write(sum[:])
+	}
+	checksum := sha256.Sum256(item.Value)
+	_, _ = signature.Write(checksum[:])
+}
+
+func (s *sqliteLedger) restartMigrationProjection(ctx context.Context, source sqliteMigrationSource, expected sqliteProjectionCheckpoint) error {
+	if expected.Complete && expected.Format == sqliteProjectionFormat {
+		return errSQLiteLedgerConflict
+	}
+	tx, err := s.writer.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	kind, scope := "object", "snapshot"
+	if source.Format == "jsonl" {
+		kind, scope = "array", "jsonl"
+	}
+	row, err := tx.ExecContext(ctx, "INSERT INTO migration_projection_nodes(source,kind,scope) VALUES(?,?,?)", source.Source, kind, scope)
+	if err != nil {
+		return err
+	}
+	root, err := row.LastInsertId()
+	if err != nil {
+		return err
+	}
+	var frames []sqliteProjectionFrame
+	if source.Format == "jsonl" {
+		frames = []sqliteProjectionFrame{{ID: root, Kind: kind, Scope: scope}}
+	}
+	stack, err := json.Marshal(frames)
+	if err != nil {
+		return err
+	}
+	changed, err := tx.ExecContext(ctx, `UPDATE migration_projections SET format=?,root=?,events=0,prefix=?,stack=?,complete=0,result=?
+ WHERE source=? AND root=? AND format=? AND fingerprint=? AND events=? AND prefix=? AND complete=?`, sqliteProjectionFormat, root, sha256.New().Sum(nil), stack, []byte(`{}`), source.Source, expected.Root, expected.Format, expected.Fingerprint, expected.Events, expected.Prefix, expected.Complete)
+	if err := sqliteRequireChanged(changed, err); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *sqliteLedger) verifyProjectionSource(ctx context.Context, path string) error {
@@ -240,10 +368,12 @@ type sqliteProjectionBuilder struct {
 	source     sqliteMigrationSource
 	checkpoint sqliteProjectionCheckpoint
 	frames     []sqliteProjectionFrame
+	signature  *sqliteProjectionSignature
 	events     int64
 	pending    int
 	inputBytes int64
 	tx         *sql.Tx
+
 	insertNode, putEdge, putValue, getChild, setLength *sql.Stmt
 }
 
@@ -308,8 +438,9 @@ func (b *sqliteProjectionBuilder) commit(result *sqliteMigrationParseResult) err
 	if err != nil {
 		return err
 	}
-	changed, err := b.tx.ExecContext(b.ctx, `UPDATE migration_projections SET events=?,stack=?,complete=?,result=?
- WHERE source=? AND events=? AND complete=0`, b.events, stack, result != nil, raw, b.source.Source, b.checkpoint.Events)
+	prefix := b.signature.Sum(nil)
+	changed, err := b.tx.ExecContext(b.ctx, `UPDATE migration_projections SET events=?,prefix=?,stack=?,complete=?,result=?
+ WHERE source=? AND events=? AND complete=0`, b.events, prefix, stack, result != nil, raw, b.source.Source, b.checkpoint.Events)
 	if err := sqliteRequireChanged(changed, err); err != nil {
 		return err
 	}
@@ -321,6 +452,7 @@ func (b *sqliteProjectionBuilder) commit(result *sqliteMigrationParseResult) err
 	}
 	b.tx = nil
 	b.checkpoint.Events, b.checkpoint.Result = b.events, parsed
+	b.checkpoint.Prefix = prefix
 	b.checkpoint.Stack = append(b.checkpoint.Stack[:0], b.frames...)
 	b.checkpoint.Complete = result != nil
 	b.pending, b.inputBytes = 0, 0
