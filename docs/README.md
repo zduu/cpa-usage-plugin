@@ -5,13 +5,13 @@
 - [guides/cpa-usage.md](guides/cpa-usage.md): 安装、配置、部署和更新说明
 - [releases/changelog.md](releases/changelog.md): `v2` 起的正式发布说明
 - [releases/v1-history.md](releases/v1-history.md): `v1` 历史标签归档
-- [releases/next-version-validation.md](releases/next-version-validation.md): 查询优化、完整备份、鉴权修复、SQLite 投影进度与 G01–G08 发布缺口
-- [plans/single-container-performance-checklist.tmp.md](plans/single-container-performance-checklist.tmp.md): 全面优化总计划（临时），统一实施顺序、资源预算、兼容契约与 G01–G08 验收门槛
-- [plans/low-resource-storage-checklist.md](plans/low-resource-storage-checklist.md): SQLite 存储专项，包含后端设计、迁移、备份恢复与平台交付
-- [plans/additional-improvements.tmp.md](plans/additional-improvements.tmp.md): 非数据库优化专项（临时），包含查询、内存、计价、传输、前端与运行诊断
-- [plans/storage-stage-20260913/README.md](plans/storage-stage-20260913/README.md): 流式周期快照、SQLite 原子状态和备份恢复、真实浏览器验收
-- [plans/release-readiness-20260912.md](plans/release-readiness-20260912.md): 最新候选审查、与 v2.6.4 的组件和历史堆对照、发布门槛与遗留项
-- [plans/single-container-performance-results.md](plans/single-container-performance-results.md): B0/B1 实测摘要、与上一正式版对比的预期收益、工程目标和验收证据状态
-- [third-party/sqlite-notices.md](third-party/sqlite-notices.md): SQLite 原型直接驱动的许可原文及发布检查边界
 
 图片资源位于 `docs/images/readme/`，供根目录 `README.md` 引用。
+
+发布包的第三方依赖许可（SQLite 的 MIT / BSD-3-Clause 声明）由 CI 在打包时从依赖模块的 `LICENSE` 文件生成 `THIRD_PARTY_NOTICES.txt`，仓库内不保留副本。
+
+## 验收脚本
+
+- `scripts/validate-stock-cpa.py`：在未修改的 stock CPA 容器里跑真实 HTTP/浏览器用例。
+- `scripts/validate-upgrade-cpa.py`：用上一正式版的共享库写出数据目录，再换成候选产物重启，核对升级后的累计值、新记录入账与重复重启稳定性。
+- `scripts/compare-release-performance.py`：冻结候选副本，与隔离基线做同工具链组件对照。

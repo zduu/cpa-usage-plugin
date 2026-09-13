@@ -34,11 +34,9 @@ temp/
 __pycache__/
 *.pyc
 /tests/
-docs/plans/*
-!docs/plans/storage-stage-20260913/
-docs/plans/storage-stage-20260913/*
-!docs/plans/storage-stage-20260913/README.md
-/docs/issues
+# 过程性文档与工作笔记不入库:只发布面向使用者的文档。
+/docs/plans/
+/docs/issues/
 # IDE
 .idea/
 .vscode/

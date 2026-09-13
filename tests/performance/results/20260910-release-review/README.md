@@ -1,6 +1,6 @@
 # 2026-09-10 发布审查证据
 
-对应[审查报告](../../../../docs/issues/2026-09-10-release-readiness-review.md)。被审查提交、环境及源码 hash 见 `manifest.json`。业务代码未修改。
+对应当时的发布前审查（审查报告未随仓库保留）。被审查提交、环境及源码 hash 见 `manifest.json`。业务代码未修改。
 
 `v2.6.4-bench.txt`、`HEAD-bench.txt`、`B1-bench.txt` 分别为正式版、候选版及完整功能基线的原始组件输出。三个版本均使用 Go 1.26.6，按 B0 → HEAD → B1 顺序运行，没有同时执行其他测试或 benchmark；未绑核，也未控制机器的其他后台活动。每项 3 次、300ms，属于本机诊断对比，不是容器资源验收。
 

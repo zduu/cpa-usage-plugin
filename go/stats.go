@@ -2897,7 +2897,7 @@ func (s *RequestStatistics) replayStorageFilesLocked(dir string, legacyPath stri
 	seenFiles := make(map[string]struct{})
 	var invalidLines int
 	s.reconcileRecordedProtocolFallbacksLocked(now)
-	replayState := s.newPersistedReplayStateLocked()
+	replayState := s.newPersistedReplayStateLocked(snapshotAt)
 	var replayed bool
 	readFile := func(path string) {
 		path = filepath.Clean(path)
@@ -3081,16 +3081,113 @@ func readPersistedStorageFile(path string) ([]persistedDetail, int, error) {
 	return records, invalidLines, err
 }
 
+// replayModelKey 标识残差所属的接口分组/模型,与 s.apis 的键保持一致。
+type replayModelKey struct {
+	api   string
+	model string
+}
+
+// replayResidual 描述一个模型「已计入累计值、却没有留下可寻址逐请求条目」的部分。
+type replayResidual struct {
+	remaining int64
+}
+
 type persistedReplayState struct {
 	existing        map[requestDedupKey]struct{}
 	pendingMetadata map[requestDedupKey]RequestDetail
+	// absorbed 记录已按快照残差吸收、不能再按去重键命中的记录。existing 会在每次
+	// 裁剪后按当前可见账本重建,所以吸收结果必须单独保存到整轮重放结束。
+	absorbed map[requestDedupKey]struct{}
+	// counted 是 v2.6.4 及更早版本留下的残差:那些快照只保存被明细上限截断后的可见
+	// 明细,超出部分仅存在于汇总计数中。重放当天 JSONL 时这些请求既无法按去重键命中,
+	// 也不应再次计入累计值。
+	counted map[replayModelKey]replayResidual
+	// snapshotAt 是快照生成时间,用于判断重放记录是否可能已被该快照计入。
+	snapshotAt time.Time
 }
 
-func (s *RequestStatistics) newPersistedReplayStateLocked() *persistedReplayState {
+func (s *RequestStatistics) newPersistedReplayStateLocked(snapshotAt time.Time) *persistedReplayState {
+	existing, counted := s.snapshotReplayIndexLocked()
 	return &persistedReplayState{
-		existing:        s.detailKeysLocked(),
+		existing:        existing,
 		pendingMetadata: make(map[requestDedupKey]RequestDetail),
+		absorbed:        make(map[requestDedupKey]struct{}),
+		counted:         counted,
+		snapshotAt:      snapshotAt,
 	}
+}
+
+// snapshotReplayIndexLocked 在一次遍历里建立重放去重键和快照残差额度。两者必须来自
+// 同一个账本视图,否则吸收判断与去重判断会看到不同长度的历史。
+func (s *RequestStatistics) snapshotReplayIndexLocked() (map[requestDedupKey]struct{}, map[replayModelKey]replayResidual) {
+	if s == nil {
+		return map[requestDedupKey]struct{}{}, nil
+	}
+	keys := make(map[requestDedupKey]struct{}, nonNegativeIntFromInt64(s.countDetailsLocked()))
+	var counted map[replayModelKey]replayResidual
+	for apiName, apiSt := range s.apis {
+		if apiSt == nil {
+			continue
+		}
+		for modelName, modelSt := range apiSt.Models {
+			if modelSt == nil {
+				continue
+			}
+			addressable := modelSt.accountingCount()
+			if residual := modelSt.TotalRequests - int64(addressable); residual > 0 {
+				if counted == nil {
+					counted = make(map[replayModelKey]replayResidual)
+				}
+				counted[replayModelKey{api: apiName, model: modelName}] = replayResidual{remaining: residual}
+			}
+			for accountingIndex := 0; accountingIndex < addressable; accountingIndex++ {
+				detail := modelSt.accountingDetailAt(accountingIndex)
+				keys[claudeCacheCanonicalDedupKey(apiName, modelName, detail)] = struct{}{}
+			}
+		}
+	}
+	return keys, counted
+}
+
+// absorbCounted 判断这条重放记录是否属于快照残差。命中时只消耗残差额度,调用方会跳过
+// 入账,避免把已计入的请求再加一次。残差用完、或者请求时间晚于快照生成时间的记录一律
+// 返回 false,按新请求正常入账。
+//
+// 已知边界:快照生成之后才上报、但请求时间早于快照的记录(跨升级的长时间请求在崩溃后
+// 重放)可能被残差吃掉而少计一条。曾尝试用「残差必然早于仍可寻址记录」的排序边界收紧,
+// 但升级后导入时间戳更早的历史备份会让该前提不成立,反而重新引入重复入账,因此不采用。
+func (st *persistedReplayState) absorbCounted(apiName, modelName string, detail RequestDetail, canonicalKey requestDedupKey) bool {
+	if st == nil || len(st.counted) == 0 {
+		return false
+	}
+	key := replayModelKey{api: apiName, model: modelName}
+	residual, ok := st.counted[key]
+	if !ok || residual.remaining <= 0 {
+		return false
+	}
+	if !st.coveredBySnapshot(detail) {
+		return false
+	}
+	residual.remaining--
+	st.counted[key] = residual
+	if st.absorbed == nil {
+		st.absorbed = make(map[requestDedupKey]struct{})
+	}
+	st.absorbed[canonicalKey] = struct{}{}
+	return true
+}
+
+// coveredBySnapshot 判断这条记录的请求时间是否可能已被快照计入。时间戳缺失的记录无法
+// 证伪,按可能计入处理;这类记录随后仍会被排序边界拦下(回放时会补成当前时间,晚于所有
+// 可寻址记录),因此不会因为时间戳缺失而被误吸收。
+func (st *persistedReplayState) coveredBySnapshot(detail RequestDetail) bool {
+	if st.snapshotAt.IsZero() {
+		return false
+	}
+	if detail.Timestamp.IsZero() || detail.TimestampSynthetic {
+		return true
+	}
+	return !detail.Timestamp.After(st.snapshotAt)
 }
 
 func (s *RequestStatistics) replayPersistedDetailBatchLocked(records []persistedDetail, reconcileBatch bool, now time.Time, state *persistedReplayState) {
@@ -3136,6 +3233,17 @@ func (s *RequestStatistics) replayPersistedDetailBatchLocked(records []persisted
 			}
 			continue
 		}
+		if _, ok := state.absorbed[canonicalKey]; ok {
+			continue
+		}
+		// 快照已经计入但不可寻址的请求:只消耗残差额度,不再累加。
+		if state.absorbCounted(apiName, modelName, detail, canonicalKey) {
+			if pending, ok := state.pendingMetadata[key]; ok {
+				s.enrichPersistedDetailMetadataLocked(apiName, modelName, key, pending)
+				delete(state.pendingMetadata, key)
+			}
+			continue
+		}
 		if s.recordDetailWithAccountingLocked(apiName, modelName, detail, key, now, false, persisted.Archived) {
 			state.existing[canonicalKey] = struct{}{}
 			if pending, ok := state.pendingMetadata[key]; ok {
@@ -3159,7 +3267,8 @@ func (s *RequestStatistics) replayPersistedDetailsLocked(records []persistedDeta
 		now = time.Now()
 	}
 	s.reconcileRecordedProtocolFallbacksLocked(now)
-	state := s.newPersistedReplayStateLocked()
+	// 这批记录不来自某个具体快照,没有残差边界可用,按新记录入账。
+	state := s.newPersistedReplayStateLocked(time.Time{})
 	s.replayPersistedDetailBatchLocked(records, reconcileBatch, now, state)
 	s.finishPersistedReplayLocked(now)
 	if invalidLines > 0 {
@@ -3174,7 +3283,7 @@ func (s *RequestStatistics) replayStorageLocked(path string) error {
 	}
 	now := time.Now()
 	s.reconcileRecordedProtocolFallbacksLocked(now)
-	state := s.newPersistedReplayStateLocked()
+	state := s.newPersistedReplayStateLocked(time.Time{})
 	invalidLines, err := scanPersistedStorageFile(path, func(records []persistedDetail) {
 		s.replayPersistedDetailBatchLocked(records, true, now, state)
 	})

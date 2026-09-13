@@ -1,6 +1,6 @@
 # SQLite 基础层与驱动对照（2026-09-10）
 
-状态：可测试的存储基础及旧文件分块暂存已实现，**尚未接入运行时存储配置、语义迁移或统计查询**。现有插件仍使用内存/JSONL；不能根据这里的数据库测试宣传插件常驻内存已降低。B0/B1 定义见[统一结果](../../../../docs/plans/single-container-performance-results.md)。本页基准为 Go 1.26.4 的历史样本，当前工具链已升级到 1.26.6，新增迁移与安全验证见[本轮记录](validation-go1266.md)。
+状态：可测试的存储基础及旧文件分块暂存已实现，**尚未接入运行时存储配置、语义迁移或统计查询**。现有插件仍使用内存/JSONL；不能根据这里的数据库测试宣传插件常驻内存已降低。B0=`v2.6.4`，B1=`967915b`。本页基准为 Go 1.26.4 的历史样本，当前工具链已升级到 1.26.6，新增迁移与安全验证见[本轮记录](validation-go1266.md)。
 
 ## 实现与边界
 
@@ -21,7 +21,7 @@
 
 CGO 候选：github.com/mattn/go-sqlite3 v1.14.52（MIT）。纯 Go 对照：modernc.org/sqlite v1.58.0（BSD-3-Clause），使用 `sqlite_purego` 构建标签。
 两者实际返回相同 SQLite 3.53.4、source ID `2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc`。
-[直接驱动许可](../../../../docs/third-party/sqlite-notices.md)已保留；全部传递依赖和发布包许可仍需最终交付检查。
+直接驱动许可现由 CI 打包时从依赖模块生成 `THIRD_PARTY_NOTICES.txt`；全部传递依赖和发布包许可仍需最终交付检查。
 
 Apple M1 / macOS 26.6.2 / Go 1.26.4 / darwin arm64、GOMAXPROCS 默认 8。两驱动顺序运行，无并行 benchmark 或构建；每项重复三次、300ms。
 完整 24 条重复样本见 [driver-samples.csv](driver-samples.csv)，下表为中位数。

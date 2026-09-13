@@ -164,6 +164,29 @@ jobs:
             windows) x86_64-w64-mingw32-objdump -p "$asset" | grep -q 'cliproxy_plugin_init' ;;
           esac
 
+      # The shared library embeds SQLite through mattn/go-sqlite3 (MIT) and, for
+      # the sqlite_purego build, modernc.org/sqlite (BSD-3-Clause). Both licences
+      # require the notices to travel with binary distributions, so they are
+      # generated from the module cache instead of being kept in the repository.
+      - name: Generate third-party notices
+        run: |
+          set -eu
+          cd go
+          notices="../THIRD_PARTY_NOTICES.txt"
+          printf '# Third-party notices\n\n' > "$notices"
+          for module in github.com/mattn/go-sqlite3 modernc.org/sqlite; do
+            dir="$(go list -m -f '{{.Dir}}' "$module")"
+            version="$(go list -m -f '{{.Version}}' "$module")"
+            printf '## %s %s\n\n' "$module" "$version" >> "$notices"
+            for file in "$dir"/LICENSE*; do
+              cat "$file" >> "$notices"
+              printf '\n' >> "$notices"
+            done
+          done
+          test -s "$notices"
+          grep -q 'Permission is hereby granted' "$notices"
+          grep -q 'Redistribution and use in source and binary forms' "$notices"
+
       - name: Package plugin store zip
         run: |
           VERSION=$(sed -n 's/^const pluginVersion = "\([^"]*\)"/\1/p' go/register.go)
@@ -171,7 +194,6 @@ jobs:
           LIB="usage-dashboard-zduu-${{ matrix.platform }}.${{ matrix.ext }}"
           mkdir -p store-artifacts
           cp "$LIB" "store-artifacts/usage-dashboard-zduu.${{ matrix.ext }}"
-          cp docs/third-party/sqlite-notices.md THIRD_PARTY_NOTICES.txt
           cp THIRD_PARTY_NOTICES.txt store-artifacts/
           cd store-artifacts
           ZIP_FILE="usage-dashboard-zduu_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.zip"
