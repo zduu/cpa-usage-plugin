@@ -2928,6 +2928,10 @@ func (s *RequestStatistics) replayStorageFilesLocked(dir string, legacyPath stri
 			s.reconcileRecordedProtocolFallbacksLocked(now)
 			s.pruneLocked(now, true)
 			replayState.existing = s.detailKeysLocked()
+			// Absorbed keys have no bound in the retained ledger, so drop them at
+			// file boundaries too. A request is written to one daily shard, and
+			// the residual budget still prevents re-counting it after the drop.
+			replayState.absorbed = nil
 		}
 	}
 	if strings.TrimSpace(legacyPath) != "" && snapshotAt.IsZero() {
