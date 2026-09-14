@@ -31,8 +31,8 @@ plugins:
     usage-dashboard-zduu:
       enabled: true
       store:
-        version: "2.6.3"
-        release-tag: "v2.6.3"
+        version: "2.6.5"
+        release-tag: "v2.6.5"
         repository: "https://github.com/zduu/cpa-usage-plugin"
       # 其他配置项见第 4 节 ...
 ```
@@ -265,8 +265,8 @@ plugins:
     usage-dashboard-zduu:
       enabled: true
       store:
-        version: "2.6.3"
-        release-tag: "v2.6.3"
+        version: "2.6.5"
+        release-tag: "v2.6.5"
         repository: "https://github.com/zduu/cpa-usage-plugin"
       # 每个上游接口/模型最多保留的请求明细条数。默认 5000。
       max_details_per_model: 5000
@@ -316,7 +316,7 @@ plugins:
       claude_cache_repair_enabled: false
       # 可选：允许外部脚本更新插件文件。默认 false。
       update_enabled: false
-      # 可选：latest 或指定版本号，例如 v2.6.3。
+      # 可选：latest 或指定版本号，例如 v2.6.5。
       update_version: latest
 ```
 
@@ -342,8 +342,8 @@ cd CLIProxyAPI
 启动后查看日志确认插件加载成功：
 
 ```text
-pluginhost: plugin loaded plugin_id=usage-dashboard-zduu version=2.6.3 path=plugins/usage-dashboard-zduu-v2.6.3.so
-pluginhost: plugin registered plugin_id=usage-dashboard-zduu plugin_name=用量统计 version=2.6.3 path=plugins/usage-dashboard-zduu-v2.6.3.so
+pluginhost: plugin loaded plugin_id=usage-dashboard-zduu version=2.6.5 path=plugins/usage-dashboard-zduu-v2.6.5.so
+pluginhost: plugin registered plugin_id=usage-dashboard-zduu plugin_name=用量统计 version=2.6.5 path=plugins/usage-dashboard-zduu-v2.6.5.so
 ```
 
 > `store-sources` 引入插件商店注册表，管理面板可浏览安装。`store` 块标记当前期望版本，pluginhost 会匹配 `usage-dashboard-zduu-v{版本号}.{ext}` 文件名，并自动清理旧版本文件。
@@ -394,9 +394,9 @@ pluginhost: plugin registered plugin_id=usage-dashboard-zduu plugin_name=用量�
 
 ## 6. 管理 API 使用
 
-下一版本候选修复了一处资源路由鉴权问题：stock CPA 的 `/v0/resource/plugins/` 是匿名资源入口，并不验证管理密钥。插件现在只在此入口提供静态 `/dashboard` 页面，统计、事件、价格、健康状态、备份及任务接口全部使用下列 `/v0/management/plugins/` 路径；旧资源数据别名不再注册，处理器也会拒绝宿主缓存的旧别名，即使请求自行附带 Authorization 头也不例外。看板会自动切换到管理路径，升级后应刷新页面；调用旧资源数据别名的外部脚本须同步调整。
+`v2.6.5` 修复了一处资源路由鉴权问题：stock CPA 的 `/v0/resource/plugins/` 是匿名资源入口，并不验证管理密钥。插件现在只在此入口提供静态 `/dashboard` 页面，统计、事件、价格、健康状态、备份及任务接口全部使用下列 `/v0/management/plugins/` 路径；旧资源数据别名不再注册，处理器也会拒绝宿主缓存的旧别名，即使请求自行附带 Authorization 头也不例外。看板会自动切换到管理路径，升级后应刷新页面；调用旧资源数据别名的外部脚本须同步调整。
 
-`v2.6.4` 及更早版本不能仅依靠管理密钥或 `remote-management.allow-remote` 保护已公开的资源数据别名。仍在使用这些版本、且 CPA 入口可被不可信方访问时，应先在网关/网络层限制访问，或升级到已修复该问题的下一版本。
+`v2.6.4` 及更早版本不能仅依靠管理密钥或 `remote-management.allow-remote` 保护已公开的资源数据别名。仍在使用这些版本、且 CPA 入口可被不可信方访问时，应先在网关/网络层限制访问，或升级到 `v2.6.5` 及更高版本。
 
 以下端点可通过管理 API 调用（需要管理密钥）：
 
@@ -496,7 +496,7 @@ curl http://127.0.0.1:8317/v0/management/plugins/usage-dashboard-zduu/health \
 
 ### 数据导出
 
-下一版本候选的看板“导出”按钮使用完整用量备份任务，文件仍为 `usage-export-<时间>.json` 和 v1 `ExportPayload`：包含 `detail_count`、配置摘要、完整 `usage` 聚合、可见 `details` 和归档 `accounting`，不受当前页面筛选或 `export_max_records` 限制。`detail_count` 只计真实保留记录，不把没有逐请求信息的历史聚合残差算作记录。
+`v2.6.5` 的看板“导出”按钮使用完整用量备份任务，文件仍为 `usage-export-<时间>.json` 和 v1 `ExportPayload`：包含 `detail_count`、配置摘要、完整 `usage` 聚合、可见 `details` 和归档 `accounting`，不受当前页面筛选或 `export_max_records` 限制。`detail_count` 只计真实保留记录，不把没有逐请求信息的历史聚合残差算作记录。
 
 浏览器支持原生 gzip 解压流和 `Blob.stream()` 时，看板自动请求压缩备份，仍按最多 256 KiB 的压缩字节分块、验证版本/长度/CRC32，再流式解压到 Blob 并核对 `raw_bytes`，最终保存普通 JSON，不生成 `.gz` 文件。压缩损坏、解压字节数不符都会报错并清理任务，不会改走旧接口。旧浏览器继续使用未压缩分块；没有增大单块上限或并发下载数。压缩会增加文件生成 CPU，但减少传输字节和管理请求次数；浏览器仍需容纳压缩文件及解压后的完整 Blob，不能视为恒定内存下载。
 
@@ -532,7 +532,7 @@ curl -X POST http://127.0.0.1:8317/v0/management/plugins/usage-dashboard-zduu/us
 导入响应包含 `added`（新增条数）、`skipped`（去重跳过）、`ignored_by_retention`（超出保留窗口忽略）。导入去重会区分上游分组、模型、时间、来源、上游凭证、客户端 API 身份、延迟、TTFT、失败状态码、错误文本和 token 统计，避免不同客户端 API key 或不同失败结果的同形请求被误合并。
 同时包含 `input_records`（输入记录数）、`accepted_records`（被处理记录数）、`rejected_records`（校验拒绝数）、`total_requests` 和 `failed_requests`，便于核对导入结果。
 
-下一版本候选修复了同一实例回导备份时客户端 hash 被提前清除导致重复入账的问题：先检查包含导出 hash 的既有完整去重指纹，匹配时跳过；未匹配的新记录继续按原有跨实例导入规则规范化身份，不仅凭 hash 或脱敏显示值跳过请求。当前导入仍是整包解析，单文件 50 MiB、最多 200000 条记录；分块上传和更大备份的分批原子恢复尚未完成，导出成功不表示任意大小文件都能通过此旧导入接口恢复。
+`v2.6.5` 修复了同一实例回导备份时客户端 hash 被提前清除导致重复入账的问题：先检查包含导出 hash 的既有完整去重指纹，匹配时跳过；未匹配的新记录继续按原有跨实例导入规则规范化身份，不仅凭 hash 或脱敏显示值跳过请求。当前导入仍是整包解析，单文件 50 MiB、最多 200000 条记录；分块上传和更大备份的分批原子恢复尚未完成，导出成功不表示任意大小文件都能通过此旧导入接口恢复。
 
 ## 7. 数据持久化（可选）
 
@@ -583,7 +583,7 @@ plugins:
 - `/health` 的 `storage.write_queue_length` 和 `storage.write_queue_capacity` 可观察后台写入队列积压；`storage.last_write_batch_records`、`storage.last_write_batch_duration_ms`、`storage.last_write_queue_wait_ms` 可观察最近 writer 批次规模、写入耗时和最长排队时长；`storage.write_batch_avg_duration_ms`、`storage.write_batch_p95_duration_ms`、`storage.write_batch_p99_duration_ms`、`storage.write_queue_wait_avg_ms`、`storage.write_queue_wait_p95_ms`、`storage.write_queue_wait_p99_ms` 和 `storage.write_pressure` 可观察持续磁盘压力与长尾抖动。看板底部出现"持久化排队中"或"持久化写入偏慢"时，说明磁盘写入速度短时间低于请求记录速度。
 - 如果已经有内存数据，建议先导出；开启持久化并重启后，再把导出的 JSON 导入一次，后续数据才会继续写入持久化文件。
 
-下一版本候选的恢复保护：如果 `snapshot.json` 读取或解码失败（包括截断 JSON、字段类型错误），或者版本不受支持、`generated_at` 无效，插件会报告对应恢复错误，不加载该快照，也不对该目标启动 writer、自动清理分片或在关闭时覆盖快照。此时配置仍可能显示已开启持久化，但新增统计仅留在内存，不能视为已经落盘。请保留原目录，检查 `/health` 的存储错误；导出当前内存数据后，使用兼容版本或已验证的备份恢复，再重启核验。不要直接把未知快照版本号改小或删除旧分片来绕过错误。SQLite 迁移仍处于开发阶段，当前没有可启用的数据库后端配置。
+`v2.6.5` 的恢复保护：如果 `snapshot.json` 读取或解码失败（包括截断 JSON、字段类型错误），或者版本不受支持、`generated_at` 无效，插件会报告对应恢复错误，不加载该快照，也不对该目标启动 writer、自动清理分片或在关闭时覆盖快照。此时配置仍可能显示已开启持久化，但新增统计仅留在内存，不能视为已经落盘。请保留原目录，检查 `/health` 的存储错误；导出当前内存数据后，使用兼容版本或已验证的备份恢复，再重启核验。不要直接把未知快照版本号改小或删除旧分片来绕过错误。SQLite 迁移仍处于开发阶段，当前没有可启用的数据库后端配置。
 
 ## 8. 更新插件
 
@@ -609,7 +609,7 @@ plugins:
     usage-dashboard-zduu:
       enabled: true
       update_enabled: true
-      update_version: latest   # 或 v2.6.3
+      update_version: latest   # 或 v2.6.5
 ```
 
 执行脚本：
@@ -699,12 +699,12 @@ CPA 主程序负责在请求完成后把 usage 记录下发给插件。CPA `v7.2
 - 实时请求不会被去重窗口合并；`max_details_per_model` 只裁剪请求明细，不会扣减总请求、token、成功率等累计统计。`retention_days` 超出窗口的记录会被淘汰并从窗口统计中扣除。
 - `api_key_hash_salt` 只影响新记录的 `api_key_hash`。留空时使用插件默认稳定 salt；填写后使用自定义稳定 salt。客户端 API 统计优先按 `api_key_hash` 聚合，缺失 hash 时再按脱敏后的 `api_key` 展示值聚合；hash 仅用于分组/排查，不能反推原始 key。导入已脱敏的旧导出数据时，插件会忽略外部实例生成的 hash，并按脱敏展示值作为兼容身份。同一脱敏显示值下存在多个不同 hash 时不会强行合并，避免把不同真实 key 混为一条。
 
-下一版本候选的周期与关闭快照：归档账本按不可变分块冻结，再逐条编码写入临时文件；可见明细和聚合仍复制。并发修复或过期通过块级复制保持冻结数据，完成 flush/fsync 后原子替换快照，编码或写入失败保留旧文件。格式及现有刷新、同步、快照间隔配置不变；启动读取完整快照的内存开销尚未消除。
+`v2.6.5` 的周期与关闭快照：归档账本按不可变分块冻结，再逐条编码写入临时文件；可见明细和聚合仍复制。并发修复或过期通过块级复制保持冻结数据，完成 flush/fsync 后原子替换快照，编码或写入失败保留旧文件。格式及现有刷新、同步、快照间隔配置不变；启动读取完整快照的内存开销尚未消除。
 
 ### 升级与回退边界
 
-下一版本候选仍使用 JSONL 和 snapshot 持久化，SQLite 只是未接管运行时的基础实现，无需添加数据库配置。升级前停用插件并备份整个 `storage_path` 目录与模型价格文件，另保留一份 `/usage/export` 完整统计导出；事件导出不包含归档账本，不能替代完整备份。升级后核对总请求数、token、成本、可见明细数及 `/health` 存储错误。
+`v2.6.5` 仍使用 JSONL 和 snapshot 持久化，SQLite 只是未接管运行时的基础实现，无需添加数据库配置。升级前停用插件并备份整个 `storage_path` 目录与模型价格文件，另保留一份 `/usage/export` 完整统计导出；事件导出不包含归档账本，不能替代完整备份。升级后核对总请求数、token、成本、可见明细数及 `/health` 存储错误。
 
-从 `v2.6.4` 升级时，累计请求、token 和费用不会重复入账。旧版快照只保存被 `max_details_per_model` 截断后的可见明细，超出上限的请求仅存在于汇总计数中，而当天 JSONL 仍包含这些请求；候选恢复时会按接口/模型记录这部分「已计入但不可寻址」的残差，重放当天日志时只消耗残差、不再累加。该缺陷在 `v2.6.4` 自身重启时同样会触发（同一模型当日请求数超过明细上限即可复现），升级与重启路径均已修复，但该候选尚未发布。注意这些旧请求本就没有逐请求记录，因此升级后它们仍不会出现在事件列表和范围统计中，只保留在累计计数里——这与 `v2.6.4` 自身的行为一致。
+从 `v2.6.4` 升级到 `v2.6.5` 时，累计请求、token 和费用不会重复入账。旧版快照只保存被 `max_details_per_model` 截断后的可见明细，超出上限的请求仅存在于汇总计数中，而当天 JSONL 仍包含这些请求；`v2.6.5` 恢复时会按接口/模型记录这部分「已计入但不可寻址」的残差，重放当天日志时只消耗残差、不再累加。该缺陷在 `v2.6.4` 自身重启时同样会触发（同一模型当日请求数超过明细上限即可复现），升级与重启路径均已修复。注意这些旧请求本就没有逐请求记录，因此升级后它们仍不会出现在事件列表和范围统计中，只保留在累计计数里——这与 `v2.6.4` 自身的行为一致。
 
-候选快照沿用 v2 编号，但增加了 `accounting` 语义。`v2.6.4` 不具备相同的逐请求历史账本语义；直接替换回旧插件不等于无损降级。回退应停用插件、保留当前目录及升级后的完整导出，再在独立目录恢复升级前备份和旧插件；这只能恢复升级前状态。升级后新增记录的无损回退转换尚未验收，不要让旧版覆盖唯一的新版数据目录。
+`v2.6.5` 快照沿用 v2 编号，但增加了 `accounting` 语义。`v2.6.4` 不具备相同的逐请求历史账本语义；直接替换回旧插件不等于无损降级。回退应停用插件、保留当前目录及升级后的完整导出，再在独立目录恢复升级前备份和旧插件；这只能恢复升级前状态。升级后新增记录的无损回退转换尚未验收，不要让旧版覆盖唯一的新版数据目录。

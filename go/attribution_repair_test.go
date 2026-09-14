@@ -8,7 +8,10 @@ import (
 	"time"
 )
 
-var repairTestTimestamp = time.Date(2026, 8, 15, 15, 4, 23, 796913688, time.FixedZone("CST", 8*3600))
+// Keep attribution fixtures inside the default retention window. Snapshot and
+// import reads intentionally prune expired usage, so a fixed production date
+// would make these tests start failing after retention_days elapsed.
+var repairTestTimestamp = time.Now().In(time.FixedZone("CST", 8*3600)).Add(-time.Minute)
 
 // repairTestOriginalClaudeRecord 复刻导出数据中真实 Claude 中转上游的原生记录:
 // deepseek 模型由 claude:apikey 认证的上游实际执行。
