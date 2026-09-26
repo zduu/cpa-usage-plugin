@@ -299,7 +299,7 @@ func TestAnonymousOpenAIProtocolFallbackCrossMatchesNonCodexUpstream(t *testing.
 // 相等,这条请求既被记成 openai-compatible 又被双计。
 func TestAnonymousOpenAIFallbackMatchesClaudeNativeWithExclusiveCacheInput(t *testing.T) {
 	location := time.FixedZone("CST", 8*60*60)
-	nativeAt := time.Date(2026, 8, 23, 13, 1, 10, 143_258_000, location)
+	nativeAt := time.Now().In(location).Add(-24 * time.Hour)
 	latency := 126022 * time.Millisecond
 
 	native := UsageRecord{

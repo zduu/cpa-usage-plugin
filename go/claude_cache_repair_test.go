@@ -13,7 +13,7 @@ import (
 func pollutedClaudeCacheDetail() RequestDetail {
 	return RequestDetail{
 		Model:     "claude-fable-5",
-		Timestamp: time.Date(2026, 8, 16, 10, 12, 33, 123456789, time.FixedZone("CST", 8*3600)),
+		Timestamp: time.Now().In(time.FixedZone("CST", 8*3600)).Add(-24 * time.Hour),
 		LatencyMs: 8421,
 		TTFTMs:    902,
 		APIKey:    "sk******zy",
