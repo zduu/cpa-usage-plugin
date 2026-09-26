@@ -222,6 +222,10 @@ h1{margin:0;font-size:24px;line-height:1.3;font-weight:700;letter-spacing:-.02em
 .select:focus,.input:focus{outline:none;border-color:var(--cpa-accent);box-shadow:0 0 0 3px var(--cpa-accent-ring)}
 .btn{height:34px;border:1px solid var(--cpa-btn-border);border-radius:9px;background:var(--cpa-btn-bg);color:var(--cpa-btn-text);padding:0 13px;font-weight:600;font-size:13px;white-space:nowrap;box-shadow:0 1px 2px rgba(16,24,40,.04);transition:background-color .15s,border-color .15s,box-shadow .15s,color .15s}
 .btn:hover{border-color:var(--cpa-btn-hover-border);background:var(--cpa-btn-hover-bg)}
+/* 分组开关在数据里没有可过滤项时置灰。只作用于 .segmented,避免影响工具栏里
+   同样会被禁用的按钮(如导出数据)的既有外观。 */
+.segmented .btn:disabled{opacity:.4;cursor:not-allowed}
+.segmented .btn:disabled:hover{border-color:var(--cpa-btn-border);background:var(--cpa-btn-bg)}
 .btn:focus-visible{outline:none;border-color:var(--cpa-accent);box-shadow:0 0 0 3px var(--cpa-accent-ring)}
 .btn.primary{background:var(--cpa-accent-strong);color:#fff;border-color:var(--cpa-accent-strong)}
 .btn.primary:hover{background:var(--cpa-accent);border-color:var(--cpa-accent)}
@@ -314,6 +318,7 @@ tbody td{transition:background-color .12s}
 .selectedBadge,.clientApiFilterBadge{display:inline-flex;align-items:center;border:1px solid var(--cpa-accent);background:var(--cpa-accent-soft);color:var(--cpa-accent-strong);border-radius:999px;padding:2px 8px;font-size:11px;font-weight:700}
 .selectedBadge{margin-left:8px;vertical-align:middle}
 .clientApiFilterStatus{min-height:22px;margin-top:6px}
+.upstreamFilterStatus{color:var(--cpa-text-tertiary);font-size:12px;line-height:1.5;margin-top:2px}
 .clientApiFilterError{display:inline-block;margin-left:8px;color:#e0564a;font-size:12px;font-weight:600}
 .apiChips{display:flex;gap:8px;flex-wrap:wrap}
 .chip{display:inline-flex;align-items:center;border:1px solid var(--cpa-border-light);background:var(--cpa-bg-raised);border-radius:999px;padding:5px 12px;color:var(--cpa-text-dim);font-size:12px;line-height:1.4}

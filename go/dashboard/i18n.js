@@ -95,6 +95,10 @@ var I18N_MAP = {
     upstream_subtle: '按上游提供商和来源聚合',
     upstream_select_none: '暂无上游接口',
     no_upstream_data: '暂无接口数据',
+    upstream_hide_zero: '隐藏成功率 0%',
+    upstream_hide_zero_hint: '隐藏成功率为 0 的上游接口',
+    upstream_hidden_count: '已隐藏 {0} 个成功率 0% 的上游接口',
+    upstream_all_hidden: '全部 {0} 个上游接口成功率为 0，已全部隐藏',
 
     // ---- upstream detail ----
     upstream_detail_title: '上游接口详情',
@@ -343,6 +347,10 @@ var I18N_MAP = {
     upstream_subtle: '按上游提供商和來源聚合',
     upstream_select_none: '暫無上游介面',
     no_upstream_data: '暫無介面資料',
+    upstream_hide_zero: '隱藏成功率 0%',
+    upstream_hide_zero_hint: '隱藏成功率為 0 的上游介面',
+    upstream_hidden_count: '已隱藏 {0} 個成功率 0% 的上游介面',
+    upstream_all_hidden: '全部 {0} 個上游介面成功率為 0，已全部隱藏',
 
     upstream_detail_title: '上游介面詳情',
     upstream_detail_select_hint: '選擇一個上游介面查看模型、來源、錯誤和最近請求。',
@@ -575,6 +583,10 @@ var I18N_MAP = {
     upstream_subtle: 'Grouped by upstream provider and source',
     upstream_select_none: 'No upstream APIs',
     no_upstream_data: 'No API data',
+    upstream_hide_zero: 'Hide 0% success',
+    upstream_hide_zero_hint: 'Hide upstream APIs with a 0% success rate',
+    upstream_hidden_count: 'Hid {0} upstream API(s) at 0% success rate',
+    upstream_all_hidden: 'All {0} upstream API(s) are at 0% success rate and were hidden',
 
     upstream_detail_title: 'Upstream API Detail',
     upstream_detail_select_hint: 'Select an upstream API to view models, sources, errors and recent requests.',
@@ -807,6 +819,10 @@ var I18N_MAP = {
     upstream_subtle: 'Сгруппировано по провайдеру и источнику',
     upstream_select_none: 'Нет входящих API',
     no_upstream_data: 'Нет данных',
+    upstream_hide_zero: 'Скрыть 0% успеха',
+    upstream_hide_zero_hint: 'Скрыть API с нулевым процентом успеха',
+    upstream_hidden_count: 'Скрыто API с нулевым успехом: {0}',
+    upstream_all_hidden: 'Все API ({0}) имеют нулевой процент успеха и скрыты',
 
     upstream_detail_title: 'Детали входящего API',
     upstream_detail_select_hint: 'Выберите API для просмотра моделей, источников, ошибок и последних запросов.',

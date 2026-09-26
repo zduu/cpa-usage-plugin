@@ -105,7 +105,10 @@
       <div id="clientApiStats"></div>
     </div>
     <div class="panel full">
-      <div class="panelHead"><h2 data-i18n="upstream_title">上游接口统计</h2><span class="subtle" data-i18n="upstream_subtle">按上游提供商和来源聚合</span></div>
+      <div class="panelHead">
+        <div><h2 data-i18n="upstream_title">上游接口统计</h2><span class="subtle" data-i18n="upstream_subtle">按上游提供商和来源聚合</span><div id="upstreamFilterStatus" class="upstreamFilterStatus" aria-live="polite"></div></div>
+        <div class="segmented"><button class="btn" id="hideZeroUpstream" type="button" aria-pressed="false" data-i18n="upstream_hide_zero">隐藏成功率 0%</button></div>
+      </div>
       <div class="tableWrap" id="apiStats"></div>
     </div>
     <div class="panel full">

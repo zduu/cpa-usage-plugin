@@ -1,5 +1,6 @@
 // cpausage dashboard — main logic. Uses helpers from helpers.js.
 const rangeKey = 'cpa-usage-range-v1';
+const hideZeroUpstreamKey = 'cpa-usage-hide-zero-upstream-v1';
 var fmt = new Intl.NumberFormat(typeof getFormatLocale === 'function' ? getFormatLocale() : 'zh-CN');
 var _lastFmtLocale = 'zh-CN';
 let summaryData = null;         // DashboardSummary from /dashboard-summary
@@ -17,6 +18,8 @@ let priceReferenceVisibleOptions = [];
 let priceReferenceActiveIndex = -1;
 let priceSearchSeq = 0;
 let selectedApi = '';
+// 隐藏成功率为 0 的上游接口(仅影响上游接口统计表格的渲染)。
+let hideZeroUpstream = readHideZeroUpstreamPreference();
 let clientApiSort = 'requests';
 let clientApiSelectMode = false;
 let selectedClientApi = null;
@@ -52,6 +55,7 @@ var dashboardCurrencyState = { currency: 'USD', rate: 0, status: 'disabled', sou
 const currencyStorageKey = 'usage-dashboard.currency';
 
 function readCurrencyPreference() { try { return localStorage.getItem(currencyStorageKey) === 'CNY' ? 'CNY' : 'USD'; } catch (_) { return 'USD'; } }
+function readHideZeroUpstreamPreference() { try { return localStorage.getItem(hideZeroUpstreamKey) === 'true'; } catch (_) { return false; } }
 function currencyFromSummary(summary) {
   const raw = summary && summary._meta && summary._meta.currency;
   if (!raw || !Array.isArray(raw.supported_display)) return { currency: 'USD', rate: 0, status: 'disabled' };
@@ -1350,35 +1354,78 @@ async function refreshFilteredSummary() {
   }
 }
 
+// 上游接口统计的原始行:全部上游都保留,过滤(隐藏 0% 成功率)只作用于渲染。
+// 上游接口详情、导出和 API Key 联动都基于全量行,避免用户隐藏后无法再选中或导出。
+// 缺少成功计数的旧快照无法确定成功率，保留「-」且不按 0% 隐藏。
+function upstreamApiRows(usage) {
+  return Object.entries((usage && usage.apis) || {}).map(([api, a]) => {
+    const requests = num(a.total_requests), success = num(a.success_count);
+    const successKnown = a.success_count != null && Number.isFinite(Number(a.success_count));
+    return {
+      api,
+      requests,
+      success,
+      failure: num(a.failure_count),
+      tokens: num(a.total_tokens),
+      avgLatency: a.avg_latency_ms,
+      successRate: requests ? (successKnown ? success / requests * 100 : NaN) : 100,
+      modelCount: Object.keys(a.models || {}).length
+    };
+  }).sort((a, b) => b.requests - a.requests);
+}
+
+// 请求数为 0 时 successRate 记为 100(没有可失败的请求)。
+const isZeroSuccessRate = (row) => row.successRate === 0;
+// 表格只显示一位小数；真实成功率大于 0 时不能让用户看到可见的“0.0%”。
+const upstreamSuccessRateText = (rate) => rate > 0 && rate < 0.05 ? '<0.1%' : pct(rate);
+
 function renderApiStats() {
   const panelData = dashboardPanelData();
   const usage = panelData && panelData.usage;
+  const hideZeroToggle = $('hideZeroUpstream');
   if (!usage || !usage.apis) {
     selectedApi = '';
     $('apiStats').innerHTML = '<div class="empty">' + (filteredSummaryError ? t('client_api_filter_failed') : t('no_upstream_data')) + '</div>';
     $('apiSelect').innerHTML = '<option value="">' + t('upstream_select_none') + '</option>';
     $('apiSelect').value = '';
     $('apiSelect').disabled = true;
+    renderUpstreamFilterStatus(0, 0, hideZeroToggle);
     return;
   }
-  const rows = Object.entries(usage.apis).map(([api, a]) => ({
-    api,
-    requests: a.total_requests,
-    success: a.success_count,
-    failure: a.failure_count,
-    tokens: a.total_tokens,
-    avgLatency: a.avg_latency_ms,
-    successRate: a.total_requests ? a.success_count / a.total_requests * 100 : 100,
-    modelCount: Object.keys(a.models || {}).length
-  })).sort((a, b) => b.requests - a.requests);
-  if (rows.length && (!selectedApi || !rows.some((r) => r.api === selectedApi))) selectedApi = rows[0].api;
-  if (!rows.length) selectedApi = '';
-  $('apiSelect').innerHTML = rows.length ? rows.map((r) => '<option value="' + esc(r.api) + '">' + esc(friendlyApiName(r.api)) + '</option>').join('') : '<option value="">' + t('upstream_select_none') + '</option>';
+  const allRows = upstreamApiRows(usage);
+  const zeroRows = allRows.filter(isZeroSuccessRate);
+  // 选中项始终跟随全量行:被隐藏的上游仍然可以在详情里查看和导出。
+  if (allRows.length && (!selectedApi || !allRows.some((r) => r.api === selectedApi))) selectedApi = allRows[0].api;
+  if (!allRows.length) selectedApi = '';
+  // 全量行已按请求数降序排列,过滤后顺序不变。
+  const rows = hideZeroUpstream ? allRows.filter((r) => !isZeroSuccessRate(r)) : allRows;
+  $('apiSelect').innerHTML = allRows.length ? allRows.map((r) => '<option value="' + esc(r.api) + '">' + esc(friendlyApiName(r.api)) + '</option>').join('') : '<option value="">' + t('upstream_select_none') + '</option>';
   $('apiSelect').value = selectedApi;
-  $('apiSelect').disabled = !rows.length;
+  $('apiSelect').disabled = !allRows.length;
   $('apiSelect').onchange = () => { selectedApi = $('apiSelect').value; renderApiStats(); renderApiDetail() };
-  $('apiStats').innerHTML = rows.length ? '<table><thead><tr><th>' + t('col_api') + '</th><th>' + t('col_requests') + '</th><th>' + t('col_success_rate') + '</th><th>' + t('col_tokens') + '</th><th>' + t('col_avg_latency') + '</th><th>' + t('col_models') + '</th></tr></thead><tbody>' + rows.map((r) => '<tr class="clickableRow ' + (r.api === selectedApi ? 'selectedRow' : '') + '" data-api="' + esc(r.api) + '"><td class="nameCell">' + esc(friendlyApiName(r.api)) + '</td><td>' + formatInteger(r.requests) + ' <span class="ok">(' + formatInteger(r.success) + '</span> <span class="bad">' + formatInteger(r.failure) + ')</span></td><td class="' + (r.successRate >= 95 ? 'ok' : r.successRate >= 80 ? 'neutral' : 'bad') + '">' + pct(r.successRate) + '</td><td>' + compact(r.tokens) + '</td><td>' + formatMs(r.avgLatency) + '</td><td>' + formatInteger(r.modelCount) + ' ' + t('model_count') + '</td></tr>').join('') + '</tbody></table>' : '<div class="empty">' + t('no_upstream_data') + '</div>';
+  $('apiStats').innerHTML = rows.length ? '<table><thead><tr><th>' + t('col_api') + '</th><th>' + t('col_requests') + '</th><th>' + t('col_success_rate') + '</th><th>' + t('col_tokens') + '</th><th>' + t('col_avg_latency') + '</th><th>' + t('col_models') + '</th></tr></thead><tbody>' + rows.map((r) => '<tr class="clickableRow ' + (r.api === selectedApi ? 'selectedRow' : '') + '" data-api="' + esc(r.api) + '"><td class="nameCell">' + esc(friendlyApiName(r.api)) + '</td><td>' + formatInteger(r.requests) + ' <span class="ok">(' + formatInteger(r.success) + '</span> <span class="bad">' + formatInteger(r.failure) + ')</span></td><td class="' + (r.successRate >= 95 ? 'ok' : r.successRate >= 80 ? 'neutral' : 'bad') + '">' + upstreamSuccessRateText(r.successRate) + '</td><td>' + compact(r.tokens) + '</td><td>' + formatMs(r.avgLatency) + '</td><td>' + formatInteger(r.modelCount) + ' ' + t('model_count') + '</td></tr>').join('') + '</tbody></table>' : '<div class="empty">' + (zeroRows.length ? t('upstream_all_hidden', formatInteger(zeroRows.length)) : t('no_upstream_data')) + '</div>';
   document.querySelectorAll('[data-api]').forEach((row) => row.onclick = () => { selectedApi = row.getAttribute('data-api') || ''; renderApiStats(); renderApiDetail() });
+  renderUpstreamFilterStatus(allRows.length, zeroRows.length, hideZeroToggle);
+}
+
+// 按钮状态和「已隐藏 N 个」提示都放在这里同步,保证任何入口(加载、轮询、筛选、
+// 语言切换后的重渲染)都得到与当前数据一致的结果。
+function renderUpstreamFilterStatus(totalCount, zeroCount, toggle) {
+  const status = $('upstreamFilterStatus');
+  if (toggle) {
+    // 开启后即使当前没有 0% 的接口也要保持可点:否则用户这一轮再也点不回去,
+    // 只能刷新页面才能关掉这个偏好。
+    toggle.disabled = zeroCount === 0 && !hideZeroUpstream;
+    toggle.classList.toggle('active', hideZeroUpstream);
+    toggle.setAttribute('aria-pressed', hideZeroUpstream ? 'true' : 'false');
+    toggle.title = t('upstream_hide_zero_hint');
+  }
+  if (!status) return;
+  const hidden = hideZeroUpstream && zeroCount > 0;
+  if (!hidden) { status.textContent = ''; return }
+  const text = zeroCount === totalCount ? t('upstream_all_hidden', formatInteger(zeroCount)) : t('upstream_hidden_count', formatInteger(zeroCount));
+  status.textContent = text;
+  status.title = text;
 }
 
 function metricHtml(label, value, extra) {
@@ -2642,6 +2689,12 @@ document.querySelectorAll('[data-api-sort]').forEach((btn) => btn.onclick = asyn
 });
 const clientApiSelectButton = document.querySelectorAll('[data-client-api-select]')[0];
 if (clientApiSelectButton) clientApiSelectButton.onclick = () => { clientApiSelectMode = true; renderClientApiStats() };
+// 只重绘上游接口统计:该开关不影响请求数据,无需重新拉取摘要或事件明细。
+$('hideZeroUpstream').onclick = () => {
+  hideZeroUpstream = !hideZeroUpstream;
+  try { localStorage.setItem(hideZeroUpstreamKey, String(hideZeroUpstream)); } catch (_) {}
+  renderApiStats();
+};
 ['filterModel', 'filterSource', 'filterAuth'].forEach((id) => $(id).onchange = () => { eventsOffset = 0; renderEvents() });
 $('clearFilters').onclick = () => { eventsOffset = 0; ['filterModel', 'filterSource', 'filterAuth'].forEach((id) => $(id).value = ''); renderEvents() };
 $('eventsPrev').onclick = async () => { eventsOffset = Math.max(0, eventsOffset - eventsLimit); $('eventsPrev').disabled = true; $('eventsNext').disabled = true; await renderEvents() };

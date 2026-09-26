@@ -18,10 +18,18 @@ class FakeElement {
     this.files = [];
     this.children = [];
     this.parentNode = null;
+    // 真实的 classList:保留类名状态,否则测试无法断言 add/remove/toggle 的效果。
+    const classes = new Set();
     this.classList = {
-      add() {},
-      remove() {},
-      toggle() {},
+      add(...names) { names.forEach((name) => classes.add(name)); },
+      remove(...names) { names.forEach((name) => classes.delete(name)); },
+      contains(name) { return classes.has(name); },
+      toggle(name, force) {
+        const on = force === undefined ? !classes.has(name) : !!force;
+        if (on) classes.add(name);
+        else classes.delete(name);
+        return on;
+      },
     };
   }
   setAttribute(name, value) {
@@ -63,6 +71,7 @@ function createDashboardHarness(options = {}) {
     return el;
   });
   const clientApiSelectButton = new FakeElement('client-api-select');
+  const hideZeroUpstreamButton = new FakeElement('hideZeroUpstream');
   const downloads = [];
   const fetchCalls = [];
   const fetchRequests = [];
@@ -88,12 +97,14 @@ function createDashboardHarness(options = {}) {
   let exportJobSeq = 0;
 
   const document = {
+    __upstreamFilterButtons: { hideZeroUpstream: hideZeroUpstreamButton },
     body: new FakeElement('body'),
     documentElement: new FakeElement('html'),
     get visibilityState() {
       return visibilityState;
     },
     getElementById(id) {
+      if (id === 'hideZeroUpstream') return hideZeroUpstreamButton;
       if (!elements.has(id)) elements.set(id, new FakeElement(id));
       return elements.get(id);
     },
@@ -123,6 +134,8 @@ function createDashboardHarness(options = {}) {
   };
   if (options.language) localStorage.setItem('cli-proxy-language', options.language);
   if (options.range) localStorage.setItem('cpa-usage-range-v1', options.range);
+  // 在页面脚本执行前预置,用于验证「上次已开启,刷新后继续生效」的持久化读取。
+  if (options.hideZeroUpstream) localStorage.setItem('cpa-usage-hide-zero-upstream-v1', String(options.hideZeroUpstream));
 
   const summary = {
     generated_at: options.generatedAt || new Date().toISOString(),
@@ -193,6 +206,18 @@ function createDashboardHarness(options = {}) {
   if (options.clientApiStats) summary.client_api_stats = options.clientApiStats;
   if (options.credentialStats) summary.credential_stats = options.credentialStats;
   if (options.summaryUsage) Object.assign(summary.usage, options.summaryUsage);
+  if (options.extraUpstreamApis) {
+    Object.entries(options.extraUpstreamApis).forEach(([api, stats]) => {
+      const merged = Object.assign({ total_requests: 0, success_count: 0, failure_count: 0, total_tokens: 0, avg_latency_ms: 0, models: {} }, stats);
+      // 只在调用方压根没写 success_count 时才推导:给了 total_requests 和
+      // failure_count 就按差值算,方便构造指定成功率的接口。显式传 undefined
+      // (模拟旧快照缺字段)时 hasOwnProperty 为真,保留 undefined 交给 num() 兜底。
+      if (!Object.prototype.hasOwnProperty.call(stats, 'success_count') && stats.total_requests !== undefined && stats.failure_count !== undefined) {
+        merged.success_count = stats.total_requests - stats.failure_count;
+      }
+      summary.usage.apis[api] = merged;
+    });
+  }
 
   function eventsPage(url) {
     const parsed = new URL(url, 'http://test.local/v0/management/plugins/usage-dashboard-zduu/dashboard');
@@ -286,9 +311,12 @@ function createDashboardHarness(options = {}) {
     return exportJobResponse(job);
   }
 
-  function apiDetailPayload() {
-    return {
-      api: 'openai',
+  // 详情载荷带上被请求的 api 与专属模型名:迟到的旧响应因此和当前选中项渲染出
+  // 不同内容,否则「丢弃过期响应」的测试无法区分两者。
+  function apiDetailPayload(url) {
+    const requestedApi = new URL(String(url || ''), 'http://test.local/v0/management/plugins/usage-dashboard-zduu/dashboard').searchParams.get('api') || 'openai';
+    const base = {
+      api: requestedApi,
       summary: {
         total_requests: 8,
         success_count: 7,
@@ -326,6 +354,15 @@ function createDashboardHarness(options = {}) {
       total_events: 8,
       generated_at: new Date().toISOString(),
     };
+    // 只有 openai 保持原有字面量(多个既有测试依赖它),其余 api 换成专属模型名,
+    // 这样过期响应的正文内容与新选中项明显不同。
+    if (requestedApi !== 'openai') {
+      const tag = requestedApi + '-model';
+      base.model_stats = base.model_stats.map((m) => Object.assign({}, m, { model: tag }));
+      base.source_stats = base.source_stats.map((s) => Object.assign({}, s, { source: tag }));
+      base.recent_events = base.recent_events.map((e) => Object.assign({}, e, { model: tag, source: tag }));
+    }
+    return base;
   }
 
   function dashboardDataPayload() {
@@ -678,6 +715,12 @@ async function waitFor(fn) {
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
   throw new Error('condition not met');
+}
+
+// 让所有已排队的微任务和宏任务跑完。waitFor(() => true) 会在第一次检查就返回、
+// 一次都不 await,所以断言「某个迟到的响应没有生效」时必须用这个真正让出执行权。
+async function flushTasks(rounds = 20) {
+  for (let i = 0; i < rounds; i++) await new Promise((resolve) => setImmediate(resolve));
 }
 
 test('dashboard loads and changes range when browser storage is unavailable', async () => {
@@ -1717,10 +1760,264 @@ test('dashboard wide statistic panels span the full layout width', () => {
   const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
   const css = fs.readFileSync(path.join(__dirname, 'style.css'), 'utf8');
 
-  assert.match(html, /<div class="panel full">\s*<div class="panelHead"><h2 data-i18n="upstream_title">/);
+  assert.match(html, /<div class="panel full">\s*<div class="panelHead">\s*<div><h2 data-i18n="upstream_title">/);
   assert.match(html, /<div class="panel full">\s*<div class="panelHead"><h2 data-i18n="model_stats_title">/);
   assert.match(css, /\.detailActivityGrid\{grid-template-columns:minmax\(0,1fr\)\}/);
   assert.match(css, /\.barLabel\{[^}]*overflow-wrap:anywhere;[^}]*word-break:break-word/);
+});
+
+test('dashboard hides zero-success upstream APIs behind a toggle', async () => {
+  const { document } = createDashboardHarness({
+    extraUpstreamApis: {
+      'ghost-free': { total_requests: 6, failure_count: 6, total_tokens: 0, models: {} },
+      'healthy': { total_requests: 3, success_count: 3, failure_count: 0, total_tokens: 30, models: { 'gpt-4.1': { total_requests: 3, success_count: 3 } } },
+    },
+  });
+  await waitFor(() => document.getElementById('apiStats').innerHTML.includes('openai'));
+
+  const toggle = document.__upstreamFilterButtons.hideZeroUpstream;
+  assert.strictEqual(toggle.disabled, false, 'toggle stays enabled while a 0% upstream exists');
+  assert.match(document.getElementById('apiStats').innerHTML, /ghost-free/);
+  assert.match(document.getElementById('apiStats').innerHTML, /healthy/);
+
+  toggle.onclick();
+  assert.doesNotMatch(document.getElementById('apiStats').innerHTML, /ghost-free/);
+  assert.match(document.getElementById('apiStats').innerHTML, /healthy/);
+  assert.match(document.getElementById('apiStats').innerHTML, /openai/);
+  assert.strictEqual(toggle.getAttribute('aria-pressed'), 'true');
+  assert.strictEqual(toggle.classList.contains('active'), true, 'active class drives the pressed styling');
+  assert.match(toggle.title, /隐藏成功率为 0 的上游接口/);
+  assert.match(document.getElementById('upstreamFilterStatus').textContent, /已隐藏 1 个成功率 0% 的上游接口/);
+  // 被隐藏的上游仍然保留在下拉和详情里,否则用户无法再查看或导出它。
+  assert.match(document.getElementById('apiSelect').innerHTML, /ghost-free/);
+
+  // 从下拉选中一个被隐藏的上游,再重复渲染:选中项和详情不能被悄悄换掉。
+  const select = document.getElementById('apiSelect');
+  select.value = 'ghost-free';
+  select.onchange();
+  assert.strictEqual(select.value, 'ghost-free');
+  assert.doesNotMatch(document.getElementById('apiStats').innerHTML, /ghost-free/);
+  assert.strictEqual(document.getElementById('apiDetailTitle').textContent, 'ghost-free');
+
+  // 开关只改表格:再次切换不能顺手把当前选中的上游重置成第一行。
+  toggle.onclick();
+  assert.match(document.getElementById('apiStats').innerHTML, /ghost-free/);
+  assert.strictEqual(select.value, 'ghost-free');
+  assert.strictEqual(document.getElementById('apiDetailTitle').textContent, 'ghost-free');
+  assert.strictEqual(toggle.getAttribute('aria-pressed'), 'false');
+  assert.strictEqual(toggle.classList.contains('active'), false);
+  assert.strictEqual(document.getElementById('upstreamFilterStatus').textContent, '');
+});
+
+test('dashboard never hides upstream APIs that have no requests yet', async () => {
+  const { document } = createDashboardHarness({
+    extraUpstreamApis: {
+      'ghost-free': { total_requests: 6, failure_count: 6, total_tokens: 0, models: {} },
+      // 没有请求的上游按 100% 计,不应该被当成「失败率 100%」隐藏掉。
+      'not-used-yet': { total_requests: 0, success_count: 0, failure_count: 0, total_tokens: 0, models: {} },
+    },
+  });
+  await waitFor(() => document.getElementById('apiStats').innerHTML.includes('ghost-free'));
+
+  document.__upstreamFilterButtons.hideZeroUpstream.onclick();
+  const html = document.getElementById('apiStats').innerHTML;
+  assert.doesNotMatch(html, /ghost-free/);
+  assert.match(html, /not-used-yet/);
+  assert.match(html, /100\.0%/);
+  assert.match(document.getElementById('upstreamFilterStatus').textContent, /已隐藏 1 /);
+  // 即便表格里还有可见行,下游的下拉也不能被当成空列表禁用。
+  assert.strictEqual(document.getElementById('apiSelect').disabled, false);
+});
+
+test('dashboard resets the zero-success toggle state when no upstream data is available', async () => {
+  // summaryUsage.apis = null 会让 panelData.usage.apis 变成 falsy,走 no-data 分支。
+  const { document } = createDashboardHarness({ summaryUsage: { apis: null } });
+  await waitFor(() => document.getElementById('apiStats').innerHTML.includes('暂无接口数据'));
+
+  const toggle = document.__upstreamFilterButtons.hideZeroUpstream;
+  assert.strictEqual(toggle.disabled, true);
+  assert.strictEqual(toggle.getAttribute('aria-pressed'), 'false');
+  assert.strictEqual(document.getElementById('upstreamFilterStatus').textContent, '');
+});
+
+test('dashboard keeps upstream APIs with unknown success counts visible', async () => {
+  // 旧快照可能缺 success_count/failure_count，未知成功率不能被当成 0% 隐藏。
+  const { document } = createDashboardHarness({
+    extraUpstreamApis: {
+      // 显式 undefined 才能覆盖 harness 的默认 0,模拟真正缺字段的旧快照。
+      'legacy-partial': { total_requests: 5, success_count: undefined, failure_count: undefined, models: {} },
+    },
+  });
+  await waitFor(() => document.getElementById('apiStats').innerHTML.includes('legacy-partial'));
+
+  const html = document.getElementById('apiStats').innerHTML;
+  assert.doesNotMatch(html, /NaN/);
+  assert.match(html, /selectedRow[^>]*>[\s\S]*?legacy-partial/);
+  assert.match(html, /bad">-</);
+  document.__upstreamFilterButtons.hideZeroUpstream.onclick();
+  assert.match(document.getElementById('apiStats').innerHTML, /legacy-partial/);
+});
+
+test('dashboard only hides an exact 0% success rate, not merely a low one', async () => {
+  // 边界的另一半:成功率只要不是恰好 0 就不该被隐藏,否则「隐藏 0%」会变成
+  // 「隐藏所有失败过的接口」。用 1/1000 构造 0.1%。
+  const { document } = createDashboardHarness({
+    extraUpstreamApis: {
+      'barely-working': { total_requests: 1000, success_count: 1, failure_count: 999, total_tokens: 10, models: {} },
+      'ghost-free': { total_requests: 6, failure_count: 6, total_tokens: 0, models: {} },
+    },
+  });
+  await waitFor(() => document.getElementById('apiStats').innerHTML.includes('barely-working'));
+
+  document.__upstreamFilterButtons.hideZeroUpstream.onclick();
+  const html = document.getElementById('apiStats').innerHTML;
+  assert.match(html, /barely-working/);
+  assert.match(html, /0\.1%/);
+  assert.doesNotMatch(html, /ghost-free/);
+  assert.match(document.getElementById('upstreamFilterStatus').textContent, /已隐藏 1 /);
+});
+
+test('dashboard drops an in-flight upstream detail response when the selection changes', async () => {
+  const { context, document } = createDashboardHarness({
+    extraUpstreamApis: { 'slower-api': { total_requests: 1, success_count: 1, failure_count: 0, models: {} } },
+  });
+  await waitFor(() => document.getElementById('apiStats').innerHTML.includes('slower-api'));
+  const originalFetch = context.fetchApiDetailData;
+  let releaseSlow = null;
+  // 只把 slower-api 的详情请求挂在途中,openai 的请求正常返回。
+  context.fetchApiDetailData = function (api) {
+    if (api !== 'slower-api') return originalFetch(api);
+    return new Promise((resolve) => { releaseSlow = () => resolve(originalFetch(api)); });
+  };
+
+  const select = document.getElementById('apiSelect');
+  select.value = 'slower-api';
+  select.onchange();
+  await waitFor(() => typeof releaseSlow === 'function');
+
+  // 在 slower-api 的响应到达前切回 openai,并让它先渲染完成。
+  select.value = 'openai';
+  select.onchange();
+  await waitFor(() => document.getElementById('apiDetailTitle').textContent === 'openai');
+  const settled = document.getElementById('apiDetail').innerHTML;
+
+  // 迟到的 slower-api 响应不能把标题或正文改回旧选中项。
+  releaseSlow();
+  await flushTasks();
+  assert.strictEqual(select.value, 'openai');
+  assert.strictEqual(document.getElementById('apiDetailTitle').textContent, 'openai');
+  assert.strictEqual(document.getElementById('apiDetail').innerHTML, settled);
+  assert.doesNotMatch(document.getElementById('apiDetail').innerHTML, /slower-api-model/);
+});
+
+test('dashboard explains when every upstream API was hidden', async () => {
+  const { document } = createDashboardHarness({
+    summaryUsage: { apis: {} },
+    extraUpstreamApis: {
+      'ghost-a': { total_requests: 2, failure_count: 2, total_tokens: 0, models: {} },
+      'ghost-b': { total_requests: 4, failure_count: 4, total_tokens: 0, models: {} },
+    },
+  });
+  await waitFor(() => document.getElementById('apiStats').innerHTML.includes('ghost-a'));
+
+  document.__upstreamFilterButtons.hideZeroUpstream.onclick();
+  const html = document.getElementById('apiStats').innerHTML;
+  assert.doesNotMatch(html, /ghost-a/);
+  assert.match(html, /全部 2 个上游接口成功率为 0，已全部隐藏/);
+  assert.match(document.getElementById('upstreamFilterStatus').textContent, /全部 2 个上游接口成功率为 0/);
+  assert.match(document.getElementById('apiSelect').innerHTML, /ghost-a/);
+  // 表格里一行不剩,但下拉仍要可用:否则用户没法再选中被隐藏的接口。
+  assert.strictEqual(document.getElementById('apiSelect').disabled, false);
+});
+
+test('dashboard keeps the zero-success toggle disabled without zero-success upstreams', async () => {
+  const { document } = createDashboardHarness();
+  await waitFor(() => document.getElementById('apiStats').innerHTML.includes('openai'));
+
+  const toggle = document.__upstreamFilterButtons.hideZeroUpstream;
+  assert.strictEqual(toggle.disabled, true);
+  // 禁用状态不能让已开启的隐藏偏好无法关闭:点开后按钮必须保持可点。
+  toggle.onclick();
+  assert.strictEqual(toggle.disabled, false);
+  assert.strictEqual(toggle.getAttribute('aria-pressed'), 'true');
+  assert.match(document.getElementById('apiStats').innerHTML, /openai/);
+  assert.strictEqual(document.getElementById('upstreamFilterStatus').textContent, '');
+  toggle.onclick();
+  assert.strictEqual(toggle.disabled, true);
+  assert.strictEqual(toggle.getAttribute('aria-pressed'), 'false');
+});
+
+test('dashboard zero-success hiding covers translations and markup', () => {
+  const { context } = createDashboardHarness();
+  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
+
+  assert.match(html, /<button class="btn" id="hideZeroUpstream" type="button" aria-pressed="false" data-i18n="upstream_hide_zero">/);
+  for (const language of ['zh-CN', 'zh-TW', 'en', 'ru']) {
+    for (const key of ['upstream_hide_zero', 'upstream_hide_zero_hint', 'upstream_hidden_count', 'upstream_all_hidden']) {
+      assert.ok(context.I18N_MAP[language][key], language + ' missing ' + key);
+    }
+  }
+});
+
+test('dashboard persists the zero-success hiding preference across reloads', async () => {
+  // 文档承诺「刷新页面后继续生效」:预置存储为 true 时,首屏就应处于已隐藏状态。
+  const { context, document } = createDashboardHarness({
+    hideZeroUpstream: true,
+    extraUpstreamApis: { 'ghost-free': { total_requests: 6, failure_count: 6, total_tokens: 0, models: {} } },
+  });
+  await waitFor(() => document.getElementById('apiStats').innerHTML.includes('openai'));
+
+  assert.strictEqual(vm.runInContext('hideZeroUpstream', context), true);
+  assert.doesNotMatch(document.getElementById('apiStats').innerHTML, /ghost-free/);
+  const toggle = document.__upstreamFilterButtons.hideZeroUpstream;
+  assert.strictEqual(toggle.getAttribute('aria-pressed'), 'true');
+  assert.strictEqual(toggle.classList.contains('active'), true);
+
+  // 关闭后必须写回存储,否则刷新又会打开。
+  toggle.onclick();
+  assert.strictEqual(vm.runInContext('hideZeroUpstream', context), false);
+  assert.strictEqual(context.localStorage.getItem('cpa-usage-hide-zero-upstream-v1'), 'false');
+});
+
+test('dashboard defaults the zero-success preference to off when storage is empty or denied', async () => {
+  const fresh = createDashboardHarness();
+  await waitFor(() => fresh.document.getElementById('apiStats').innerHTML.includes('openai'));
+  assert.strictEqual(vm.runInContext('hideZeroUpstream', fresh.context), false, 'empty storage must not enable hiding');
+
+  // 存储被拒时不能抛错,退回默认关闭。
+  const denied = createDashboardHarness({ denyStorageReads: true });
+  await waitFor(() => denied.document.getElementById('apiStats').innerHTML.includes('openai'));
+  assert.strictEqual(vm.runInContext('hideZeroUpstream', denied.context), false);
+});
+
+test('dashboard renders sub-0.1% success rates without showing a misleading 0.0%', async () => {
+  // 可见一位小数时,真实成功率 > 0 不能显示成 0.0%(那会被误读为「和 0% 一样差」)。
+  const { context, document } = createDashboardHarness({
+    extraUpstreamApis: {
+      'tiny-rate': { total_requests: 10000, success_count: 1, failure_count: 9999, total_tokens: 5, models: {} },
+      'exactly-zero': { total_requests: 6, failure_count: 6, total_tokens: 0, models: {} },
+      // 0.2%:安全落在阈值之外,用来区分 0.05% 和更宽的阈值。
+      'small-but-real': { total_requests: 5000, success_count: 10, failure_count: 4990, total_tokens: 5, models: {} },
+    },
+  });
+  await waitFor(() => document.getElementById('apiStats').innerHTML.includes('tiny-rate'));
+
+  const render = (api) => vm.runInContext(
+    'JSON.stringify((function(){var p=dashboardPanelData();var r=upstreamApiRows(p.usage).filter(function(x){return x.api==="' + api + '"})[0];' +
+    'return {rate: r.successRate, text: upstreamSuccessRateText(r.successRate), hidden: isZeroSuccessRate(r)}})())', context);
+  const tiny = JSON.parse(render('tiny-rate'));
+  const zero = JSON.parse(render('exactly-zero'));
+  assert.strictEqual(tiny.text, '<0.1%', '非零的极小成功率不能显示为 0.0%');
+  assert.strictEqual(tiny.hidden, false, '非零成功率不得被当作 0% 隐藏');
+  assert.strictEqual(zero.text, '0.0%', '真正的 0% 仍显示 0.0%');
+  assert.strictEqual(zero.hidden, true);
+  const small = JSON.parse(render('small-but-real'));
+  assert.strictEqual(small.text, '0.2%', '0.2% 应显示真实值,不能被 <0.1% 的阈值覆盖');
+  assert.strictEqual(small.hidden, false);
+
+  document.__upstreamFilterButtons.hideZeroUpstream.onclick();
+  assert.match(document.getElementById('apiStats').innerHTML, /tiny-rate/);
+  assert.doesNotMatch(document.getElementById('apiStats').innerHTML, /exactly-zero/);
 });
 
 test('dashboard shows pending storage buffer status', async () => {
