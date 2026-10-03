@@ -274,6 +274,7 @@ func (s *RequestStatistics) advanceQuotaCyclesLocked(now time.Time) {
 }
 
 func (s *RequestStatistics) pruneQuotaLocked(now time.Time) {
+	const revocationRetention = 2 * 366 * 24 * time.Hour
 	if s.quota == nil {
 		return
 	}
@@ -289,9 +290,9 @@ func (s *RequestStatistics) pruneQuotaLocked(now time.Time) {
 			p = w.Previous
 		}
 		if p == nil {
-			// No duration is known for a revocation received before any
-			// window. Bound its lifetime by two maximum supported periods.
-			if w.Hidden && now.After(w.UpdatedAt.Add(2*366*24*time.Hour)) {
+			// A marker without retained usage has no duration. Bound its
+			// lifetime by two maximum supported periods.
+			if w.Hidden && now.After(w.UpdatedAt.Add(revocationRetention)) {
 				delete(s.quota.Windows, key)
 				s.quota.VersionCounter++
 				s.invalidateCachedResponsesLocked()
@@ -299,7 +300,15 @@ func (s *RequestStatistics) pruneQuotaLocked(now time.Time) {
 			continue
 		}
 		if now.After(p.End.Add(time.Duration(w.Seconds) * time.Second)) {
-			delete(s.quota.Windows, key)
+			if w.Hidden && !now.After(w.UpdatedAt.Add(revocationRetention)) {
+				// Expiring old usage must not erase a newer revocation. Keep
+				// only its marker; late observations can still carry new periods.
+				w.Current, w.Previous, w.Seconds = nil, nil, 0
+				w.EstimateExpired = false
+				s.quota.Windows[key] = w
+			} else {
+				delete(s.quota.Windows, key)
+			}
 			s.quota.VersionCounter++
 			s.invalidateCachedResponsesLocked()
 			continue

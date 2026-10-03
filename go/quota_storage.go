@@ -254,7 +254,9 @@ func (s *RequestStatistics) mergeQuotaSnapshotLocked(in *quotaSnapshot) {
 		q.Deleted = make(map[string]time.Time)
 	}
 	for key, at := range copy.Deleted {
-		q.Deleted[key] = at
+		if at.After(q.Deleted[key]) {
+			q.Deleted[key] = at
+		}
 		delete(q.Facts, key)
 	}
 	s.removeQuotaDeletedDetailsLocked(copy.Deleted)

@@ -406,3 +406,69 @@ func TestQuotaSnapshotRevocationKeepsLatestHistory(t *testing.T) {
 		}
 	}
 }
+
+func TestQuotaRevocationSurvivesExpiredHistory(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	s := NewRequestStatistics()
+	defer s.Close()
+	r := quotaTestRecord("request", "m", now.Add(-time.Minute), 7)
+	s.Record(r)
+	quotaTestObserve(s, now.Add(-7*time.Hour), now.Add(-6*time.Hour), .8, 18000)
+	s.applyQuotaObservationLocked(quotaObservation{Provider: r.Provider, AuthIndex: r.AuthIndex, AuthID: r.AuthID,
+		Group: "shared", Slot: "5h", ObservedAt: now, Revoked: true})
+	s.quota.NextPrune = time.Time{}
+	s.pruneQuotaLocked(now)
+	backup := s.Snapshot()
+	for _, w := range backup.QuotaCycles.Windows {
+		if !w.Hidden || w.Current != nil || w.Previous != nil {
+			t.Fatal("expired revoked history was retained instead of only its marker")
+		}
+	}
+	restored := NewRequestStatistics()
+	defer restored.Close()
+	if _, err := restored.mergeSnapshotChecked(backup); err != nil {
+		t.Fatal(err)
+	}
+	expired := NewRequestStatistics()
+	defer expired.Close()
+	if _, err := expired.mergeSnapshotChecked(backup); err != nil {
+		t.Fatal(err)
+	}
+	expired.pruneQuotaLocked(now.Add(733 * 24 * time.Hour))
+	if len(expired.quota.Windows) != 0 {
+		t.Fatal("revocation markers were retained beyond the supported horizon")
+	}
+	for _, target := range []*RequestStatistics{s, restored} {
+		quotaTestObserve(target, now.Add(-time.Second), now.Add(time.Hour), .4, 18000)
+		if len(target.QueryAPIDetailAt(usageGroupKey(r), "all", 10, 10, now).QuotaCycles) != 0 {
+			t.Fatal("pruning expired history discarded the newer revocation")
+		}
+		quotaTestObserve(target, now.Add(time.Second), now.Add(time.Hour), .5, 18000)
+		if len(target.QueryAPIDetailAt(usageGroupKey(r), "all", 10, 10, now.Add(time.Second)).QuotaCycles) != 1 {
+			t.Fatal("a fresh observation did not reopen the pruned revoked window")
+		}
+	}
+}
+
+func TestQuotaDeletionMergeKeepsLatestRetentionTime(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, newestFirst := range []bool{false, true} {
+		t.Run(fmt.Sprint(newestFirst), func(t *testing.T) {
+			s := NewRequestStatistics()
+			defer s.Close()
+			s.retention = time.Hour
+			older := &quotaSnapshot{Version: 1, Deleted: map[string]time.Time{"deleted": now.Add(-2 * time.Hour)}}
+			newer := &quotaSnapshot{Version: 1, Deleted: map[string]time.Time{"deleted": now}}
+			first, second := older, newer
+			if newestFirst {
+				first, second = second, first
+			}
+			s.mergeQuotaSnapshotLocked(first)
+			s.mergeQuotaSnapshotLocked(second)
+			s.pruneQuotaLocked(now)
+			if !s.quota.Deleted["deleted"].Equal(now) {
+				t.Fatal("importing an older deletion shortened the latest deletion's retention")
+			}
+		})
+	}
+}
