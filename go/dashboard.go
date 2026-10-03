@@ -83,6 +83,7 @@ func handleDashboardSummary(query map[string][]string, headers map[string][]stri
 	}
 	summary := stats.SummaryWithoutDetailsForRangeAndClientAPIAt(rangeKey, clientAPI, now)
 	summary.Meta.QuotaCyclesEnabled = true
+	summary.Meta.InstanceID = stats.instanceID
 	if compactHealth {
 		compactDashboardHealthGrid(&summary)
 	}
@@ -117,7 +118,7 @@ func dashboardSummaryETagForClientAPIVersion(now time.Time, rangeKey string, cli
 
 func dashboardSummaryETagForClientAPIRepresentation(now time.Time, rangeKey string, clientAPI string, version uint64, compactHealth bool) string {
 	window := summaryHealthWindow(now).UTC().Format(time.RFC3339)
-	parts := []string{"summary", strconv.FormatUint(version, 10), strconv.FormatUint(stats.CurrencyVersion(), 10), window}
+	parts := []string{"summary", stats.instanceID, strconv.FormatUint(version, 10), strconv.FormatUint(stats.CurrencyVersion(), 10), window}
 	if rangeKey != "" {
 		parts = append(parts, rangeKey)
 	}
@@ -220,6 +221,7 @@ func dashboardEventsETagForVersion(params EventsQuery, now time.Time, version ui
 	key := dashboardEventCacheKeyFor(params, now)
 	return dashboardWeakETag(
 		"events",
+		stats.instanceID,
 		strconv.FormatUint(version, 10),
 		strconv.Itoa(key.limit),
 		strconv.Itoa(key.offset),
@@ -577,6 +579,7 @@ func dashboardAPIDetailETagForClientAPIVersion(api string, rangeKey string, clie
 	}
 	return dashboardWeakETag(
 		"api-detail",
+		stats.instanceID,
 		strconv.FormatUint(version, 10),
 		strconv.FormatInt(timeBucket, 10),
 		api,

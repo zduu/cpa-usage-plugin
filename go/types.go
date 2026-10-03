@@ -1179,6 +1179,7 @@ type DashboardSummary struct {
 
 // DashboardMeta carries observability metadata.
 type DashboardMeta struct {
+	InstanceID         string         `json:"instance_id,omitempty"`
 	QuotaCyclesEnabled bool           `json:"quota_cycles_enabled,omitempty"`
 	QuotaAPIs          []string       `json:"quota_apis,omitempty"`
 	RetentionDays      int            `json:"retention_days"`

@@ -177,7 +177,7 @@ func main() {
 				current := g["current"].(map[string]any)
 				require(old["summary"].(map[string]any)["estimated_cost"] == float64(30), "previous actual cost changed")
 				require(current["summary"].(map[string]any)["estimated_cost"] == float64(25), "current actual cost changed")
-				require(old["estimated_total_usd"] == nil, "previous quota was estimated")
+				require(old["estimated_total_usd"] == nil, "uncalibrated previous quota should remain unknown")
 			}
 		}
 	}

@@ -80,8 +80,8 @@ func TestQuotaRealPreviousAndCurrentModelDistribution(t *testing.T) {
 		t.Fatal("mixed period model usage")
 	}
 	raw, _ := json.Marshal(group.Previous)
-	if bytes.Contains(raw, []byte("estimated_total_usd")) {
-		t.Fatal("previous has an estimated quota")
+	if !bytes.Contains(raw, []byte(`"estimated_total_usd":50`)) || group.Previous.ActualTotalUSD != nil {
+		t.Fatalf("partially used previous period must show its estimated capacity: %s", raw)
 	}
 	// Window accounting deliberately ignores the page's client/range filters.
 	filtered := s.QueryAPIDetailForClientAPIAt(api, "7h", "missing-client", 10, 10, now)

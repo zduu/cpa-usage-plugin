@@ -50,6 +50,7 @@ func handleQuotaObservations(body []byte) ([]byte, error) {
 		stats.mu.Lock()
 		changed := false
 		for _, o := range observations {
+			o.CollectionStartedAt = stats.ensureQuotaLocked().StartedAt
 			if stats.applyQuotaObservationLocked(o) {
 				changed = true
 				if stats.storageEnabled {

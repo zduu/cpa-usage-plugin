@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"container/heap"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -28,8 +29,9 @@ import (
 // ============================================================================
 
 type RequestStatistics struct {
-	quota *quotaState
-	mu    sync.RWMutex
+	instanceID string // Immutable; distinguishes caches across plugin re-enables.
+	quota      *quotaState
+	mu         sync.RWMutex
 	// A configuration change stops workers before taking mu. Serialize the
 	// complete transition so another change or Close cannot replace a worker
 	// between its stop and restart.
@@ -584,6 +586,7 @@ var stats = NewRequestStatistics()
 
 func NewRequestStatistics() *RequestStatistics {
 	return &RequestStatistics{
+		instanceID:                    rand.Text(),
 		maxDetailsPerModel:            defaultMaxDetailsPerModel,
 		retention:                     time.Duration(defaultRetentionDays) * 24 * time.Hour,
 		dedupWindow:                   time.Duration(defaultDedupWindowMinutes) * time.Minute,
@@ -699,6 +702,9 @@ func (s *RequestStatistics) ConfigurePatch(cfg runtimeConfigPatch) {
 		s.maxDetailsPerModel = *cfg.MaxDetailsPerModel
 	}
 	if duration, ok := configDuration(cfg.RetentionDays, 24*time.Hour); ok {
+		if duration != s.retention && s.quota != nil {
+			s.quota.NextPrune = time.Time{}
+		}
 		s.retention = duration
 	}
 	if duration, ok := configDuration(cfg.DedupWindowMinutes, time.Minute); ok {
@@ -815,6 +821,7 @@ func (s *RequestStatistics) ConfigurePatch(cfg runtimeConfigPatch) {
 	s.loadModelPricesLocked()
 	s.rebuildCostSeriesLocked()
 	s.pruneLocked(time.Now(), true)
+	s.pruneQuotaLocked(time.Now())
 	s.rebuildSeenLocked(time.Now())
 	s.invalidateSummaryLocked()
 }
@@ -899,6 +906,9 @@ func (s *RequestStatistics) Record(record UsageRecord) {
 		}
 	}
 	observations := s.observeQuotaUsageLocked(record, now)
+	// Memory-only installations also need bounded quota retention. Observe
+	// first so a request's own headers can protect its period from pruning.
+	s.pruneQuotaLocked(now)
 	if persistDetail != nil {
 		persistDetail.QuotaObservations = observations
 	}

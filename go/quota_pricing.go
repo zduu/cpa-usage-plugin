@@ -102,6 +102,19 @@ func quotaEstimate(w quotaWindow, p *quotaPeriod, facts []quotaFact, pricing *pr
 	if last.ObservedAt.Before(started) || last.ObservedAt.After(now) || now.Sub(last.ObservedAt) > time.Duration(w.Seconds)*time.Second/4 {
 		return nil, nil
 	}
+	return quotaEstimateFromSamples(w, p, facts, pricing, started)
+}
+
+// Completed periods use their final observed watermark and historical baseline,
+// without the live estimate's freshness deadline or a later process's restart.
+func quotaEstimateFromSamples(w quotaWindow, p *quotaPeriod, facts []quotaFact, pricing *pricingSnapshot, started time.Time) (*float64, *float64) {
+	if p == nil || w.Unmapped || len(p.Samples) == 0 || started.IsZero() {
+		return nil, nil
+	}
+	last := p.Samples[len(p.Samples)-1]
+	if last.ObservedAt.Before(started) {
+		return nil, nil
+	}
 	matched := false
 	for _, f := range facts {
 		if !quotaFactMatches(f, w, p) || f.Timestamp.After(last.ObservedAt) || f.CompletedAt.After(last.ObservedAt) {
@@ -196,9 +209,23 @@ func (s *RequestStatistics) quotaCyclesForAPILocked(api string, now time.Time) [
 		group := quotaGroupDTO{GroupID: w.Group + ":" + w.Slot, Name: w.Name, WindowSeconds: w.Seconds}
 		if current := quotaBuildPeriod(w, w.Current, facts, pricing); current != nil {
 			total, remaining := quotaEstimate(w, w.Current, facts, pricing, s.quota.StartedAt, now)
-			group.Current = &quotaCurrentDTO{quotaCycleDTO: *current, EstimatedTotalUSD: total, EstimatedRemainingUSD: remaining}
+			current.EstimatedTotalUSD = total
+			group.Current = &quotaCurrentDTO{quotaCycleDTO: *current, EstimatedRemainingUSD: remaining}
 		}
 		group.Previous = quotaBuildPeriod(w, w.Previous, facts, pricing)
+		if previous := group.Previous; previous != nil && previous.UsedPercent != nil {
+			if *previous.UsedPercent == 100 {
+				if previous.Summary != nil {
+					previous.ActualTotalUSD = previous.Summary.CostUSD
+				}
+			} else {
+				started := w.Previous.CollectionStartedAt
+				if started.IsZero() {
+					started = s.quota.StartedAt
+				}
+				previous.EstimatedTotalUSD, _ = quotaEstimateFromSamples(w, w.Previous, facts, pricing, started)
+			}
+		}
 		v.Groups = append(v.Groups, group)
 	}
 	var out []quotaCredentialDTO

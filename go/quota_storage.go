@@ -157,7 +157,12 @@ func cloneQuotaSnapshot(in *quotaSnapshot) *quotaSnapshot {
 		if p == nil {
 			return nil
 		}
-		return &quotaPeriod{Start: p.Start, End: p.End, Samples: append([]quotaObservation(nil), p.Samples...)}
+		cloned := *p
+		cloned.Samples = append([]quotaObservation(nil), p.Samples...)
+		if cloned.CollectionStartedAt.IsZero() {
+			cloned.CollectionStartedAt = in.StartedAt
+		}
+		return &cloned
 	}
 	for key, w := range in.Windows {
 		w.Current = clonePeriod(w.Current)
@@ -205,13 +210,14 @@ func validateQuotaSnapshot(in *quotaSnapshot, current *quotaState) error {
 		}
 	}
 	for key, w := range in.Windows {
-		if !quotaProvider(w.Provider) || w.Seconds <= 0 || w.Seconds > 366*86400 ||
+		revocationOnly := w.Hidden && w.Seconds == 0 && w.Current == nil && w.Previous == nil && !w.UpdatedAt.IsZero()
+		if !quotaProvider(w.Provider) || (!revocationOnly && w.Seconds <= 0) || w.Seconds > 366*86400 ||
 			(w.AuthID == "" && w.AuthIndex == "") || len(w.AuthID) > 512 || len(w.AuthIndex) > 512 ||
 			w.Group == "" || len(w.Group) > 256 || w.Slot == "" || len(w.Slot) > 64 || len(w.Name) > 256 || len(w.Model) > 1024 {
 			return errors.New("invalid quota window")
 		}
 		o := quotaObservation{Provider: w.Provider, AuthIndex: w.AuthIndex, AuthID: w.AuthID, Group: w.Group, Slot: w.Slot}
-		if key != quotaWindowKey(o) || (w.Group != "shared" && !w.Unmapped && w.Model == "") {
+		if key != quotaWindowKey(o) || (!revocationOnly && w.Group != "shared" && !w.Unmapped && w.Model == "") {
 			return errors.New("invalid quota group")
 		}
 		for _, p := range []*quotaPeriod{w.Current, w.Previous} {
@@ -251,32 +257,55 @@ func (s *RequestStatistics) mergeQuotaSnapshotLocked(in *quotaSnapshot) {
 		q.Deleted[key] = at
 		delete(q.Facts, key)
 	}
+	s.removeQuotaDeletedDetailsLocked(copy.Deleted)
 	for key, f := range copy.Facts {
 		if _, deleted := q.Deleted[key]; !deleted {
 			q.Facts[key] = f
 		}
 	}
 	for key, w := range copy.Windows {
-		if old, ok := q.Windows[key]; !ok || w.UpdatedAt.After(old.UpdatedAt) {
-			q.Windows[key] = w
-		} else {
-			for _, incoming := range []*quotaPeriod{w.Previous, w.Current} {
-				if incoming == nil {
-					continue
-				}
-				for _, period := range []*quotaPeriod{old.Previous, old.Current} {
-					if period != nil && period.End.Equal(incoming.End) && old.Seconds == w.Seconds {
-						for _, sample := range incoming.Samples {
-							quotaAppendSample(period, sample, q.StartedAt)
-						}
-					}
-				}
+		if old, ok := q.Windows[key]; ok {
+			if w.UpdatedAt.Before(old.UpdatedAt) || (w.UpdatedAt.Equal(old.UpdatedAt) && (!w.Hidden || old.Hidden)) {
+				w, old = old, w
 			}
-			q.Windows[key] = old
+			mergeQuotaWindowHistory(&w, old)
 		}
+		q.Windows[key] = w
 	}
 	q.VersionCounter++
 	s.invalidateCachedResponsesLocked()
+}
+
+// Keep the newest window metadata, while retaining samples and a real adjacent
+// previous period from either backup. Import order must not discard history.
+func mergeQuotaWindowHistory(w *quotaWindow, incoming quotaWindow) {
+	if w.Hidden && incoming.Seconds > 0 && (w.Seconds == 0 || quotaWindowObservedAt(incoming).After(quotaWindowObservedAt(*w))) {
+		// The newest revocation may have older period history. Choose the
+		// history by usage observation time, independently of visibility.
+		updated := w.UpdatedAt
+		*w, incoming = incoming, *w
+		w.UpdatedAt, w.Hidden = updated, true
+	}
+	if w.Seconds != incoming.Seconds {
+		return
+	}
+	for _, p := range []*quotaPeriod{incoming.Previous, incoming.Current} {
+		if p == nil {
+			continue
+		}
+		if w.Current != nil && w.Previous == nil && quotaResetDriftIsSmall(w.Current.Start, p.End, w.Seconds) {
+			w.Previous = &quotaPeriod{Start: w.Current.Start.Add(-time.Duration(w.Seconds) * time.Second), End: w.Current.Start,
+				CollectionStartedAt: p.CollectionStartedAt}
+		}
+		for _, period := range []*quotaPeriod{w.Previous, w.Current} {
+			if period != nil && quotaResetDriftIsSmall(period.End, p.End, w.Seconds) {
+				for _, sample := range p.Samples {
+					quotaAppendSample(period, sample, p.CollectionStartedAt)
+				}
+				break
+			}
+		}
+	}
 }
 
 func (s *RequestStatistics) restoreQuotaSnapshotLocked(snapshot StatisticsSnapshot) {
@@ -285,6 +314,7 @@ func (s *RequestStatistics) restoreQuotaSnapshotLocked(snapshot StatisticsSnapsh
 		s.quota = &quotaState{quotaSnapshot: *cloneQuotaSnapshot(snapshot.QuotaCycles)}
 		// Restart can leave an unobserved interval; calibrate with a new pair.
 		s.quota.StartedAt = time.Now()
+		s.removeQuotaDeletedDetailsLocked(s.quota.Deleted)
 		return
 	}
 	for api, a := range s.apis {
@@ -300,6 +330,49 @@ func (s *RequestStatistics) restoreQuotaSnapshotLocked(snapshot StatisticsSnapsh
 				}
 			}
 		}
+	}
+}
+
+// A tombstone identifies an accounting deletion, including when it arrives
+// after the original detail through an import or journal replay. Apply only
+// addressable per-detail deltas so legacy aggregate residuals survive.
+func (s *RequestStatistics) removeQuotaDeletedDetailsLocked(deleted map[string]time.Time) {
+	if len(deleted) == 0 {
+		return
+	}
+	changed := false
+	for apiName, api := range s.apis {
+		if api == nil {
+			continue
+		}
+		for modelName, model := range api.Models {
+			if model == nil {
+				continue
+			}
+			for i := model.accountingCount() - 1; i >= 0; i-- {
+				d := model.accountingDetailAt(i)
+				id := d.RecordID
+				if id == "" && quotaEligible(d) {
+					id = quotaLegacyRecordID(apiName, modelName, d)
+				}
+				if _, ok := deleted[id]; !ok {
+					continue
+				}
+				s.decrementCounters(d, api, model, modelName)
+				model.removeAccountingDetailAt(i)
+				changed = true
+			}
+			if model.accountingCount() == 0 && model.TotalRequests <= 0 {
+				delete(api.Models, modelName)
+			}
+		}
+		if len(api.Models) == 0 && api.TotalRequests <= 0 {
+			delete(s.apis, apiName)
+		}
+	}
+	if changed {
+		s.rebuildSeenLocked(time.Now())
+		s.invalidateSummaryLocked()
 	}
 }
 

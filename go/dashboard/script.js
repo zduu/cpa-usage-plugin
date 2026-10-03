@@ -48,6 +48,7 @@ let apiDetailLastRender = null;
 const quotaPeriodSelections = new Map();
 const quotaSubmittedObservations = new Map();
 let quotaCollectionRequest = null;
+let quotaCollectionInstance = '';
 let quotaCollectionRetryAt = 0;
 let quotaCountdownTimer = null;
 const quotaExpiredRefreshes = new Set();
@@ -1580,12 +1581,16 @@ function quotaModelsHtml(cycle) {
 function quotaPeriodHtml(cycle, current) {
   if (!cycle) return '<div class="empty">' + t(current ? 'quota_no_current' : 'quota_no_previous') + '</div>';
   const summary = cycle.summary;
-  const percent = cycle.used_percent === null || cycle.used_percent === undefined ? '—' : pct(cycle.used_percent);
+  const percent = cycle.used_percent === null || cycle.used_percent === undefined ? '—' :
+    (cycle.used_percent >= 99.95 && cycle.used_percent < 100 ? '&lt;100%' : pct(cycle.used_percent));
   const range = esc(formatDateTime(timestampMs(cycle.start_at))) + ' – ' + esc(formatDateTime(timestampMs(cycle.end_at)));
   let html = '<div class="subtle quotaDates">' + range + '</div><div class="detailGrid">' + metricHtml(t('quota_actual_cost'), quotaValue(summary && summary.estimated_cost, true)) + metricHtml(t('quota_used'), percent) + metricHtml(t('requests_label'), quotaValue(summary && summary.total_requests, false)) + metricHtml(t('total_tokens_label'), quotaValue(summary && summary.total_tokens, false));
   if (current) {
     const end = timestampMs(cycle.end_at);
     html += metricHtml(t('quota_estimated_total'), quotaValue(cycle.estimated_total_usd, true)) + metricHtml(t('quota_estimated_remaining'), quotaValue(cycle.estimated_remaining_usd, true)) + metricHtml(t('quota_reset'), '<span data-quota-reset="' + end + '">' + quotaCountdownText(end, Date.now()) + '</span>');
+  } else {
+    const full = cycle.used_percent === 100;
+    html += metricHtml(t(full ? 'quota_actual_total' : 'quota_estimated_total'), quotaValue(full ? cycle.actual_total_usd : cycle.estimated_total_usd, true));
   }
   return html + '</div>' + quotaModelsHtml(cycle);
 }
@@ -1598,8 +1603,19 @@ function quotaCyclesHtml(credentials) {
     return '<div class="quotaWindow"><strong>' + label + '</strong><div class="quotaTabs" role="group" aria-label="' + esc(label) + '">' + ['current', 'previous'].map((period) => '<button type="button" class="btn" data-quota-key="' + esc(key) + '" data-quota-period="' + period + '" aria-pressed="' + (period === selected) + '">' + t(period === 'current' ? 'quota_current' : 'quota_previous') + '</button>').join('') + '</div>' + quotaPeriodHtml(group[selected], selected === 'current') + '</div>';
   }).join('') + '</div>').join('') + '</section>';
 }
-async function collectQuotaObservations() {
-  if (quotaCollectionRequest) return quotaCollectionRequest;
+async function collectQuotaObservations(instanceID = '') {
+  if (quotaCollectionRequest) {
+    const changed = await quotaCollectionRequest;
+    if (instanceID === quotaCollectionInstance) return changed;
+  }
+  if (instanceID !== quotaCollectionInstance) {
+    quotaCollectionInstance = instanceID;
+    quotaSubmittedObservations.clear();
+    quotaCollectionRetryAt = 0;
+    apiDetailCache.clear();
+    apiDetailLastRender = null;
+    quotaExpiredRefreshes.clear();
+  }
   if (Date.now() < quotaCollectionRetryAt) return false;
   quotaCollectionRequest = (async () => {
     try {
@@ -2609,6 +2625,7 @@ function summaryRecordKey(data) {
   const meta = data._meta || {};
   const usage = data.usage || {};
   return [
+    meta.instance_id || '',
     meta.summary_version || '',
     meta.last_recorded_at || '',
     usage.total_requests || '',
@@ -2677,7 +2694,7 @@ async function load(options) {
     const data = summaryResult.data;
     summaryData = requireObjectPayload(data, 'dashboard-summary');
     applyCurrencySummary(summaryData);
-    const quotaChanged = summaryData._meta && summaryData._meta.quota_cycles_enabled ? await collectQuotaObservations() : false;
+    const quotaChanged = summaryData._meta && summaryData._meta.quota_cycles_enabled ? await collectQuotaObservations(summaryData._meta.instance_id || '') : false;
     if (requestSeq !== summaryLoadSeq) return;
     let filteredResult = null;
     if (selectedClientApi) filteredResult = await refreshFilteredSummary();

@@ -85,6 +85,12 @@ func quotaAppendSample(period *quotaPeriod, o quotaObservation, started time.Tim
 		}
 	}
 	period.Samples = append(period.Samples, o)
+	// Preserve the calibration that was valid when this period was observed.
+	// A later process starts a new baseline only upon a new live observation;
+	// replaying older samples must not erase a completed period's calibration.
+	if period.CollectionStartedAt.IsZero() || (!o.ObservedAt.Before(started) && started.After(period.CollectionStartedAt)) {
+		period.CollectionStartedAt = started
+	}
 	sort.SliceStable(period.Samples, func(i, j int) bool { return period.Samples[i].ObservedAt.Before(period.Samples[j].ObservedAt) })
 	if len(period.Samples) > 64 {
 		// Preserve the first observation of this run and both sides of the
@@ -92,7 +98,7 @@ func quotaAppendSample(period *quotaPeriod, o quotaObservation, started time.Tim
 		// reset and make later estimates include costs from before the reset.
 		first, drop := -1, -1
 		for i, sample := range period.Samples {
-			if first < 0 && !sample.ObservedAt.Before(started) {
+			if first < 0 && !sample.ObservedAt.Before(period.CollectionStartedAt) {
 				first = i
 			}
 			if i > 0 && sample.Used < period.Samples[i-1].Used {
@@ -110,16 +116,37 @@ func quotaAppendSample(period *quotaPeriod, o quotaObservation, started time.Tim
 	return true
 }
 
+func quotaWindowObservedAt(w quotaWindow) time.Time {
+	var latest time.Time
+	for _, p := range []*quotaPeriod{w.Current, w.Previous} {
+		if p != nil && len(p.Samples) > 0 {
+			at := p.Samples[len(p.Samples)-1].ObservedAt
+			if at.After(latest) {
+				latest = at
+			}
+		}
+	}
+	return latest
+}
+
 func (s *RequestStatistics) applyQuotaObservationLocked(o quotaObservation) bool {
 	if !validQuotaObservation(o) {
 		return false
 	}
 	q := s.ensureQuotaLocked()
 	key := quotaWindowKey(o)
+	if o.CollectionStartedAt.IsZero() {
+		o.CollectionStartedAt = q.StartedAt
+	}
 	w, exists := q.Windows[key]
 	if o.Revoked {
-		if !exists || !o.ObservedAt.After(w.UpdatedAt) {
+		if exists && (o.ObservedAt.Before(w.UpdatedAt) || (w.Hidden && o.ObservedAt.Equal(w.UpdatedAt))) {
 			return false
+		}
+		if !exists {
+			// Remember revocation even before the first window arrives. A
+			// delayed usage callback must not make that older window visible.
+			w = quotaWindow{Provider: o.Provider, AuthIndex: o.AuthIndex, AuthID: o.AuthID, Group: o.Group, Slot: o.Slot}
 		}
 		w.Hidden, w.UpdatedAt = true, o.ObservedAt
 		q.Windows[key] = w
@@ -132,16 +159,36 @@ func (s *RequestStatistics) applyQuotaObservationLocked(o quotaObservation) bool
 		w = quotaWindow{Provider: o.Provider, AuthIndex: o.AuthIndex, AuthID: o.AuthID, Group: o.Group,
 			Name: o.Name, Slot: o.Slot, Seconds: o.Seconds, Model: o.Model, Unmapped: o.Unmapped}
 	}
-	if o.ObservedAt.Before(w.UpdatedAt) {
+	var revokedAt time.Time
+	if w.Hidden && !o.ObservedAt.After(w.UpdatedAt) {
+		// Revocation and usage have separate ordering: older usage may still
+		// advance the retained history without making the window visible.
+		revokedAt, w.UpdatedAt = w.UpdatedAt, quotaWindowObservedAt(w)
+	}
+	commit := func() bool {
+		if !revokedAt.IsZero() {
+			w.Hidden, w.UpdatedAt = true, revokedAt
+		}
+		q.Windows[key] = w
+		q.VersionCounter++
+		s.invalidateCachedResponsesLocked()
+		return true
+	}
+	if o.ObservedAt.Before(w.UpdatedAt) || (w.Hidden && o.ObservedAt.Equal(w.UpdatedAt)) {
 		for _, p := range []*quotaPeriod{w.Current, w.Previous} {
 			// Boundary alignment must still accept delayed relative-reset samples
 			// without moving the shared boundary back to their older timestamp.
-			if w.Seconds == o.Seconds && p != nil && quotaResetDriftIsSmall(p.End, o.Reset, o.Seconds) && quotaAppendSample(p, o, q.StartedAt) {
-				q.Windows[key] = w
-				q.VersionCounter++
-				s.invalidateCachedResponsesLocked()
-				return true
+			if w.Seconds == o.Seconds && p != nil && quotaResetDriftIsSmall(p.End, o.Reset, o.Seconds) && quotaAppendSample(p, o, o.CollectionStartedAt) {
+				return commit()
 			}
+		}
+		// Observations can be delivered out of order, including across a
+		// journal restart. A real adjacent window may not have a slot yet.
+		if w.Seconds == o.Seconds && w.Current != nil && w.Previous == nil &&
+			quotaResetDriftIsSmall(w.Current.Start, o.Reset, o.Seconds) {
+			w.Previous = &quotaPeriod{Start: w.Current.Start.Add(-time.Duration(o.Seconds) * time.Second),
+				End: w.Current.Start, CollectionStartedAt: o.CollectionStartedAt, Samples: []quotaObservation{o}}
+			return commit()
 		}
 		return false
 	}
@@ -157,7 +204,7 @@ func (s *RequestStatistics) applyQuotaObservationLocked(o quotaObservation) bool
 		p = w.Previous
 	}
 	if p != nil && p.End.Equal(o.Reset) && w.Seconds == o.Seconds {
-		if !quotaAppendSample(p, o, q.StartedAt) {
+		if !quotaAppendSample(p, o, o.CollectionStartedAt) {
 			return false
 		}
 	} else if w.Current != nil && w.Seconds == o.Seconds && o.ObservedAt.Before(w.Current.End) &&
@@ -167,7 +214,7 @@ func (s *RequestStatistics) applyQuotaObservationLocked(o quotaObservation) bool
 		// Small rounding/arrival drift remains compatible when usage decreases;
 		// retaining that sample lets quotaEstimate establish a new baseline.
 		w.Current.Start, w.Current.End = start, o.Reset
-		quotaAppendSample(w.Current, o, q.StartedAt)
+		quotaAppendSample(w.Current, o, o.CollectionStartedAt)
 	} else {
 		if w.Current != nil {
 			if !w.Current.End.After(start) {
@@ -176,7 +223,7 @@ func (s *RequestStatistics) applyQuotaObservationLocked(o quotaObservation) bool
 				return false
 			}
 		}
-		w.Current = &quotaPeriod{Start: start, End: o.Reset, Samples: []quotaObservation{o}}
+		w.Current = &quotaPeriod{Start: start, End: o.Reset, CollectionStartedAt: o.CollectionStartedAt, Samples: []quotaObservation{o}}
 	}
 	if w.Current != nil && w.Previous != nil {
 		if quotaResetDriftIsSmall(w.Previous.End, w.Current.Start, o.Seconds) {
@@ -191,11 +238,7 @@ func (s *RequestStatistics) applyQuotaObservationLocked(o quotaObservation) bool
 	w.Seconds, w.Name, w.Model, w.Unmapped = o.Seconds, o.Name, o.Model, o.Unmapped
 	w.UpdatedAt, w.Hidden = o.ObservedAt, false
 	w.EstimateExpired = false
-	q.Windows[key] = w
-	q.NextPrune = time.Time{}
-	q.VersionCounter++
-	s.invalidateCachedResponsesLocked()
-	return true
+	return commit()
 }
 
 func quotaResetDriftIsSmall(previous, next time.Time, seconds int64) bool {
@@ -246,6 +289,13 @@ func (s *RequestStatistics) pruneQuotaLocked(now time.Time) {
 			p = w.Previous
 		}
 		if p == nil {
+			// No duration is known for a revocation received before any
+			// window. Bound its lifetime by two maximum supported periods.
+			if w.Hidden && now.After(w.UpdatedAt.Add(2*366*24*time.Hour)) {
+				delete(s.quota.Windows, key)
+				s.quota.VersionCounter++
+				s.invalidateCachedResponsesLocked()
+			}
 			continue
 		}
 		if now.After(p.End.Add(time.Duration(w.Seconds) * time.Second)) {
@@ -314,6 +364,7 @@ func (s *RequestStatistics) observeQuotaUsageLocked(record UsageRecord, now time
 	input := quotaSignalsInput{Provider: record.Provider, AuthIndex: record.AuthIndex, AuthID: record.AuthID, ObservedAt: observed, Signals: signals}
 	var accepted []quotaObservation
 	for _, o := range parseQuotaSignals(input) {
+		o.CollectionStartedAt = s.ensureQuotaLocked().StartedAt
 		if s.applyQuotaObservationLocked(o) {
 			accepted = append(accepted, o)
 		}

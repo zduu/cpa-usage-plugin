@@ -18,25 +18,27 @@ type quotaFact struct {
 }
 
 type quotaObservation struct {
-	Provider   string    `json:"provider"`
-	AuthIndex  string    `json:"auth_index"`
-	AuthID     string    `json:"auth_id"`
-	Group      string    `json:"group"`
-	Name       string    `json:"name"`
-	Slot       string    `json:"slot"`
-	Seconds    int64     `json:"seconds"`
-	Reset      time.Time `json:"reset"`
-	ObservedAt time.Time `json:"observed_at"`
-	Used       float64   `json:"used"`
-	Model      string    `json:"model,omitempty"`
-	Unmapped   bool      `json:"unmapped,omitempty"`
-	Revoked    bool      `json:"revoked,omitempty"`
+	CollectionStartedAt time.Time `json:"collection_started_at,omitempty"`
+	Provider            string    `json:"provider"`
+	AuthIndex           string    `json:"auth_index"`
+	AuthID              string    `json:"auth_id"`
+	Group               string    `json:"group"`
+	Name                string    `json:"name"`
+	Slot                string    `json:"slot"`
+	Seconds             int64     `json:"seconds"`
+	Reset               time.Time `json:"reset"`
+	ObservedAt          time.Time `json:"observed_at"`
+	Used                float64   `json:"used"`
+	Model               string    `json:"model,omitempty"`
+	Unmapped            bool      `json:"unmapped,omitempty"`
+	Revoked             bool      `json:"revoked,omitempty"`
 }
 
 type quotaPeriod struct {
-	Start   time.Time          `json:"start"`
-	End     time.Time          `json:"end"`
-	Samples []quotaObservation `json:"samples"`
+	Start               time.Time          `json:"start"`
+	End                 time.Time          `json:"end"`
+	CollectionStartedAt time.Time          `json:"collection_started_at,omitempty"`
+	Samples             []quotaObservation `json:"samples"`
 }
 
 type quotaWindow struct {
@@ -71,12 +73,14 @@ type quotaState struct {
 }
 
 type quotaCycleDTO struct {
-	StartAt     time.Time          `json:"start_at"`
-	EndAt       time.Time          `json:"end_at"`
-	ObservedAt  time.Time          `json:"observed_at"`
-	UsedPercent *float64           `json:"used_percent"`
-	Summary     *quotaUsageSummary `json:"summary"`
-	ModelStats  []quotaModelStat   `json:"model_stats"`
+	ActualTotalUSD    *float64           `json:"actual_total_usd,omitempty"`
+	EstimatedTotalUSD *float64           `json:"estimated_total_usd"`
+	StartAt           time.Time          `json:"start_at"`
+	EndAt             time.Time          `json:"end_at"`
+	ObservedAt        time.Time          `json:"observed_at"`
+	UsedPercent       *float64           `json:"used_percent"`
+	Summary           *quotaUsageSummary `json:"summary"`
+	ModelStats        []quotaModelStat   `json:"model_stats"`
 }
 
 type quotaUsageSummary struct {
@@ -91,7 +95,6 @@ type quotaModelStat struct {
 
 type quotaCurrentDTO struct {
 	quotaCycleDTO
-	EstimatedTotalUSD     *float64 `json:"estimated_total_usd"`
 	EstimatedRemainingUSD *float64 `json:"estimated_remaining_usd"`
 }
 

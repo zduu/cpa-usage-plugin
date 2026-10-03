@@ -724,8 +724,8 @@ test('quota collector submits authenticated v8 observations once and strips unre
     }] } : { accepted: 1, skipped: 0, rejected: 0 };
     return { ok: true, status: 200, headers: { get() { return ''; } }, text: async () => JSON.stringify(payload) };
   };
-  assert.equal(await context.collectQuotaObservations(), true);
-  assert.equal(await context.collectQuotaObservations(), false);
+  assert.equal(await context.collectQuotaObservations('first-instance'), true);
+  assert.equal(await context.collectQuotaObservations('first-instance'), false);
   assert.equal(calls.filter(call => call.options.method === 'POST').length, 1);
   assert.equal(calls[0].url, '/proxy/v8/management/credentials');
   for (const call of calls) assert.equal(call.options.headers.Authorization, 'Bearer fixture-key');
@@ -733,6 +733,8 @@ test('quota collector submits authenticated v8 observations once and strips unre
   assert.equal(body.observations[0].observed_at, observed);
   assert.deepEqual(Object.keys(body.observations[0].signals).sort(), ['weekly_quota_remaining_percent', 'weekly_quota_reset_at']);
   assert.ok(!JSON.stringify(body).includes('must-not-be-submitted'));
+  assert.equal(await context.collectQuotaObservations('restarted-instance'), true);
+  assert.equal(calls.filter(call => call.options.method === 'POST').length, 2, 'restart must resubmit observations lost by an in-memory backend');
 });
 
 test('quota periods keep unknown values and separate the previous model table', async () => {
@@ -750,6 +752,31 @@ test('quota periods keep unknown values and separate the previous model table', 
   const weekly = context.quotaCyclesHtml([{ provider: 'codex', auth_index: 'index', groups: [{ group_id: 'shared:primary', window_seconds: 604800, current: cycle }] }]);
   assert.match(weekly, /Weekly quota/);
   assert.doesNotMatch(weekly, /5-hour|5h/);
+});
+
+test('quota previous capacity distinguishes fully used and estimated amounts', async () => {
+  const { context } = createDashboardHarness({ language: 'en' });
+  await context.load();
+  const cycle = { start_at: '2026-10-02T08:00:00Z', end_at: '2026-10-02T13:00:00Z',
+    used_percent: 40, estimated_total_usd: 50, actual_total_usd: null,
+    summary: { total_requests: 1, total_tokens: 1000, estimated_cost: 20 }, model_stats: [] };
+  const partial = context.quotaPeriodHtml(cycle, false);
+  assert.match(partial, /Estimated capacity/);
+  assert.match(partial, /40\.0%/);
+  assert.match(partial, /50\.00/);
+  assert.doesNotMatch(partial, /Actual capacity|Estimated remaining|data-quota-reset/);
+  const full = context.quotaPeriodHtml({ ...cycle, used_percent: 100, actual_total_usd: 20, estimated_total_usd: null }, false);
+  assert.match(full, /Actual capacity/);
+  assert.match(full, /100\.0%/);
+  assert.match(full, /20\.00/);
+  assert.doesNotMatch(full, /Estimated capacity|Estimated remaining|data-quota-reset/);
+  const unknown = context.quotaPeriodHtml({ ...cycle, estimated_total_usd: null }, false);
+  assert.match(unknown, /40\.0%/);
+  assert.match(unknown, /—/);
+  const almostFull = context.quotaPeriodHtml({ ...cycle, used_percent: 99.99 }, false);
+  assert.match(almostFull, /Estimated capacity/);
+  assert.match(almostFull, /&lt;100%/);
+  assert.doesNotMatch(almostFull, /Actual capacity/);
 });
 
 test('quota detail remains selectable when retention or filters remove all main events', async () => {
