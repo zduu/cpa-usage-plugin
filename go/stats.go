@@ -28,7 +28,8 @@ import (
 // ============================================================================
 
 type RequestStatistics struct {
-	mu sync.RWMutex
+	quota *quotaState
+	mu    sync.RWMutex
 	// A configuration change stops workers before taking mu. Serialize the
 	// complete transition so another change or Close cannot replace a worker
 	// between its stop and restart.
@@ -802,6 +803,9 @@ func (s *RequestStatistics) ConfigurePatch(cfg runtimeConfigPatch) {
 	s.configureModelsDevPriceWorkerLocked()
 	s.configureExchangeRateWorkerLocked()
 	if storageConfigTouched {
+		// Normalize existing accounting before comparing it with a storage
+		// snapshot under a newly enabled repair setting.
+		s.repairClaudeCacheFallbackDetailsLocked(time.Now())
 		s.configureStorageLocked()
 	}
 	// 修复开关可能刚由热重载打开:存储装载(冷恢复或合并)完成后统一对当前
@@ -894,6 +898,10 @@ func (s *RequestStatistics) Record(record UsageRecord) {
 			s.trimModelDetailsLocked(api.Models[modelName])
 		}
 	}
+	observations := s.observeQuotaUsageLocked(record, now)
+	if persistDetail != nil {
+		persistDetail.QuotaObservations = observations
+	}
 	s.mu.Unlock()
 	if persistDetail != nil {
 		s.enqueueStorageDetail(*persistDetail)
@@ -904,6 +912,7 @@ func requestDetailFromUsageRecord(record UsageRecord, timestamp time.Time, white
 	cacheReadTokens, cacheWriteTokens, cacheTokens := usageDetailCacheTokenParts(record.Detail, record.Provider)
 	totalTokens := usageDetailTotalTokens(record.Detail, record.Provider)
 	detail := RequestDetail{
+		RecordID:       quotaRequestID(record),
 		Model:          firstNonEmpty(record.Model, "unknown"),
 		RequestedModel: strings.TrimSpace(firstNonEmpty(record.Alias, record.Model)),
 		Timestamp:      timestamp,
@@ -1012,12 +1021,16 @@ func enrichRequestDetailMetadata(detail *RequestDetail, update RequestDetail) bo
 }
 
 type persistedDetail struct {
-	API          string        `json:"api"`
-	Model        string        `json:"model"`
-	Detail       RequestDetail `json:"detail"`
-	MetadataOnly bool          `json:"metadata_only,omitempty"`
-	Archived     bool          `json:"archived,omitempty"`
-	enqueuedAt   time.Time     `json:"-"`
+	Kind              string             `json:"kind,omitempty"`
+	QuotaObservations []quotaObservation `json:"quota_observations,omitempty"`
+	QuotaFacts        []quotaFact        `json:"quota_facts,omitempty"`
+	QuotaSnapshot     *quotaSnapshot     `json:"quota_snapshot,omitempty"`
+	API               string             `json:"api"`
+	Model             string             `json:"model"`
+	Detail            RequestDetail      `json:"detail"`
+	MetadataOnly      bool               `json:"metadata_only,omitempty"`
+	Archived          bool               `json:"archived,omitempty"`
+	enqueuedAt        time.Time          `json:"-"`
 }
 
 type persistedStorageSnapshot struct {
@@ -1026,7 +1039,12 @@ type persistedStorageSnapshot struct {
 	Usage       StatisticsSnapshot `json:"usage"`
 }
 
-const currentStorageSnapshotVersion = 2
+const (
+	currentStorageSnapshotVersion = 3
+	// v2 changed cached_tokens from reads+writes to reads only. Later storage
+	// versions do not change that accounting boundary.
+	cacheReadOnlySnapshotVersion = 2
+)
 
 var errInvalidStorageSnapshotHeader = errors.New("invalid storage snapshot header")
 
@@ -1576,6 +1594,14 @@ func (s *RequestStatistics) recordDetailWithAccountingLocked(apiName, modelName 
 	// cost_usd 只在查询期附加。导入的导出文件里带着当时的成本,留着会被原样写进
 	// JSONL 并且永远不会被读取,反而让存储记录与「后端没算过成本」的语义冲突。
 	detail.CostUSD = nil
+	if detail.RecordID == "" && quotaEligible(detail) {
+		detail.RecordID = quotaLegacyRecordID(apiName, modelName, detail)
+	}
+	if s.quota != nil {
+		if _, deleted := s.quota.Deleted[detail.RecordID]; deleted {
+			return false
+		}
+	}
 	if s.retention > 0 && !detail.Timestamp.IsZero() {
 		expires := detail.Timestamp.Add(s.retention)
 		if s.nextDetailExpiry.IsZero() || expires.Before(s.nextDetailExpiry) {
@@ -1645,6 +1671,7 @@ func (s *RequestStatistics) recordDetailWithAccountingLocked(apiName, modelName 
 	if !archived {
 		s.queueDashboardEventLocked(apiName, modelName, apiSt.Models[modelName].lastEventRef)
 	}
+	s.addQuotaFactLocked(apiName, detail)
 	return true
 }
 
@@ -1760,17 +1787,32 @@ func (s *RequestStatistics) loadStorageSnapshotLocked(dir string, now time.Time)
 	// Validate before changing live counters or replay cutoff. Previously a
 	// malformed generated_at restored the counters first and then returned
 	// an error, leaving a partially accepted snapshot in live statistics.
+	if err := validateQuotaSnapshot(persisted.Usage.QuotaCycles, nil); err != nil {
+		return time.Time{}, err
+	}
 	generatedAt, err := validateStorageSnapshotHeader(persisted.Version, persisted.GeneratedAt)
 	if err != nil {
 		return time.Time{}, err
 	}
-	if persisted.Version < currentStorageSnapshotVersion {
+	if persisted.Version < cacheReadOnlySnapshotVersion {
 		migrateLegacySnapshotCacheReads(&persisted.Usage)
 	}
-	if s.hasRecordsLocked() {
+	persisted.Usage = s.prepareQuotaImportSnapshotLocked(persisted.Usage)
+	if err := validateQuotaImport(persisted.Usage, s.quota, s.claudeCacheRepairEnabled); err != nil {
+		return time.Time{}, err
+	}
+	if s.hasMainRecordsLocked() {
 		_, _ = s.mergeSnapshotLocked(persisted.Usage, false, now)
 	} else {
 		s.restoreStorageSnapshotLocked(persisted.Usage, now)
+		if s.quota == nil {
+			s.restoreQuotaSnapshotLocked(persisted.Usage)
+		} else {
+			// Quota state has its own retention. Restore authoritative main
+			// totals even when observations or facts already exist in memory.
+			s.mergeQuotaSnapshotLocked(persisted.Usage.QuotaCycles)
+			s.mergeRestoredQuotaDetailsLocked(now)
+		}
 		s.repairMigratedAttributionDetailsLocked(now)
 	}
 	return generatedAt, nil
@@ -1787,8 +1829,11 @@ func validateStorageSnapshotHeader(version int, generated string) (time.Time, er
 	return generatedAt, nil
 }
 
-func (s *RequestStatistics) hasRecordsLocked() bool {
-	return s != nil && (s.totalRequests != 0 || len(s.apis) != 0)
+func (s *RequestStatistics) hasMainRecordsLocked() bool {
+	if s == nil {
+		return false
+	}
+	return s.totalRequests != 0 || len(s.apis) != 0
 }
 
 func (s *RequestStatistics) restoreStorageSnapshotLocked(snapshot StatisticsSnapshot, now time.Time) {
@@ -3079,7 +3124,7 @@ func scanPersistedStorageFile(path string, consume func([]persistedDetail)) (int
 			continue
 		}
 		apiName := strings.TrimSpace(persisted.API)
-		if apiName == "" {
+		if (persisted.Kind != "" && persisted.Kind != "quota") || (apiName == "" && persisted.Kind != "quota") {
 			invalidLines++
 			continue
 		}
@@ -3115,6 +3160,8 @@ type replayResidual struct {
 }
 
 type persistedReplayState struct {
+	recordIDs       map[string]struct{}
+	quotaFactIDs    map[string]struct{}
 	existing        map[requestDedupKey]struct{}
 	pendingMetadata map[requestDedupKey]RequestDetail
 	// absorbed 记录已按快照残差吸收、不能再按去重键命中的记录。existing 会在每次
@@ -3130,7 +3177,23 @@ type persistedReplayState struct {
 
 func (s *RequestStatistics) newPersistedReplayStateLocked(snapshotAt time.Time) *persistedReplayState {
 	existing, counted := s.snapshotReplayIndexLocked()
-	return &persistedReplayState{
+	ids := make(map[string]struct{})
+	quotaIDs := make(map[string]struct{})
+	if s.quota != nil {
+		for id := range s.quota.Facts {
+			quotaIDs[id] = struct{}{}
+		}
+	}
+	for _, api := range s.apis {
+		for _, m := range api.Models {
+			for i := 0; i < m.accountingCount(); i++ {
+				if id := m.accountingDetailAt(i).RecordID; id != "" {
+					ids[id] = struct{}{}
+				}
+			}
+		}
+	}
+	return &persistedReplayState{recordIDs: ids, quotaFactIDs: quotaIDs,
 		existing:        existing,
 		pendingMetadata: make(map[requestDedupKey]RequestDetail),
 		absorbed:        make(map[requestDedupKey]struct{}),
@@ -3220,6 +3283,32 @@ func (s *RequestStatistics) replayPersistedDetailBatchLocked(records []persisted
 		records, _ = reconcilePersistedProtocolFallbacks(records)
 	}
 	for _, persisted := range records {
+		if persisted.Kind == "quota" {
+			for _, f := range persisted.QuotaFacts {
+				if _, restored := state.quotaFactIDs[f.ID]; restored {
+					continue
+				}
+				if _, restored := state.recordIDs[f.ID]; restored {
+					continue
+				}
+				if validQuotaFact(f) {
+					q := s.ensureQuotaLocked()
+					if _, deleted := q.Deleted[f.ID]; !deleted {
+						q.Facts[f.ID] = f
+					}
+				}
+			}
+			if persisted.QuotaSnapshot != nil {
+				s.mergeQuotaSnapshotLocked(persisted.QuotaSnapshot)
+			}
+			for _, o := range persisted.QuotaObservations {
+				s.applyQuotaObservationLocked(o)
+			}
+			continue
+		}
+		for _, o := range persisted.QuotaObservations {
+			s.applyQuotaObservationLocked(o)
+		}
 		apiName := strings.TrimSpace(persisted.API)
 		detail := persisted.Detail
 		modelName := normalizeDetailModelName(persisted.Model, detail.Model)
@@ -3248,12 +3337,48 @@ func (s *RequestStatistics) replayPersistedDetailBatchLocked(records []persisted
 			}
 			continue
 		}
-		if _, ok := state.existing[canonicalKey]; ok {
+		if _, ok := state.existing[canonicalKey]; ok && detail.RecordID == "" {
 			if pending, ok := state.pendingMetadata[key]; ok {
 				s.enrichPersistedDetailMetadataLocked(apiName, modelName, key, pending)
 				delete(state.pendingMetadata, key)
 			}
 			continue
+		}
+		if detail.RecordID == "" && quotaEligible(detail) {
+			detail.RecordID = quotaLegacyRecordID(apiName, modelName, detail)
+		}
+		if _, restored := state.quotaFactIDs[detail.RecordID]; restored && s.quota != nil {
+			if f, exists := s.quota.Facts[detail.RecordID]; exists {
+				// The main detail may have expired while its repaired quota fact
+				// survived. Rehydrate it using the snapshot's accounting values.
+				detail.Tokens, detail.TimestampSynthetic = f.Tokens, f.TimestampSynthetic
+				// A newly enabled repair still takes precedence over an older
+				// snapshot's uncorrected accounting values.
+				if s.claudeCacheRepairEnabled {
+					detail = normalizeClaudeCacheFallbackDetail(detail)
+				}
+				key = dedupKey(apiName, modelName, detail)
+				canonicalKey = claudeCacheCanonicalDedupKey(apiName, modelName, detail)
+			}
+		}
+		if detail.RecordID != "" {
+			// A restored detail and its quota fact may already contain repairs.
+			// Do not replace that fact with an older duplicate journal row.
+			if _, exists := state.recordIDs[detail.RecordID]; exists {
+				if pending, ok := state.pendingMetadata[key]; ok {
+					s.enrichPersistedDetailMetadataLocked(apiName, modelName, key, pending)
+					delete(state.pendingMetadata, key)
+				}
+				continue
+			}
+		}
+		if detail.RecordID != "" && quotaEligible(detail) {
+			if s.quota != nil {
+				if _, deleted := s.quota.Deleted[detail.RecordID]; deleted {
+					continue
+				}
+			}
+			s.addQuotaFactLocked(apiName, detail)
 		}
 		if _, ok := state.absorbed[canonicalKey]; ok {
 			continue
@@ -3265,6 +3390,9 @@ func (s *RequestStatistics) replayPersistedDetailBatchLocked(records []persisted
 				delete(state.pendingMetadata, key)
 			}
 			continue
+		}
+		if detail.RecordID != "" {
+			state.recordIDs[detail.RecordID] = struct{}{}
 		}
 		if s.recordDetailWithAccountingLocked(apiName, modelName, detail, key, now, false, persisted.Archived) {
 			state.existing[canonicalKey] = struct{}{}
@@ -5473,6 +5601,7 @@ func (s *RequestStatistics) snapshotLocked() StatisticsSnapshot {
 
 func (s *RequestStatistics) snapshotWithAccountingLocked(includeAccounting bool) StatisticsSnapshot {
 	result := StatisticsSnapshot{}
+	result.QuotaCycles = s.captureQuotaSnapshotLocked()
 	result.TotalRequests = s.totalRequests
 	result.SuccessCount = s.successCount
 	result.FailureCount = s.failureCount
@@ -5596,23 +5725,43 @@ func cloneRequestDetail(detail RequestDetail) RequestDetail {
 
 // MergeSnapshot imports a snapshot into the current statistics.
 func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResult {
+	result, _ := s.mergeSnapshotChecked(snapshot)
+	return result
+}
+
+func (s *RequestStatistics) mergeSnapshotChecked(snapshot StatisticsSnapshot) (MergeResult, error) {
 	result := MergeResult{}
 	if s == nil {
-		return result
+		return result, nil
 	}
 
 	s.mu.Lock()
+	snapshot = s.prepareQuotaImportSnapshotLocked(snapshot)
+	if err := validateQuotaImport(snapshot, s.quota, s.claudeCacheRepairEnabled); err != nil {
+		s.mu.Unlock()
+		return result, err
+	}
 	result, persisted := s.mergeSnapshotLocked(snapshot, true, time.Now())
 	s.mu.Unlock()
 	for _, detail := range persisted {
 		s.enqueueStorageDetail(detail)
 	}
-	return result
+	return result, nil
 }
 
 func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, persist bool, now time.Time) (MergeResult, []persistedDetail) {
 	result := MergeResult{}
 	var persisted []persistedDetail
+	if snapshot.QuotaCycles != nil {
+		snapshot = s.prepareQuotaImportSnapshotLocked(snapshot)
+		if err := validateQuotaSnapshot(snapshot.QuotaCycles, s.quota); err != nil {
+			return result, nil
+		}
+		s.mergeQuotaSnapshotLocked(snapshot.QuotaCycles)
+		if persist && s.storageEnabled {
+			persisted = append(persisted, quotaStorageRecords(snapshot.QuotaCycles)...)
+		}
+	}
 	var reconciledProtocolFallbacks int
 	snapshot, reconciledProtocolFallbacks = reconcileProtocolFallbackSnapshot(snapshot)
 	result.Skipped = addNonNegativeInt64(result.Skipped, int64(reconciledProtocolFallbacks))
@@ -5623,6 +5772,8 @@ func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, per
 	}
 
 	seen := make(map[requestDedupKey]struct{}, nonNegativeIntFromInt64(s.countDetailsLocked()+snapshotImportDetailCapacity(snapshot, cutoff, now)))
+	seenIDs := make(map[string]struct{})
+	legacySeen := make(map[requestDedupKey]struct{})
 	for apiName, apiSt := range s.apis {
 		if apiSt == nil {
 			continue
@@ -5633,7 +5784,13 @@ func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, per
 			}
 			for accountingIndex := 0; accountingIndex < modelSt.accountingCount(); accountingIndex++ {
 				detail := modelSt.accountingDetailAt(accountingIndex)
-				seen[claudeCacheCanonicalDedupKey(apiName, modelName, detail)] = struct{}{}
+				key := claudeCacheCanonicalDedupKey(apiName, modelName, detail)
+				seen[key] = struct{}{}
+				if detail.RecordID != "" {
+					seenIDs[detail.RecordID] = struct{}{}
+				} else {
+					legacySeen[key] = struct{}{}
+				}
 			}
 		}
 	}
@@ -5647,6 +5804,7 @@ func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, per
 			modelName = normalizeModelName(modelName)
 
 			for detailIndex, detail := range modelSnapshot.accountingDetails() {
+				hasRecordID := detail.RecordID != ""
 				importModelName := normalizeDetailModelName(modelName, detail.Model)
 				detail.Model = importModelName
 				detail.Tokens.TotalTokens = detailTotalTokensForRequest(detail)
@@ -5671,6 +5829,22 @@ func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, per
 				} else {
 					detail = normalizeStoredClientAPIIdentity(detail)
 				}
+				if !hasRecordID && quotaEligible(detail) {
+					// Grouping clears foreign hashes from masked labels, but the
+					// execution identity must still match the original journal.
+					identity := detail
+					if exportedClientHash != "" {
+						identity.APIKeyHash = exportedClientHash
+					}
+					detail.RecordID = quotaLegacyRecordID(importAPIName, importModelName, identity)
+					if s.quota != nil {
+						if fact, exists := s.quota.Facts[detail.RecordID]; exists {
+							// A retained fact can contain a repair made after this
+							// backup was written and after its main detail expired.
+							detail.Tokens, detail.TimestampSynthetic = fact.Tokens, fact.TimestampSynthetic
+						}
+					}
+				}
 				if s.claudeCacheRepairEnabled {
 					detail = normalizeClaudeCacheFallbackDetail(detail)
 				}
@@ -5681,6 +5855,22 @@ func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, per
 				}
 
 				key := claudeCacheCanonicalDedupKey(importAPIName, importModelName, detail)
+				if detail.RecordID != "" {
+					if s.quota != nil {
+						if _, deleted := s.quota.Deleted[detail.RecordID]; deleted {
+							result.Skipped = addNonNegativeInt64(result.Skipped, 1)
+							continue
+						}
+					}
+					if _, exists := seenIDs[detail.RecordID]; exists {
+						result.Skipped = addNonNegativeInt64(result.Skipped, 1)
+						continue
+					}
+				}
+				contentSeen := seen
+				if hasRecordID {
+					contentSeen = legacySeen
+				}
 				// Cross-instance imports still normalize masked identities to the
 				// legacy label-based form. First recognize an exact existing
 				// fingerprint using the exported hash: a backup from this same
@@ -5688,16 +5878,22 @@ func (s *RequestStatistics) mergeSnapshotLocked(snapshot StatisticsSnapshot, per
 				if exportedClientHash != "" {
 					exportedKey := key
 					exportedKey.clientAPIHash, exportedKey.clientAPIKey = exportedClientHash, ""
-					if _, exists := seen[exportedKey]; exists {
+					if _, exists := contentSeen[exportedKey]; exists {
 						result.Skipped = addNonNegativeInt64(result.Skipped, 1)
 						continue
 					}
 				}
-				if _, exists := seen[key]; exists {
+				if _, exists := contentSeen[key]; exists {
 					result.Skipped = addNonNegativeInt64(result.Skipped, 1)
 					continue
 				}
 				seen[key] = struct{}{}
+				if !hasRecordID {
+					legacySeen[key] = struct{}{}
+				}
+				if detail.RecordID != "" {
+					seenIDs[detail.RecordID] = struct{}{}
+				}
 
 				if s.recordDetailWithAccountingLocked(importAPIName, importModelName, detail, key, now, false, detailIndex >= len(modelSnapshot.Details)) {
 					if persist && s.storageEnabled {
@@ -6519,6 +6715,7 @@ func (s *RequestStatistics) SummaryWithoutDetailsAt(now time.Time) DashboardSumm
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pruneExpiredLocked(now)
+	s.pruneQuotaLocked(now)
 
 	if s.summaryCacheValid && s.summaryCacheVersion == s.summaryVersion && s.summaryCacheWindow.Equal(healthWindow) {
 		s.summaryCacheHits++
@@ -6568,6 +6765,7 @@ func (s *RequestStatistics) SummaryWithoutDetailsForRangeAndClientAPIAt(rangeKey
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pruneExpiredLocked(now)
+	s.pruneQuotaLocked(now)
 
 	if s.summaryRangeCache == nil {
 		s.summaryRangeCache = make(map[string]DashboardSummary)
@@ -6628,6 +6826,7 @@ func summaryHealthWindow(now time.Time) time.Time {
 
 func cloneDashboardSummary(summary DashboardSummary) DashboardSummary {
 	cloned := summary
+	cloned.Meta.QuotaAPIs = append([]string(nil), summary.Meta.QuotaAPIs...)
 	cloned.Usage = cloneStatisticsSnapshotWithoutDetails(summary.Usage)
 	cloned.HealthGrid = append([]HealthGridSlot(nil), summary.HealthGrid...)
 	if summary.HealthGridV2 != nil {
@@ -6891,6 +7090,7 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsLocked(now time.Time, heal
 	}
 
 	// Metadata
+	summary.Meta.QuotaAPIs = s.quotaAPINamesLocked()
 	summary.Meta.RetentionDays = int(s.retention.Hours() / 24)
 	summary.Meta.MaxDetailsPerModel = s.maxDetailsPerModel
 	summary.Meta.CurrentDetailCount = s.countDetailsLocked()
@@ -6919,7 +7119,9 @@ func (s *RequestStatistics) buildSummaryWithoutDetailsLocked(now time.Time, heal
 // buildSummaryWithoutDetailsForRangeLocked scans all events within the cutoff window
 // and builds a fresh DashboardSummary. Caller must hold s.mu.
 func (s *RequestStatistics) buildSummaryWithoutDetailsForRangeLocked(now time.Time, healthWindow time.Time, cutoff time.Time, clientAPI string) DashboardSummary {
-	return s.rangeSummaryLocked(cutoff, clientAPI).summary(s, now, healthWindow)
+	summary := s.rangeSummaryLocked(cutoff, clientAPI).summary(s, now, healthWindow)
+	summary.Meta.QuotaAPIs = s.quotaAPINamesLocked()
+	return summary
 }
 
 // apiRangeAgg and modelRangeAgg are lightweight accumulators used during
@@ -8283,6 +8485,7 @@ func (s *RequestStatistics) QueryAPIDetailForClientAPIAt(api string, rangeKey st
 	generatedAt := s.dashboardQueryGeneratedAtLocked(rangeKey, now).UTC().Format(time.RFC3339)
 	result.GeneratedAt = generatedAt
 	finish := func(result APIDetailResponse) APIDetailResponse {
+		result.QuotaCycles = s.quotaCyclesForAPILocked(api, now)
 		s.attachEventCostsLocked(result.RecentEvents)
 		result.Summary.EstimatedCost = s.applyModelEstimatedCostsLocked(result.ModelStats)
 		result.dashboardVersion = s.summaryVersion
@@ -8455,6 +8658,7 @@ func (s *RequestStatistics) dashboardVersionAt(now time.Time) uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pruneExpiredLocked(now)
+	s.pruneQuotaLocked(now)
 	return s.summaryVersion
 }
 

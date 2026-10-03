@@ -83,6 +83,10 @@ func (s *sqliteLedger) ScanMigrationSource(parent context.Context, path string, 
 			return err
 		}
 		result = parser.result
+		// The prototype has no quota-period authority; reject rather than drop it.
+		if result.Version > 2 {
+			return errors.New("SQLite migration does not support quota-period snapshots")
+		}
 		generatedAt, err := validateStorageSnapshotHeader(result.Version, parser.generatedAt)
 		if err != nil {
 			return err

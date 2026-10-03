@@ -1476,7 +1476,7 @@ func protocolCacheReadsCompatible(fallbackCacheRead, nativeCacheRead int64) bool
 func reconcilePersistedProtocolFallbacks(records []persistedDetail) ([]persistedDetail, int) {
 	refs := make([]protocolFallbackDetailRef, 0, len(records))
 	for i, record := range records {
-		if record.MetadataOnly {
+		if record.MetadataOnly || record.Kind == "quota" {
 			continue
 		}
 		detail := record.Detail
@@ -1746,6 +1746,7 @@ func (s *RequestStatistics) reconcileRecordedProtocolFallbacksLocked(now time.Ti
 		sort.Slice(removals, func(i, j int) bool { return removals[i].index > removals[j].index })
 		for _, removal := range removals {
 			detail := modelSt.accountingDetailAt(removal.index)
+			s.removeQuotaFactLocked(detail)
 			s.decrementCounters(detail, apiSt, modelSt, parts[1])
 			modelSt.removeAccountingDetailAt(removal.index)
 		}
@@ -1837,6 +1838,7 @@ func (s *RequestStatistics) RemoveRecordedUsage(record UsageRecord) bool {
 			continue
 		}
 		detail := modelSt.accountingDetailAt(i)
+		s.removeQuotaFactLocked(detail)
 		s.decrementCounters(detail, apiSt, modelSt, modelName)
 		modelSt.removeAccountingDetailAt(i)
 		if len(modelSt.Details) == 0 && modelSt.TotalRequests <= 0 {

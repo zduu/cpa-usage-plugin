@@ -547,6 +547,7 @@ function createDashboardHarness(options = {}) {
     URL,
     URLSearchParams,
     TextDecoder,
+    TextEncoder,
     atob: (value) => Buffer.from(value, 'base64').toString('binary'),
     document,
     localStorage,
@@ -708,6 +709,105 @@ function createDashboardHarness(options = {}) {
 
   return { context, document, fetchCalls, fetchRequests, downloads, timeoutDelays, setVisibility, setLanguage, setSummaryLastRecordedAt, setSummaryVersion, setDashboardEventsFailure };
 }
+
+test('quota collector submits authenticated v8 observations once and strips unrelated signals', async () => {
+  const { context } = createDashboardHarness({ pathname: '/proxy/v0/resource/plugins/usage-dashboard-zduu/dashboard' });
+  await context.load();
+  context.localStorage.setItem('managementKey', 'fixture-key');
+  const calls = [];
+  const observed = '2026-10-02T08:00:00Z';
+  context.fetch = async (url, options) => {
+    calls.push({ url, options });
+    const payload = String(url).endsWith('/credentials') ? { files: [{
+      provider: 'devin', auth_index: 'index', id: 'devin.json',
+      quota: { observed_at: observed, signals: { weekly_quota_remaining_percent: '60%', weekly_quota_reset_at: '2026-10-05T08:00:00Z', access_token: 'must-not-be-submitted' } },
+    }] } : { accepted: 1, skipped: 0, rejected: 0 };
+    return { ok: true, status: 200, headers: { get() { return ''; } }, text: async () => JSON.stringify(payload) };
+  };
+  assert.equal(await context.collectQuotaObservations(), true);
+  assert.equal(await context.collectQuotaObservations(), false);
+  assert.equal(calls.filter(call => call.options.method === 'POST').length, 1);
+  assert.equal(calls[0].url, '/proxy/v8/management/credentials');
+  for (const call of calls) assert.equal(call.options.headers.Authorization, 'Bearer fixture-key');
+  const body = JSON.parse(calls.find(call => call.options.method === 'POST').options.body);
+  assert.equal(body.observations[0].observed_at, observed);
+  assert.deepEqual(Object.keys(body.observations[0].signals).sort(), ['weekly_quota_remaining_percent', 'weekly_quota_reset_at']);
+  assert.ok(!JSON.stringify(body).includes('must-not-be-submitted'));
+});
+
+test('quota periods keep unknown values and separate the previous model table', async () => {
+  const { context } = createDashboardHarness({ language: 'en' });
+  await context.load();
+  const cycle = { start_at: '2026-10-02T08:00:00Z', end_at: '2026-10-02T13:00:00Z', used_percent: null,
+    summary: { total_requests: 1, total_tokens: 1000, estimated_cost: 0 },
+    model_stats: [{ model: '<previous-model>', total_requests: 1, estimated_cost: 0 }] };
+  const html = context.quotaPeriodHtml(cycle, false);
+  assert.match(html, /&lt;previous-model&gt;/);
+  assert.match(html, /—/);
+  assert.doesNotMatch(html, /Estimated quota|data-quota-reset|NaN|Infinity/);
+  assert.equal(context.quotaValue(null, true), '—');
+  assert.notEqual(context.quotaValue(0, true), '—');
+  const weekly = context.quotaCyclesHtml([{ provider: 'codex', auth_index: 'index', groups: [{ group_id: 'shared:primary', window_seconds: 604800, current: cycle }] }]);
+  assert.match(weekly, /Weekly quota/);
+  assert.doesNotMatch(weekly, /5-hour|5h/);
+});
+
+test('quota detail remains selectable when retention or filters remove all main events', async () => {
+  const { context, document } = createDashboardHarness();
+  await context.load();
+  vm.runInContext('summaryData._meta.quota_apis = ["retained-credential"]; summaryData.usage.apis = {}; selectedApi = "retained-credential";', context);
+  context.renderApiStats();
+  assert.equal(document.getElementById('apiSelect').value, 'retained-credential');
+  assert.equal(document.getElementById('apiSelect').disabled, false);
+  let requests = 0;
+  context.fetchApiDetailData = async api => {
+    requests++;
+    assert.equal(api, 'retained-credential');
+    return { summary: { total_requests: 0, total_tokens: 0 }, model_stats: [], recent_events: [],
+      credential_quota_cycles: [{ provider: 'claude', auth_index: 'index', credential_name: 'account.json',
+        groups: [{ group_id: 'shared:5h', window_seconds: 18000, previous: { start_at: '2026-10-02T08:00:00Z', end_at: '2026-10-02T13:00:00Z', used_percent: 30, summary: { total_requests: 1, estimated_cost: 5 }, model_stats: [{ model: 'retained-model', total_requests: 1, estimated_cost: 5 }] } }] }] };
+  };
+  await context.renderApiDetail();
+  assert.equal(requests, 1);
+  assert.match(document.getElementById('apiDetail').innerHTML, /quotaCycles/);
+  vm.runInContext('selectedClientApi = { selector: "other-client" }; filteredSummaryData = { usage: { apis: {} } };', context);
+  context.renderApiStats();
+  assert.equal(document.getElementById('apiSelect').value, 'retained-credential');
+  await context.renderApiDetail();
+  assert.equal(requests, 2);
+  context.renderApiDetailFromCache();
+  assert.match(document.getElementById('apiDetail').innerHTML, /quotaCycles/);
+  vm.runInContext('summaryData._meta.quota_apis = [];', context);
+  context.renderApiStats();
+  assert.equal(document.getElementById('apiSelect').disabled, true);
+});
+
+test('quota countdown updates locally and refreshes an expired period only once', async () => {
+  const { context, document } = createDashboardHarness();
+  await context.load();
+  const element = new FakeElement('countdown');
+  element.dataset.quotaReset = String(Date.now() - 1000);
+  document.querySelectorAll = selector => selector === '[data-quota-reset]' ? [element] : [];
+  let refreshes = 0;
+  context.renderApiDetail = () => { refreshes++; };
+  context.updateQuotaCountdowns();
+  context.updateQuotaCountdowns();
+  assert.equal(element.textContent, '00:00:00');
+  assert.equal(refreshes, 1);
+  assert.equal(context.quotaCountdownText(3661000, 0), '01:01:01');
+});
+
+test('quota collection failure retries without clearing stored observations', async () => {
+  const { context } = createDashboardHarness();
+  await context.load();
+  vm.runInContext('quotaSubmittedObservations.set("existing", "observation")', context);
+  let requests = 0;
+  context.fetch = async () => { requests++; throw new Error('offline'); };
+  assert.equal(await context.collectQuotaObservations(), false);
+  assert.equal(await context.collectQuotaObservations(), false);
+  assert.equal(requests, 1);
+  assert.equal(vm.runInContext('quotaSubmittedObservations.get("existing")', context), 'observation');
+});
 
 async function waitFor(fn) {
   for (let i = 0; i < 50; i++) {

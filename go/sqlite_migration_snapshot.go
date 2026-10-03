@@ -466,7 +466,7 @@ func (b *sqliteSnapshotCatalogBuilder) apply(item sqliteMigrationProjectedItem) 
 		if err != nil || g.Ignored {
 			return err
 		}
-		if b.catalog.Version < currentStorageSnapshotVersion {
+		if b.catalog.Version < cacheReadOnlySnapshotVersion {
 			value.CachedTokens = legacyCacheReadTokens(value.CachedTokens, value.CacheWriteTokens)
 		}
 		for key, stat := range modelProviderStatsFromSnapshot([]ModelProviderStat{value}) {

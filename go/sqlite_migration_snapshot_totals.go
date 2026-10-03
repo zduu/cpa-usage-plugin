@@ -120,7 +120,7 @@ type sqliteMigrationSnapshotGroup struct {
 
 func (g *sqliteMigrationSnapshotGroup) finish(version int) {
 	m := g.Snapshot
-	if version < currentStorageSnapshotVersion {
+	if version < cacheReadOnlySnapshotVersion {
 		m.CachedTokens = legacyCacheReadTokens(m.CachedTokens, m.CacheWriteTokens)
 	}
 	g.Restored = sqliteSnapshotTotalsFromRaw(m)

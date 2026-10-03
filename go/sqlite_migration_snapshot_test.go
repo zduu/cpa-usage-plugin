@@ -80,7 +80,7 @@ func TestSQLiteSnapshotCatalogMatchesLegacyAggregateBasis(t *testing.T) {
 				if tc.name == "normalized-model-collisions" && len(legacy.Usage.APIs) != 2 {
 					t.Fatal("invalid API collision fixture")
 				}
-				if version < currentStorageSnapshotVersion {
+				if version < cacheReadOnlySnapshotVersion {
 					migrateLegacySnapshotCacheReads(&legacy.Usage)
 				}
 				want := NewRequestStatistics()
@@ -123,7 +123,7 @@ func TestSQLiteSnapshotCatalogProviderSemantics(t *testing.T) {
 			if err := json.Unmarshal([]byte(raw), &legacy); err != nil {
 				t.Fatal(err)
 			}
-			if version < currentStorageSnapshotVersion {
+			if version < cacheReadOnlySnapshotVersion {
 				migrateLegacySnapshotCacheReads(&legacy.Usage)
 			}
 			m := legacy.Usage.APIs["API"].Models["M"]
@@ -154,6 +154,38 @@ func TestSQLiteSnapshotCatalogProviderSemantics(t *testing.T) {
 				t.Fatalf("provider scan count=%d catalog=%d snapshot=%t err=%v", seen, model.CatalogProviders, model.HasProviderSnapshot, err)
 			}
 		})
+	}
+}
+
+func TestSQLiteSnapshotV2KeepsCacheReadsSeparateFromWrites(t *testing.T) {
+	s, _ := testSQLiteLedger(t)
+	raw := `{"version":2,"generated_at":"2026-09-13T00:00:00Z","usage":{"total_requests":1,"cached_tokens":100,"cache_write_tokens":40,"apis":{"claude":{"total_requests":1,"cached_tokens":100,"cache_write_tokens":40,"models":{"m":{"total_requests":1,"cached_tokens":100,"cache_write_tokens":40,"providers":[{"provider":"claude","total_requests":1,"cached_tokens":100,"cache_write_tokens":40}]}}}}}}`
+	path, _, groups := snapshotCatalogForTest(t, s, raw)
+	err := s.WithMigrationSnapshotCatalog(context.Background(), path, func(reader *sqliteSnapshotCatalogReader) error {
+		for _, group := range groups {
+			if group.Restored.CachedTokens != 100 || group.Restored.CacheWriteTokens != 40 {
+				t.Fatalf("v2 %s cache totals changed: %+v", group.Scope, group.Restored)
+			}
+			if group.Scope == "model" {
+				seen := 0
+				if err := reader.WalkProviders(group.Node, func(p sqliteMigrationSnapshotProvider) error {
+					seen++
+					if p.Snapshot.CachedTokens != 100 || p.Snapshot.CacheWriteTokens != 40 {
+						t.Fatalf("v2 provider cache totals changed: %+v", p.Snapshot)
+					}
+					return nil
+				}); err != nil {
+					return err
+				}
+				if seen != 1 {
+					t.Fatalf("provider count = %d, want 1", seen)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -342,7 +374,7 @@ func TestSQLiteSnapshotCatalogGeneratedTotals(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, catalog, groups := snapshotCatalogForTest(t, s, string(raw))
-		if version < currentStorageSnapshotVersion {
+		if version < cacheReadOnlySnapshotVersion {
 			migrateLegacySnapshotCacheReads(&snapshot)
 		}
 		want := NewRequestStatistics()

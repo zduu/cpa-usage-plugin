@@ -41,7 +41,8 @@ func (s *RequestStatistics) captureStorageSnapshotLocked() storageSnapshotView {
 // snapshot structs and their import/export contracts remain unchanged.
 type storageUsageHeader struct {
 	*StatisticsSnapshot
-	APIs *int `json:"apis,omitempty"`
+	APIs        *int `json:"apis,omitempty"`
+	QuotaCycles *int `json:"quota_cycles,omitempty"`
 }
 type storageAPIHeader struct {
 	*APISnapshot
@@ -172,7 +173,18 @@ func (view storageSnapshotView) writeUsage(w io.Writer) error {
 			return err
 		}
 	}
-	_, err := io.WriteString(w, "}}")
+	if _, err := io.WriteString(w, "}"); err != nil {
+		return err
+	}
+	if view.metadata.QuotaCycles != nil {
+		if _, err := io.WriteString(w, `,"quota_cycles":`); err != nil {
+			return err
+		}
+		if err := writeQuotaSnapshot(w, view.metadata.QuotaCycles); err != nil {
+			return err
+		}
+	}
+	_, err := io.WriteString(w, "}")
 	return err
 }
 

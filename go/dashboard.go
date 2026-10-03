@@ -82,6 +82,7 @@ func handleDashboardSummary(query map[string][]string, headers map[string][]stri
 		return dashboardNotModified(etag)
 	}
 	summary := stats.SummaryWithoutDetailsForRangeAndClientAPIAt(rangeKey, clientAPI, now)
+	summary.Meta.QuotaCyclesEnabled = true
 	if compactHealth {
 		compactDashboardHealthGrid(&summary)
 	}

@@ -3,6 +3,25 @@ package main
 /*
 #include <stdint.h>
 #include <stdlib.h>
+#if defined(__APPLE__)
+#include <dlfcn.h>
+#endif
+
+// Go runtime threads and signal handlers outlive the plugin shutdown callback.
+// Darwin otherwise unmaps their code when the host calls dlclose. Keep one
+// reference per image for the process lifetime; plugin workers still shut down.
+static int pin_go_runtime_image(void) {
+#if defined(__APPLE__)
+	static void* pinned_image;
+	if (pinned_image != NULL) return 1;
+	Dl_info info;
+	if (dladdr((void*)&pin_go_runtime_image, &info) == 0) return 0;
+	pinned_image = dlopen(info.dli_fname, RTLD_NOW | RTLD_LOCAL | RTLD_NODELETE);
+	return pinned_image != NULL;
+#else
+	return 1;
+#endif
+}
 
 typedef struct {
 	void* ptr;
@@ -57,16 +76,70 @@ import "C"
 
 import (
 	"encoding/json"
+	"fmt"
+	"sync"
 	"unsafe"
 )
 
 func main() {}
+
+var pluginLifecycle struct {
+	sync.Mutex
+	stopped bool
+}
+
+// A pinned shared library can be initialized again without rerunning Go init.
+// Recreate closed services so re-enabling it behaves like a fresh process.
+func restartPluginState() {
+	pluginLifecycle.Lock()
+	defer pluginLifecycle.Unlock()
+	if !pluginLifecycle.stopped {
+		return
+	}
+	stats = NewRequestStatistics()
+	dashboardExportJobs = newDashboardExportJobManager()
+	requestMetadata = newRequestMetadataCache()
+	authIndexes = newAuthIndexLearner()
+	usageFallbacks = nil
+	apiKeySalt = defaultAPIKeyHashSalt
+	pluginLifecycle.stopped = false
+}
+
+// callQuotaHostAuth validates a submitted observation against the live host.
+func callQuotaHostAuth(index string) (quotaHostAuth, error) {
+	var auth quotaHostAuth
+	raw, _ := json.Marshal(map[string]string{"auth_index": index})
+	method := C.CString("host.auth.get_runtime")
+	defer C.free(unsafe.Pointer(method))
+	request := C.CBytes(raw)
+	defer C.free(request)
+	var response C.cliproxy_buffer
+	status := C.call_host_api(method, (*C.uint8_t)(request), C.size_t(len(raw)), &response)
+	defer C.free_host_buffer(response.ptr, response.len)
+	if status != 0 || response.ptr == nil || response.len > 4*1024*1024 {
+		return auth, fmt.Errorf("host credential lookup failed")
+	}
+	var result struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Auth quotaHostAuth `json:"auth"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(C.GoBytes(response.ptr, C.int(response.len)), &result); err != nil || !result.OK {
+		return auth, fmt.Errorf("invalid host credential response")
+	}
+	return result.Result.Auth, nil
+}
 
 //export cliproxy_plugin_init
 func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_api) C.int {
 	if plugin == nil {
 		return 1
 	}
+	if C.pin_go_runtime_image() == 0 {
+		return 1
+	}
+	restartPluginState()
 	C.store_host_api(host)
 	plugin.abi_version = C.uint32_t(abiVersion)
 	plugin.call = C.cliproxy_plugin_call_fn(C.cliproxyPluginCall)
@@ -110,6 +183,11 @@ func cliproxyPluginFree(ptr unsafe.Pointer, len C.size_t) {
 
 //export cliproxyPluginShutdown
 func cliproxyPluginShutdown() {
+	pluginLifecycle.Lock()
+	defer pluginLifecycle.Unlock()
+	if pluginLifecycle.stopped {
+		return
+	}
 	if dashboardExportJobs != nil {
 		dashboardExportJobs.close()
 	}
@@ -119,6 +197,7 @@ func cliproxyPluginShutdown() {
 	if stats != nil {
 		stats.Close()
 	}
+	pluginLifecycle.stopped = true
 }
 
 func handleMethod(method string, requestBody []byte) ([]byte, error) {

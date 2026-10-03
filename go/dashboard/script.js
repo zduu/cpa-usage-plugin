@@ -45,6 +45,12 @@ const conditionalPayloadCache = new Map();
 const conditionalPayloadRequests = new Map();
 const conditionalPayloadCacheMax = 64;
 let apiDetailLastRender = null;
+const quotaPeriodSelections = new Map();
+const quotaSubmittedObservations = new Map();
+let quotaCollectionRequest = null;
+let quotaCollectionRetryAt = 0;
+let quotaCountdownTimer = null;
+const quotaExpiredRefreshes = new Set();
 let updatedState = { type: 'loading', generatedAt: null, message: '' };
 let healthCells = [];
 let healthCellKeys = [];
@@ -1379,6 +1385,16 @@ const isZeroSuccessRate = (row) => row.successRate === 0;
 // 表格只显示一位小数；真实成功率大于 0 时不能让用户看到可见的“0.0%”。
 const upstreamSuccessRateText = (rate) => rate > 0 && rate < 0.05 ? '<0.1%' : pct(rate);
 
+function quotaApiNames() {
+  const names = summaryData && summaryData._meta && summaryData._meta.quota_apis;
+  return Array.isArray(names) ? names.filter((name) => typeof name === 'string' && name) : [];
+}
+
+function selectedApiData(usage) {
+  if (!usage || !usage.apis) return null;
+  return usage.apis[selectedApi] || (quotaApiNames().includes(selectedApi) ? { total_requests: 0, success_count: 0, failure_count: 0, total_tokens: 0, models: {} } : null);
+}
+
 function renderApiStats() {
   const panelData = dashboardPanelData();
   const usage = panelData && panelData.usage;
@@ -1393,15 +1409,17 @@ function renderApiStats() {
     return;
   }
   const allRows = upstreamApiRows(usage);
+  const selectionApis = allRows.map((row) => row.api);
+  for (const api of quotaApiNames()) if (!selectionApis.includes(api)) selectionApis.push(api);
   const zeroRows = allRows.filter(isZeroSuccessRate);
   // 选中项始终跟随全量行:被隐藏的上游仍然可以在详情里查看和导出。
-  if (allRows.length && (!selectedApi || !allRows.some((r) => r.api === selectedApi))) selectedApi = allRows[0].api;
-  if (!allRows.length) selectedApi = '';
+  if (selectionApis.length && !selectionApis.includes(selectedApi)) selectedApi = selectionApis[0];
+  if (!selectionApis.length) selectedApi = '';
   // 全量行已按请求数降序排列,过滤后顺序不变。
   const rows = hideZeroUpstream ? allRows.filter((r) => !isZeroSuccessRate(r)) : allRows;
-  $('apiSelect').innerHTML = allRows.length ? allRows.map((r) => '<option value="' + esc(r.api) + '">' + esc(friendlyApiName(r.api)) + '</option>').join('') : '<option value="">' + t('upstream_select_none') + '</option>';
+  $('apiSelect').innerHTML = selectionApis.length ? selectionApis.map((api) => '<option value="' + esc(api) + '">' + esc(friendlyApiName(api)) + '</option>').join('') : '<option value="">' + t('upstream_select_none') + '</option>';
   $('apiSelect').value = selectedApi;
-  $('apiSelect').disabled = !allRows.length;
+  $('apiSelect').disabled = !selectionApis.length;
   $('apiSelect').onchange = () => { selectedApi = $('apiSelect').value; renderApiStats(); renderApiDetail() };
   $('apiStats').innerHTML = rows.length ? '<table><thead><tr><th>' + t('col_api') + '</th><th>' + t('col_requests') + '</th><th>' + t('col_success_rate') + '</th><th>' + t('col_tokens') + '</th><th>' + t('col_avg_latency') + '</th><th>' + t('col_models') + '</th></tr></thead><tbody>' + rows.map((r) => '<tr class="clickableRow ' + (r.api === selectedApi ? 'selectedRow' : '') + '" data-api="' + esc(r.api) + '"><td class="nameCell">' + esc(friendlyApiName(r.api)) + '</td><td>' + formatInteger(r.requests) + ' <span class="ok">(' + formatInteger(r.success) + '</span> <span class="bad">' + formatInteger(r.failure) + ')</span></td><td class="' + (r.successRate >= 95 ? 'ok' : r.successRate >= 80 ? 'neutral' : 'bad') + '">' + upstreamSuccessRateText(r.successRate) + '</td><td>' + compact(r.tokens) + '</td><td>' + formatMs(r.avgLatency) + '</td><td>' + formatInteger(r.modelCount) + ' ' + t('model_count') + '</td></tr>').join('') + '</tbody></table>' : '<div class="empty">' + (zeroRows.length ? t('upstream_all_hidden', formatInteger(zeroRows.length)) : t('no_upstream_data')) + '</div>';
   document.querySelectorAll('[data-api]').forEach((row) => row.onclick = () => { selectedApi = row.getAttribute('data-api') || ''; renderApiStats(); renderApiDetail() });
@@ -1507,6 +1525,128 @@ function apiDetailRecentHtml(rows, loading, error) {
     '</div>';
 }
 
+
+function quotaValue(value, money) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return '—';
+  return money ? formatUsd(Number(value)) : formatInteger(Number(value));
+}
+function quotaWindowLabel(seconds) {
+  if (seconds === 18000) return t('quota_5h');
+  if (seconds === 604800) return t('quota_week');
+  if (seconds === 86400) return t('quota_day');
+  return seconds % 86400 === 0 ? (seconds / 86400) + ' ' + t('quota_days') : (seconds / 3600) + ' ' + t('quota_hours');
+}
+function quotaCountdownText(end, now) {
+  let seconds = Math.max(0, Math.ceil((end - now) / 1000));
+  const days = Math.floor(seconds / 86400);
+  seconds %= 86400;
+  return (days ? days + ' ' + t('quota_days') + ' ' : '') +
+    [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60].map((value) => String(value).padStart(2, '0')).join(':');
+}
+function updateQuotaCountdowns() {
+  clearTimeout(quotaCountdownTimer);
+  quotaCountdownTimer = null;
+  if (document.visibilityState === 'hidden') return;
+  const now = Date.now();
+  let active = false, refresh = false;
+  document.querySelectorAll('[data-quota-reset]').forEach((element) => {
+    const end = Number(element.dataset.quotaReset);
+    if (!Number.isFinite(end)) return;
+    element.textContent = quotaCountdownText(end, now);
+    if (end > now) active = true;
+    else {
+      const key = JSON.stringify([selectedApi, end]);
+      if (!quotaExpiredRefreshes.has(key)) {
+        quotaExpiredRefreshes.add(key);
+        while (quotaExpiredRefreshes.size > 64) quotaExpiredRefreshes.delete(quotaExpiredRefreshes.values().next().value);
+        refresh = true;
+      }
+    }
+  });
+  if (active) quotaCountdownTimer = setTimeout(updateQuotaCountdowns, 1000);
+  if (refresh) renderApiDetail();
+}
+function quotaSignalAllowed(provider, key) {
+  if (provider === 'claude') return /^anthropic-ratelimit-unified-(5h|7d)-(utilization|reset)$/.test(key);
+  if (provider === 'devin') return /^(daily|weekly)_quota_(remaining_percent|reset_at)$/.test(key);
+  return provider === 'codex' && /^x-codex-(?:[a-z0-9.-]+-)*(?:(?:primary|secondary)-(?:used-percent|window-minutes|reset-at|reset-after-seconds)|limit-name)$/.test(key);
+}
+function quotaModelsHtml(cycle) {
+  const rows = cycle && cycle.model_stats;
+  if (!Array.isArray(rows) || !rows.length) return '<div class="empty">' + t('no_model_data') + '</div>';
+  const total = cycle.summary && cycle.summary.estimated_cost;
+  return '<div class="tableWrap"><table><thead><tr>' + ['col_model', 'requests_label', 'success_label', 'failure_label', 'col_input', 'col_output', 'reasoning_tokens', 'col_cache', 'cache_write_tokens', 'col_total', 'quota_actual_cost', 'quota_cost_share'].map((key) => '<th>' + esc(t(key)) + '</th>').join('') + '</tr></thead><tbody>' + rows.map((row) => '<tr><td class="nameCell">' + esc(row.model) + '</td>' + ['total_requests', 'success_count', 'failure_count', 'input_tokens', 'output_tokens', 'reasoning_tokens', 'cached_tokens', 'cache_write_tokens', 'total_tokens'].map((key) => '<td>' + quotaValue(row[key], false) + '</td>').join('') + '<td>' + quotaValue(row.estimated_cost, true) + '</td><td>' + (Number(total) > 0 && row.estimated_cost != null && Number.isFinite(Number(row.estimated_cost)) ? pct(Number(row.estimated_cost) / Number(total) * 100) : '—') + '</td></tr>').join('') + '</tbody></table></div>';
+}
+function quotaPeriodHtml(cycle, current) {
+  if (!cycle) return '<div class="empty">' + t(current ? 'quota_no_current' : 'quota_no_previous') + '</div>';
+  const summary = cycle.summary;
+  const percent = cycle.used_percent === null || cycle.used_percent === undefined ? '—' : pct(cycle.used_percent);
+  const range = esc(formatDateTime(timestampMs(cycle.start_at))) + ' – ' + esc(formatDateTime(timestampMs(cycle.end_at)));
+  let html = '<div class="subtle quotaDates">' + range + '</div><div class="detailGrid">' + metricHtml(t('quota_actual_cost'), quotaValue(summary && summary.estimated_cost, true)) + metricHtml(t('quota_used'), percent) + metricHtml(t('requests_label'), quotaValue(summary && summary.total_requests, false)) + metricHtml(t('total_tokens_label'), quotaValue(summary && summary.total_tokens, false));
+  if (current) {
+    const end = timestampMs(cycle.end_at);
+    html += metricHtml(t('quota_estimated_total'), quotaValue(cycle.estimated_total_usd, true)) + metricHtml(t('quota_estimated_remaining'), quotaValue(cycle.estimated_remaining_usd, true)) + metricHtml(t('quota_reset'), '<span data-quota-reset="' + end + '">' + quotaCountdownText(end, Date.now()) + '</span>');
+  }
+  return html + '</div>' + quotaModelsHtml(cycle);
+}
+function quotaCyclesHtml(credentials) {
+  if (!Array.isArray(credentials) || !credentials.length) return '';
+  return '<section class="quotaCycles"><h3>' + t('quota_title') + '</h3>' + credentials.map((credential) => '<div class="quotaCredential"><div class="subtle quotaCredentialName">' + esc(credential.credential_name || credential.auth_index) + '</div>' + (credential.groups || []).map((group) => {
+    const key = JSON.stringify([selectedApi, credential.provider, credential.auth_index, credential.credential_name, group.group_id]);
+    const selected = quotaPeriodSelections.get(key) || 'current';
+    const label = (group.name ? esc(group.name) + ' · ' : '') + esc(quotaWindowLabel(Number(group.window_seconds)));
+    return '<div class="quotaWindow"><strong>' + label + '</strong><div class="quotaTabs" role="group" aria-label="' + esc(label) + '">' + ['current', 'previous'].map((period) => '<button type="button" class="btn" data-quota-key="' + esc(key) + '" data-quota-period="' + period + '" aria-pressed="' + (period === selected) + '">' + t(period === 'current' ? 'quota_current' : 'quota_previous') + '</button>').join('') + '</div>' + quotaPeriodHtml(group[selected], selected === 'current') + '</div>';
+  }).join('') + '</div>').join('') + '</section>';
+}
+async function collectQuotaObservations() {
+  if (quotaCollectionRequest) return quotaCollectionRequest;
+  if (Date.now() < quotaCollectionRetryAt) return false;
+  quotaCollectionRequest = (async () => {
+    try {
+      const data = await fetchJsonPayload(managementEndpoint('').replace(/\/v0\/management\/plugins\/.*$/, '/v8/management/credentials'), managementFetchOptions({ cache: 'no-store' }));
+      const pending = [];
+      for (const file of (data && Array.isArray(data.files) ? data.files : [])) {
+        const provider = String(file && (file.provider || file.type) || '').trim().toLowerCase();
+        if (!file || file.runtime_only || !file.auth_index || !file.id || !file.quota || !file.quota.observed_at || !['claude', 'codex', 'devin'].includes(provider)) continue;
+        const signals = Object.create(null);
+        for (const rawKey of Object.keys(file.quota.signals || {}).sort()) {
+          const key = rawKey.trim().toLowerCase();
+          if (key.length > 256 || !quotaSignalAllowed(provider, key)) continue;
+          const value = String(file.quota.signals[rawKey]).trim();
+          if (value.length <= 512 && !/[\x00-\x1f\x7f]/.test(value)) signals[key] = value;
+        }
+        if (Object.keys(signals).length > 64) continue;
+        const input = { provider, auth_index: file.auth_index, auth_id: file.id, observed_at: file.quota.observed_at, signals };
+        const signature = JSON.stringify(input);
+        const key = JSON.stringify([input.provider, input.auth_index, input.auth_id]);
+        if (quotaSubmittedObservations.get(key) !== signature && Object.keys(signals).length) pending.push({ input, key, signature });
+      }
+      let changed = false;
+      while (pending.length) {
+        const batch = [];
+        let bytes = 64;
+        while (pending.length && batch.length < 100) {
+          const next = pending[0];
+          const size = new TextEncoder().encode(next.signature).byteLength + 1;
+          if (batch.length && bytes + size > 200 * 1024) break;
+          bytes += size; batch.push(pending.shift());
+        }
+        const response = await fetchManagementJsonPayload('dashboard-quota-observations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version: 1, observations: batch.map((row) => row.input) }), cache: 'no-store' });
+        changed = changed || num(response && response.accepted) > 0;
+        if (!num(response && response.rejected)) for (const row of batch) {
+          quotaSubmittedObservations.set(row.key, row.signature);
+          while (quotaSubmittedObservations.size > 1024) quotaSubmittedObservations.delete(quotaSubmittedObservations.keys().next().value);
+        }
+      }
+      return changed;
+    } catch (_) {
+      quotaCollectionRetryAt = Date.now() + hiddenPollDelayMs;
+      return false;
+    }
+  })();
+  try { return await quotaCollectionRequest; } finally { quotaCollectionRequest = null; }
+}
+
 function renderApiDetailContent(apiData, detailState) {
   apiDetailLastRender = { api: selectedApi, apiData, detailState };
   const detail = detailState && detailState.detail;
@@ -1537,13 +1677,14 @@ function renderApiDetailContent(apiData, detailState) {
     barsHtml(t('model_distribution'), models, requests, t('no_model_data'), true) +
     barsHtml(t('source_distribution'), sources, requests, loading ? t('loading_source_data') : t('no_source_data')) +
     '</div>' +
-    '<div class="splitGrid detailActivityGrid">' + (showErrorStats ? apiDetailErrorHtml(errorRows, loading, error, knownFailureCount) : '') + apiDetailRecentHtml(rows, loading, error) + '</div>';
+    '<div class="splitGrid detailActivityGrid">' + (showErrorStats ? apiDetailErrorHtml(errorRows, loading, error, knownFailureCount) : '') + apiDetailRecentHtml(rows, loading, error) + '</div>' + quotaCyclesHtml(detail && detail.credential_quota_cycles);
+  updateQuotaCountdowns();
 }
 
 async function renderApiDetail() {
   const panelData = dashboardPanelData();
   const usage = panelData && panelData.usage;
-  const apiData = usage && usage.apis && usage.apis[selectedApi];
+  const apiData = selectedApiData(usage);
   if (!apiData) { apiDetailSeq++; apiDetailLastRender = null; setText('apiDetailTitle', t('upstream_detail_select_hint')); $('apiDetail').innerHTML = '<div class="empty">' + t('no_detail_data') + '</div>'; return }
   const api = selectedApi;
   const seq = ++apiDetailSeq;
@@ -1565,7 +1706,7 @@ async function renderApiDetail() {
 function renderApiDetailFromCache() {
   const panelData = dashboardPanelData();
   const usage = panelData && panelData.usage;
-  const apiData = usage && usage.apis && usage.apis[selectedApi];
+  const apiData = selectedApiData(usage);
   if (!apiData) {
     apiDetailSeq++;
     apiDetailLastRender = null;
@@ -2536,10 +2677,12 @@ async function load(options) {
     const data = summaryResult.data;
     summaryData = requireObjectPayload(data, 'dashboard-summary');
     applyCurrencySummary(summaryData);
+    const quotaChanged = summaryData._meta && summaryData._meta.quota_cycles_enabled ? await collectQuotaObservations() : false;
+    if (requestSeq !== summaryLoadSeq) return;
     let filteredResult = null;
     if (selectedClientApi) filteredResult = await refreshFilteredSummary();
     if (requestSeq !== summaryLoadSeq) return;
-    if (summaryResult.notModified && previousSummary === summaryData && updatedState.type === 'success' && currentRange === selectedRange && !forceDetails && (!selectedClientApi || (filteredResult && filteredResult.notModified))) {
+    if (summaryResult.notModified && previousSummary === summaryData && updatedState.type === 'success' && currentRange === selectedRange && !forceDetails && !quotaChanged && (!selectedClientApi || (filteredResult && filteredResult.notModified))) {
       currentRange = selectedRange;
       pollFailures = 0;
       schedulePoll(pollDelay());
@@ -2550,7 +2693,7 @@ async function load(options) {
     }
     updatedState = { type: 'success', generatedAt: data.generated_at || Date.now(), message: '' };
     renderUpdated();
-    const refreshDetails = !!selectedClientApi || shouldRefreshDetails(previousSummary, summaryData, forceDetails);
+    const refreshDetails = quotaChanged || !!selectedClientApi || shouldRefreshDetails(previousSummary, summaryData, forceDetails);
     await rerender({ refreshEvents: refreshDetails, refreshApiDetail: refreshDetails });
     if (requestSeq !== summaryLoadSeq) return;
     currentRange = selectedRange;
@@ -2588,6 +2731,7 @@ async function load(options) {
 }
 
 function handleVisibilityChange() {
+  updateQuotaCountdowns();
   if (document.visibilityState === 'visible') {
     load();
     return;
@@ -2675,6 +2819,12 @@ $('priceReferenceOptions').onclick = (event) => {
   if (target && target.dataset && target.dataset.priceReferenceOption) selectPriceReferenceModel(target.dataset.priceReferenceOption);
 };
 if (document.addEventListener) document.addEventListener('click', (event) => {
+  const target = event && event.target;
+  if (target && target.dataset && target.dataset.quotaKey && ['current', 'previous'].includes(target.dataset.quotaPeriod)) {
+    quotaPeriodSelections.set(target.dataset.quotaKey, target.dataset.quotaPeriod);
+    while (quotaPeriodSelections.size > 64) quotaPeriodSelections.delete(quotaPeriodSelections.keys().next().value);
+    renderApiDetailFromCache();
+  }
   if (!elementContains($('priceReferenceCombo'), event && event.target)) closePriceReferenceOptions();
 });
 document.querySelectorAll('[data-api-sort]').forEach((btn) => btn.onclick = async () => {

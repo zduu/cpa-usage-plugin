@@ -372,7 +372,7 @@ func TestSQLiteProjectionPreservesInputsToLegacyResidualRestore(t *testing.T) {
 				t.Fatal(err)
 			}
 			projected := projectedSnapshotForTest(t, s, path)
-			if version < currentStorageSnapshotVersion {
+			if version < cacheReadOnlySnapshotVersion {
 				migrateLegacySnapshotCacheReads(&legacy.Usage)
 				migrateLegacySnapshotCacheReads(&projected.Usage)
 			}

@@ -37,6 +37,8 @@ __pycache__/
 # 过程性文档与工作笔记不入库:只发布面向使用者的文档。
 /docs/plans/
 /docs/issues/
+# Keep quota regression tests visible even when local excludes hide Go tests.
+!/go/quota_*_test.go
 # IDE
 .idea/
 .vscode/

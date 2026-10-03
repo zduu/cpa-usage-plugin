@@ -171,6 +171,7 @@ func (s *RequestStatistics) repairMigratedAttributionDetailsLocked(now time.Time
 				if !s.isRepairableMigratedTwinLocked(originals, detail) {
 					continue
 				}
+				s.removeQuotaFactLocked(detail)
 				s.decrementCounters(detail, apiSt, modelSt, modelName)
 				removed = append(removed, dedupKey(apiName, modelName, detail))
 				modelSt.removeAccountingDetailAt(i)

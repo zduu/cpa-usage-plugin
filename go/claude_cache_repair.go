@@ -78,7 +78,8 @@ type claudeCacheFallbackRepair struct {
 }
 
 // repairClaudeCacheFallbackDetailsLocked 还原被双计的历史明细:摘除污染明细并
-// 回退其计入的全部计数,再以修复后的 token 重新入账。返回修复条数。仅在用户
+// 回退其计入的全部计数,再以修复后的 token 重新入账,并修复独立保留的额度事实。
+// 返回修复条数。仅在用户
 // 显式启用 claude_cache_repair_enabled 后执行。
 func (s *RequestStatistics) repairClaudeCacheFallbackDetailsLocked(now time.Time) int {
 	if s == nil || !s.claudeCacheRepairEnabled {
@@ -124,13 +125,29 @@ func (s *RequestStatistics) repairClaudeCacheFallbackDetailsLocked(now time.Time
 			modelSt.Details = kept
 		}
 	}
-	if len(repairs) == 0 && archivedRepairs == 0 {
-		return 0
-	}
 	for _, repair := range repairs {
 		s.recordDetailLocked(repair.apiName, repair.modelName, repair.detail, requestDedupKey{}, now, false)
 	}
+	// Quota facts can outlive every main-ledger detail, and the original
+	// journal may already be compacted. Apply the same opt-in repair to those
+	// facts too; repaired main details have updated their facts above.
+	quotaRepairs := 0
+	if s.quota != nil {
+		for id, fact := range s.quota.Facts {
+			detail := fact.detail()
+			if !isPollutedClaudeCacheFallbackDetail(detail) {
+				continue
+			}
+			fact.Tokens = repairClaudeCacheFallbackTokens(detail).Tokens
+			s.quota.Facts[id] = fact
+			s.quota.VersionCounter++
+			quotaRepairs++
+		}
+	}
+	if len(repairs) == 0 && archivedRepairs == 0 && quotaRepairs == 0 {
+		return 0
+	}
 	s.rebuildSeenLocked(now)
 	s.invalidateSummaryLocked()
-	return len(repairs) + archivedRepairs
+	return len(repairs) + archivedRepairs + quotaRepairs
 }

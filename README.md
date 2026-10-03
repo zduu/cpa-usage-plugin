@@ -4,6 +4,8 @@ CPA 用量统计插件，用于在 CLIProxyAPI/CPA v7 插件系统中记录请�
 
 当前代码版本：`2.6.6`。本版本在上游接口统计表格增加「隐藏成功率 0%」开关，并将开关状态保存在浏览器中。变更和已知边界见[更新日志](docs/releases/changelog.md)。
 
+工作区新增待发布的 [CPA v8 凭证额度周期](docs/guides/quota-cycles.md)，包含本期/上期用量、模型分布、额度推算和持久化备份。
+
 > **2.4.0 迁移提示**：插件 ID 已从 `usage-statistics` 改为 `usage-dashboard-zduu`，用于避开 CPA 官方商店中同 ID 插件造成的安装状态、配置和路由冲突。升级时必须先停用并删除旧插件，再安装新插件；历史统计数据路径保持不变。详细步骤见[部署文档的 2.3.4 → 2.4.0 迁移章节](docs/guides/cpa-usage.md#从-234-迁移到-240)。
 
 `v1.0.0` 到 `v1.2.18` 属于规范化发布流程建立前的 legacy 历史版本；tag、release 和资产下载地址保持不变，说明见 [docs/releases/v1-history.md](docs/releases/v1-history.md)。
@@ -11,6 +13,7 @@ CPA 用量统计插件，用于在 CLIProxyAPI/CPA v7 插件系统中记录请�
 ## 功能
 
 - 记录请求数、成功/失败、延迟、TTFT。
+- CPA v8 凭证额度按真实上游窗口展示本期和上期，分别统计模型用量与实际花费；支持 Claude、Codex、Devin 的既有额度观测，本期可推算总额度，上期保留真实历史。详见[使用说明](docs/guides/quota-cycles.md)。
 - 记录 input/output/reasoning/cache/total token。
 - 按上游接口、模型、来源、CPA 凭证和调用 CPA 的客户端 API key 聚合统计。上游接口统计面板可用「隐藏成功率 0%」按钮隐藏成功率为 0 的上游；开关状态保存在浏览器 localStorage 中，只影响这张表格的显示，详情下拉、导出和 API Key 联动仍保留全部上游。
 - API 详细统计支持主动选择脱敏后的客户端 API key，并联动筛选上游接口统计、上游接口详情、模型统计、请求事件明细和用量趋势；默认仍展示当前时间范围内的全量数据。
@@ -164,6 +167,7 @@ GET  /v0/management/plugins/usage-dashboard-zduu/dashboard-events-export-jobs
 DELETE /v0/management/plugins/usage-dashboard-zduu/dashboard-events-export-jobs
 GET  /v0/management/plugins/usage-dashboard-zduu/dashboard-events-export-download
 GET  /v0/management/plugins/usage-dashboard-zduu/dashboard-api-detail
+POST /v0/management/plugins/usage-dashboard-zduu/dashboard-quota-observations
 GET  /v0/management/plugins/usage-dashboard-zduu/dashboard-data
 GET  /v0/management/plugins/usage-dashboard-zduu/health
 ```
@@ -185,6 +189,7 @@ GET  /v0/management/plugins/usage-dashboard-zduu/health
 | `/dashboard-events-export-download` | GET | 下载已完成的后台事件导出任务结果，使用 `?id=<job_id>`；可协商分块下载，详见[部署文档](docs/guides/cpa-usage.md#按筛选导出事件)。 |
 | `/dashboard-api-detail` | GET | 单个上游接口详情，支持 `?api=xxx&range=24h&client_api=xxx`，返回模型分布、来源、错误统计和最近请求；最近请求携带完整上游接口 `api`，并在有数据时返回推理强度 `thinking`、请求端点 `endpoint` 和流式标记 `stream`。 |
 | `/dashboard-data` | GET | 兼容旧版，返回含全部 `details` 数组的完整数据。 |
+| `/dashboard-quota-observations` | POST | 保存经过宿主凭证身份校验的额度观测，返回接受、跳过、拒绝数量；不增加请求计数。 |
 | `/health` | GET | 运行健康状态：`status`、`alerts`、`detail_count`、`evicted_total`、`total_requests`。 |
 
 `/dashboard-summary`、`/dashboard-events`、`/dashboard-api-detail` 和 `/dashboard-events-export` 支持弱 ETag；内置看板轮询会自动使用 `If-None-Match`，外部脚本也可用条件请求减少未变化数据的重复传输。`/health.runtime.conditional_requests` 会按端点统计条件请求的 304 命中率。

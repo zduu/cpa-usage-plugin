@@ -49,6 +49,8 @@ func handleManagement(requestBody []byte) ([]byte, error) {
 		return dashboardExportJobJSON(http.StatusNotFound, dashboardExportJobErrorResponse{Error: "endpoint not found"})
 	}
 	switch {
+	case req.Method == "POST" && tail == "dashboard-quota-observations":
+		return handleQuotaObservations(req.Body)
 	case req.Method == "GET" && tail == "dashboard":
 		return handleDashboardPage(req.Headers)
 	case req.Method == "GET" && tail == "dashboard-summary":
@@ -115,6 +117,7 @@ func handleManagementRegister() ([]byte, error) {
 	pluginPath := "/plugins/" + pluginID
 	result := ManagementRegisterResponse{
 		Routes: []ManagementRoute{
+			{Method: "POST", Path: pluginPath + "/dashboard-quota-observations", Description: "保存认证凭证额度观测。"},
 			{
 				Method:      "GET",
 				Path:        pluginPath + "/usage",
@@ -506,7 +509,10 @@ func handleImportUsage(body []byte) ([]byte, error) {
 		}
 	}
 
-	result := stats.MergeSnapshot(importPayload.Usage)
+	result, quotaErr := stats.mergeSnapshotChecked(importPayload.Usage)
+	if quotaErr != nil {
+		return errorEnvelope("invalid_record", quotaErr.Error()), nil
+	}
 
 	responseData := ImportResponse{
 		InputRecords:       recordCount,

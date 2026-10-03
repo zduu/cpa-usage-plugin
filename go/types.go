@@ -140,6 +140,7 @@ func defaultRuntimeConfig() runtimeConfig {
 // ============================================================================
 
 type UsageRecord struct {
+	RequestID       string `json:"request_id"`
 	streamPresent   bool
 	Provider        string              `json:"provider"`
 	ExecutorType    string              `json:"executor_type"`
@@ -172,6 +173,7 @@ type UsageRecord struct {
 
 func (r *UsageRecord) UnmarshalJSON(data []byte) error {
 	var current struct {
+		RequestID       string              `json:"request_id"`
 		Provider        string              `json:"provider"`
 		ExecutorType    string              `json:"executor_type"`
 		Model           string              `json:"model"`
@@ -201,6 +203,7 @@ func (r *UsageRecord) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	var legacy struct {
+		RequestID       string              `json:"RequestID"`
 		Provider        string              `json:"Provider"`
 		ExecutorType    string              `json:"ExecutorType"`
 		Model           string              `json:"Model"`
@@ -241,6 +244,7 @@ func (r *UsageRecord) UnmarshalJSON(data []byte) error {
 	}
 
 	record := UsageRecord{
+		RequestID:       firstNonEmpty(current.RequestID, legacy.RequestID),
 		streamPresent:   aliases.Stream != nil || aliases.Streaming != nil,
 		Provider:        firstNonEmpty(current.Provider, legacy.Provider),
 		ExecutorType:    firstNonEmpty(current.ExecutorType, legacy.ExecutorType),
@@ -857,6 +861,7 @@ type ImportResponse struct {
 // ============================================================================
 
 type RequestDetail struct {
+	RecordID string `json:"record_id,omitempty"`
 	// Internal stable index reference; never retained by a query/snapshot copy.
 	eventRef      *dashboardEventRef
 	eventSequence int64
@@ -921,16 +926,17 @@ type UsageThinking struct {
 }
 
 type StatisticsSnapshot struct {
-	TotalRequests    int64   `json:"total_requests"`
-	SuccessCount     int64   `json:"success_count"`
-	FailureCount     int64   `json:"failure_count"`
-	TotalTokens      int64   `json:"total_tokens"`
-	InputTokens      int64   `json:"input_tokens,omitempty"`
-	OutputTokens     int64   `json:"output_tokens,omitempty"`
-	CachedTokens     int64   `json:"cached_tokens,omitempty"`
-	CacheWriteTokens int64   `json:"cache_write_tokens,omitempty"`
-	ReasoningTokens  int64   `json:"reasoning_tokens,omitempty"`
-	AvgLatencyMs     float64 `json:"avg_latency_ms,omitempty"`
+	QuotaCycles      *quotaSnapshot `json:"quota_cycles,omitempty"`
+	TotalRequests    int64          `json:"total_requests"`
+	SuccessCount     int64          `json:"success_count"`
+	FailureCount     int64          `json:"failure_count"`
+	TotalTokens      int64          `json:"total_tokens"`
+	InputTokens      int64          `json:"input_tokens,omitempty"`
+	OutputTokens     int64          `json:"output_tokens,omitempty"`
+	CachedTokens     int64          `json:"cached_tokens,omitempty"`
+	CacheWriteTokens int64          `json:"cache_write_tokens,omitempty"`
+	ReasoningTokens  int64          `json:"reasoning_tokens,omitempty"`
+	AvgLatencyMs     float64        `json:"avg_latency_ms,omitempty"`
 
 	APIs map[string]APISnapshot `json:"apis"`
 
@@ -1173,6 +1179,8 @@ type DashboardSummary struct {
 
 // DashboardMeta carries observability metadata.
 type DashboardMeta struct {
+	QuotaCyclesEnabled bool           `json:"quota_cycles_enabled,omitempty"`
+	QuotaAPIs          []string       `json:"quota_apis,omitempty"`
 	RetentionDays      int            `json:"retention_days"`
 	MaxDetailsPerModel int            `json:"max_details_per_model"`
 	CurrentDetailCount int64          `json:"current_detail_count"`
@@ -1241,6 +1249,7 @@ type APIDetailErrorStat struct {
 
 // APIDetailResponse is a compact backend-rendered detail payload for one API.
 type APIDetailResponse struct {
+	QuotaCycles  []quotaCredentialDTO `json:"credential_quota_cycles,omitempty"`
 	API          string               `json:"api"`
 	Summary      APIDetailSummary     `json:"summary"`
 	ModelStats   []ModelStat          `json:"model_stats"`

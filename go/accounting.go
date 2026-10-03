@@ -14,6 +14,7 @@ type accountingIdentity struct {
 }
 
 type accountingRecord struct {
+	RecordID          string
 	Correlation       *ProtocolCorrelationMeta
 	Timestamp         time.Time
 	Identity          *accountingIdentity
@@ -31,13 +32,13 @@ func (m *modelStats) archiveDetail(d RequestDetail) {
 func (m *modelStats) accountingRecord(d RequestDetail) accountingRecord {
 	key := accountingIdentity{d.Model, d.Provider, d.Source, d.AuthIndex, d.AuthID, d.AuthType, d.APIKey, d.APIKeyHash, d.BaseURL, d.RequestedModel, d.ExecutorType, d.Endpoint}
 	identity := m.internAccountingIdentity(key)
-	return accountingRecord{Correlation: cloneProtocolCorrelationMeta(d.Correlation), Timestamp: d.Timestamp, Identity: identity, Tokens: d.Tokens,
+	return accountingRecord{RecordID: d.RecordID, Correlation: cloneProtocolCorrelationMeta(d.Correlation), Timestamp: d.Timestamp, Identity: identity, Tokens: d.Tokens,
 		LatencyMs: d.LatencyMs, TTFTMs: d.TTFTMs, Failure: d.Failure, StatusCode: d.StatusCode, Failed: d.Failed, Synthetic: d.TimestampSynthetic}
 }
 
 func (r accountingRecord) detail() RequestDetail {
 	i := r.Identity
-	return RequestDetail{Model: i.Model, Provider: i.Provider, Source: i.Source, AuthIndex: i.AuthIndex, AuthID: i.AuthID, AuthType: i.AuthType, BaseURL: i.BaseURL, RequestedModel: i.RequestedModel, ExecutorType: i.ExecutorType, Endpoint: i.Endpoint, Correlation: r.Correlation,
+	return RequestDetail{RecordID: r.RecordID, Model: i.Model, Provider: i.Provider, Source: i.Source, AuthIndex: i.AuthIndex, AuthID: i.AuthID, AuthType: i.AuthType, BaseURL: i.BaseURL, RequestedModel: i.RequestedModel, ExecutorType: i.ExecutorType, Endpoint: i.Endpoint, Correlation: r.Correlation,
 		APIKey: i.APIKey, APIKeyHash: i.APIKeyHash, Timestamp: r.Timestamp, Tokens: r.Tokens, LatencyMs: r.LatencyMs, TTFTMs: r.TTFTMs,
 		Failure: r.Failure, StatusCode: r.StatusCode, Failed: r.Failed, TimestampSynthetic: r.Synthetic}
 }
