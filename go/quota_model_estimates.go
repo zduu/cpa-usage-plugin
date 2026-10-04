@@ -17,6 +17,7 @@ type quotaModelInterval struct {
 }
 
 // Only monotonic observations within one collection run can calibrate a model.
+// Complete intervals from earlier runs remain usable after a restart.
 // Hold the baseline through plateaus so rounded usage is not assigned to just
 // the last request before the next increase. A decrease discards old estimates.
 func quotaModelIntervals(p *quotaPeriod) []quotaModelInterval {
@@ -24,7 +25,7 @@ func quotaModelIntervals(p *quotaPeriod) []quotaModelInterval {
 	var base *quotaObservation
 	for i := range p.Samples {
 		sample := &p.Samples[i]
-		if sample.ObservedAt.Before(p.Start) || sample.ObservedAt.After(p.End) || sample.ObservedAt.Before(p.CollectionStartedAt) {
+		if sample.ObservedAt.Before(p.Start) || sample.ObservedAt.After(p.End) {
 			continue
 		}
 		if math.IsNaN(sample.Used) || math.IsInf(sample.Used, 0) || sample.Used < 0 || sample.Used > 1 {
@@ -45,8 +46,12 @@ func quotaModelIntervals(p *quotaPeriod) []quotaModelInterval {
 			if baseEpoch.IsZero() {
 				baseEpoch = p.CollectionStartedAt
 			}
-			if !epoch.Equal(baseEpoch) || sample.Used < base.Used {
+			if sample.Used < base.Used {
 				intervals = nil
+				base = nil
+			} else if !epoch.Equal(baseEpoch) {
+				// A restart prevents calibrating across the collection gap,
+				// but does not invalidate complete historical intervals.
 				base = nil
 			}
 		}

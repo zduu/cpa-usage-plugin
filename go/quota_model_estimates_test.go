@@ -115,6 +115,9 @@ func TestQuotaModelRejectsUnreliableIntervals(t *testing.T) {
 				p.Samples[1].CollectionStartedAt = p.Start.Add(3 * time.Minute)
 			case "before-collection":
 				p.CollectionStartedAt = p.Start.Add(time.Minute)
+				for i := range p.Samples {
+					p.Samples[i].CollectionStartedAt = time.Time{}
+				}
 			case "decrease":
 				p.Samples = append(p.Samples, quotaObservation{ObservedAt: now, Used: .05, CollectionStartedAt: p.CollectionStartedAt})
 			case "same-timestamp":
@@ -128,6 +131,38 @@ func TestQuotaModelRejectsUnreliableIntervals(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestQuotaModelHistorySurvivesRestartWithoutCalibratingAcrossGap(t *testing.T) {
+	w, p, facts, now := quotaModelFixture()
+	price := quotaModelTestPrice(map[string]ModelPrice{"a": {Prompt: 8}, "b": {Prompt: 40}})
+	// A's complete interval was recorded before the latest process start.
+	// B used tokens during the restart gap; those tokens have no paired
+	// observations and cannot be counted in either model's calibration.
+	p.CollectionStartedAt = p.Start.Add(12 * time.Minute)
+	for i := 2; i < len(p.Samples); i++ {
+		p.Samples[i].CollectionStartedAt = p.CollectionStartedAt
+	}
+	facts = []quotaFact{facts[0], facts[1], facts[3]}
+	rows := quotaModelTestResult(w, p, facts, price, now, true)
+	quotaModelAssert(t, rows["a"].ModelOnlyTotalUSD, 80)
+	quotaModelAssert(t, rows["a"].ModelOnlyTotalTokens, 10_000_000)
+	quotaModelAssert(t, rows["b"].ModelOnlyTotalUSD, 400)
+	quotaModelAssert(t, rows["b"].ModelOnlyTotalTokens, 10_000_000)
+	// A single new observation cannot erase a completed historical estimate.
+	p.Samples = p.Samples[:3]
+	rows = quotaModelTestResult(w, p, facts, price, now, true)
+	quotaModelAssert(t, rows["a"].ModelOnlyTotalUSD, 80)
+	if rows["b"].ModelOnlyTotalTokens != nil {
+		t.Fatal("restart gap was used as a model-only interval")
+	}
+	// Staleness still applies separately to each model's old observations.
+	rows = quotaModelTestResult(w, p, facts, price, now.Add(2*time.Hour), true)
+	if rows["a"].ModelOnlyTotalUSD != nil {
+		t.Fatal("stale historical estimate was retained in current period")
+	}
+	rows = quotaModelTestResult(w, p, facts, price, now.Add(2*time.Hour), false)
+	quotaModelAssert(t, rows["a"].ModelOnlyTotalUSD, 80)
 }
 
 func TestQuotaModelCombinesIndependentIntervalsAndRecalibratesAfterDecrease(t *testing.T) {
