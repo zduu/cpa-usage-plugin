@@ -1587,12 +1587,14 @@ function quotaPeriodHtml(cycle, current) {
   let html = '<div class="subtle quotaDates">' + range + '</div><div class="detailGrid">' + metricHtml(t('quota_actual_cost'), quotaValue(summary && summary.estimated_cost, true)) + metricHtml(t('quota_used'), percent) + metricHtml(t('requests_label'), quotaValue(summary && summary.total_requests, false)) + metricHtml(t('total_tokens_label'), quotaValue(summary && summary.total_tokens, false));
   if (current) {
     const end = timestampMs(cycle.end_at);
-    html += metricHtml(t('quota_estimated_total'), quotaValue(cycle.estimated_total_usd, true)) + metricHtml(t('quota_estimated_remaining'), quotaValue(cycle.estimated_remaining_usd, true)) + metricHtml(t('quota_reset'), '<span data-quota-reset="' + end + '">' + quotaCountdownText(end, Date.now()) + '</span>');
+    const full = cycle.used_percent === 100;
+    html += metricHtml(t(full ? 'quota_actual_total' : 'quota_estimated_total'), quotaValue(full ? cycle.actual_total_usd : cycle.estimated_total_usd, true)) + metricHtml(t('quota_estimated_remaining'), quotaValue(cycle.estimated_remaining_usd, true)) + metricHtml(t('quota_reset'), '<span data-quota-reset="' + end + '">' + quotaCountdownText(end, Date.now()) + '</span>');
   } else {
     const full = cycle.used_percent === 100;
     html += metricHtml(t(full ? 'quota_actual_total' : 'quota_estimated_total'), quotaValue(full ? cycle.actual_total_usd : cycle.estimated_total_usd, true));
   }
-  return html + '</div>' + quotaModelsHtml(cycle);
+  html += '</div><div class="subtle quotaDates">' + esc(t(cycle.used_percent === 100 ? 'quota_full_hint' : 'quota_estimate_hint')) + '</div>';
+  return html + quotaModelsHtml(cycle);
 }
 function quotaCyclesHtml(credentials) {
   if (!Array.isArray(credentials) || !credentials.length) return '';

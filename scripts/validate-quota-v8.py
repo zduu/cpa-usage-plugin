@@ -177,7 +177,16 @@ func main() {
 				current := g["current"].(map[string]any)
 				require(old["summary"].(map[string]any)["estimated_cost"] == float64(30), "previous actual cost changed")
 				require(current["summary"].(map[string]any)["estimated_cost"] == float64(25), "current actual cost changed")
-				require(old["estimated_total_usd"] == nil, "uncalibrated previous quota should remain unknown")
+				if old["used_percent"] == float64(100) {
+					require(old["actual_total_usd"] == float64(30) && old["estimated_total_usd"] == nil, "full previous amount changed")
+				} else {
+					require(old["estimated_total_usd"] == float64(50), "previous estimate must equal recorded cost / used fraction")
+				}
+				if current["used_percent"] == float64(100) {
+					require(current["actual_total_usd"] == float64(25) && current["estimated_total_usd"] == nil && current["estimated_remaining_usd"] == float64(0), "full current amount changed")
+				} else {
+					require(current["estimated_total_usd"] == float64(62.5) && current["estimated_remaining_usd"] == float64(37.5), "current estimate must equal recorded cost / used fraction")
+				}
 			}
 		}
 	}

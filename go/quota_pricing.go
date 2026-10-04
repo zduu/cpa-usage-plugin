@@ -77,98 +77,29 @@ func quotaBuildPeriod(w quotaWindow, p *quotaPeriod, facts []quotaFact, pricing 
 		v.Summary = &quotaUsageSummary{APIDetailSummary: acc.summary}
 		if len(unpriced) == 0 {
 			v.Summary.CostUSD = &v.Summary.APIDetailSummary.EstimatedCost
+			if v.UsedPercent != nil && *v.UsedPercent == 100 {
+				// Exhaustion is a recorded result, not another calibration
+				// sample. Use the same tracked spend for current and previous
+				// periods, including late usage and costs after the watermark.
+				v.ActualTotalUSD = v.Summary.CostUSD
+			}
 		}
 	}
 	return v
 }
 
-func quotaCostAt(w quotaWindow, p *quotaPeriod, facts []quotaFact, pricing *pricingSnapshot, at time.Time) float64 {
-	var sum float64
-	for _, f := range facts {
-		if quotaFactMatches(f, w, p) && !f.Timestamp.After(at) && !f.CompletedAt.After(at) {
-			d := f.detail()
-			sum = addNonNegativeCost(sum, pricing.detailCost(f.Model, d, detailTotalsFromRequest(d)))
-		}
-	}
-	return sum
-}
-
-func quotaEstimate(w quotaWindow, p *quotaPeriod, facts []quotaFact, pricing *pricingSnapshot, started, now time.Time) (*float64, *float64) {
-	if p == nil || w.Unmapped || len(p.Samples) == 0 || !now.Before(p.End) {
+// Both operands come from the displayed period. A process restart or a missing
+// early observation must not silently switch this to a marginal-cost estimate.
+func quotaEstimate(period *quotaCycleDTO) (*float64, *float64) {
+	if period == nil || period.Summary == nil || period.Summary.CostUSD == nil || period.UsedPercent == nil {
 		return nil, nil
 	}
-	last := p.Samples[len(p.Samples)-1]
-	// Keep displayed watermarks, but do not extend an old calibration indefinitely.
-	if last.ObservedAt.Before(started) || last.ObservedAt.After(now) || now.Sub(last.ObservedAt) > time.Duration(w.Seconds)*time.Second/4 {
-		return nil, nil
-	}
-	return quotaEstimateFromSamples(w, p, facts, pricing, started)
-}
-
-// Completed periods use their final observed watermark and historical baseline,
-// without the live estimate's freshness deadline or a later process's restart.
-func quotaEstimateFromSamples(w quotaWindow, p *quotaPeriod, facts []quotaFact, pricing *pricingSnapshot, started time.Time) (*float64, *float64) {
-	if p == nil || w.Unmapped || len(p.Samples) == 0 || started.IsZero() {
-		return nil, nil
-	}
-	last := p.Samples[len(p.Samples)-1]
-	if last.ObservedAt.Before(started) {
-		return nil, nil
-	}
-	matched := false
-	for _, f := range facts {
-		if !quotaFactMatches(f, w, p) || f.Timestamp.After(last.ObservedAt) || f.CompletedAt.After(last.ObservedAt) {
-			continue
-		}
-		matched = true
-		if !quotaPriceKnown(f, pricing) {
-			return nil, nil
-		}
-	}
-	if !matched {
-		return nil, nil
-	}
-	used, cost := last.Used, quotaCostAt(w, p, facts, pricing, last.ObservedAt)
-	baseline := 0
-	for baseline < len(p.Samples) && p.Samples[baseline].ObservedAt.Before(started) {
-		baseline++
-	}
-	dropped := false
-	for i := baseline + 1; i < len(p.Samples); i++ {
-		if p.Samples[i].Used < p.Samples[i-1].Used {
-			baseline, dropped = i, true
-		}
-	}
-	if started.After(p.Start) || dropped {
-		if baseline >= len(p.Samples)-1 {
-			return nil, nil
-		}
-		first := p.Samples[baseline]
-		if !first.ObservedAt.Before(last.ObservedAt) {
-			return nil, nil
-		}
-		hasIncrement := false
-		for _, f := range facts {
-			completed := f.CompletedAt
-			if completed.IsZero() {
-				completed = f.Timestamp
-			}
-			if quotaFactMatches(f, w, p) && completed.After(first.ObservedAt) && !completed.After(last.ObservedAt) {
-				hasIncrement = true
-				break
-			}
-		}
-		if !hasIncrement {
-			return nil, nil
-		}
-		used -= first.Used
-		cost -= quotaCostAt(w, p, facts, pricing, first.ObservedAt)
-	}
-	if used <= 0 || cost < 0 {
+	used, cost := *period.UsedPercent/100, *period.Summary.CostUSD
+	if used <= 0 || used > 1 || cost < 0 || math.IsNaN(used) || math.IsInf(used, 0) {
 		return nil, nil
 	}
 	total := cost / used
-	remaining := total * (1 - last.Used)
+	remaining := total - cost
 	if math.IsInf(total, 0) || math.IsNaN(total) {
 		return nil, nil
 	}
@@ -208,23 +139,20 @@ func (s *RequestStatistics) quotaCyclesForAPILocked(api string, now time.Time) [
 		}
 		group := quotaGroupDTO{GroupID: w.Group + ":" + w.Slot, Name: w.Name, WindowSeconds: w.Seconds}
 		if current := quotaBuildPeriod(w, w.Current, facts, pricing); current != nil {
-			total, remaining := quotaEstimate(w, w.Current, facts, pricing, s.quota.StartedAt, now)
-			current.EstimatedTotalUSD = total
+			var remaining *float64
+			if current.UsedPercent != nil && *current.UsedPercent == 100 {
+				if !w.Unmapped {
+					zero := 0.0
+					remaining = &zero
+				}
+			} else if !current.ObservedAt.After(now) && now.Sub(current.ObservedAt) <= time.Duration(w.Seconds)*time.Second/4 {
+				current.EstimatedTotalUSD, remaining = quotaEstimate(current)
+			}
 			group.Current = &quotaCurrentDTO{quotaCycleDTO: *current, EstimatedRemainingUSD: remaining}
 		}
 		group.Previous = quotaBuildPeriod(w, w.Previous, facts, pricing)
-		if previous := group.Previous; previous != nil && previous.UsedPercent != nil {
-			if *previous.UsedPercent == 100 {
-				if previous.Summary != nil {
-					previous.ActualTotalUSD = previous.Summary.CostUSD
-				}
-			} else {
-				started := w.Previous.CollectionStartedAt
-				if started.IsZero() {
-					started = s.quota.StartedAt
-				}
-				previous.EstimatedTotalUSD, _ = quotaEstimateFromSamples(w, w.Previous, facts, pricing, started)
-			}
+		if previous := group.Previous; previous != nil && previous.UsedPercent != nil && *previous.UsedPercent != 100 {
+			previous.EstimatedTotalUSD, _ = quotaEstimate(previous)
 		}
 		v.Groups = append(v.Groups, group)
 	}

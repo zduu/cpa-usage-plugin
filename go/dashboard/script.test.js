@@ -754,6 +754,29 @@ test('quota periods keep unknown values and separate the previous model table', 
   assert.doesNotMatch(weekly, /5-hour|5h/);
 });
 
+test('quota current capacity uses the full amount only at exactly 100 percent', async () => {
+  const { context } = createDashboardHarness({ language: 'en' });
+  await context.load();
+  const base = { start_at: '2026-10-02T08:00:00Z', end_at: '2026-10-02T13:00:00Z',
+    summary: { estimated_cost: 3.57 }, model_stats: [], used_percent: 100,
+    actual_total_usd: 3.57, estimated_total_usd: null, estimated_remaining_usd: 0 };
+  const full = context.quotaPeriodHtml(base, true);
+  assert.match(full, /Actual capacity/);
+  assert.match(full, /3\.57/);
+  assert.match(full, /0\.00/);
+  assert.match(full, /Fully used/);
+  assert.doesNotMatch(full, /Estimated capacity/);
+  const partial = context.quotaPeriodHtml({ ...base, used_percent: 99.99, actual_total_usd: null, estimated_total_usd: 3.58 }, true);
+  assert.match(partial, /Estimated capacity/);
+  assert.match(partial, /&lt;100%/);
+  assert.match(partial, /recorded spend ÷ used fraction/);
+  assert.doesNotMatch(partial, /Actual capacity|Fully used/);
+  const unknown = context.quotaPeriodHtml({ ...base, actual_total_usd: null, summary: { estimated_cost: null } }, true);
+  assert.match(unknown, /Actual capacity/);
+  assert.match(unknown, /—/);
+  assert.doesNotMatch(unknown, /3\.57|NaN|Infinity/);
+});
+
 test('quota previous capacity distinguishes fully used and estimated amounts', async () => {
   const { context } = createDashboardHarness({ language: 'en' });
   await context.load();

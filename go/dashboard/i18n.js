@@ -3,6 +3,8 @@
 
 var I18N_MAP = {
   'zh-CN': {
+    "quota_estimate_hint": "推算总额度 = 本周期实际花费 ÷ 已用比例；预计剩余 = 推算总额度 − 实际花费。按本插件已记录花费估算；中途开始记录、缺失记录或凭证在其他地方使用时可能偏低，观测延迟也会造成偏差。",
+    "quota_full_hint": "已用满：总额与本插件记录的本周期实际花费一致，按配置的模型价格计算；缺失记录或插件外消耗不在其中，并非上游公布的美元限额。",
     "quota_title": "额度周期",
     "quota_current": "本周期",
     "quota_previous": "上一个完整周期",
@@ -278,6 +280,8 @@ var I18N_MAP = {
   },
 
   'zh-TW': {
+    "quota_estimate_hint": "推算總額度 = 本週期實際花費 ÷ 已用比例；預計剩餘 = 推算總額度 − 實際花費。按本外掛已記錄花費估算；中途開始記錄、缺失記錄或憑證在其他地方使用時可能偏低，觀測延遲也會造成偏差。",
+    "quota_full_hint": "已用滿：總額與本外掛記錄的本週期實際花費一致，按設定的模型價格計算；缺失記錄或外掛以外消耗不在其中，並非上游公布的美元限額。",
     "quota_title": "額度週期",
     "quota_current": "本週期",
     "quota_previous": "上一個完整週期",
@@ -531,6 +535,8 @@ var I18N_MAP = {
   },
 
   'en': {
+    "quota_estimate_hint": "Capacity = this period’s recorded spend ÷ used fraction; remaining = capacity − recorded spend. Partial recording or usage elsewhere can underestimate capacity; delayed quota observations can also skew it.",
+    "quota_full_hint": "Fully used: capacity equals this period’s spend recorded by the plugin at configured model prices. Missing records and usage outside the plugin are excluded; this is not an official dollar limit.",
     "quota_title": "Quota periods",
     "quota_current": "Current period",
     "quota_previous": "Previous complete period",
@@ -784,6 +790,8 @@ var I18N_MAP = {
   },
 
   'ru': {
+    "quota_estimate_hint": "Лимит = записанные расходы периода ÷ доля использования; остаток = лимит − расходы. Неполные записи или использование вне плагина могут занижать оценку; задержка наблюдений также влияет на результат.",
+    "quota_full_hint": "Лимит исчерпан: сумма равна расходам периода, записанным плагином по настроенным ценам моделей. Пропущенные записи и внешнее использование не учитываются; это не официальный денежный лимит.",
     "quota_title": "Периоды квоты",
     "quota_current": "Текущий период",
     "quota_previous": "Предыдущий полный период",

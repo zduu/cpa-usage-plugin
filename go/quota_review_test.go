@@ -124,9 +124,6 @@ func TestQuotaPreviousCapacityAndPersistence(t *testing.T) {
 						}
 					} else {
 						amount = p.EstimatedTotalUSD
-						if mode == "partial" {
-							want = price / (used - .3)
-						}
 						if p.ActualTotalUSD != nil {
 							t.Fatal("partially used period was labeled actual capacity")
 						}
@@ -236,7 +233,7 @@ func TestQuotaPreviousCalibrationSurvivesJournalAndRepricing(t *testing.T) {
 			t.Fatal(err)
 		}
 		p := restored.QueryAPIDetailAt(rows[0].API, "all", 10, 10, now).QuotaCycles[0].Groups[0].Previous
-		if p == nil || p.EstimatedTotalUSD == nil || math.Abs(*p.EstimatedTotalUSD-price/.1) > 1e-9 || p.Summary.CostUSD == nil || *p.Summary.CostUSD != 2*price {
+		if p == nil || p.EstimatedTotalUSD == nil || math.Abs(*p.EstimatedTotalUSD-2*price/.4) > 1e-9 || p.Summary.CostUSD == nil || *p.Summary.CostUSD != 2*price {
 			t.Fatalf("journal lost historical calibration or repricing: %+v", p)
 		}
 	}

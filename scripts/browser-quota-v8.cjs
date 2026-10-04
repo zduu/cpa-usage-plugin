@@ -38,6 +38,8 @@ const { chromium } = require(process.env.CPA_PLAYWRIGHT || 'playwright');
     await quota.getByText('current-a', { exact: true }).waitFor();
     await quota.getByText('current-b', { exact: true }).waitFor();
     assert.match(await quota.textContent(), /25\.00/);
+    assert.match(await quota.textContent(), /62\.50/);
+    assert.match(await quota.textContent(), /37\.50/);
     assert.equal(await quota.getByText('old-model', { exact: true }).count(), 0);
     await quota.locator('[data-quota-period="previous"]').click();
     await quota.getByText('old-model', { exact: true }).waitFor();
@@ -77,6 +79,34 @@ const { chromium } = require(process.env.CPA_PLAYWRIGHT || 'playwright');
     await page.waitForFunction(previous => document.querySelector('[data-quota-reset]')?.textContent !== previous, countdown);
     await quota.screenshot({ path: path.join(output, 'current-period.png') });
 
+    const exhausted = await page.evaluate(async () => {
+      const detail = await fetchApiDetailData(selectedApi);
+      const credential = detail.credential_quota_cycles[0];
+      const current = credential.groups[0].current;
+      const result = await fetchManagementJsonPayload('dashboard-quota-observations', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ version: 1, observations: [{
+          provider: credential.provider, auth_index: credential.auth_index, auth_id: credential.credential_name,
+          observed_at: new Date().toISOString(), signals: {
+            'anthropic-ratelimit-unified-5h-utilization': '1', 'anthropic-ratelimit-unified-5h-reset': current.end_at,
+          },
+        }] }),
+      });
+      await renderApiDetail();
+      const updated = await fetchApiDetailData(selectedApi);
+      return { accepted: result.accepted, cycle: updated.credential_quota_cycles[0].groups[0].current };
+    });
+    assert.equal(exhausted.accepted, 1);
+    assert.equal(exhausted.cycle.actual_total_usd, exhausted.cycle.summary.estimated_cost);
+    assert.equal(exhausted.cycle.actual_total_usd, 25);
+    assert.equal(exhausted.cycle.estimated_total_usd, null);
+    assert.equal(exhausted.cycle.estimated_remaining_usd, 0);
+    await quota.getByText('Actual capacity', { exact: true }).waitFor();
+    assert.equal(await quota.getByText('Estimated capacity', { exact: true }).count(), 0);
+    assert.match(await quota.textContent(), /100\.0%/);
+    assert.match(await quota.textContent(), /25\.00/);
+    await quota.screenshot({ path: path.join(output, 'current-exhausted-period.png') });
+
     await page.selectOption('#apiSelect', config.apis.codex);
     await quota.getByText('Weekly quota', { exact: true }).waitFor();
     assert.doesNotMatch(await quota.textContent(), /5-hour|5h/);
@@ -96,7 +126,7 @@ const { chromium } = require(process.env.CPA_PLAYWRIGHT || 'playwright');
     assert.ok(await quota.locator('.tableWrap').evaluate(el => el.scrollWidth > el.clientWidth), 'wide model table should scroll on mobile');
     assert.deepEqual(errors, []);
     assert.deepEqual(unauthenticated, []);
-    const report = { passed: true, checks: ['native usage', 'current and previous models and costs', 'partial previous estimate and full previous actual capacity', 'selection survives refresh', 'live countdown', 'weekly-only Codex', 'Devin browser collection', 'management authentication', 'mobile table'], submissions: submissions.length };
+    const report = { passed: true, checks: ['native usage', 'current and previous models and costs', 'recorded cost / used fraction', 'full current amount equals recorded spend', 'partial previous estimate and full previous actual capacity', 'selection survives refresh', 'live countdown', 'weekly-only Codex', 'Devin browser collection', 'management authentication', 'mobile table'], submissions: submissions.length };
     await fs.writeFile(path.join(output, 'browser-result.json'), JSON.stringify(report, null, 2) + '\n');
     console.log('PASS: quota browser, current/previous models, authenticated collection and mobile view');
   } finally {
