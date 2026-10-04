@@ -60,7 +60,7 @@ func main() {
 		os.WriteFile(filepath.Join(root, "anchor.json"), b, 0600)
 	}
 	identities := map[string]*auth.Auth{}
-	for _, provider := range []string{"claude", "codex", "devin"} {
+	for _, provider := range []string{"claude", "codex", "devin", "antigravity"} {
 		id := provider + "-fixture.json"
 		path := filepath.Join(cfg.AuthDir, id)
 		os.MkdirAll(cfg.AuthDir, 0700)
@@ -68,6 +68,9 @@ func main() {
 		a := &auth.Auth{ID: id, FileName: id, Provider: provider, Status: auth.StatusActive, Attributes: map[string]string{"path": path, "auth_kind": "oauth"}, Metadata: map[string]any{"type": provider, "auth_kind": "oauth"}}
 		if provider == "devin" {
 			a.Quota = auth.QuotaState{ObservedAt: now, Signals: map[string]string{"weekly_quota_remaining_percent": "60%", "weekly_quota_reset_at": now.Add(time.Hour).Format(time.RFC3339)}}
+		}
+		if provider == "antigravity" {
+			a.Metadata["project_id"] = "fixture-project"
 		}
 		registered, err := manager.Register(ctx, a)
 		if err != nil {
@@ -126,20 +129,21 @@ func main() {
 		publish("claude", "current-b", "current-b", now.Add(-time.Minute), claudeHeaders(start.Add(5*time.Hour), "0.4"))
 		publish("codex", "weekly-model", "weekly", now.Add(-time.Minute), http.Header{"X-Codex-Primary-Used-Percent": {"10"}, "X-Codex-Primary-Window-Minutes": {"10080"}, "X-Codex-Primary-Reset-At": {fmt.Sprint(now.Add(time.Hour).Unix())}})
 		publish("devin", "devin-model", "devin", now.Add(-time.Minute), nil)
+		publish("antigravity", "ag-model", "antigravity", now.Add(-time.Minute), nil)
 	}
 	var summary map[string]any
 	for i := 0; i < 500; i++ {
 		status, value, _ := request("GET", prefix+"/dashboard-summary", nil, true)
 		if status == 200 {
 			summary = value
-			if u, ok := value["usage"].(map[string]any); ok && u["total_requests"] == float64(5) {
+			if u, ok := value["usage"].(map[string]any); ok && u["total_requests"] == float64(6) {
 				break
 			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	require(summary != nil, "summary unavailable")
-	require(summary["usage"].(map[string]any)["total_requests"] == float64(5), "request totals changed")
+	require(summary["usage"].(map[string]any)["total_requests"] == float64(6), "request totals changed")
 	status, credentials, _ := request("GET", "/v8/management/credentials", nil, true)
 	require(status == 200, "v8 credentials unavailable")
 	if phase == "seed" {
@@ -153,12 +157,28 @@ func main() {
 		}
 		status, result, _ := request("POST", prefix+"/dashboard-quota-observations", map[string]any{"version": 1, "observations": observations}, true)
 		require(status == 200 && result["accepted"] == float64(1), "live host auth bridge rejected the credential observation")
+		a := identities["antigravity"]
+		status, result, _ = request("POST", prefix+"/dashboard-quota-observations", map[string]any{"version": 1, "observations": []any{map[string]any{
+			"provider": "antigravity", "auth_index": a.Index, "auth_id": a.ID, "observed_at": now.Format(time.RFC3339), "signals": map[string]string{},
+			"antigravity_buckets": []any{
+				map[string]any{"group": "Claude", "id": "claude-5h", "window": "5h", "remaining_fraction": 0.8, "reset_time": now.Add(time.Hour).Format(time.RFC3339)},
+				map[string]any{"group": "Gemini", "id": "gemini-weekly", "window": "weekly", "remaining_fraction": 0.6, "reset_time": now.Add(24*time.Hour).Format(time.RFC3339)},
+			},
+		}}}, true)
+		require(status == 200 && result["accepted"] == float64(1), "Antigravity host auth bridge rejected quota buckets")
 	}
 	apis := summary["usage"].(map[string]any)["apis"].(map[string]any)
 	keys := map[string]string{}
 	for name := range apis {
 		status, detail, _ := request("GET", prefix+"/dashboard-api-detail?api="+urlEscape(name), nil, true)
 		require(status == 200, "detail unavailable")
+		if refs, ok := detail["quota_credentials"].([]any); ok && len(refs) > 0 {
+			keys["antigravity"] = name
+			if phase == "browser" {
+				require(detail["credential_quota_cycles"] == nil, "Antigravity should await expanded browser collection")
+				continue
+			}
+		}
 		if phase == "browser" && detail["credential_quota_cycles"] == nil {
 			keys["devin"] = name
 			continue
@@ -170,6 +190,13 @@ func main() {
 			groups := credential["groups"].([]any)
 			if provider == "codex" {
 				require(len(groups) == 1 && groups[0].(map[string]any)["window_seconds"] == float64(604800), "invented a Codex 5h quota")
+			}
+			if provider == "antigravity" {
+				require(len(groups) == 2, "Antigravity independent pools were lost")
+				for _, group := range groups {
+					current := group.(map[string]any)["current"].(map[string]any)
+					require(current["unmapped"] == true && current["summary"] == nil && current["estimated_total_usd"] == nil, "Antigravity pool attributed unknown model usage")
+				}
 			}
 			if provider == "claude" {
 				g := groups[0].(map[string]any)
@@ -200,7 +227,7 @@ func main() {
 		server.RefreshPluginManagementRoutes()
 		require(host.PluginLoaded("usage-dashboard-zduu"), "plugin did not reload after shutdown")
 		status, reloaded, _ := request("GET", prefix+"/dashboard-summary", nil, true)
-		require(status == 200 && reloaded["usage"].(map[string]any)["total_requests"] == float64(5), "reload changed request totals")
+		require(status == 200 && reloaded["usage"].(map[string]any)["total_requests"] == float64(6), "reload changed request totals")
 		status, job, _ := request("POST", prefix+"/usage/export-jobs", nil, true)
 		require(status == 202, "export manager did not restart after reload")
 		id := job["id"].(string)

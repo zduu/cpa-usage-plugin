@@ -13,7 +13,7 @@ CPA 用量统计插件，用于在 CLIProxyAPI/CPA v7 插件系统中记录请�
 ## 功能
 
 - 记录请求数、成功/失败、延迟、TTFT。
-- CPA v8 凭证额度按真实上游窗口展示本期和上期，分别统计模型用量与实际花费；支持 Claude、Codex、Devin 的既有额度观测，本期可推算总额度，上期保留真实历史。详见[使用说明](docs/guides/quota-cycles.md)。
+- CPA v8 凭证额度按真实上游窗口展示本期和上期；支持 Claude、Codex、Devin 观测及 Antigravity 分组额度查询。额度周期位于来源分布和错误统计之间，可折叠；模型表显示 M 单位总 token、缓存命中率及仅使用该模型的预计额度。无法确认模型归属的额度组只显示比例、重置和周期历史。详见[使用说明](docs/guides/quota-cycles.md)。
 - 记录 input/output/reasoning/cache/total token。
 - 按上游接口、模型、来源、CPA 凭证和调用 CPA 的客户端 API key 聚合统计。上游接口统计面板可用「隐藏成功率 0%」按钮隐藏成功率为 0 的上游；开关状态保存在浏览器 localStorage 中，只影响这张表格的显示，详情下拉、导出和 API Key 联动仍保留全部上游。
 - API 详细统计支持主动选择脱敏后的客户端 API key，并联动筛选上游接口统计、上游接口详情、模型统计、请求事件明细和用量趋势；默认仍展示当前时间范围内的全量数据。

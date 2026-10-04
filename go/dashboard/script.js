@@ -52,6 +52,10 @@ let quotaCollectionInstance = '';
 let quotaCollectionRetryAt = 0;
 let quotaCountdownTimer = null;
 const quotaExpiredRefreshes = new Set();
+const quotaExpandedApis = new Set();
+const antigravityQuotaRefreshAt = new Map();
+const antigravityQuotaErrors = new Set();
+let antigravityQuotaRequest = null;
 let updatedState = { type: 'loading', generatedAt: null, message: '' };
 let healthCells = [];
 let healthCellKeys = [];
@@ -1531,6 +1535,18 @@ function quotaValue(value, money) {
   if (value === null || value === undefined || !Number.isFinite(Number(value))) return '—';
   return money ? formatUsd(Number(value)) : formatInteger(Number(value));
 }
+function quotaTokens(value) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value)) || Number(value) < 0) return '—';
+  return new Intl.NumberFormat(currentLocale(), { minimumFractionDigits: 2, maximumFractionDigits: 3 }).format(Number(value) / 1000000) + ' M';
+}
+function quotaModelCapacity(cycle, row) {
+  const budget = cycle.actual_total_usd ?? cycle.estimated_total_usd;
+  const cost = row.estimated_cost;
+  const tokens = Number(row.total_tokens);
+  if (budget == null || cost == null || !Number.isFinite(Number(budget)) || Number(budget) < 0 || !Number.isFinite(Number(cost)) || Number(cost) <= 0 || !Number.isFinite(tokens) || tokens <= 0) return { tokens: null, usd: null };
+  const capacity = Number(budget) / Number(cost) * tokens;
+  return Number.isFinite(capacity) ? { tokens: capacity, usd: Number(budget) } : { tokens: null, usd: null };
+}
 function quotaWindowLabel(seconds) {
   if (seconds === 18000) return t('quota_5h');
   if (seconds === 604800) return t('quota_week');
@@ -1548,6 +1564,8 @@ function updateQuotaCountdowns() {
   clearTimeout(quotaCountdownTimer);
   quotaCountdownTimer = null;
   if (document.visibilityState === 'hidden') return;
+  const panel = $('quotaCycles');
+  if (panel && panel.open === false) return;
   const now = Date.now();
   let active = false, refresh = false;
   document.querySelectorAll('[data-quota-reset]').forEach((element) => {
@@ -1576,7 +1594,10 @@ function quotaModelsHtml(cycle) {
   const rows = cycle && cycle.model_stats;
   if (!Array.isArray(rows) || !rows.length) return '<div class="empty">' + t('no_model_data') + '</div>';
   const total = cycle.summary && cycle.summary.estimated_cost;
-  return '<div class="tableWrap"><table><thead><tr>' + ['col_model', 'requests_label', 'success_label', 'failure_label', 'col_input', 'col_output', 'reasoning_tokens', 'col_cache', 'cache_write_tokens', 'col_total', 'quota_actual_cost', 'quota_cost_share'].map((key) => '<th>' + esc(t(key)) + '</th>').join('') + '</tr></thead><tbody>' + rows.map((row) => '<tr><td class="nameCell">' + esc(row.model) + '</td>' + ['total_requests', 'success_count', 'failure_count', 'input_tokens', 'output_tokens', 'reasoning_tokens', 'cached_tokens', 'cache_write_tokens', 'total_tokens'].map((key) => '<td>' + quotaValue(row[key], false) + '</td>').join('') + '<td>' + quotaValue(row.estimated_cost, true) + '</td><td>' + (Number(total) > 0 && row.estimated_cost != null && Number.isFinite(Number(row.estimated_cost)) ? pct(Number(row.estimated_cost) / Number(total) * 100) : '—') + '</td></tr>').join('') + '</tbody></table></div>';
+  return '<div class="tableWrap"><table><thead><tr>' + ['col_model', 'requests_label', 'success_label', 'failure_label', 'col_total', 'col_cache_rate', 'quota_actual_cost', 'quota_cost_share', 'quota_model_capacity_tokens', 'quota_model_capacity_cost'].map((key) => '<th>' + esc(t(key)) + '</th>').join('') + '</tr></thead><tbody>' + rows.map((row) => {
+    const capacity = quotaModelCapacity(cycle, row);
+    return '<tr><td class="nameCell">' + esc(row.model) + '</td>' + ['total_requests', 'success_count', 'failure_count'].map((key) => '<td>' + quotaValue(row[key], false) + '</td>').join('') + '<td>' + quotaTokens(row.total_tokens) + '</td><td>' + pct(cacheRate(row)) + '</td><td>' + quotaValue(row.estimated_cost, true) + '</td><td>' + (Number(total) > 0 && row.estimated_cost != null && Number.isFinite(Number(row.estimated_cost)) ? pct(Number(row.estimated_cost) / Number(total) * 100) : '—') + '</td><td>' + quotaTokens(capacity.tokens) + '</td><td>' + quotaValue(capacity.usd, true) + '</td></tr>';
+  }).join('') + '</tbody></table></div><div class="subtle quotaEstimateHint">' + t('quota_model_capacity_hint') + '</div>';
 }
 function quotaPeriodHtml(cycle, current) {
   if (!cycle) return '<div class="empty">' + t(current ? 'quota_no_current' : 'quota_no_previous') + '</div>';
@@ -1584,7 +1605,7 @@ function quotaPeriodHtml(cycle, current) {
   const percent = cycle.used_percent === null || cycle.used_percent === undefined ? '—' :
     (cycle.used_percent >= 99.95 && cycle.used_percent < 100 ? '&lt;100%' : pct(cycle.used_percent));
   const range = esc(formatDateTime(timestampMs(cycle.start_at))) + ' – ' + esc(formatDateTime(timestampMs(cycle.end_at)));
-  let html = '<div class="subtle quotaDates">' + range + '</div><div class="detailGrid">' + metricHtml(t('quota_actual_cost'), quotaValue(summary && summary.estimated_cost, true)) + metricHtml(t('quota_used'), percent) + metricHtml(t('requests_label'), quotaValue(summary && summary.total_requests, false)) + metricHtml(t('total_tokens_label'), quotaValue(summary && summary.total_tokens, false));
+  let html = '<div class="subtle quotaDates">' + range + '</div><div class="detailGrid">' + metricHtml(t('quota_actual_cost'), quotaValue(summary && summary.estimated_cost, true)) + metricHtml(t('quota_used'), percent) + metricHtml(t('requests_label'), quotaValue(summary && summary.total_requests, false)) + metricHtml(t('total_tokens_label'), quotaTokens(summary && summary.total_tokens));
   if (current) {
     const end = timestampMs(cycle.end_at);
     const full = cycle.used_percent === 100;
@@ -1593,17 +1614,114 @@ function quotaPeriodHtml(cycle, current) {
     const full = cycle.used_percent === 100;
     html += metricHtml(t(full ? 'quota_actual_total' : 'quota_estimated_total'), quotaValue(full ? cycle.actual_total_usd : cycle.estimated_total_usd, true));
   }
-  html += '</div><div class="subtle quotaDates">' + esc(t(cycle.used_percent === 100 ? 'quota_full_hint' : 'quota_estimate_hint')) + '</div>';
+  html += '</div>';
+  if (cycle.unmapped) return html + '<div class="subtle">' + t('quota_scope_unknown') + '</div>';
+  html += '<div class="subtle quotaDates">' + esc(t(cycle.used_percent === 100 ? 'quota_full_hint' : 'quota_estimate_hint')) + '</div>';
   return html + quotaModelsHtml(cycle);
 }
-function quotaCyclesHtml(credentials) {
-  if (!Array.isArray(credentials) || !credentials.length) return '';
-  return '<section class="quotaCycles"><h3>' + t('quota_title') + '</h3>' + credentials.map((credential) => '<div class="quotaCredential"><div class="subtle quotaCredentialName">' + esc(credential.credential_name || credential.auth_index) + '</div>' + (credential.groups || []).map((group) => {
+function quotaCyclesHtml(credentials, refs = []) {
+  const rows = Array.isArray(credentials) ? credentials : [];
+  const canFetchAntigravity = refs.some((ref) => ref.provider === 'antigravity');
+  if (!rows.length && !canFetchAntigravity) return '';
+  const open = quotaExpandedApis.has(selectedApi) ? ' open' : '';
+  return '<details class="quotaCycles pricePanel" id="quotaCycles"' + open + '><summary class="priceSummary"><span class="priceSummaryHeading" role="heading" aria-level="3">' + t('quota_title') + '</span><span class="priceSummaryToggle" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M3 5l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span></summary><div class="priceSettingsBody">' +
+    (canFetchAntigravity ? '<div class="toolbar"><button type="button" class="btn" id="refreshAntigravityQuota">' + t('quota_refresh_antigravity') + '</button><span class="subtle" id="antigravityQuotaStatus" role="status">' + t(antigravityQuotaErrors.has(selectedApi) ? 'quota_fetch_failed' : 'quota_antigravity_refresh_hint') + '</span></div>' : '') +
+    (!rows.length ? '<div class="empty">' + t('quota_antigravity_empty') + '</div>' : '') +
+    rows.map((credential) => '<div class="quotaCredential"><div class="subtle quotaCredentialName">' + esc(credential.credential_name || credential.auth_index) + '</div>' + (credential.groups || []).map((group) => {
     const key = JSON.stringify([selectedApi, credential.provider, credential.auth_index, credential.credential_name, group.group_id]);
     const selected = quotaPeriodSelections.get(key) || 'current';
     const label = (group.name ? esc(group.name) + ' · ' : '') + esc(quotaWindowLabel(Number(group.window_seconds)));
     return '<div class="quotaWindow"><strong>' + label + '</strong><div class="quotaTabs" role="group" aria-label="' + esc(label) + '">' + ['current', 'previous'].map((period) => '<button type="button" class="btn" data-quota-key="' + esc(key) + '" data-quota-period="' + period + '" aria-pressed="' + (period === selected) + '">' + t(period === 'current' ? 'quota_current' : 'quota_previous') + '</button>').join('') + '</div>' + quotaPeriodHtml(group[selected], selected === 'current') + '</div>';
-  }).join('') + '</div>').join('') + '</section>';
+  }).join('') + '</div>').join('') + '</div></details>';
+}
+
+// Retain only quota data from Google's explicit bucket windows. Credentials
+// and OAuth tokens stay in CPA; the browser asks its authenticated api-call
+// endpoint to substitute $TOKEN$ on the server.
+function antigravityQuotaBuckets(payload) {
+  const buckets = [];
+  for (const group of (Array.isArray(payload && payload.groups) ? payload.groups : [])) {
+    const name = String(group.displayName || group.display_name || '').trim();
+    if (!name || name.length > 256) continue;
+    for (const bucket of (Array.isArray(group.buckets) ? group.buckets : [])) {
+      const rawWindow = String(bucket.window || '').trim().toLowerCase();
+      const window = ['5h', 'five-hour', 'five_hour'].includes(rawWindow) ? '5h' : ['weekly', 'week'].includes(rawWindow) ? 'weekly' : '';
+      const raw = bucket.remainingFraction ?? bucket.remaining_fraction;
+      const remaining = raw === null || raw === undefined || String(raw).trim() === '' ? NaN : Number(raw);
+      const reset = String(bucket.resetTime || bucket.reset_time || '').trim();
+      const id = String(bucket.bucketId || bucket.bucket_id || window).trim();
+      if (!window || !Number.isFinite(remaining) || remaining < 0 || remaining > 1 || !Number.isFinite(Date.parse(reset)) || reset.length > 128 || id.length > 256 || /[\x00-\x1f\x7f]/.test(name + id)) continue;
+      buckets.push({ group: name, id, window, remaining_fraction: remaining, reset_time: reset });
+      if (buckets.length === 64) return buckets;
+    }
+  }
+  return buckets;
+}
+
+async function fetchAntigravityQuota(file) {
+  const project = typeof file.project_id === 'string' ? file.project_id.trim() : '';
+  if (!project) throw new Error('Missing Antigravity project');
+  const apiCall = managementEndpoint('').replace(/\/v0\/management\/plugins\/.*$/, '/v0/management/api-call');
+  for (const base of ['https://daily-cloudcode-pa.googleapis.com', 'https://daily-cloudcode-pa.sandbox.googleapis.com', 'https://cloudcode-pa.googleapis.com']) {
+    try {
+      const result = await fetchJsonPayloadWithMeta(apiCall, managementFetchOptions({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+        auth_index: file.auth_index, method: 'POST', url: base + '/v1internal:retrieveUserQuotaSummary',
+        header: { Authorization: 'Bearer $TOKEN$', 'Content-Type': 'application/json', 'User-Agent': 'antigravity/cli/1.0.13 (aidev_client; os_type=darwin; arch=arm64)' },
+        data: JSON.stringify({ project }),
+      }) }));
+      if (result.statusCode < 200 || result.statusCode >= 300) continue;
+      const buckets = antigravityQuotaBuckets(result.data);
+      if (buckets.length) return buckets;
+    } catch (_) { /* Try the next Google endpoint without exposing its body. */ }
+  }
+  throw new Error('Antigravity quota unavailable');
+}
+
+async function refreshAntigravityQuotaForSelectedApi(force = false) {
+  if (antigravityQuotaRequest || document.visibilityState === 'hidden') return;
+  const api = selectedApi;
+  if (!quotaExpandedApis.has(api)) return;
+  const detail = apiDetailLastRender && apiDetailLastRender.api === api && apiDetailLastRender.detailState && apiDetailLastRender.detailState.detail;
+  const refs = detail && Array.isArray(detail.quota_credentials) ? detail.quota_credentials.filter((ref) => ref.provider === 'antigravity') : [];
+  const due = refs.filter((ref) => force || Date.now() >= (antigravityQuotaRefreshAt.get(ref.auth_index + ':' + ref.auth_id) || 0));
+  if (!due.length) return;
+  const refreshButton = $('refreshAntigravityQuota');
+  if (refreshButton) refreshButton.disabled = true;
+  setText('antigravityQuotaStatus', t('quota_fetch_loading'));
+  antigravityQuotaRequest = (async () => {
+    let failed = false, changed = false;
+    try {
+      const credentialsUrl = managementEndpoint('').replace(/\/v0\/management\/plugins\/.*$/, '/v8/management/credentials');
+      const data = await fetchJsonPayload(credentialsUrl, managementFetchOptions({ cache: 'no-store' }));
+      for (const ref of due) {
+        if (api !== selectedApi || document.visibilityState === 'hidden' || !quotaExpandedApis.has(api)) break;
+        const key = ref.auth_index + ':' + ref.auth_id;
+        try {
+          const file = (data.files || []).find((row) => row.auth_index === ref.auth_index && row.id === ref.auth_id && String(row.provider || row.type || '').trim().toLowerCase() === 'antigravity' && !row.runtime_only && !row.disabled);
+          if (!file) throw new Error('Antigravity credential unavailable');
+          const buckets = await fetchAntigravityQuota(file);
+          const result = await fetchManagementJsonPayload('dashboard-quota-observations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version: 1, observations: [{ provider: 'antigravity', auth_index: ref.auth_index, auth_id: ref.auth_id, observed_at: new Date().toISOString(), signals: {}, antigravity_buckets: buckets }] }) });
+          if (num(result.rejected)) throw new Error('Quota observation rejected');
+          changed = changed || num(result.accepted) > 0;
+          antigravityQuotaRefreshAt.set(key, Date.now() + 300000);
+        } catch (_) { failed = true; antigravityQuotaRefreshAt.set(key, Date.now() + 60000); }
+        while (antigravityQuotaRefreshAt.size > 1024) antigravityQuotaRefreshAt.delete(antigravityQuotaRefreshAt.keys().next().value);
+      }
+    } catch (_) {
+      failed = true;
+      for (const ref of due) antigravityQuotaRefreshAt.set(ref.auth_index + ':' + ref.auth_id, Date.now() + 60000);
+    }
+    if (failed) antigravityQuotaErrors.add(api); else antigravityQuotaErrors.delete(api);
+    while (antigravityQuotaErrors.size > 64) antigravityQuotaErrors.delete(antigravityQuotaErrors.values().next().value);
+    if (api !== selectedApi) return;
+    if (changed) await renderApiDetail();
+    else renderApiDetailFromCache();
+  })();
+  try { await antigravityQuotaRequest; } finally {
+    antigravityQuotaRequest = null;
+    const button = api === selectedApi && $('refreshAntigravityQuota');
+    if (button) button.disabled = false;
+  }
 }
 async function collectQuotaObservations(instanceID = '') {
   if (quotaCollectionRequest) {
@@ -1617,6 +1735,7 @@ async function collectQuotaObservations(instanceID = '') {
     apiDetailCache.clear();
     apiDetailLastRender = null;
     quotaExpiredRefreshes.clear();
+    antigravityQuotaRefreshAt.clear();
   }
   if (Date.now() < quotaCollectionRetryAt) return false;
   quotaCollectionRequest = (async () => {
@@ -1695,8 +1814,21 @@ function renderApiDetailContent(apiData, detailState) {
     barsHtml(t('model_distribution'), models, requests, t('no_model_data'), true) +
     barsHtml(t('source_distribution'), sources, requests, loading ? t('loading_source_data') : t('no_source_data')) +
     '</div>' +
-    '<div class="splitGrid detailActivityGrid">' + (showErrorStats ? apiDetailErrorHtml(errorRows, loading, error, knownFailureCount) : '') + apiDetailRecentHtml(rows, loading, error) + '</div>' + quotaCyclesHtml(detail && detail.credential_quota_cycles);
+    quotaCyclesHtml(detail && detail.credential_quota_cycles, detail && detail.quota_credentials || []) +
+    '<div class="splitGrid detailActivityGrid">' + (showErrorStats ? apiDetailErrorHtml(errorRows, loading, error, knownFailureCount) : '') + apiDetailRecentHtml(rows, loading, error) + '</div>';
+  const quotaPanel = $('quotaCycles');
+  const quotaApi = selectedApi;
+  if (quotaPanel) quotaPanel.ontoggle = () => {
+    if (quotaApi !== selectedApi) return;
+    if (quotaPanel.open) quotaExpandedApis.add(quotaApi); else quotaExpandedApis.delete(quotaApi);
+    while (quotaExpandedApis.size > 64) quotaExpandedApis.delete(quotaExpandedApis.values().next().value);
+    updateQuotaCountdowns();
+    if (quotaPanel.open) refreshAntigravityQuotaForSelectedApi();
+  };
+  const refreshQuota = $('refreshAntigravityQuota');
+  if (refreshQuota) refreshQuota.onclick = () => refreshAntigravityQuotaForSelectedApi(true);
   updateQuotaCountdowns();
+  refreshAntigravityQuotaForSelectedApi();
 }
 
 async function renderApiDetail() {
@@ -2704,6 +2836,7 @@ async function load(options) {
     if (summaryResult.notModified && previousSummary === summaryData && updatedState.type === 'success' && currentRange === selectedRange && !forceDetails && !quotaChanged && (!selectedClientApi || (filteredResult && filteredResult.notModified))) {
       currentRange = selectedRange;
       pollFailures = 0;
+      refreshAntigravityQuotaForSelectedApi();
       schedulePoll(pollDelay());
       return;
     }

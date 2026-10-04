@@ -435,4 +435,5 @@ html[data-cpa-theme="light"] .anomalyBar.muted{background:#f8f9fb;border-color:#
 @media(prefers-reduced-motion:reduce){*{transition-duration:0s!important;animation-duration:0s!important}}
 
 /* Credential quota periods */
-.quotaCycles{margin-top:24px}.quotaCredential{margin-top:16px}.quotaCredentialName{overflow-wrap:anywhere}.quotaWindow{margin-top:12px;padding:16px;border:1px solid var(--cpa-border);border-radius:12px}.quotaTabs{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.quotaTabs [aria-pressed="true"]{font-weight:700;outline:2px solid currentColor;outline-offset:1px}.quotaDates{margin:8px 0 12px;overflow-wrap:anywhere}.quotaWindow .tableWrap{margin-top:16px}
+.quotaEstimateHint{margin-top:10px;line-height:1.5}
+.quotaCycles{margin-top:24px;padding:16px;border:1px solid var(--cpa-border);border-radius:12px}.quotaCredential{margin-top:16px}.quotaCredentialName{overflow-wrap:anywhere}.quotaWindow{margin-top:12px;padding:16px;border:1px solid var(--cpa-border);border-radius:12px}.quotaTabs{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.quotaTabs [aria-pressed="true"]{font-weight:700;outline:2px solid currentColor;outline-offset:1px}.quotaDates{margin:8px 0 12px;overflow-wrap:anywhere}.quotaWindow .tableWrap{margin-top:16px}

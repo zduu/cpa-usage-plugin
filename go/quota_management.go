@@ -33,7 +33,7 @@ func handleQuotaObservations(body []byte) ([]byte, error) {
 	var persist []persistedDetail
 	for _, input := range batch.Observations {
 		input.Provider = strings.ToLower(strings.TrimSpace(input.Provider))
-		if !quotaProvider(input.Provider) || input.AuthIndex == "" || input.AuthID == "" || len(input.AuthID) > 512 || len(input.AuthIndex) > 512 || len(input.Signals) > 64 || input.ObservedAt.IsZero() || input.ObservedAt.After(now.Add(5*time.Minute)) {
+		if !quotaProvider(input.Provider) || input.AuthIndex == "" || input.AuthID == "" || len(input.AuthID) > 512 || len(input.AuthIndex) > 512 || len(input.Signals) > 64 || len(input.AntigravityBuckets) > 64 || input.ObservedAt.IsZero() || input.ObservedAt.After(now.Add(5*time.Minute)) {
 			rejected++
 			continue
 		}

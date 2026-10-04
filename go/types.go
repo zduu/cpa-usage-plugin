@@ -1250,15 +1250,16 @@ type APIDetailErrorStat struct {
 
 // APIDetailResponse is a compact backend-rendered detail payload for one API.
 type APIDetailResponse struct {
-	QuotaCycles  []quotaCredentialDTO `json:"credential_quota_cycles,omitempty"`
-	API          string               `json:"api"`
-	Summary      APIDetailSummary     `json:"summary"`
-	ModelStats   []ModelStat          `json:"model_stats"`
-	SourceStats  []SourceStat         `json:"source_stats"`
-	ErrorStats   []APIDetailErrorStat `json:"error_stats"`
-	RecentEvents []RequestDetail      `json:"recent_events"`
-	TotalEvents  int                  `json:"total_events"`
-	GeneratedAt  string               `json:"generated_at"`
+	QuotaCycles      []quotaCredentialDTO `json:"credential_quota_cycles,omitempty"`
+	QuotaCredentials []quotaCredentialRef `json:"quota_credentials,omitempty"`
+	API              string               `json:"api"`
+	Summary          APIDetailSummary     `json:"summary"`
+	ModelStats       []ModelStat          `json:"model_stats"`
+	SourceStats      []SourceStat         `json:"source_stats"`
+	ErrorStats       []APIDetailErrorStat `json:"error_stats"`
+	RecentEvents     []RequestDetail      `json:"recent_events"`
+	TotalEvents      int                  `json:"total_events"`
+	GeneratedAt      string               `json:"generated_at"`
 
 	dashboardVersion uint64
 }

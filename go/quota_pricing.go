@@ -33,7 +33,7 @@ func quotaBuildPeriod(w quotaWindow, p *quotaPeriod, facts []quotaFact, pricing 
 	if p == nil {
 		return nil
 	}
-	v := &quotaCycleDTO{StartAt: p.Start, EndAt: p.End, ModelStats: []quotaModelStat{}}
+	v := &quotaCycleDTO{StartAt: p.Start, EndAt: p.End, ModelStats: []quotaModelStat{}, Unmapped: w.Unmapped}
 	if len(p.Samples) > 0 {
 		last := p.Samples[len(p.Samples)-1]
 		percent := last.Used * 100
@@ -169,6 +169,26 @@ func (s *RequestStatistics) quotaCyclesForAPILocked(api string, now time.Time) [
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].Provider+out[i].AuthIndex+out[i].CredentialName < out[j].Provider+out[j].AuthIndex+out[j].CredentialName
 	})
+	return out
+}
+
+// Include identities before the first Antigravity quota query, so the dashboard
+// only probes credentials that actually belong to the selected upstream API.
+func (s *RequestStatistics) antigravityQuotaCredentialsForAPILocked(api string) []quotaCredentialRef {
+	if s.quota == nil {
+		return nil
+	}
+	refs := make(map[string]quotaCredentialRef)
+	for _, f := range s.quota.Facts {
+		if f.API == api && f.Provider == "antigravity" && f.AuthIndex != "" && f.AuthID != "" {
+			refs[quotaCredentialKey(f.Provider, f.AuthIndex, f.AuthID)] = quotaCredentialRef{Provider: f.Provider, AuthIndex: f.AuthIndex, AuthID: f.AuthID}
+		}
+	}
+	var out []quotaCredentialRef
+	for _, ref := range refs {
+		out = append(out, ref)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].AuthIndex < out[j].AuthIndex })
 	return out
 }
 

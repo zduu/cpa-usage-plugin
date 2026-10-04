@@ -777,6 +777,122 @@ test('quota current capacity uses the full amount only at exactly 100 percent', 
   assert.doesNotMatch(unknown, /3\.57|NaN|Infinity/);
 });
 
+test('quota model table preserves accounting columns, adds cache rate and model capacity, and uses million tokens', async () => {
+  const { context } = createDashboardHarness({ language: 'en' });
+  await context.load();
+  const cheap = { model: '<cheap>', total_requests: 3, success_count: 2, failure_count: 1, total_tokens: 1000000,
+    input_tokens: 800000, output_tokens: 200000, cached_tokens: 400000, cache_write_tokens: 0, estimated_cost: 10 };
+  const expensive = { ...cheap, model: 'expensive', total_tokens: 500000, estimated_cost: 25 };
+  const cycle = { estimated_total_usd: 100, used_percent: 35, summary: { total_requests: 6, total_tokens: 1500000, estimated_cost: 35 }, model_stats: [cheap, expensive] };
+  const html = context.quotaModelsHtml(cycle);
+  const headers = Array.from(html.matchAll(/<th>(.*?)<\/th>/g), match => match[1]);
+  assert.deepEqual(headers, ['Model', 'Requests', 'Success', 'Failure', 'Total', 'Cache Hit Rate', 'Actual cost', 'Cost share', 'Model-only estimated total tokens', 'Model-only estimated total cost']);
+  assert.match(html, /&lt;cheap&gt;/);
+  assert.match(html, /1\.00 M/);
+  assert.match(html, /0\.50 M/);
+  assert.match(html, /50\.0%/);
+  assert.match(html, /28\.6%/);
+  assert.match(html, /10\.00 M/);
+  assert.match(html, /2\.00 M/);
+  assert.match(html, /\$100\.00/);
+  assert.match(context.quotaPeriodHtml(cycle, true), /1\.50 M/);
+  const previous = context.quotaModelCapacity({ actual_total_usd: 200, estimated_total_usd: null }, cheap);
+  assert.equal(previous.tokens, 20000000);
+  assert.equal(previous.usd, 200);
+  for (const row of [{ ...cheap, estimated_cost: null }, { ...cheap, estimated_cost: 0 }, { ...cheap, total_tokens: 0 }]) {
+    assert.equal(context.quotaModelCapacity(cycle, row).tokens, null);
+  }
+  assert.equal(context.quotaModelCapacity({ estimated_total_usd: null }, cheap).tokens, null);
+  assert.equal(context.quotaTokens(null), '—');
+  assert.equal(context.quotaTokens(0), '0.00 M');
+  assert.doesNotMatch(context.quotaPeriodHtml({ summary: null, model_stats: [] }, true), /does not identify the models/);
+  // Claude's prompt denominator includes its separate cache reads and writes.
+  const claude = { ...cheap, providers: [{ provider: 'claude', input_tokens: 100, output_tokens: 20, cached_tokens: 40, cache_write_tokens: 10, total_tokens: 170 }] };
+  assert.match(context.quotaModelsHtml({ ...cycle, model_stats: [claude] }), /26\.7%/);
+});
+
+test('quota panel sits between source distribution and activity, starts collapsed and retains its toggle state', async () => {
+  const { context, document } = createDashboardHarness({ language: 'en' });
+  await context.load();
+  const cycle = { start_at: '2026-10-02T08:00:00Z', end_at: '2026-10-02T13:00:00Z', used_percent: 50,
+    summary: { total_requests: 1, estimated_cost: 5 }, model_stats: [] };
+  const detail = { summary: { total_requests: 1 }, model_stats: [], source_stats: [], error_stats: [], recent_events: [],
+    credential_quota_cycles: [{ provider: 'codex', auth_index: 'index', groups: [{ group_id: 'shared:primary', window_seconds: 18000, current: cycle }] }] };
+  context.renderApiDetailContent({ total_requests: 1, models: {} }, { detail });
+  let html = document.getElementById('apiDetail').innerHTML;
+  assert.match(html, /<details[^>]*id="quotaCycles">/);
+  assert.ok(html.indexOf('Source Distribution') < html.indexOf('id="quotaCycles"'));
+  assert.ok(html.indexOf('id="quotaCycles"') < html.indexOf('detailActivityGrid'));
+  const panel = document.getElementById('quotaCycles');
+  panel.open = true;
+  panel.ontoggle();
+  context.renderApiDetailContent({ total_requests: 1, models: {} }, { detail });
+  html = document.getElementById('apiDetail').innerHTML;
+  assert.match(html, /<details[^>]*id="quotaCycles" open>/);
+  panel.open = false;
+  panel.ontoggle();
+  context.renderApiDetailContent({ total_requests: 1, models: {} }, { detail });
+  assert.match(document.getElementById('apiDetail').innerHTML, /<details[^>]*id="quotaCycles">/);
+});
+
+test('Antigravity collector only probes selected credentials while expanded and throttles upstream requests', async () => {
+  const { context, document, setVisibility } = createDashboardHarness({ language: 'en', pathname: '/proxy/v0/resource/plugins/usage-dashboard-zduu/dashboard' });
+  context.atob = atob; // api-call returns plain JSON, matching browser decoding.
+  await context.load();
+  context.localStorage.setItem('managementKey', 'fixture-key');
+  vm.runInContext('selectedApi = "antigravity-upstream";', context);
+  const refs = [{ provider: 'antigravity', auth_index: 'ag-index', auth_id: 'antigravity.json' }];
+  context.renderApiDetailContent({ total_requests: 1, models: {} }, { detail: { summary: { total_requests: 1 }, quota_credentials: refs } });
+  const calls = [];
+  let detailRefreshes = 0;
+  context.renderApiDetail = async () => { detailRefreshes++; };
+  context.fetch = async (url, options) => {
+    calls.push({ url, options });
+    let payload;
+    if (url.endsWith('/credentials')) payload = { files: [
+      { provider: 'antigravity', id: 'antigravity.json', auth_index: 'ag-index', project_id: 'fixture-project', access_token: 'private-token' },
+      { provider: 'antigravity', id: 'unselected.json', auth_index: 'other-index', project_id: 'other-project' },
+    ] };
+    else if (url.endsWith('/api-call')) payload = { status_code: 200, body: JSON.stringify({ groups: [{ displayName: '<Claude>', access_token: 'private-token', buckets: [
+      { bucketId: 'five-hour', window: '5h', remainingFraction: 0, resetTime: '2026-10-05T08:00:00Z' },
+      { bucketId: 'weekly', window: 'weekly', remainingFraction: '0.6', resetTime: '2026-10-10T08:00:00Z' },
+      { window: 'monthly', remainingFraction: 0.5, resetTime: '2026-10-10T08:00:00Z' },
+    ] }] }) };
+    else payload = { accepted: 1, rejected: 0 };
+    return { ok: true, status: 200, headers: { get() { return ''; } }, text: async () => JSON.stringify(payload) };
+  };
+  await context.refreshAntigravityQuotaForSelectedApi();
+  assert.equal(calls.length, 0, 'collapsed quota panel must not query upstream');
+  const panel = document.getElementById('quotaCycles');
+  panel.open = true;
+  panel.ontoggle();
+  await vm.runInContext('antigravityQuotaRequest', context);
+  assert.equal(calls.length, 3, calls.map((call) => call.url).join('\n'));
+  const probe = JSON.parse(calls[1].options.body);
+  assert.equal(probe.auth_index, 'ag-index');
+  assert.equal(probe.header.Authorization, 'Bearer $TOKEN$');
+  assert.equal(probe.url, 'https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary');
+  assert.equal(calls[1].url, '/proxy/v0/management/api-call');
+  assert.equal(calls[1].options.headers.Authorization, 'Bearer fixture-key');
+  const observation = JSON.parse(calls[2].options.body).observations[0];
+  assert.equal(observation.provider, 'antigravity');
+  assert.equal(observation.antigravity_buckets.length, 2, 'unsupported durations must not create guessed cycles');
+  assert.equal(observation.antigravity_buckets[0].remaining_fraction, 0, 'zero is exhausted quota');
+  assert.ok(!JSON.stringify(calls).includes('private-token'));
+  assert.equal(detailRefreshes, 1);
+  await context.refreshAntigravityQuotaForSelectedApi();
+  assert.equal(calls.length, 3, 'ordinary polling must retain the five-minute throttle');
+  context.load = async () => {}; // Isolate visibility gating from ordinary dashboard polling.
+  setVisibility('hidden');
+  await context.refreshAntigravityQuotaForSelectedApi(true);
+  assert.equal(calls.length, 3, 'hidden pages must not probe upstream');
+  setVisibility('visible');
+  await context.refreshAntigravityQuotaForSelectedApi(true);
+  assert.equal(calls.length, 6, 'manual refresh can bypass the throttle');
+  const html = context.quotaPeriodHtml({ unmapped: true, used_percent: 100, start_at: '2026-10-02T08:00:00Z', end_at: '2026-10-02T13:00:00Z', summary: null, model_stats: null }, true);
+  assert.match(html, /does not identify the models/);
+});
+
 test('quota previous capacity distinguishes fully used and estimated amounts', async () => {
   const { context } = createDashboardHarness({ language: 'en' });
   await context.load();
@@ -800,6 +916,51 @@ test('quota previous capacity distinguishes fully used and estimated amounts', a
   assert.match(almostFull, /Estimated capacity/);
   assert.match(almostFull, /&lt;100%/);
   assert.doesNotMatch(almostFull, /Actual capacity/);
+});
+
+test('Antigravity query failures preserve history, back off, and allow manual fallback recovery', async () => {
+  const { context } = createDashboardHarness({ language: 'en' });
+  context.atob = atob;
+  await context.load();
+  vm.runInContext('selectedApi = "ag";', context);
+  context.renderApiDetailContent({ total_requests: 1, models: {} }, { detail: { summary: { total_requests: 1 },
+    quota_credentials: [{ provider: 'antigravity', auth_index: 'index', auth_id: 'ag.json' }] } });
+  vm.runInContext('quotaExpandedApis.add("ag");', context);
+  let probes = 0, submissions = 0, recovered = false;
+  context.renderApiDetail = async () => {};
+  context.renderApiDetailFromCache = () => {};
+  context.fetch = async (url, options) => {
+    let payload;
+    if (url.endsWith('/credentials')) payload = { files: [{ provider: 'antigravity', auth_index: 'index', id: 'ag.json', project_id: 'project' }] };
+    else if (url.endsWith('/api-call')) {
+      probes++;
+      const upstream = JSON.parse(options.body).url;
+      payload = recovered && upstream.includes('.sandbox.') ? { status_code: 200, body: JSON.stringify({ groups: [{ display_name: 'Gemini', buckets: [{ bucket_id: 'weekly', window: 'week', remaining_fraction: 0.4, reset_time: '2026-10-10T08:00:00Z' }] }] }) } : { status_code: 503, body: 'Unavailable' };
+    } else { submissions++; payload = { accepted: 1, rejected: 0 }; }
+    return { ok: true, status: 200, headers: { get() { return ''; } }, text: async () => JSON.stringify(payload) };
+  };
+  await context.refreshAntigravityQuotaForSelectedApi();
+  assert.equal(probes, 3);
+  assert.equal(submissions, 0, 'failed quota fetch must not overwrite stored observations');
+  assert.equal(vm.runInContext('antigravityQuotaErrors.has("ag")', context), true);
+  await context.refreshAntigravityQuotaForSelectedApi();
+  assert.equal(probes, 3, 'failed queries must not retry on every detail render');
+  recovered = true;
+  await context.refreshAntigravityQuotaForSelectedApi(true);
+  assert.equal(probes, 5, 'manual refresh tries the primary endpoint then the sandbox fallback');
+  assert.equal(submissions, 1);
+  assert.equal(vm.runInContext('antigravityQuotaErrors.has("ag")', context), false);
+});
+
+test('unchanged summary polling still checks whether expanded Antigravity quota is due', async () => {
+  const { context, document, fetchCalls } = createDashboardHarness({ dashboardEtags: true });
+  await waitFor(() => document.getElementById('apiDetail').innerHTML.includes('deepseek-v4-flash-free'));
+  let quotaChecks = 0;
+  context.refreshAntigravityQuotaForSelectedApi = () => { quotaChecks++; };
+  const before = fetchCalls.filter(url => url.includes('dashboard-api-detail')).length;
+  await context.load();
+  assert.equal(quotaChecks, 1, '304 summary must not suppress automatic quota collection');
+  assert.equal(fetchCalls.filter(url => url.includes('dashboard-api-detail')).length, before);
 });
 
 test('quota detail remains selectable when retention or filters remove all main events', async () => {

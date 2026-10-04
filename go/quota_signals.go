@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"math"
 	"strconv"
 	"strings"
@@ -9,7 +11,7 @@ import (
 
 func quotaProvider(provider string) bool {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "claude", "codex", "devin":
+	case "claude", "codex", "devin", "antigravity":
 		return true
 	}
 	return false
@@ -69,6 +71,33 @@ func parseQuotaSignals(input quotaSignalsInput) []quotaObservation {
 		}
 	}
 	switch provider {
+	case "antigravity":
+		if len(input.AntigravityBuckets) > 64 {
+			return nil
+		}
+		for _, bucket := range input.AntigravityBuckets {
+			bucket.Group, bucket.ID = strings.TrimSpace(bucket.Group), strings.TrimSpace(bucket.ID)
+			if bucket.Group == "" || len(bucket.Group) > 256 || len(bucket.ID) > 256 || len(bucket.Window) > 64 || len(bucket.ResetTime) > 128 || strings.IndexFunc(bucket.Group+bucket.ID, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 || bucket.RemainingFraction == nil {
+				continue
+			}
+			remaining := *bucket.RemainingFraction
+			if math.IsNaN(remaining) || math.IsInf(remaining, 0) || remaining < 0 || remaining > 1 {
+				continue
+			}
+			var seconds int64
+			switch strings.ToLower(strings.TrimSpace(bucket.Window)) {
+			case "5h", "five-hour", "five_hour":
+				seconds = 18000
+			case "weekly", "week":
+				seconds = 604800
+			default:
+				continue // A reset timestamp alone does not define a period.
+			}
+			groupHash := sha256.Sum256([]byte(bucket.Group))
+			bucketHash := sha256.Sum256([]byte(bucket.ID + "\x00" + strconv.FormatInt(seconds, 10)))
+			add("antigravity-"+hex.EncodeToString(groupHash[:16]), bucket.Group, hex.EncodeToString(bucketHash[:16]), seconds,
+				1-remaining, quotaTime(bucket.ResetTime), true)
+		}
 	case "claude":
 		for _, w := range []struct {
 			slot    string

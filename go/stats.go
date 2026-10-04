@@ -8496,6 +8496,7 @@ func (s *RequestStatistics) QueryAPIDetailForClientAPIAt(api string, rangeKey st
 	result.GeneratedAt = generatedAt
 	finish := func(result APIDetailResponse) APIDetailResponse {
 		result.QuotaCycles = s.quotaCyclesForAPILocked(api, now)
+		result.QuotaCredentials = s.antigravityQuotaCredentialsForAPILocked(api)
 		s.attachEventCostsLocked(result.RecentEvents)
 		result.Summary.EstimatedCost = s.applyModelEstimatedCostsLocked(result.ModelStats)
 		result.dashboardVersion = s.summaryVersion

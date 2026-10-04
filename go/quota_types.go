@@ -73,6 +73,7 @@ type quotaState struct {
 }
 
 type quotaCycleDTO struct {
+	Unmapped          bool               `json:"unmapped,omitempty"`
 	ActualTotalUSD    *float64           `json:"actual_total_usd,omitempty"`
 	EstimatedTotalUSD *float64           `json:"estimated_total_usd"`
 	StartAt           time.Time          `json:"start_at"`
@@ -114,9 +115,27 @@ type quotaCredentialDTO struct {
 }
 
 type quotaSignalsInput struct {
-	Provider   string            `json:"provider"`
-	AuthIndex  string            `json:"auth_index"`
-	AuthID     string            `json:"auth_id"`
-	ObservedAt time.Time         `json:"observed_at"`
-	Signals    map[string]string `json:"signals"`
+	Provider           string                   `json:"provider"`
+	AuthIndex          string                   `json:"auth_index"`
+	AuthID             string                   `json:"auth_id"`
+	ObservedAt         time.Time                `json:"observed_at"`
+	Signals            map[string]string        `json:"signals"`
+	AntigravityBuckets []quotaAntigravityBucket `json:"antigravity_buckets,omitempty"`
+}
+
+// retrieveUserQuotaSummary provides explicit windows, but no model-to-pool
+// membership. Preserve each real pool without attributing all credential
+// requests to every independent pool.
+type quotaAntigravityBucket struct {
+	Group             string   `json:"group"`
+	ID                string   `json:"id"`
+	Window            string   `json:"window"`
+	RemainingFraction *float64 `json:"remaining_fraction"`
+	ResetTime         string   `json:"reset_time"`
+}
+
+type quotaCredentialRef struct {
+	Provider  string `json:"provider"`
+	AuthIndex string `json:"auth_index"`
+	AuthID    string `json:"auth_id"`
 }

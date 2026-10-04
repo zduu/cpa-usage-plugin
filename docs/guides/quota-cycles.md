@@ -1,18 +1,20 @@
 # 凭证额度周期（CPA v8）
 
-此功能位于上游接口详情的「额度周期」区域，适用于 Claude、Codex、Devin 的认证文件凭证。只有取得真实上游窗口时才显示卡片；仅有周额度的凭证不会出现 5h 占位。
+此功能位于上游接口详情的「额度周期」区域，适用于 Claude、Codex、Devin、Antigravity 的认证文件凭证。只有取得真实上游窗口时才显示周期卡片；仅有周额度的凭证不会出现 5h 占位。Antigravity 在首次观测前会显示可展开的查询面板。
 
 本功能尚未发布，插件版本号暂保持 `2.6.6`。验收宿主为 CPA v8；宿主的插件管理接口仍使用 `/v0/management/plugins/usage-dashboard-zduu`，原生凭证列表使用 `/v8/management/credentials`。
 
 ## 页面用法
 
 1. 打开用量统计看板，选择一个认证文件凭证对应的上游接口。
-2. 在额度周期中查看本期实际请求、token、按模型价格计算的实际花费、上游已用比例、推算总额度及预计剩余。倒计时每秒更新，周期结束后刷新详情。
+2. 在来源分布和错误统计之间展开「额度周期」，折叠样式与模型价格设置一致。默认收起，页面刷新详情时保留当前接口的展开状态。在其中查看本期实际请求、总 token（M）、按模型价格计算的实际花费、上游已用比例、推算总额度及预计剩余。展开时倒计时每秒更新，周期结束后刷新详情；收起或页面隐藏时停止倒计时。
 3. 点击「上一个完整周期」查看相邻的真实历史窗口及其模型分布。上期保留最后取得的已用比例；本期和上期达到 100% 时，按实际花费显示「真实总额度」；未用满时，同时显示已用百分比和「推算总额度」。无法计价或推算时金额显示 `—`。
 
 额度按凭证统计所有客户端的请求，不受页面时间范围和客户端 API key 筛选截断。同一凭证的 5h 与周窗口可能包含相同请求，两者不能相加作为总消耗。普通详情和事件表仍按所选筛选条件展示。
 
-两期的模型表分别显示请求、成功/失败、输入、输出、推理、缓存读写、总 token、实际花费和费用占比。页面沿用 USD/CNY 显示切换，接口和备份以 USD 计价。没有价格、没有记录、不能推算时显示 `—`；显式设置的零价格显示 0。
+两期的模型表分别保留模型、请求、成功、失败、实际花费和费用占比。去掉非缓存输入、输出、思考 token、缓存命中、缓存创建 token 的细分列，总 token 统一使用 M（百万），新增缓存命中率和「仅用此模型预计总 token / 总金额」。缓存命中率复用现有提供商口径，以缓存读取 token 除以包含缓存读写的全部输入 token，避免把 Claude 的独立缓存部分漏掉。
+
+单模型预计容量假设未来仍保持该模型在所选周期的输入、输出和缓存比例，并沿用该周期已经校准的金额额度：`预计 token = 周期金额额度 ÷ 模型实际花费 × 模型总 token`。上期用满时采用已知真实总额度；否则采用可用的推算总额度。金额沿用该周期总额度，因此同一额度池内不同模型的金额相同，token 容量随平均成本变化。模型用量、花费未知或为零，或周期金额未校准时不换算 token 容量。页面沿用 USD/CNY 显示切换，接口和备份以 USD 计价。没有价格、没有记录、不能推算时显示 `—`；显式设置的零价格仍显示实际花费 0，但不能据此推算有限的 token 容量。
 
 ## 信号来源
 
@@ -21,10 +23,15 @@
 | Claude | `Anthropic-Ratelimit-Unified-5h/7d-Utilization` 与 `Reset` | 真实提供的 5h、7d |
 | Codex | `X-Codex-…-Primary/Secondary-Used-Percent`、`Window-Minutes`、`Reset-At` 或 `Reset-After-Seconds` | 按上游实际分钟数确定，包括只有周窗口的情形 |
 | Devin | `daily/weekly_quota_remaining_percent` 与 `daily/weekly_quota_reset_at` | 真实提供的日、周窗口 |
+| Antigravity | `retrieveUserQuotaSummary` 的 `groups[].buckets[]`，剩余比例及重置时间 | 显式标明的 5h、周窗口 |
 
 Claude/Codex 优先读取原生 usage 的响应头，不依赖 `log_response_headers`。WebSocket 配额使用 CPA 已转换出的响应头。Codex 附加额度单独分组；未提供可靠模型范围时只显示比例和重置时间，费用、模型统计与推算保持为空。不会通过名称包含某个单词来推断模型范围，也不会根据套餐结束日期生成月额度。
 
 看板复用管理鉴权读取 v8 凭证列表，并提交白名单中的观测字段。原始观测时间会保留，同一运行实例内不重复提交同一份观测；插件重启或重新启用后会重新提交，以恢复内存模式的数据。可见页面沿用 30 秒轮询，隐藏页面沿用 300 秒轮询；读取失败保留已有历史。浏览器关闭期间，原生 usage 继续入账，但仅存在于宿主凭证列表中的新观测要等看板再次打开后才能保存。
+
+Antigravity 没有原生被动额度信号，因此看板只为当前所选接口实际使用过的凭证，通过管理鉴权的 `POST /v0/management/api-call` 查询 Google `v1internal:retrieveUserQuotaSummary`。认证文件必须提供 `project_id`；宿主替换 `$TOKEN$`，浏览器不下载认证文件或 OAuth token。依次尝试 daily、daily sandbox、cloudcode 三个官方地址。只在额度面板展开且页面可见时查询，自动间隔至少 5 分钟，失败后至少 60 秒再尝试，也可手动刷新。折叠面板或切换接口后不再启动后续凭证查询，已发出的请求可能完成。查询失败保留已有历史。
+
+Antigravity 的组名和 bucket 标识保留为独立额度池，接受 `5h` / `five-hour` / `five_hour` 和 `weekly` / `week`，不会仅凭重置时间猜测窗口长度。该摘要没有提供各池对应的模型范围，因此目前能展示分组已用比例、重置时间及本期/上期历史，请求量、花费、模型表和金额推算保持未知；普通接口统计仍完整保留全部请求。
 
 缺少某个响应头不表示撤销窗口。明确传递为 `null` 的使用率信号会隐藏对应窗口并保留历史；如果宿主把上游 null 丢弃、只传递其余字段，插件不会猜测撤销。没有后续观测时，到期的本期转为上期；超过该窗口的下一周期末后释放周期历史，不虚构新的本期。撤销标记独立保留，防止迟到观测重新显示已撤销的窗口。
 
@@ -58,6 +65,10 @@ macOS 构建会将 Go 动态库映像保留到宿主进程退出，避免宿主�
 
 `GET /v0/management/plugins/usage-dashboard-zduu/dashboard-api-detail?api=…` 增加可选 `credential_quota_cycles`：按凭证返回 `groups`，每组含 `window_seconds`、`current`、`previous`。周期包含 `start_at`、`end_at`、`observed_at`、`used_percent`、`summary`、`model_stats` 和 `estimated_total_usd`。本期或上期达到 100% 且费用已知时返回 `actual_total_usd`，未用满时返回可用的 `estimated_total_usd`；未知值为 null。达到 100% 时 `estimated_total_usd` 为 null；已映射额度池的本期剩余金额为 0，不受价格是否已知或估算新鲜度影响。只有 `current` 含 `estimated_remaining_usd`。
 
+详情还可返回 `quota_credentials`，包含当前接口用过的 Antigravity 凭证的 `provider`、`auth_index`、`auth_id`，用于首次额度查询。这些身份可在首次额度观测前取得，不包含 OAuth token。
+
+模型范围未知的周期返回 `unmapped: true`，其 `summary`、`model_stats` 和金额推算为 null，页面据此显示归属未知提示；没有请求的已映射周期仍显示无模型数据。
+
 `POST /v0/management/plugins/usage-dashboard-zduu/dashboard-quota-observations` 接收：
 
 ```json
@@ -75,6 +86,14 @@ macOS 构建会将 Go 动态库映像保留到宿主进程退出，避免宿主�
   }]
 }
 ```
+
+Antigravity 使用同一接口，`provider` 为 `antigravity`，把 `signals` 设为空对象，另提供 `antigravity_buckets`：
+
+```json
+[{"group":"Claude","id":"claude-5h","window":"5h","remaining_fraction":0.6,"reset_time":"2026-10-05T08:00:00Z"}]
+```
+
+`remaining_fraction` 范围为 0 到 1，0 表示已用尽，不等同于缺失。每条最多 64 个 bucket，组名及 ID 最多 256 字节；窗口别名统一为同一周期身份，避免更换拼写丢失历史。
 
 响应为 `accepted`、`skipped`、`rejected`、`quota_version`，计数单位是观测条目，不是请求。请求体最多 256 KiB，每批 100 条，每条最多 64 个信号、单值最多 512 字符。后端通过 `host.auth.get_runtime` 核对实时凭证身份，拒绝 runtime-only 条目。该接口需要管理鉴权，匿名 resource 别名返回 404；提交方具有管理权限，观测值本身不属于宿主签名数据。
 
