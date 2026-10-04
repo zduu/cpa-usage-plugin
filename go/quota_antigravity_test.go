@@ -132,3 +132,49 @@ func TestAntigravityObservationChecksHostIdentityAndDoesNotCountRequests(t *test
 		t.Fatal("quota observations changed request accounting")
 	}
 }
+
+func TestAntigravityLegacyRequestsDiscoverCredentialsWithoutQuotaFacts(t *testing.T) {
+	s := NewRequestStatistics()
+	defer s.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+	r := quotaTestRecord("legacy-ag", "claude-model", now.Add(-time.Hour), 1000)
+	r.Provider, r.AuthID = "antigravity", "antigravity.json"
+	s.Record(r)
+	api := usageGroupKey(r)
+	// Simulate a pre-quota ledger, first without quota state and then with
+	// existing quota state that contains no facts for these older requests.
+	s.quota = nil
+	check := func() {
+		t.Helper()
+		refs := s.antigravityQuotaCredentialsForAPILocked(api)
+		if len(refs) != 1 || refs[0].AuthID != r.AuthID {
+			t.Fatalf("legacy credential missing: %+v", refs)
+		}
+		if len(s.antigravityQuotaCredentialsForAPILocked("unrelated-api")) != 0 {
+			t.Fatal("cross-API credential disclosure")
+		}
+	}
+	check()
+	s.ensureQuotaLocked()
+	check()
+	remaining := .8
+	input := quotaSignalsInput{Provider: r.Provider, AuthIndex: r.AuthIndex, AuthID: r.AuthID, ObservedAt: now,
+		AntigravityBuckets: []quotaAntigravityBucket{{Group: "Claude", ID: "week", Window: "weekly", RemainingFraction: &remaining, ResetTime: now.Add(time.Hour).Format(time.RFC3339)}}}
+	for _, o := range parseQuotaSignals(input) {
+		s.applyQuotaObservationLocked(o)
+	}
+	detail := s.QueryAPIDetailAt(api, "all", 10, 10, now)
+	if len(detail.QuotaCycles) != 1 || len(detail.QuotaCredentials) != 1 {
+		t.Fatal("newly queried pool hidden without quota facts")
+	}
+	if len(s.quota.Facts) != 0 || detail.Summary.TotalRequests != 1 {
+		t.Fatal("discovery changed accounting")
+	}
+	if detail.QuotaCycles[0].Groups[0].Current.Summary != nil {
+		t.Fatal("unmapped pool acquired invented usage")
+	}
+	// A new quota fact must not duplicate an identity discovered from history.
+	r.RequestID, r.RequestedAt = "new-ag", now
+	s.Record(r)
+	check()
+}

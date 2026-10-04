@@ -71,7 +71,7 @@ macOS 构建会将 Go 动态库映像保留到宿主进程退出，避免宿主�
 
 `GET /v0/management/plugins/usage-dashboard-zduu/dashboard-api-detail?api=…` 增加可选 `credential_quota_cycles`：按凭证返回 `groups`，每组含 `window_seconds`、`current`、`previous`。周期包含 `start_at`、`end_at`、`observed_at`、`used_percent`、`summary`、`model_stats` 和 `estimated_total_usd`。本期或上期达到 100% 且费用已知时返回 `actual_total_usd`，未用满时返回可用的 `estimated_total_usd`；未知值为 null。达到 100% 时 `estimated_total_usd` 为 null；已映射额度池的本期剩余金额为 0，不受价格是否已知或估算新鲜度影响。只有 `current` 含 `estimated_remaining_usd`。
 
-详情还可返回 `quota_credentials`，包含当前接口用过的 Antigravity 凭证的 `provider`、`auth_index`、`auth_id`，用于首次额度查询。这些身份可在首次额度观测前取得，不包含 OAuth token。
+详情还可返回 `quota_credentials`，包含当前接口用过的 Antigravity 凭证的 `provider`、`auth_index`、`auth_id`，用于首次额度查询。这些身份可在首次额度观测前取得，不包含 OAuth token。升级前的历史请求即使没有额度事实，也会从保留的普通请求账本发现凭证；查询返回后可展示对应额度池。
 
 模型范围未知的周期返回 `unmapped: true`，其 `summary`、`model_stats` 和金额推算为 null，页面据此显示归属未知提示；没有请求的已映射周期仍显示无模型数据。
 

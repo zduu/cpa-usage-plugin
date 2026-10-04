@@ -147,6 +147,10 @@ func (s *RequestStatistics) quotaCyclesForAPILocked(api string, now time.Time) [
 			credentials[quotaCredentialKey(f.Provider, f.AuthIndex, f.AuthID)] = true
 		}
 	}
+	// Older snapshots can contain Antigravity requests without quota facts.
+	for _, ref := range s.antigravityQuotaCredentialsForAPILocked(api) {
+		credentials[quotaCredentialKey(ref.Provider, ref.AuthIndex, ref.AuthID)] = true
+	}
 	factsByCredential := make(map[string][]quotaFact, len(credentials))
 	for _, f := range s.quota.Facts {
 		key := quotaCredentialKey(f.Provider, f.AuthIndex, f.AuthID)
@@ -207,13 +211,32 @@ func (s *RequestStatistics) quotaCyclesForAPILocked(api string, now time.Time) [
 // Include identities before the first Antigravity quota query, so the dashboard
 // only probes credentials that actually belong to the selected upstream API.
 func (s *RequestStatistics) antigravityQuotaCredentialsForAPILocked(api string) []quotaCredentialRef {
-	if s.quota == nil {
-		return nil
-	}
 	refs := make(map[string]quotaCredentialRef)
-	for _, f := range s.quota.Facts {
-		if f.API == api && f.Provider == "antigravity" && f.AuthIndex != "" && f.AuthID != "" {
-			refs[quotaCredentialKey(f.Provider, f.AuthIndex, f.AuthID)] = quotaCredentialRef{Provider: f.Provider, AuthIndex: f.AuthIndex, AuthID: f.AuthID}
+	add := func(provider, index, id string) {
+		if provider == "antigravity" && index != "" && id != "" {
+			refs[quotaCredentialKey(provider, index, id)] = quotaCredentialRef{Provider: provider, AuthIndex: index, AuthID: id}
+		}
+	}
+	if s.quota != nil {
+		for _, f := range s.quota.Facts {
+			if f.API == api {
+				add(f.Provider, f.AuthIndex, f.AuthID)
+			}
+		}
+	}
+	// Quota tracking was introduced after ordinary accounting. Discover retained
+	// historical identities without inventing quota observations or duplicating facts.
+	if a := s.apis[api]; a != nil {
+		for _, m := range a.Models {
+			if m == nil {
+				continue
+			}
+			for i := 0; i < m.accountingCount(); i++ {
+				d := m.accountingDetailAt(i)
+				if quotaEligible(d) {
+					add(d.Provider, d.AuthIndex, d.AuthID)
+				}
+			}
 		}
 	}
 	var out []quotaCredentialRef
