@@ -6,6 +6,11 @@ import (
 	"time"
 )
 
+// A conservative one-percentage-point endpoint-difference error, even when
+// raw upstream values expose more precision. Ten ticks bound direct error.
+const quotaModelQuantum = .01
+const quotaModelMinDelta = .10
+
 type quotaModelInterval struct {
 	start, end time.Time
 	delta      float64
@@ -14,6 +19,13 @@ type quotaModelInterval struct {
 	cost       float64
 	unpriced   bool
 	mixed      bool
+	models     map[string]quotaIntervalModel
+}
+
+type quotaIntervalModel struct {
+	tokens   float64
+	cost     float64
+	unpriced bool
 }
 
 // Only monotonic observations within one collection run can calibrate a model.
@@ -75,13 +87,14 @@ func quotaModelIntervals(p *quotaPeriod) []quotaModelInterval {
 	return intervals
 }
 
-// Model-only capacity uses recorded tokens and cost divided by the quota
-// fraction consumed in intervals containing that model alone. Mixed intervals
-// and executions crossing observations cannot attribute usage reliably.
+// Preserve directly observed model capacities and supplement them with a joint
+// fit across mixed intervals. Executions crossing observations cannot reliably
+// attribute their token usage to an observed quota increment.
 func applyQuotaModelEstimates(dto *quotaCycleDTO, w quotaWindow, p *quotaPeriod, facts []quotaFact, pricing *pricingSnapshot, now time.Time, current bool) {
 	if dto == nil || p == nil || w.Unmapped {
 		return
 	}
+	p, _ = quotaEffectivePeriod(p)
 	intervals := quotaModelIntervals(p)
 	if len(intervals) == 0 {
 		return
@@ -141,24 +154,44 @@ func applyQuotaModelEstimates(dto *quotaCycleDTO, w quotaWindow, p *quotaPeriod,
 		}
 		interval.model = f.Model
 		interval.tokens += float64(tokens)
-		interval.cost = addNonNegativeCost(interval.cost, pricing.detailCost(f.Model, f.detail(), detailTotalsFromRequest(f.detail())))
-		interval.unpriced = interval.unpriced || !quotaPriceKnown(f, pricing)
+		cost := pricing.detailCost(f.Model, f.detail(), detailTotalsFromRequest(f.detail()))
+		unpriced := !quotaPriceKnown(f, pricing)
+		interval.cost = addNonNegativeCost(interval.cost, cost)
+		interval.unpriced = interval.unpriced || unpriced
+		if interval.models == nil {
+			interval.models = make(map[string]quotaIntervalModel)
+		}
+		model := interval.models[f.Model]
+		model.tokens += float64(tokens)
+		model.cost = addNonNegativeCost(model.cost, cost)
+		model.unpriced = model.unpriced || unpriced
+		interval.models[f.Model] = model
 	}
 	type calibration struct {
-		tokens, cost, delta float64
-		unpriced            bool
+		tokens, cost, delta, uncertainty float64
+		end                              time.Time
+		unpriced                         bool
 	}
 	models := make(map[string]calibration)
+	var eligible []quotaModelInterval
 	bad := 0
 	for i, interval := range intervals {
 		bad += invalid[i]
-		if bad > 0 || interval.mixed || interval.model == "" || interval.tokens <= 0 {
+		if bad > 0 || interval.tokens <= 0 {
 			continue
 		}
 		if current && (interval.end.After(now) || now.Sub(interval.end) > time.Duration(w.Seconds)*time.Second/4) {
 			continue
 		}
+		eligible = append(eligible, interval)
+		if interval.mixed || interval.model == "" {
+			continue
+		}
 		c := models[interval.model]
+		if !c.end.Equal(interval.start) {
+			c.uncertainty += quotaModelQuantum
+		}
+		c.end = interval.end
 		c.tokens += interval.tokens
 		c.cost = addNonNegativeCost(c.cost, interval.cost)
 		c.delta += interval.delta
@@ -168,16 +201,37 @@ func applyQuotaModelEstimates(dto *quotaCycleDTO, w quotaWindow, p *quotaPeriod,
 	for i := range dto.ModelStats {
 		row := &dto.ModelStats[i]
 		c, ok := models[row.Model]
-		if !ok || c.delta <= 0 {
+		if !ok || c.delta+1e-12 < quotaModelMinDelta || c.delta+1e-12 < 10*c.uncertainty {
 			continue
 		}
 		tokens := c.tokens / c.delta
 		if !math.IsNaN(tokens) && !math.IsInf(tokens, 0) && tokens > 0 {
 			row.ModelOnlyTotalTokens = &tokens
+			low, high := c.tokens/(c.delta+c.uncertainty), c.tokens/(c.delta-c.uncertainty)
+			row.ModelOnlyTokensLow, row.ModelOnlyTokensHigh = &low, &high
 		}
 		cost := c.cost / c.delta
-		if !c.unpriced && !math.IsNaN(cost) && !math.IsInf(cost, 0) && cost >= 0 {
+		low, high := c.cost/(c.delta+c.uncertainty), c.cost/(c.delta-c.uncertainty)
+		if !c.unpriced && !math.IsNaN(cost) && !math.IsInf(cost, 0) && cost >= 0 && !math.IsInf(high, 0) {
 			row.ModelOnlyTotalUSD = &cost
+			row.ModelOnlyUSDLow, row.ModelOnlyUSDHigh = &low, &high
+		}
+	}
+	fitted := fitQuotaMixedModels(eligible)
+	for i := range dto.ModelStats {
+		row := &dto.ModelStats[i]
+		if capacity, ok := fitted[row.Model]; ok && row.ModelOnlyTotalTokens == nil {
+			tokens := capacity.tokens
+			row.ModelOnlyTotalTokens, row.ModelOnlyTotalUSD = &tokens, capacity.cost
+			row.ModelOnlyTokensLow, row.ModelOnlyTokensHigh = &capacity.low, &capacity.high
+			if capacity.cost != nil {
+				low, high := *capacity.cost*(capacity.low/tokens), *capacity.cost*(capacity.high/tokens)
+				if math.IsInf(high, 0) || math.IsNaN(high) {
+					row.ModelOnlyTotalUSD = nil
+				} else {
+					row.ModelOnlyUSDLow, row.ModelOnlyUSDHigh = &low, &high
+				}
+			}
 		}
 	}
 }

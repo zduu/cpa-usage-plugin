@@ -3796,3 +3796,21 @@ test('full backup handles old not-found envelopes but rejects invalid fallback d
     assert.strictEqual(calls.length, 2);
   }
 });
+
+test('quota capacity renders reference ranges and reset explanation', async () => {
+  const { context } = createDashboardHarness({ language: 'en' });
+  await context.load();
+  assert.equal(context.quotaCapacityRange(1e9, 909e6, 1111e6, false), '909.00 M – 1,111.00 M');
+  assert.equal(context.quotaCapacityRange(null, 909e6, 1111e6, false), '—');
+  assert.equal(context.quotaCapacityRange(1e6, Infinity, 2e6, false), '1.00 M');
+  assert.equal(context.quotaCapacityRange(0, 0, 0, true), '$0.00 – $0.00');
+  const html = context.quotaPeriodHtml({
+    reset_baseline_used_percent: 20, used_percent: 30,
+    summary: { estimated_cost: 5, total_requests: 1, total_tokens: 1e6 },
+    model_stats: [{ model: 'm', model_only_estimated_total_tokens: 1e9,
+      model_only_tokens_low: 909e6, model_only_tokens_high: 1111e6 }]
+  }, true);
+  assert.match(html, /909\.00 M – 1,111\.00 M/);
+  assert.match(html, /Usage decreased/);
+  assert.match(html, /new spend divided by new quota consumption/);
+});

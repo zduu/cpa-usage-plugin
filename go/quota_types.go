@@ -73,15 +73,16 @@ type quotaState struct {
 }
 
 type quotaCycleDTO struct {
-	Unmapped          bool               `json:"unmapped,omitempty"`
-	ActualTotalUSD    *float64           `json:"actual_total_usd,omitempty"`
-	EstimatedTotalUSD *float64           `json:"estimated_total_usd"`
-	StartAt           time.Time          `json:"start_at"`
-	EndAt             time.Time          `json:"end_at"`
-	ObservedAt        time.Time          `json:"observed_at"`
-	UsedPercent       *float64           `json:"used_percent"`
-	Summary           *quotaUsageSummary `json:"summary"`
-	ModelStats        []quotaModelStat   `json:"model_stats"`
+	ResetBaselineUsedPercent *float64           `json:"reset_baseline_used_percent,omitempty"`
+	Unmapped                 bool               `json:"unmapped,omitempty"`
+	ActualTotalUSD           *float64           `json:"actual_total_usd,omitempty"`
+	EstimatedTotalUSD        *float64           `json:"estimated_total_usd"`
+	StartAt                  time.Time          `json:"start_at"`
+	EndAt                    time.Time          `json:"end_at"`
+	ObservedAt               time.Time          `json:"observed_at"`
+	UsedPercent              *float64           `json:"used_percent"`
+	Summary                  *quotaUsageSummary `json:"summary"`
+	ModelStats               []quotaModelStat   `json:"model_stats"`
 }
 
 type quotaUsageSummary struct {
@@ -90,6 +91,10 @@ type quotaUsageSummary struct {
 }
 
 type quotaModelStat struct {
+	ModelOnlyTokensLow  *float64 `json:"model_only_tokens_low,omitempty"`
+	ModelOnlyTokensHigh *float64 `json:"model_only_tokens_high,omitempty"`
+	ModelOnlyUSDLow     *float64 `json:"model_only_usd_low,omitempty"`
+	ModelOnlyUSDHigh    *float64 `json:"model_only_usd_high,omitempty"`
 	ModelStat
 	CostUSD              *float64 `json:"estimated_cost"`
 	ModelOnlyTotalTokens *float64 `json:"model_only_estimated_total_tokens"`

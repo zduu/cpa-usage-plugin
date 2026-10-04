@@ -208,11 +208,9 @@ func (s *RequestStatistics) applyQuotaObservationLocked(o quotaObservation) bool
 			return false
 		}
 	} else if w.Current != nil && w.Seconds == o.Seconds && o.ObservedAt.Before(w.Current.End) &&
-		start.Before(w.Current.End) && len(w.Current.Samples) > 0 &&
-		(o.Used >= w.Current.Samples[len(w.Current.Samples)-1].Used || quotaResetDriftIsSmall(w.Current.End, o.Reset, o.Seconds)) {
-		// A relative-reset timestamp can drift while referring to the same window.
-		// Small rounding/arrival drift remains compatible when usage decreases;
-		// retaining that sample lets the displayed ratio follow the correction.
+		start.Before(w.Current.End) && len(w.Current.Samples) > 0 {
+		// Relative deadlines can drift; reset cards can move them substantially.
+		// Retain the decrease sample so the effective view excludes old spend.
 		w.Current.Start, w.Current.End = start, o.Reset
 		quotaAppendSample(w.Current, o, o.CollectionStartedAt)
 	} else {

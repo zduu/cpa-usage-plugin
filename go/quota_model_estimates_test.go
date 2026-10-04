@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"math"
 	"testing"
 	"time"
@@ -41,7 +42,7 @@ func quotaModelTestResult(w quotaWindow, p *quotaPeriod, facts []quotaFact, pric
 
 func quotaModelAssert(t *testing.T, got *float64, want float64) {
 	t.Helper()
-	if got == nil || math.Abs(*got-want) > 1e-7 {
+	if got == nil || math.Abs(*got-want) > math.Max(1e-7, math.Abs(want)*1e-12) {
 		t.Fatalf("got %v, want %.8f", got, want)
 	}
 }
@@ -259,6 +260,92 @@ func TestQuotaModelCapacityBackupRepricingAndRollover(t *testing.T) {
 	for _, row := range previous.ModelStats {
 		if row.Model == "a" {
 			quotaModelAssert(t, row.ModelOnlyTotalUSD, 160)
+		}
+	}
+}
+
+func TestQuotaModelQuantizedPlateauNeedsEnoughEvidence(t *testing.T) {
+	w, p, facts, _ := quotaModelFixture()
+	p.Samples[0].Used, p.Samples[1].Used, p.Samples[2].Used, p.Samples[3].Used = 0, .01, .01, .10
+	facts = facts[:3]
+	for i, tokens := range []int64{10_000_000, 2_000_000, 88_000_000} {
+		facts[i].Model = "a"
+		facts[i].Tokens = TokenStats{InputTokens: tokens, TotalTokens: tokens}
+	}
+	price := quotaModelTestPrice(map[string]ModelPrice{"a": {Prompt: 8}})
+	for _, count := range []int{2, 3} {
+		copy := *p
+		copy.Samples = p.Samples[:count]
+		rows := quotaModelTestResult(w, &copy, facts[:count-1], price, copy.Samples[count-1].ObservedAt, true)
+		if rows["a"].ModelOnlyTotalTokens != nil {
+			t.Fatal("10M or 12M at 99% remaining is insufficient evidence")
+		}
+	}
+	now := p.Samples[3].ObservedAt
+	rows := quotaModelTestResult(w, p, facts, price, now, true)
+	quotaModelAssert(t, rows["a"].ModelOnlyTotalTokens, 1e9)
+	quotaModelAssert(t, rows["a"].ModelOnlyTokensLow, 100e6/.11)
+	quotaModelAssert(t, rows["a"].ModelOnlyTokensHigh, 100e6/.09)
+	quotaModelAssert(t, rows["a"].ModelOnlyUSDLow, 800/.11)
+	quotaModelAssert(t, rows["a"].ModelOnlyUSDHigh, 800/.09)
+	// Switching models while the reading is unchanged cannot assign the
+	// eventual increase to the new model alone.
+	facts[2].Model = "b"
+	rows = quotaModelTestResult(w, p, facts, price, now, true)
+	if rows["a"].ModelOnlyTotalTokens != nil || rows["b"].ModelOnlyTotalTokens != nil {
+		t.Fatal("mixed plateau was assigned to a single model")
+	}
+}
+
+func TestQuotaModelManySmallTicksShareOnlyContiguousEndpointError(t *testing.T) {
+	w, p, seed, _ := quotaModelFixture()
+	p.Samples = p.Samples[:1]
+	p.Samples[0].Used = 0
+	var facts []quotaFact
+	for i := 1; i <= 10; i++ {
+		at := p.Start.Add(time.Duration(i) * time.Minute)
+		p.Samples = append(p.Samples, quotaObservation{ObservedAt: at, Used: float64(i) / 100, CollectionStartedAt: p.CollectionStartedAt})
+		f := seed[0]
+		f.Timestamp, f.CompletedAt = at.Add(-30*time.Second), at.Add(-29*time.Second)
+		facts = append(facts, f)
+	}
+	now := p.Samples[10].ObservedAt
+	rows := quotaModelTestResult(w, p, facts, nil, now, true)
+	quotaModelAssert(t, rows["a"].ModelOnlyTotalTokens, 100e6)
+	quotaModelAssert(t, rows["a"].ModelOnlyTokensLow, 10e6/.11)
+	// Alternating models creates disconnected tiny intervals, not a single
+	// large, precise observation.
+	for i := 1; i < len(facts); i += 2 {
+		facts[i].Model = "b"
+	}
+	rows = quotaModelTestResult(w, p, facts, nil, now, true)
+	if rows["a"].ModelOnlyTotalTokens != nil || rows["b"].ModelOnlyTotalTokens != nil {
+		t.Fatal("disconnected tiny intervals acquired false precision")
+	}
+}
+
+func TestQuotaCapacityRangesRemainJSONSafeAtExtremePrices(t *testing.T) {
+	w, p, facts, now := quotaModelFixture()
+	p.Samples, facts = p.Samples[:2], facts[:1]
+	price := quotaModelTestPrice(map[string]ModelPrice{"a": {Prompt: 1.7e307}})
+	dto := quotaBuildPeriod(w, p, facts, price)
+	applyQuotaModelEstimates(dto, w, p, facts, price, now, true)
+	if _, err := json.Marshal(dto); err != nil {
+		t.Fatal(err)
+	}
+	if dto.ModelStats[0].ModelOnlyTotalUSD != nil {
+		t.Fatal("overflowing dollar range should be unknown")
+	}
+	w, p, facts, now = quotaMixedFixture()
+	price = quotaModelTestPrice(map[string]ModelPrice{"a": {Prompt: 1e301}, "b": {Prompt: 1e301}})
+	dto = quotaBuildPeriod(w, p, facts, price)
+	applyQuotaModelEstimates(dto, w, p, facts, price, now, true)
+	if _, err := json.Marshal(dto); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range dto.ModelStats {
+		if row.ModelOnlyUSDHigh == nil {
+			t.Fatal("finite range lost to intermediate overflow")
 		}
 	}
 }

@@ -29,11 +29,34 @@ func quotaPriceKnown(f quotaFact, pricing *pricingSnapshot) bool {
 	return ok
 }
 
+// Use the first observation after the latest usage decrease as a conservative
+// reset boundary. The exact reset time is not supplied; never reuse old spend.
+func quotaEffectivePeriod(p *quotaPeriod) (*quotaPeriod, *float64) {
+	if p == nil {
+		return nil, nil
+	}
+	index := -1
+	for i := 1; i < len(p.Samples); i++ {
+		if p.Samples[i].Used < p.Samples[i-1].Used && p.Samples[i].ObservedAt.Before(p.End) {
+			index = i
+		}
+	}
+	if index < 0 {
+		return p, nil
+	}
+	copy := *p
+	copy.Start = p.Samples[index].ObservedAt
+	copy.Samples = p.Samples[index:]
+	used := copy.Samples[0].Used * 100
+	return &copy, &used
+}
+
 func quotaBuildPeriod(w quotaWindow, p *quotaPeriod, facts []quotaFact, pricing *pricingSnapshot) *quotaCycleDTO {
 	if p == nil {
 		return nil
 	}
-	v := &quotaCycleDTO{StartAt: p.Start, EndAt: p.End, ModelStats: []quotaModelStat{}, Unmapped: w.Unmapped}
+	p, resetUsed := quotaEffectivePeriod(p)
+	v := &quotaCycleDTO{ResetBaselineUsedPercent: resetUsed, StartAt: p.Start, EndAt: p.End, ModelStats: []quotaModelStat{}, Unmapped: w.Unmapped}
 	if len(p.Samples) > 0 {
 		last := p.Samples[len(p.Samples)-1]
 		percent := last.Used * 100
@@ -98,8 +121,15 @@ func quotaEstimate(period *quotaCycleDTO) (*float64, *float64) {
 	if used <= 0 || used > 1 || cost < 0 || math.IsNaN(used) || math.IsInf(used, 0) {
 		return nil, nil
 	}
-	total := cost / used
-	remaining := total - cost
+	consumed := used
+	if period.ResetBaselineUsedPercent != nil {
+		consumed -= *period.ResetBaselineUsedPercent / 100
+		if consumed < quotaModelMinDelta-1e-12 {
+			return nil, nil
+		}
+	}
+	total := cost / consumed
+	remaining := total * (1 - used)
 	if math.IsInf(total, 0) || math.IsNaN(total) {
 		return nil, nil
 	}

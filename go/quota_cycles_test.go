@@ -300,8 +300,8 @@ func TestQuotaEstimateUsesSameRatioAfterRestartOrDecrease(t *testing.T) {
 	}
 	s.quota.StartedAt = start.Add(-time.Hour)
 	quotaTestObserve(s, now, start.Add(5*time.Hour), .2, 18000)
-	if got := s.QueryAPIDetailAt(api, "all", 10, 10, now).QuotaCycles[0].Groups[0].Current.EstimatedTotalUSD; got == nil || math.Abs(*got-75) > 1e-9 {
-		t.Fatal("usage correction should update the recorded-spend ratio")
+	if got := s.QueryAPIDetailAt(api, "all", 10, 10, now).QuotaCycles[0].Groups[0].Current.EstimatedTotalUSD; got != nil {
+		t.Fatal("reset must discard pre-reset spend")
 	}
 }
 
@@ -661,7 +661,7 @@ func TestQuotaRelativeResetDriftUsesCorrectedRatio(t *testing.T) {
 				t.Fatal("decrease with relative-reset drift rejected")
 			}
 			cycle := s.QueryAPIDetailAt(usageGroupKey(r), "all", 10, 10, now).QuotaCycles[0].Groups[0].Current
-			if *cycle.UsedPercent != 20 || cycle.EstimatedTotalUSD == nil || math.Abs(*cycle.EstimatedTotalUSD-25) > 1e-9 {
+			if *cycle.UsedPercent != 20 || cycle.EstimatedTotalUSD != nil || cycle.Summary != nil {
 				t.Fatalf("decrease retained old watermark or estimate: %+v", cycle)
 			}
 			r.RequestID, r.RequestedAt = "after", now.Add(-2*time.Minute)
@@ -671,17 +671,16 @@ func TestQuotaRelativeResetDriftUsesCorrectedRatio(t *testing.T) {
 				t.Fatal("post-decrease observation rejected")
 			}
 			cycle = s.QueryAPIDetailAt(usageGroupKey(r), "all", 10, 10, now).QuotaCycles[0].Groups[0].Current
-			if cycle.EstimatedTotalUSD == nil || math.Abs(*cycle.EstimatedTotalUSD-10/.3) > 1e-9 || math.Abs(*cycle.EstimatedRemainingUSD-(10/.3-10)) > 1e-9 {
+			if cycle.EstimatedTotalUSD == nil || math.Abs(*cycle.EstimatedTotalUSD-50) > 1e-9 || math.Abs(*cycle.EstimatedRemainingUSD-35) > 1e-9 {
 				t.Fatalf("did not use all displayed cost after usage correction: %+v", cycle)
 			}
 			if err := validateQuotaSnapshot(s.Snapshot().QuotaCycles, nil); err != nil {
 				t.Fatal(err)
 			}
-			// A different overlapping window with a large reset shift must not
-			// be mistaken for rounding drift merely because utilization fell.
+			// A reset card may also change the deadline substantially.
 			o.ObservedAt, o.Reset, o.Used = now.Add(time.Minute), o.Reset.Add(time.Hour), .1
-			if s.applyQuotaObservationLocked(o) {
-				t.Fatal("accepted a different overlapping window as small reset drift")
+			if !s.applyQuotaObservationLocked(o) {
+				t.Fatal("reset card deadline change was rejected")
 			}
 		})
 	}
@@ -753,7 +752,7 @@ func TestQuotaRecordedSpendRatioSurvivesSampleLimit(t *testing.T) {
 				quotaTestObserve(s, start.Add(6*time.Minute+time.Duration(i)*15*time.Second), start.Add(5*time.Hour), .1+.003*float64(i), 18000)
 			}
 			cycle := s.QueryAPIDetailAt(usageGroupKey(quotaTestRecord("", "m", now, 0)), "all", 10, 10, now).QuotaCycles[0].Groups[0].Current
-			if cycle.EstimatedTotalUSD == nil || math.Abs(*cycle.EstimatedTotalUSD-55/.7) > 1e-9 || math.Abs(*cycle.EstimatedRemainingUSD-(55/.7-55)) > 1e-9 {
+			if cycle.EstimatedTotalUSD == nil || math.Abs(*cycle.EstimatedTotalUSD-50) > 1e-9 || math.Abs(*cycle.EstimatedRemainingUSD-15) > 1e-9 {
 				t.Fatalf("calibration lost after 200 observations: %+v", cycle)
 			}
 			raw, err := json.Marshal(s.Snapshot())
@@ -772,7 +771,7 @@ func TestQuotaRecordedSpendRatioSurvivesSampleLimit(t *testing.T) {
 					t.Fatal("sample limit exceeded")
 				}
 				total, _ := quotaEstimate(quotaBuildPeriod(w, w.Current, quotaFactsForTest(backup.QuotaCycles), s.PricingSnapshot()))
-				if total == nil || math.Abs(*total-55/.7) > 1e-9 {
+				if total == nil || math.Abs(*total-50) > 1e-9 {
 					t.Fatal("backup changed recorded-spend ratio")
 				}
 			}
@@ -804,8 +803,8 @@ func TestQuotaSampleLimitKeepsDecreaseAboveInitialUtilization(t *testing.T) {
 		quotaTestObserve(s, start.Add(6*time.Minute+time.Duration(i)*15*time.Second), start.Add(5*time.Hour), .5+.001*float64(i), 18000)
 	}
 	cycle := s.QueryAPIDetailAt(usageGroupKey(quotaTestRecord("", "m", now, 0)), "all", 10, 10, now).QuotaCycles[0].Groups[0].Current
-	if cycle.EstimatedTotalUSD == nil || math.Abs(*cycle.EstimatedTotalUSD-50/.7) > 1e-9 {
-		t.Fatalf("a drop above the initial utilization changed recorded-spend basis: %+v", cycle)
+	if cycle.EstimatedTotalUSD == nil || math.Abs(*cycle.EstimatedTotalUSD-50) > 1e-9 {
+		t.Fatalf("a drop above initial utilization failed to reset recorded-spend basis: %+v", cycle)
 	}
 }
 
@@ -1352,6 +1351,56 @@ func TestQuotaSummaryKeepsDetailDiscoverableAfterRetention(t *testing.T) {
 				if names := s.SummaryWithoutDetailsForRangeAt(rangeKey, later).Meta.QuotaAPIs; len(names) != 0 {
 					t.Fatalf("expired or revoked quota remained selectable: %v", names)
 				}
+			}
+		})
+	}
+}
+
+func TestQuotaResetCardSurvivesCompactionAndSnapshot(t *testing.T) {
+	for _, shift := range []time.Duration{0, time.Hour, -time.Hour} {
+		t.Run(shift.String(), func(t *testing.T) {
+			s := NewRequestStatistics()
+			defer s.Close()
+			now := time.Now().UTC().Truncate(time.Second)
+			start := now.Add(-2 * time.Hour)
+			s.startedAt = start.Add(-time.Hour)
+			s.modelPrices = map[string]ModelPrice{"m": {Prompt: 5}}
+			old := quotaTestRecord("before-reset", "m", start.Add(time.Minute), 10_000_000)
+			s.Record(old)
+			end := start.Add(5 * time.Hour)
+			quotaTestObserve(s, start.Add(2*time.Minute), end, .8, 18000)
+			resetAt := start.Add(70 * time.Minute)
+			quotaTestObserve(s, resetAt, end.Add(shift), .2, 18000)
+			for i := 1; i <= 70; i++ {
+				quotaTestObserve(s, resetAt.Add(time.Duration(i)*time.Second), end.Add(shift), .2, 18000)
+			}
+			s.Record(quotaTestRecord("after-reset", "m", now.Add(-2*time.Minute), 1_000_000))
+			quotaTestObserve(s, now, end.Add(shift), .3, 18000)
+			api := usageGroupKey(old)
+			check := func(stats *RequestStatistics) {
+				t.Helper()
+				cycle := stats.QueryAPIDetailAt(api, "all", 10, 10, now).QuotaCycles[0].Groups[0].Current
+				if !cycle.StartAt.Equal(resetAt) || !cycle.EndAt.Equal(end.Add(shift)) ||
+					cycle.Summary == nil || cycle.Summary.TotalRequests != 1 {
+					t.Fatalf("reset boundary or post-reset requests lost: %+v", cycle)
+				}
+				quotaModelAssert(t, cycle.Summary.CostUSD, 5)
+				quotaModelAssert(t, cycle.EstimatedTotalUSD, 50)
+				quotaModelAssert(t, cycle.EstimatedRemainingUSD, 35)
+				quotaModelAssert(t, cycle.ModelStats[0].ModelOnlyTotalTokens, 10e6)
+			}
+			check(s)
+			snapshot := s.Snapshot()
+			if err := validateQuotaSnapshot(snapshot.QuotaCycles, nil); err != nil {
+				t.Fatal(err)
+			}
+			restored := NewRequestStatistics()
+			defer restored.Close()
+			restored.modelPrices = s.modelPrices
+			restored.restoreQuotaSnapshotLocked(snapshot)
+			check(restored)
+			if len(restored.quota.Facts) != 2 {
+				t.Fatal("reset deleted historical requests")
 			}
 		})
 	}

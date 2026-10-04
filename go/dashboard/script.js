@@ -1547,6 +1547,15 @@ function quotaModelCapacity(row) {
     usd: usd != null && Number.isFinite(Number(usd)) && Number(usd) >= 0 ? Number(usd) : null,
   };
 }
+function quotaCapacityRange(value, low, high, money) {
+  const format = money ? (n) => quotaValue(n, true) : quotaTokens;
+  if (value == null) return '—';
+  if (low != null && high != null && Number.isFinite(Number(low)) && Number.isFinite(Number(high)) &&
+      Number(low) >= 0 && Number(low) <= value && Number(high) >= value) {
+    return format(Number(low)) + ' – ' + format(Number(high));
+  }
+  return format(value);
+}
 function quotaWindowLabel(seconds) {
   if (seconds === 18000) return t('quota_5h');
   if (seconds === 604800) return t('quota_week');
@@ -1596,7 +1605,7 @@ function quotaModelsHtml(cycle) {
   const total = cycle.summary && cycle.summary.estimated_cost;
   return '<div class="tableWrap"><table><thead><tr>' + ['col_model', 'requests_label', 'success_label', 'failure_label', 'col_total', 'col_cache_rate', 'quota_actual_cost', 'quota_cost_share', 'quota_model_capacity_tokens', 'quota_model_capacity_cost'].map((key) => '<th>' + esc(t(key)) + '</th>').join('') + '</tr></thead><tbody>' + rows.map((row) => {
     const capacity = quotaModelCapacity(row);
-    return '<tr><td class="nameCell">' + esc(row.model) + '</td>' + ['total_requests', 'success_count', 'failure_count'].map((key) => '<td>' + quotaValue(row[key], false) + '</td>').join('') + '<td>' + quotaTokens(row.total_tokens) + '</td><td>' + pct(cacheRate(row)) + '</td><td>' + quotaValue(row.estimated_cost, true) + '</td><td>' + (Number(total) > 0 && row.estimated_cost != null && Number.isFinite(Number(row.estimated_cost)) ? pct(Number(row.estimated_cost) / Number(total) * 100) : '—') + '</td><td>' + quotaTokens(capacity.tokens) + '</td><td>' + quotaValue(capacity.usd, true) + '</td></tr>';
+    return '<tr><td class="nameCell">' + esc(row.model) + '</td>' + ['total_requests', 'success_count', 'failure_count'].map((key) => '<td>' + quotaValue(row[key], false) + '</td>').join('') + '<td>' + quotaTokens(row.total_tokens) + '</td><td>' + pct(cacheRate(row)) + '</td><td>' + quotaValue(row.estimated_cost, true) + '</td><td>' + (Number(total) > 0 && row.estimated_cost != null && Number.isFinite(Number(row.estimated_cost)) ? pct(Number(row.estimated_cost) / Number(total) * 100) : '—') + '</td><td>' + quotaCapacityRange(capacity.tokens, row.model_only_tokens_low, row.model_only_tokens_high, false) + '</td><td>' + quotaCapacityRange(capacity.usd, row.model_only_usd_low, row.model_only_usd_high, true) + '</td></tr>';
   }).join('') + '</tbody></table></div><div class="subtle quotaEstimateHint">' + t('quota_model_capacity_hint') + '</div>';
 }
 function quotaPeriodHtml(cycle, current) {
@@ -1615,8 +1624,9 @@ function quotaPeriodHtml(cycle, current) {
     html += metricHtml(t(full ? 'quota_actual_total' : 'quota_estimated_total'), quotaValue(full ? cycle.actual_total_usd : cycle.estimated_total_usd, true));
   }
   html += '</div>';
+  if (cycle.reset_baseline_used_percent != null) html += '<div class="subtle quotaEstimateHint">' + esc(t('quota_reset_detected_hint')) + '</div>';
   if (cycle.unmapped) return html + '<div class="subtle">' + t('quota_scope_unknown') + '</div>';
-  html += '<div class="subtle quotaDates">' + esc(t(cycle.used_percent === 100 ? 'quota_full_hint' : 'quota_estimate_hint')) + '</div>';
+  if (cycle.reset_baseline_used_percent == null) html += '<div class="subtle quotaDates">' + esc(t(cycle.used_percent === 100 ? 'quota_full_hint' : 'quota_estimate_hint')) + '</div>';
   return html + quotaModelsHtml(cycle);
 }
 function quotaCyclesHtml(credentials, refs = []) {
