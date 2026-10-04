@@ -980,7 +980,7 @@ function renderPriceReferenceInfo(options) {
     ['cache_price', 'cache'],
     ['cache_write_price', 'cache_write'],
   ];
-  info.innerHTML = '<div class="priceReferenceCard"><div class="priceReferenceHead"><span class="priceReferenceModel">' + esc(selectedPriceReferenceModel) + '</span><span class="priceReferenceSource">' + esc(source) + '</span></div><div class="priceReferenceGrid">' + fields.map(([label, key]) => '<div class="priceReferenceValue"><span class="priceReferenceValueLabel">' + esc(t(label)) + '</span><span class="priceReferenceValueNumber">' + formatUnitPrice(match.price[key]) + '</span></div>').join('') + '</div>' + timeRulesReferenceHtml(match.price, fields) + '</div>';
+  info.innerHTML = '<div class="priceReferenceCard"><div class="priceReferenceHead"><span class="priceReferenceModel">' + esc(selectedPriceReferenceModel) + '</span><span class="priceReferenceSource">' + esc(source) + '</span></div><div class="priceReferenceGrid">' + fields.map(([label, key]) => '<div class="priceReferenceValue"><span class="priceReferenceValueLabel">' + esc(t(label)) + '</span><span class="priceReferenceValueNumber">' + esc(formatUnitPrice(match.price[key])) + '</span></div>').join('') + '</div>' + timeRulesReferenceHtml(match.price, fields) + '</div>';
 }
 
 // 查询面板必须显示生效时段:只看四项基础价格时,一个带分时价格的模型看起来跟全天
@@ -993,7 +993,7 @@ function timeRulesReferenceHtml(price, fields) {
     '<span class="priceReferenceRuleRange">' + esc(ruleDaysLabel(rule)) + ' ' + esc(rule.start || '') + '–' + esc(rule.end || '') + '</span>' +
     '<span class="priceReferenceRuleGrid">' + fields.map(([label, key]) => {
       const overridden = rule[key] != null;
-      return '<span class="priceReferenceRuleValue' + (overridden ? ' overridden' : '') + '"><span class="priceReferenceValueLabel">' + esc(t(label)) + '</span>' + formatUnitPrice(overridden ? rule[key] : price[key]) + '</span>';
+      return '<span class="priceReferenceRuleValue' + (overridden ? ' overridden' : '') + '"><span class="priceReferenceValueLabel">' + esc(t(label)) + '</span>' + esc(formatUnitPrice(overridden ? rule[key] : price[key])) + '</span>';
     }).join('') + '</span></div>').join('');
   return '<div class="priceReferenceRules"><div class="priceReferenceRulesHead subtle">' + esc(t('time_rules_title')) + ' · ' + esc(t('time_rules_timezone_hint')) + '</div>' + rows + '</div>';
 }
@@ -1258,7 +1258,7 @@ function renderPrices() {
   renderPriceReference();
   renderTimeRules();
   const entries = Object.entries(manualModelPrices).sort(([a], [b]) => a.localeCompare(b));
-  $('priceList').innerHTML = entries.length ? entries.map(([m, p]) => '<div class="priceItem"><div><strong>' + esc(m) + '</strong><div class="priceMeta"><span>' + t('input_price') + ' ' + formatMoney(num(p.prompt), dashboardCurrencyState) + '/M</span><span>' + t('output_price') + ' ' + formatMoney(num(p.completion), dashboardCurrencyState) + '/M</span><span>' + t('cache_price') + ' ' + formatMoney(num(p.cache), dashboardCurrencyState) + '/M</span><span>' + t('cache_write_price') + ' ' + formatMoney(num(p.cache_write), dashboardCurrencyState) + '/M</span></div>' + (Array.isArray(p.time_rules) && p.time_rules.length ? '<div class="priceMeta timeRuleSummary">' + p.time_rules.map((r) => esc(r.name || t('time_rule_unnamed')) + ' ' + esc(ruleDaysLabel(r)) + ' ' + esc(r.start) + '–' + esc(r.end) + '：' + formatMoney(num(r.prompt ?? p.prompt), dashboardCurrencyState) + '/M → ' + formatMoney(num(r.completion ?? p.completion), dashboardCurrencyState) + '/M').join('；') + '</div>' : '') + '</div><div class="priceActions"><button class="btn" data-edit-price="' + esc(m) + '">' + t('edit') + '</button><button class="btn danger" data-del-price="' + esc(m) + '">' + t('delete') + '</button></div></div>').join('') : '<div class="empty">' + t('no_prices') + '</div>';
+  $('priceList').innerHTML = entries.length ? entries.map(([m, p]) => '<div class="priceItem"><div><strong>' + esc(m) + '</strong><div class="priceMeta"><span>' + t('input_price') + ' ' + esc(formatMoney(num(p.prompt), dashboardCurrencyState)) + '/M</span><span>' + t('output_price') + ' ' + esc(formatMoney(num(p.completion), dashboardCurrencyState)) + '/M</span><span>' + t('cache_price') + ' ' + esc(formatMoney(num(p.cache), dashboardCurrencyState)) + '/M</span><span>' + t('cache_write_price') + ' ' + esc(formatMoney(num(p.cache_write), dashboardCurrencyState)) + '/M</span></div>' + (Array.isArray(p.time_rules) && p.time_rules.length ? '<div class="priceMeta timeRuleSummary">' + p.time_rules.map((r) => esc(r.name || t('time_rule_unnamed')) + ' ' + esc(ruleDaysLabel(r)) + ' ' + esc(r.start) + '–' + esc(r.end) + '：' + esc(formatMoney(num(r.prompt ?? p.prompt), dashboardCurrencyState)) + '/M → ' + esc(formatMoney(num(r.completion ?? p.completion), dashboardCurrencyState)) + '/M').join('；') + '</div>' : '') + '</div><div class="priceActions"><button class="btn" data-edit-price="' + esc(m) + '">' + t('edit') + '</button><button class="btn danger" data-del-price="' + esc(m) + '">' + t('delete') + '</button></div></div>').join('') : '<div class="empty">' + t('no_prices') + '</div>';
   document.querySelectorAll('[data-edit-price]').forEach((btn) => btn.onclick = () => fillPriceForm(btn.dataset.editPrice));
   document.querySelectorAll('[data-del-price]').forEach((btn) => btn.onclick = async () => {
     try {
@@ -1310,7 +1310,7 @@ function renderClientApiStats() {
     const interactive = clientApiSelectMode && !!r.selector;
     return '<div class="apiCard' + (interactive ? ' selectable' : '') + (selected ? ' selected' : '') + '"' +
       (interactive ? ' role="button" tabindex="0" data-client-api-selector="' + esc(r.selector) + '" aria-pressed="' + (selected ? 'true' : 'false') + '"' : '') +
-      '><div><div class="apiName">' + esc(r.name) + (selected ? '<span class="selectedBadge">' + esc(t('client_api_selected')) + '</span>' : '') + '</div><div class="apiChips"><span class="chip">' + withLabel('sort_requests', formatInteger(r.requests)) + ' (<span class="ok">' + formatInteger(r.success) + '</span>&nbsp;<span class="bad">' + formatInteger(r.failure) + '</span>)</span><span class="chip">' + withLabel('sort_tokens', compact(r.tokens)) + '</span><span class="chip">' + withLabel('sort_cost', formatUsd(r.cost)) + '</span></div></div></div>';
+      '><div><div class="apiName">' + esc(r.name) + (selected ? '<span class="selectedBadge">' + esc(t('client_api_selected')) + '</span>' : '') + '</div><div class="apiChips"><span class="chip">' + withLabel('sort_requests', formatInteger(r.requests)) + ' (<span class="ok">' + formatInteger(r.success) + '</span>&nbsp;<span class="bad">' + formatInteger(r.failure) + '</span>)</span><span class="chip">' + withLabel('sort_tokens', compact(r.tokens)) + '</span><span class="chip">' + withLabel('sort_cost', esc(formatUsd(r.cost))) + '</span></div></div></div>';
   }).join('') + '</div>' : '<div class="empty">' + t('no_api_data') + '</div>';
   document.querySelectorAll('[data-client-api-selector]').forEach((card) => {
     const activate = () => selectClientApiCard(card.getAttribute('data-client-api-selector') || '', rows);
@@ -1460,7 +1460,7 @@ function barsHtml(title, rows, total, emptyText, showTokenUsage) {
   return '<div><div class="subtle" style="margin-bottom:8px">' + esc(title) + '</div><div class="barList">' + rows.slice(0, 8).map((r) => {
     const width = total ? Math.max(4, Math.round(r.requests / total * 100)) : 0;
     const tokens = showTokenUsage ? '<span class="barTokens">' + compact(r.tokens) + '</span>' : '';
-    const cost = Number.isFinite(r.cost) ? '<span class="barCost">' + formatUsd(r.cost) + '</span>' : '';
+    const cost = Number.isFinite(r.cost) ? '<span class="barCost">' + esc(formatUsd(r.cost)) + '</span>' : '';
     return '<div class="barItem"><div class="barLabel" title="' + esc(r.name) + '">' + esc(r.name) + tokens + cost + '</div><div class="barTrack"><div class="barFill" style="width:' + width + '%"></div></div><div class="barValue">' + formatInteger(r.requests) + ' ' + t('col_requests') + '</div></div>';
   }).join('') + '</div></div>';
 }
@@ -1533,19 +1533,19 @@ function apiDetailRecentHtml(rows, loading, error) {
 
 function quotaValue(value, money) {
   if (value === null || value === undefined || !Number.isFinite(Number(value))) return '—';
-  return money ? formatUsd(Number(value)) : formatInteger(Number(value));
+  return money ? esc(formatUsd(Number(value))) : formatInteger(Number(value));
 }
 function quotaTokens(value) {
   if (value === null || value === undefined || !Number.isFinite(Number(value)) || Number(value) < 0) return '—';
   return new Intl.NumberFormat(currentLocale(), { minimumFractionDigits: 2, maximumFractionDigits: 3 }).format(Number(value) / 1000000) + ' M';
 }
-function quotaModelCapacity(cycle, row) {
-  const budget = cycle.actual_total_usd ?? cycle.estimated_total_usd;
-  const cost = row.estimated_cost;
-  const tokens = Number(row.total_tokens);
-  if (budget == null || cost == null || !Number.isFinite(Number(budget)) || Number(budget) < 0 || !Number.isFinite(Number(cost)) || Number(cost) <= 0 || !Number.isFinite(tokens) || tokens <= 0) return { tokens: null, usd: null };
-  const capacity = Number(budget) / Number(cost) * tokens;
-  return Number.isFinite(capacity) ? { tokens: capacity, usd: Number(budget) } : { tokens: null, usd: null };
+function quotaModelCapacity(row) {
+  const tokens = row.model_only_estimated_total_tokens;
+  const usd = row.model_only_estimated_total_usd;
+  return {
+    tokens: tokens != null && Number.isFinite(Number(tokens)) && Number(tokens) > 0 ? Number(tokens) : null,
+    usd: usd != null && Number.isFinite(Number(usd)) && Number(usd) >= 0 ? Number(usd) : null,
+  };
 }
 function quotaWindowLabel(seconds) {
   if (seconds === 18000) return t('quota_5h');
@@ -1595,7 +1595,7 @@ function quotaModelsHtml(cycle) {
   if (!Array.isArray(rows) || !rows.length) return '<div class="empty">' + t('no_model_data') + '</div>';
   const total = cycle.summary && cycle.summary.estimated_cost;
   return '<div class="tableWrap"><table><thead><tr>' + ['col_model', 'requests_label', 'success_label', 'failure_label', 'col_total', 'col_cache_rate', 'quota_actual_cost', 'quota_cost_share', 'quota_model_capacity_tokens', 'quota_model_capacity_cost'].map((key) => '<th>' + esc(t(key)) + '</th>').join('') + '</tr></thead><tbody>' + rows.map((row) => {
-    const capacity = quotaModelCapacity(cycle, row);
+    const capacity = quotaModelCapacity(row);
     return '<tr><td class="nameCell">' + esc(row.model) + '</td>' + ['total_requests', 'success_count', 'failure_count'].map((key) => '<td>' + quotaValue(row[key], false) + '</td>').join('') + '<td>' + quotaTokens(row.total_tokens) + '</td><td>' + pct(cacheRate(row)) + '</td><td>' + quotaValue(row.estimated_cost, true) + '</td><td>' + (Number(total) > 0 && row.estimated_cost != null && Number.isFinite(Number(row.estimated_cost)) ? pct(Number(row.estimated_cost) / Number(total) * 100) : '—') + '</td><td>' + quotaTokens(capacity.tokens) + '</td><td>' + quotaValue(capacity.usd, true) + '</td></tr>';
   }).join('') + '</tbody></table></div><div class="subtle quotaEstimateHint">' + t('quota_model_capacity_hint') + '</div>';
 }
@@ -1733,6 +1733,7 @@ async function collectQuotaObservations(instanceID = '') {
     quotaSubmittedObservations.clear();
     quotaCollectionRetryAt = 0;
     apiDetailCache.clear();
+    apiDetailSeq++;
     apiDetailLastRender = null;
     quotaExpiredRefreshes.clear();
     antigravityQuotaRefreshAt.clear();
@@ -1785,7 +1786,7 @@ async function collectQuotaObservations(instanceID = '') {
 }
 
 function renderApiDetailContent(apiData, detailState) {
-  apiDetailLastRender = { api: selectedApi, apiData, detailState };
+  apiDetailLastRender = { api: selectedApi, cacheKey: apiDetailCacheKey(selectedApi), apiData, detailState };
   const detail = detailState && detailState.detail;
   const rows = (detail && detail.recent_events) || [];
   const loading = detailState && detailState.loading;
@@ -1808,7 +1809,7 @@ function renderApiDetailContent(apiData, detailState) {
     metricHtml(t('total_tokens_label'), compact(summary.total_tokens), '<span>' + withLabel('cached_tokens', compact(summary.cached_tokens)) + '</span><span>' + withLabel('cache_write_tokens', compact(summary.cache_write_tokens)) + '</span><span>' + withLabel('reasoning_tokens', compact(summary.reasoning_tokens)) + '</span>') +
     metricHtml(t('avg_latency'), formatMs(summary.avg_latency_ms)) +
     metricHtml(t('model_count'), formatInteger(models.length), sources.length ? '<span>' + t('source_count') + ' ' + formatInteger(sources.length) + '</span>' : '') +
-    metricHtml(t('total_cost'), formatUsd(totalCost), '<span>' + withLabel('total_tokens_label', compact(summary.total_tokens)) + '</span>') +
+    metricHtml(t('total_cost'), esc(formatUsd(totalCost)), '<span>' + withLabel('total_tokens_label', compact(summary.total_tokens)) + '</span>') +
     '</div>' +
     '<div class="splitGrid">' +
     barsHtml(t('model_distribution'), models, requests, t('no_model_data'), true) +
@@ -1844,11 +1845,11 @@ async function renderApiDetail() {
   renderApiDetailContent(apiData, cached ? { detail: cached, loading: true } : { loading: true });
   try {
     const result = await fetchApiDetailData(api);
-    if (seq !== apiDetailSeq || api !== selectedApi) return;
+    if (seq !== apiDetailSeq || api !== selectedApi || cacheKey !== apiDetailCacheKey(api)) return;
     cacheApiDetail(cacheKey, result);
     renderApiDetailContent(apiData, { detail: result });
   } catch (e) {
-    if (seq !== apiDetailSeq || api !== selectedApi) return;
+    if (seq !== apiDetailSeq || api !== selectedApi || cacheKey !== apiDetailCacheKey(api)) return;
     renderApiDetailContent(apiData, cached ? { detail: cached, error: e } : { error: e });
   }
 }
@@ -1865,7 +1866,7 @@ function renderApiDetailFromCache() {
     return;
   }
   setText('apiDetailTitle', friendlyApiName(selectedApi));
-  if (apiDetailLastRender && apiDetailLastRender.api === selectedApi) {
+  if (apiDetailLastRender && apiDetailLastRender.cacheKey === apiDetailCacheKey(selectedApi)) {
     renderApiDetailContent(apiData, apiDetailLastRender.detailState);
     return;
   }
@@ -1882,7 +1883,7 @@ function renderModelStats() {
     const cost = aggregateCost(r, modelPrices, manualModelPrices);
     const cRate = cacheRate(r);
     const cpM = costPerMillion(r, modelPrices, manualModelPrices);
-    return '<tr><td class="nameCell">' + esc(r.model) + '</td><td>' + formatInteger(r.total_requests) + ' <span class="ok">(' + formatInteger(r.success_count) + '</span> <span class="bad">' + formatInteger(r.failure_count) + ')</span></td><td>' + compact(r.total_tokens) + '</td><td>' + formatMs(r.avg_latency_ms) + '</td><td class="' + (rate >= 95 ? 'ok' : rate >= 80 ? 'neutral' : 'bad') + '">' + pct(rate) + '</td><td class="' + (cRate >= 50 ? 'ok' : cRate >= 20 ? 'neutral' : '') + '">' + pct(cRate) + '</td><td>' + formatUsd(cost) + '</td><td>' + (cpM ? formatUsd(cpM) + ' ' + t('cost_per_m_unit') : '-') + '</td></tr>';
+    return '<tr><td class="nameCell">' + esc(r.model) + '</td><td>' + formatInteger(r.total_requests) + ' <span class="ok">(' + formatInteger(r.success_count) + '</span> <span class="bad">' + formatInteger(r.failure_count) + ')</span></td><td>' + compact(r.total_tokens) + '</td><td>' + formatMs(r.avg_latency_ms) + '</td><td class="' + (rate >= 95 ? 'ok' : rate >= 80 ? 'neutral' : 'bad') + '">' + pct(rate) + '</td><td class="' + (cRate >= 50 ? 'ok' : cRate >= 20 ? 'neutral' : '') + '">' + pct(cRate) + '</td><td>' + esc(formatUsd(cost)) + '</td><td>' + (cpM ? esc(formatUsd(cpM)) + ' ' + t('cost_per_m_unit') : '-') + '</td></tr>';
   }).join('') + '</tbody></table>' : '<div class="empty">' + t('no_model_data') + '</div>';
 }
 
@@ -2096,8 +2097,7 @@ function renderEventsContent() {
   renderFilters();
 }
 
-async function renderEvents() {
-  // Fetch paginated events from server
+function eventsQueryURL() {
   const params = new URLSearchParams();
   params.set('limit', String(eventsLimit));
   params.set('offset', String(eventsOffset));
@@ -2106,15 +2106,19 @@ async function renderEvents() {
   const fs = $('filterSource').value; if (fs) params.set('source', fs);
   const fa = $('filterAuth').value; if (fa) params.set('auth', fa);
   if (selectedClientApiSelector()) params.set('client_api', selectedClientApiSelector());
+  return pluginEndpoint('dashboard-events') + '?' + params.toString();
+}
+
+async function renderEvents() {
   const requestSeq = ++eventsSeq;
-  const url = pluginEndpoint('dashboard-events') + '?' + params.toString();
+  const url = eventsQueryURL();
   try {
     const data = normalizeEventsPayload(await fetchConditionalJsonPayload('dashboard-events:' + url, url, pluginFetchOptions({ cache: 'no-store' })));
-    if (requestSeq !== eventsSeq) return;
+    if (requestSeq !== eventsSeq || url !== eventsQueryURL()) return;
     eventsData = data;
     eventsDataUrl = url;
   } catch (e) {
-    if (requestSeq !== eventsSeq) return;
+    if (requestSeq !== eventsSeq || url !== eventsQueryURL()) return;
     if (!eventsData || eventsDataUrl !== url) {
       eventsData = { events: [], total: 0, limit: eventsLimit, offset: 0 };
       eventsDataUrl = url;

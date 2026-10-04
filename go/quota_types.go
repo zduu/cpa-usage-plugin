@@ -91,7 +91,9 @@ type quotaUsageSummary struct {
 
 type quotaModelStat struct {
 	ModelStat
-	CostUSD *float64 `json:"estimated_cost"`
+	CostUSD              *float64 `json:"estimated_cost"`
+	ModelOnlyTotalTokens *float64 `json:"model_only_estimated_total_tokens"`
+	ModelOnlyTotalUSD    *float64 `json:"model_only_estimated_total_usd"`
 }
 
 type quotaCurrentDTO struct {

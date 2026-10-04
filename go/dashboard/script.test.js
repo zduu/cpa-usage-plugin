@@ -781,8 +781,8 @@ test('quota model table preserves accounting columns, adds cache rate and model 
   const { context } = createDashboardHarness({ language: 'en' });
   await context.load();
   const cheap = { model: '<cheap>', total_requests: 3, success_count: 2, failure_count: 1, total_tokens: 1000000,
-    input_tokens: 800000, output_tokens: 200000, cached_tokens: 400000, cache_write_tokens: 0, estimated_cost: 10 };
-  const expensive = { ...cheap, model: 'expensive', total_tokens: 500000, estimated_cost: 25 };
+    input_tokens: 800000, output_tokens: 200000, cached_tokens: 400000, cache_write_tokens: 0, estimated_cost: 10, model_only_estimated_total_tokens: 8000000, model_only_estimated_total_usd: 80 };
+  const expensive = { ...cheap, model: 'expensive', total_tokens: 500000, estimated_cost: 25, model_only_estimated_total_tokens: 2500000, model_only_estimated_total_usd: 125 };
   const cycle = { estimated_total_usd: 100, used_percent: 35, summary: { total_requests: 6, total_tokens: 1500000, estimated_cost: 35 }, model_stats: [cheap, expensive] };
   const html = context.quotaModelsHtml(cycle);
   const headers = Array.from(html.matchAll(/<th>(.*?)<\/th>/g), match => match[1]);
@@ -792,17 +792,34 @@ test('quota model table preserves accounting columns, adds cache rate and model 
   assert.match(html, /0\.50 M/);
   assert.match(html, /50\.0%/);
   assert.match(html, /28\.6%/);
-  assert.match(html, /10\.00 M/);
-  assert.match(html, /2\.00 M/);
-  assert.match(html, /\$100\.00/);
+  assert.match(html, /8\.00 M/);
+  assert.match(html, /2\.50 M/);
+  assert.match(html, /\$80\.00/);
+  assert.match(html, /\$125\.00/);
+  assert.doesNotMatch(html, /\$100\.00/);
   assert.match(context.quotaPeriodHtml(cycle, true), /1\.50 M/);
-  const previous = context.quotaModelCapacity({ actual_total_usd: 200, estimated_total_usd: null }, cheap);
-  assert.equal(previous.tokens, 20000000);
-  assert.equal(previous.usd, 200);
-  for (const row of [{ ...cheap, estimated_cost: null }, { ...cheap, estimated_cost: 0 }, { ...cheap, total_tokens: 0 }]) {
-    assert.equal(context.quotaModelCapacity(cycle, row).tokens, null);
+  // Backend calibration is independent of the shared budget and whole-period cost share.
+  const calibrated = context.quotaModelCapacity(cheap);
+  assert.equal(calibrated.tokens, 8000000);
+  assert.equal(calibrated.usd, 80);
+  const noObservation = { ...cheap, model_only_estimated_total_tokens: null, model_only_estimated_total_usd: null };
+  assert.equal(context.quotaModelCapacity(noObservation).tokens, null);
+  assert.equal(context.quotaModelCapacity(noObservation).usd, null);
+  const missing = { total_tokens: 1000000, estimated_cost: 10 };
+  assert.equal(context.quotaModelCapacity(missing).tokens, null);
+  assert.equal(context.quotaModelCapacity(missing).usd, null);
+  for (const invalid of [NaN, Infinity, -1]) {
+    const result = context.quotaModelCapacity({ model_only_estimated_total_tokens: invalid, model_only_estimated_total_usd: invalid });
+    assert.equal(result.tokens, null);
+    assert.equal(result.usd, null);
   }
-  assert.equal(context.quotaModelCapacity({ estimated_total_usd: null }, cheap).tokens, null);
+  const free = context.quotaModelCapacity({ model_only_estimated_total_tokens: 1000000, model_only_estimated_total_usd: 0 });
+  assert.equal(free.tokens, 1000000);
+  assert.equal(free.usd, 0);
+  const unpriced = context.quotaModelCapacity({ model_only_estimated_total_tokens: 1000000, model_only_estimated_total_usd: null });
+  assert.equal(unpriced.tokens, 1000000);
+  assert.equal(unpriced.usd, null);
+  assert.doesNotMatch(context.quotaModelsHtml({ ...cycle, model_stats: [noObservation] }), /NaN|Infinity|8\.00 M|\$80\.00|\$100\.00/);
   assert.equal(context.quotaTokens(null), '—');
   assert.equal(context.quotaTokens(0), '0.00 M');
   assert.doesNotMatch(context.quotaPeriodHtml({ summary: null, model_stats: [] }, true), /does not identify the models/);
@@ -1033,6 +1050,76 @@ async function waitFor(fn) {
 async function flushTasks(rounds = 20) {
   for (let i = 0; i < rounds; i++) await new Promise((resolve) => setImmediate(resolve));
 }
+
+test('API detail ignores responses after the range or client filter changes before its next request', async () => {
+  for (const filter of ['range', 'client']) for (const fails of [false, true]) {
+    const { context, document } = createDashboardHarness();
+    await context.load();
+    let resolve, reject;
+    context.fetchApiDetailData = () => new Promise((yes, no) => { resolve = yes; reject = no; });
+    const renders = [];
+    context.renderApiDetailContent = (_, state) => { renders.push(state); };
+    const pending = context.renderApiDetail();
+    if (filter === 'range') document.getElementById('range').value = '7d';
+    else vm.runInContext('selectedClientApi = { selector: "another-client" };', context);
+    if (fails) reject(new Error('old filter failed'));
+    else resolve({ summary: { total_requests: 999 }, recent_events: [] });
+    await pending;
+    assert.equal(renders.length, 1, `${filter}/${fails}: old response rendered under the new filter`);
+  }
+});
+
+test('cached API detail does not cross range or client filters during a local rerender', async () => {
+  for (const filter of ['range', 'client']) {
+    const { context, document } = createDashboardHarness();
+    await context.load();
+    const oldDetail = vm.runInContext('apiDetailLastRender.detailState.detail', context);
+    if (filter === 'range') document.getElementById('range').value = '7d';
+    else vm.runInContext('selectedClientApi = { selector: "another-client" }; filteredSummaryData = summaryData;', context);
+    const renders = [];
+    context.renderApiDetailContent = (_, state) => { renders.push(state); };
+    context.renderApiDetailFromCache();
+    assert.notEqual(renders[0].detail, oldDetail, `${filter}: stale filter data was reused`);
+  }
+});
+
+test('events ignore a response when filters change while a new summary is loading', async () => {
+  for (const filter of ['range', 'client']) for (const fails of [false, true]) {
+    const { context, document } = createDashboardHarness();
+    await context.load();
+    const before = vm.runInContext('eventsData', context);
+    let resolve, reject;
+    context.fetchConditionalJsonPayload = () => new Promise((yes, no) => { resolve = yes; reject = no; });
+    const pending = context.renderEvents();
+    if (filter === 'range') document.getElementById('range').value = '7d';
+    else vm.runInContext('selectedClientApi = { selector: "another-client" };', context);
+    if (fails) reject(new Error('old filter failed'));
+    else resolve({ events: [], total: 999, offset: 0, limit: 50 });
+    await pending;
+    assert.equal(vm.runInContext('eventsData', context), before, `${filter}/${fails}: obsolete events were applied`);
+  }
+});
+
+test('tiny USD costs stay visible as escaped text in dashboard HTML', async () => {
+  const { context, document } = createDashboardHarness({ language: 'zh-CN' });
+  await context.load();
+  const tinyCost = 0.00000001;
+  const formatted = context.formatUsd(tinyCost);
+  assert.ok(formatted.startsWith('<'), 'fixture must exercise the threshold marker');
+  const escaped = formatted.replace('<', '&lt;');
+  const bars = context.barsHtml('cost', [{ name: 'model', requests: 1, cost: tinyCost }], 1, '', false);
+  assert.ok(bars.includes(escaped), 'a cost must not become an HTML tag');
+  const cycle = { used_percent: 50, estimated_total_usd: tinyCost, summary: { estimated_cost: tinyCost },
+    model_stats: [{ model: 'tiny', total_requests: 1, total_tokens: 1, estimated_cost: tinyCost }] };
+  const quota = context.quotaPeriodHtml(cycle, true);
+  assert.ok(quota.includes(escaped));
+  assert.ok(!quota.includes(formatted));
+  vm.runInContext('summaryData.model_stats = [{ model: "tiny", total_requests: 1, total_tokens: 1000000, estimated_cost: 0.00000001 }];', context);
+  context.renderModelStats();
+  const models = document.getElementById('modelStats').innerHTML;
+  assert.ok(models.includes(escaped));
+  assert.ok(!models.includes(formatted));
+});
 
 test('dashboard loads and changes range when browser storage is unavailable', async () => {
   for (const denied of ['denyStorageReads', 'denyStorageWrites', 'denyStorageAccess']) {

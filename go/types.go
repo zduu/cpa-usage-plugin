@@ -349,20 +349,28 @@ func unixTimeFromFlexibleNumber(value float64) time.Time {
 		return time.Time{}
 	}
 	abs := math.Abs(value)
+	var sec, nsec float64
 	switch {
 	case abs >= 1e17:
-		sec := math.Trunc(value / 1e9)
-		nsec := math.Round(value - sec*1e9)
-		return time.Unix(int64(sec), int64(nsec)).UTC()
+		sec = math.Trunc(value / 1e9)
+		nsec = math.Round(value - sec*1e9)
 	case abs >= 1e12:
-		sec := math.Trunc(value / 1e3)
-		nsec := math.Round((value - sec*1e3) * 1e6)
-		return time.Unix(int64(sec), int64(nsec)).UTC()
+		sec = math.Trunc(value / 1e3)
+		nsec = math.Round((value - sec*1e3) * 1e6)
 	default:
-		sec := math.Trunc(value)
-		nsec := math.Round((value - sec) * 1e9)
-		return time.Unix(int64(sec), int64(nsec)).UTC()
+		sec = math.Trunc(value)
+		nsec = math.Round((value - sec) * 1e9)
 	}
+	// Check before converting to int64: finite JSON numbers can still overflow
+	// it or create years that time.Time cannot serialize in any later backup.
+	if sec < -62167219200 || sec >= 253402300800 {
+		return time.Time{}
+	}
+	timestamp := time.Unix(int64(sec), int64(nsec)).UTC()
+	if timestamp.Year() < 0 || timestamp.Year() > 9999 {
+		return time.Time{}
+	}
+	return timestamp
 }
 
 func parseFlexibleDuration(raw json.RawMessage, numberUnit time.Duration) time.Duration {

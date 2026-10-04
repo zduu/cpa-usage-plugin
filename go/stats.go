@@ -892,6 +892,19 @@ func (s *RequestStatistics) Record(record UsageRecord) {
 	var persistDetail *persistedDetail
 	s.mu.Lock()
 	detail := requestDetailFromUsageRecord(record, timestamp, s.logResponseHeaders)
+	// Native callbacks count executions, and retries can reuse the host request
+	// ID. Keep their persisted identities distinct just as their main-ledger
+	// counters are distinct. Imported and replayed IDs remain unchanged.
+	if detail.RecordID != "" && s.quota != nil {
+		for {
+			_, exists := s.quota.Facts[detail.RecordID]
+			_, deleted := s.quota.Deleted[detail.RecordID]
+			if !exists && !deleted {
+				break
+			}
+			detail.RecordID = newQuotaRecordID()
+		}
+	}
 
 	now := time.Now()
 	if s.recordDetailLocked(statsKey, modelName, detail, requestDedupKey{}, now, false) {
@@ -941,9 +954,9 @@ func requestDetailFromUsageRecord(record UsageRecord, timestamp time.Time, white
 		Stream:         record.Stream,
 		Thinking:       usageThinking(record),
 		Tokens: TokenStats{
-			InputTokens:      record.Detail.InputTokens,
-			OutputTokens:     record.Detail.OutputTokens,
-			ReasoningTokens:  record.Detail.ReasoningTokens,
+			InputTokens:      nonNegativeInt64(record.Detail.InputTokens),
+			OutputTokens:     nonNegativeInt64(record.Detail.OutputTokens),
+			ReasoningTokens:  nonNegativeInt64(record.Detail.ReasoningTokens),
 			CachedTokens:     cacheReadTokens,
 			CacheReadTokens:  cacheReadTokens,
 			CacheTokens:      cacheTokens,

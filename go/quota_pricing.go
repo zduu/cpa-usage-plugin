@@ -16,7 +16,7 @@ func quotaFactMatches(f quotaFact, w quotaWindow, p *quotaPeriod) bool {
 }
 
 func quotaPriceKnown(f quotaFact, pricing *pricingSnapshot) bool {
-	if f.Tokens.TotalTokens == 0 {
+	if detailTotalTokensForRequest(f.detail()) == 0 && normalizedCacheTokens(f.Tokens) == 0 {
 		return true
 	}
 	if pricing == nil {
@@ -139,6 +139,7 @@ func (s *RequestStatistics) quotaCyclesForAPILocked(api string, now time.Time) [
 		}
 		group := quotaGroupDTO{GroupID: w.Group + ":" + w.Slot, Name: w.Name, WindowSeconds: w.Seconds}
 		if current := quotaBuildPeriod(w, w.Current, facts, pricing); current != nil {
+			applyQuotaModelEstimates(current, w, w.Current, facts, pricing, now, true)
 			var remaining *float64
 			if current.UsedPercent != nil && *current.UsedPercent == 100 {
 				if !w.Unmapped {
@@ -151,6 +152,7 @@ func (s *RequestStatistics) quotaCyclesForAPILocked(api string, now time.Time) [
 			group.Current = &quotaCurrentDTO{quotaCycleDTO: *current, EstimatedRemainingUSD: remaining}
 		}
 		group.Previous = quotaBuildPeriod(w, w.Previous, facts, pricing)
+		applyQuotaModelEstimates(group.Previous, w, w.Previous, facts, pricing, now, false)
 		if previous := group.Previous; previous != nil && previous.UsedPercent != nil && *previous.UsedPercent != 100 {
 			previous.EstimatedTotalUSD, _ = quotaEstimate(previous)
 		}
