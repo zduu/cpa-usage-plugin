@@ -7,9 +7,17 @@ import (
 )
 
 // A conservative one-percentage-point endpoint-difference error, even when
-// raw upstream values expose more precision. Ten ticks bound direct error.
+// raw upstream values expose more precision. Longer windows allow earlier,
+// wider estimates; disconnected intervals still accumulate endpoint error.
 const quotaModelQuantum = .01
 const quotaModelMinDelta = .10
+
+func quotaMinimumDelta(seconds int64) float64 {
+	if seconds >= 7*86400 {
+		return .03
+	}
+	return quotaModelMinDelta
+}
 
 type quotaModelInterval struct {
 	start, end time.Time
@@ -172,6 +180,7 @@ func applyQuotaModelEstimates(dto *quotaCycleDTO, w quotaWindow, p *quotaPeriod,
 		end                              time.Time
 		unpriced                         bool
 	}
+	minimumDelta := quotaMinimumDelta(w.Seconds)
 	models := make(map[string]calibration)
 	var eligible []quotaModelInterval
 	bad := 0
@@ -201,7 +210,7 @@ func applyQuotaModelEstimates(dto *quotaCycleDTO, w quotaWindow, p *quotaPeriod,
 	for i := range dto.ModelStats {
 		row := &dto.ModelStats[i]
 		c, ok := models[row.Model]
-		if !ok || c.delta+1e-12 < quotaModelMinDelta || c.delta+1e-12 < 10*c.uncertainty {
+		if !ok || c.delta+1e-12 < minimumDelta || c.delta+1e-12 < minimumDelta/quotaModelQuantum*c.uncertainty {
 			continue
 		}
 		tokens := c.tokens / c.delta
@@ -217,7 +226,7 @@ func applyQuotaModelEstimates(dto *quotaCycleDTO, w quotaWindow, p *quotaPeriod,
 			row.ModelOnlyUSDLow, row.ModelOnlyUSDHigh = &low, &high
 		}
 	}
-	fitted := fitQuotaMixedModels(eligible)
+	fitted := fitQuotaMixedModels(eligible, minimumDelta)
 	for i := range dto.ModelStats {
 		row := &dto.ModelStats[i]
 		if capacity, ok := fitted[row.Model]; ok && row.ModelOnlyTotalTokens == nil {

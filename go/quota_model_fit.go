@@ -15,7 +15,7 @@ type quotaFittedCapacity struct {
 // Prices never enter the fit: changing prices only changes the dollar conversion.
 // Column scaling allows small-volume models to participate without being lost
 // merely because another model has more recorded tokens.
-func fitQuotaMixedModels(intervals []quotaModelInterval) map[string]quotaFittedCapacity {
+func fitQuotaMixedModels(intervals []quotaModelInterval, minimumDelta float64) map[string]quotaFittedCapacity {
 	totals := make(map[string]quotaIntervalModel)
 	hasMixed := false
 	for _, interval := range intervals {
@@ -150,7 +150,7 @@ func fitQuotaMixedModels(intervals []quotaModelInterval) map[string]quotaFittedC
 		}
 		roundingMargin += math.Abs(previousWeight) * quotaModelQuantum / 2
 		errorMargin = math.Max(errorMargin, roundingMargin)
-		if beta[j]/scale[j]*totals[name].tokens/1e6+1e-12 < quotaModelMinDelta {
+		if beta[j]/scale[j]*totals[name].tokens/1e6+1e-12 < minimumDelta {
 			continue
 		}
 		if beta[j] <= errorMargin || beta[j] <= 0 || math.IsNaN(beta[j]) || math.IsInf(beta[j], 0) {

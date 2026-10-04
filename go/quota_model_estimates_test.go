@@ -349,3 +349,44 @@ func TestQuotaCapacityRangesRemainJSONSafeAtExtremePrices(t *testing.T) {
 		}
 	}
 }
+
+func TestQuotaWeeklyCapacityUsesEarlierWiderEstimate(t *testing.T) {
+	for _, seconds := range []int64{18000, 604800, 2592000} {
+		w, p, facts, now := quotaModelFixture()
+		w.Seconds = seconds
+		p.Samples, facts = p.Samples[:2], facts[:1]
+		p.Samples[0].Used, p.Samples[1].Used = .1, .13
+		rows := quotaModelTestResult(w, p, facts, nil, now, true)
+		if seconds < 604800 {
+			if rows["a"].ModelOnlyTotalTokens != nil {
+				t.Fatal("short-window threshold changed")
+			}
+			continue
+		}
+		quotaModelAssert(t, rows["a"].ModelOnlyTotalTokens, 1e6/.03)
+		quotaModelAssert(t, rows["a"].ModelOnlyTokensLow, 1e6/.04)
+		quotaModelAssert(t, rows["a"].ModelOnlyTokensHigh, 1e6/.02)
+		p.Samples[1].Used = .129
+		rows = quotaModelTestResult(w, p, facts, nil, now, true)
+		if rows["a"].ModelOnlyTotalTokens != nil {
+			t.Fatal("less than three points produced an estimate")
+		}
+	}
+}
+
+func TestQuotaWeeklyResetEstimateUsesWindowThreshold(t *testing.T) {
+	w, p, facts, _ := quotaModelFixture()
+	p.Samples = p.Samples[:3]
+	p.Samples[0].Used, p.Samples[1].Used, p.Samples[2].Used = .8, .2, .23
+	price := quotaModelTestPrice(map[string]ModelPrice{"a": {Prompt: 8}, "b": {Prompt: 8}})
+	w.Seconds = 604800
+	dto := quotaBuildPeriod(w, p, facts[:2], price)
+	total, remaining := quotaEstimate(dto)
+	quotaModelAssert(t, total, 8/.03)
+	quotaModelAssert(t, remaining, 8/.03*.77)
+	w.Seconds = 18000
+	total, _ = quotaEstimate(quotaBuildPeriod(w, p, facts[:2], price))
+	if total != nil {
+		t.Fatal("short reset window bypassed threshold")
+	}
+}
