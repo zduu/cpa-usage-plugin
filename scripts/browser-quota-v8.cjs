@@ -94,7 +94,7 @@ const { chromium } = require(process.env.CPA_PLAYWRIGHT || 'playwright');
     await quota.screenshot({ path: path.join(output, 'previous-period.png') });
     await quota.locator('[data-quota-period="current"]').click();
     const headers = await quota.locator('th').allTextContents();
-    assert.deepEqual(headers, ['Model', 'Requests', 'Success', 'Failure', 'Total', 'Cache Hit Rate', 'Actual cost', 'Cost share', 'Model-only estimated total tokens', 'Model-only estimated total cost']);
+    assert.deepEqual(headers, ['Model', 'Requests', 'Success', 'Failure', 'Total', 'Cache Hit Rate', 'Actual cost', 'Cost share', 'Model-only estimated total tokens']);
     assert.match(await quota.textContent(), /1\.00 M/);
     assert.match(await quota.textContent(), /2\.00 M/);
     const countdown = await quota.locator('[data-quota-reset]').textContent();

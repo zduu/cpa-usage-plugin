@@ -1539,23 +1539,6 @@ function quotaTokens(value) {
   if (value === null || value === undefined || !Number.isFinite(Number(value)) || Number(value) < 0) return '—';
   return new Intl.NumberFormat(currentLocale(), { minimumFractionDigits: 2, maximumFractionDigits: 3 }).format(Number(value) / 1000000) + ' M';
 }
-function quotaModelCapacity(row) {
-  const tokens = row.model_only_estimated_total_tokens;
-  const usd = row.model_only_estimated_total_usd;
-  return {
-    tokens: tokens != null && Number.isFinite(Number(tokens)) && Number(tokens) > 0 ? Number(tokens) : null,
-    usd: usd != null && Number.isFinite(Number(usd)) && Number(usd) >= 0 ? Number(usd) : null,
-  };
-}
-function quotaCapacityRange(value, low, high, money) {
-  const format = money ? (n) => quotaValue(n, true) : quotaTokens;
-  if (value == null) return '—';
-  if (low != null && high != null && Number.isFinite(Number(low)) && Number.isFinite(Number(high)) &&
-      Number(low) >= 0 && Number(low) <= value && Number(high) >= value) {
-    return format(Number(low)) + ' – ' + format(Number(high));
-  }
-  return format(value);
-}
 function quotaWindowLabel(seconds) {
   if (seconds === 18000) return t('quota_5h');
   if (seconds === 604800) return t('quota_week');
@@ -1603,9 +1586,8 @@ function quotaModelsHtml(cycle) {
   const rows = cycle && cycle.model_stats;
   if (!Array.isArray(rows) || !rows.length) return '<div class="empty">' + t('no_model_data') + '</div>';
   const total = cycle.summary && cycle.summary.estimated_cost;
-  return '<div class="tableWrap"><table><thead><tr>' + ['col_model', 'requests_label', 'success_label', 'failure_label', 'col_total', 'col_cache_rate', 'quota_actual_cost', 'quota_cost_share', 'quota_model_capacity_tokens', 'quota_model_capacity_cost'].map((key) => '<th>' + esc(t(key)) + '</th>').join('') + '</tr></thead><tbody>' + rows.map((row) => {
-    const capacity = quotaModelCapacity(row);
-    return '<tr><td class="nameCell">' + esc(row.model) + '</td>' + ['total_requests', 'success_count', 'failure_count'].map((key) => '<td>' + quotaValue(row[key], false) + '</td>').join('') + '<td>' + quotaTokens(row.total_tokens) + '</td><td>' + pct(cacheRate(row)) + '</td><td>' + quotaValue(row.estimated_cost, true) + '</td><td>' + (Number(total) > 0 && row.estimated_cost != null && Number.isFinite(Number(row.estimated_cost)) ? pct(Number(row.estimated_cost) / Number(total) * 100) : '—') + '</td><td>' + quotaCapacityRange(capacity.tokens, row.model_only_tokens_low, row.model_only_tokens_high, false) + '</td><td>' + quotaCapacityRange(capacity.usd, row.model_only_usd_low, row.model_only_usd_high, true) + '</td></tr>';
+  return '<div class="tableWrap"><table><thead><tr>' + ['col_model', 'requests_label', 'success_label', 'failure_label', 'col_total', 'col_cache_rate', 'quota_actual_cost', 'quota_cost_share', 'quota_model_capacity_tokens'].map((key) => '<th>' + esc(t(key)) + '</th>').join('') + '</tr></thead><tbody>' + rows.map((row) => {
+    return '<tr><td class="nameCell">' + esc(row.model) + '</td>' + ['total_requests', 'success_count', 'failure_count'].map((key) => '<td>' + quotaValue(row[key], false) + '</td>').join('') + '<td>' + quotaTokens(row.total_tokens) + '</td><td>' + pct(cacheRate(row)) + '</td><td>' + quotaValue(row.estimated_cost, true) + '</td><td>' + (Number(total) > 0 && row.estimated_cost != null && Number.isFinite(Number(row.estimated_cost)) ? pct(Number(row.estimated_cost) / Number(total) * 100) : '—') + '</td><td>' + quotaTokens(row.model_only_estimated_total_tokens) + '</td></tr>';
   }).join('') + '</tbody></table></div><div class="subtle quotaEstimateHint">' + t('quota_model_capacity_hint') + '</div>';
 }
 function quotaPeriodHtml(cycle, current) {

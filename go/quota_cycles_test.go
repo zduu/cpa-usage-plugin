@@ -1387,7 +1387,7 @@ func TestQuotaResetCardSurvivesCompactionAndSnapshot(t *testing.T) {
 				quotaModelAssert(t, cycle.Summary.CostUSD, 5)
 				quotaModelAssert(t, cycle.EstimatedTotalUSD, 5/.3)
 				quotaModelAssert(t, cycle.EstimatedRemainingUSD, 5/.3-5)
-				quotaModelAssert(t, cycle.ModelStats[0].ModelOnlyTotalTokens, 10e6)
+				quotaModelAssert(t, cycle.ModelStats[0].ModelOnlyTotalTokens, 1e6/.3)
 			}
 			check(s)
 			snapshot := s.Snapshot()

@@ -777,50 +777,34 @@ test('quota current capacity uses the full amount only at exactly 100 percent', 
   assert.doesNotMatch(unknown, /3\.57|NaN|Infinity/);
 });
 
-test('quota model table preserves accounting columns, adds cache rate and model capacity, and uses million tokens', async () => {
+test('quota model table shows budget-based token capacity without a model-only cost column', async () => {
   const { context } = createDashboardHarness({ language: 'en' });
   await context.load();
   const cheap = { model: '<cheap>', total_requests: 3, success_count: 2, failure_count: 1, total_tokens: 1000000,
-    input_tokens: 800000, output_tokens: 200000, cached_tokens: 400000, cache_write_tokens: 0, estimated_cost: 10, model_only_estimated_total_tokens: 8000000, model_only_estimated_total_usd: 80 };
-  const expensive = { ...cheap, model: 'expensive', total_tokens: 500000, estimated_cost: 25, model_only_estimated_total_tokens: 2500000, model_only_estimated_total_usd: 125 };
+    input_tokens: 800000, output_tokens: 200000, cached_tokens: 400000, cache_write_tokens: 0,
+    estimated_cost: 10, model_only_estimated_total_tokens: 10000000 };
+  const expensive = { ...cheap, model: 'expensive', total_tokens: 500000, estimated_cost: 25, model_only_estimated_total_tokens: 2000000 };
   const cycle = { estimated_total_usd: 100, used_percent: 35, summary: { total_requests: 6, total_tokens: 1500000, estimated_cost: 35 }, model_stats: [cheap, expensive] };
   const html = context.quotaModelsHtml(cycle);
   const headers = Array.from(html.matchAll(/<th>(.*?)<\/th>/g), match => match[1]);
-  assert.deepEqual(headers, ['Model', 'Requests', 'Success', 'Failure', 'Total', 'Cache Hit Rate', 'Actual cost', 'Cost share', 'Model-only estimated total tokens', 'Model-only estimated total cost']);
+  assert.deepEqual(headers, ['Model', 'Requests', 'Success', 'Failure', 'Total', 'Cache Hit Rate', 'Actual cost', 'Cost share', 'Model-only estimated total tokens']);
   assert.match(html, /&lt;cheap&gt;/);
   assert.match(html, /1\.00 M/);
   assert.match(html, /0\.50 M/);
   assert.match(html, /50\.0%/);
   assert.match(html, /28\.6%/);
-  assert.match(html, /8\.00 M/);
-  assert.match(html, /2\.50 M/);
-  assert.match(html, /\$80\.00/);
-  assert.match(html, /\$125\.00/);
-  assert.doesNotMatch(html, /\$100\.00/);
+  assert.match(html, /10\.00 M/);
+  assert.match(html, /2\.00 M/);
+  assert.match(html, /estimated capacity × this model’s period tokens ÷ its actual cost/);
+  assert.doesNotMatch(html, /Model-only estimated total cost|reference range|percentage points|\$100\.00/);
   assert.match(context.quotaPeriodHtml(cycle, true), /1\.50 M/);
-  // Backend calibration is independent of the shared budget and whole-period cost share.
-  const calibrated = context.quotaModelCapacity(cheap);
-  assert.equal(calibrated.tokens, 8000000);
-  assert.equal(calibrated.usd, 80);
-  const noObservation = { ...cheap, model_only_estimated_total_tokens: null, model_only_estimated_total_usd: null };
-  assert.equal(context.quotaModelCapacity(noObservation).tokens, null);
-  assert.equal(context.quotaModelCapacity(noObservation).usd, null);
-  const missing = { total_tokens: 1000000, estimated_cost: 10 };
-  assert.equal(context.quotaModelCapacity(missing).tokens, null);
-  assert.equal(context.quotaModelCapacity(missing).usd, null);
-  for (const invalid of [NaN, Infinity, -1]) {
-    const result = context.quotaModelCapacity({ model_only_estimated_total_tokens: invalid, model_only_estimated_total_usd: invalid });
-    assert.equal(result.tokens, null);
-    assert.equal(result.usd, null);
+  assert.equal(Array.from(html.matchAll(/<td[ >]/g)).length, headers.length * 2);
+  for (const invalid of [null, undefined, NaN, Infinity, -1]) {
+    const row = { ...cheap, model_only_estimated_total_tokens: invalid };
+    const unknown = context.quotaModelsHtml({ ...cycle, model_stats: [row] });
+    assert.match(unknown, /<td>—<\/td><\/tr>/);
+    assert.doesNotMatch(unknown, /NaN|Infinity|10\.00 M/);
   }
-  const free = context.quotaModelCapacity({ model_only_estimated_total_tokens: 1000000, model_only_estimated_total_usd: 0 });
-  assert.equal(free.tokens, 1000000);
-  assert.equal(free.usd, 0);
-  const unpriced = context.quotaModelCapacity({ model_only_estimated_total_tokens: 1000000, model_only_estimated_total_usd: null });
-  assert.equal(unpriced.tokens, 1000000);
-  assert.equal(unpriced.usd, null);
-  assert.doesNotMatch(context.quotaModelsHtml({ ...cycle, model_stats: [noObservation] }), /NaN|Infinity|8\.00 M|\$80\.00|\$100\.00/);
-  assert.equal(context.quotaTokens(null), '—');
   assert.equal(context.quotaTokens(0), '0.00 M');
   assert.doesNotMatch(context.quotaPeriodHtml({ summary: null, model_stats: [] }, true), /does not identify the models/);
   // Claude's prompt denominator includes its separate cache reads and writes.
@@ -3797,20 +3781,17 @@ test('full backup handles old not-found envelopes but rejects invalid fallback d
   }
 });
 
-test('quota capacity renders reference ranges and reset explanation', async () => {
+test('quota capacity shows a single token estimate and keeps the reset explanation', async () => {
   const { context } = createDashboardHarness({ language: 'en' });
   await context.load();
-  assert.equal(context.quotaCapacityRange(1e9, 909e6, 1111e6, false), '909.00 M – 1,111.00 M');
-  assert.equal(context.quotaCapacityRange(null, 909e6, 1111e6, false), '—');
-  assert.equal(context.quotaCapacityRange(1e6, Infinity, 2e6, false), '1.00 M');
-  assert.equal(context.quotaCapacityRange(0, 0, 0, true), '$0.00 – $0.00');
   const html = context.quotaPeriodHtml({
-    reset_baseline_used_percent: 20, used_percent: 30,
+    reset_baseline_used_percent: 20, used_percent: 30, estimated_total_usd: 5 / .3,
     summary: { estimated_cost: 5, total_requests: 1, total_tokens: 1e6 },
-    model_stats: [{ model: 'm', model_only_estimated_total_tokens: 1e9,
+    model_stats: [{ model: 'm', estimated_cost: 5, total_tokens: 1e6, model_only_estimated_total_tokens: 1e6 / .3,
       model_only_tokens_low: 909e6, model_only_tokens_high: 1111e6 }]
   }, true);
-  assert.match(html, /909\.00 M – 1,111\.00 M/);
+  assert.match(html, /3\.333 M/);
+  assert.doesNotMatch(html, /909\.00 M|1,111\.00 M|Model-only estimated total cost/);
   assert.match(html, /Usage decreased/);
   assert.match(html, /No minimum consumption threshold applies/);
 });

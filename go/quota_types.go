@@ -91,14 +91,9 @@ type quotaUsageSummary struct {
 }
 
 type quotaModelStat struct {
-	ModelOnlyTokensLow  *float64 `json:"model_only_tokens_low,omitempty"`
-	ModelOnlyTokensHigh *float64 `json:"model_only_tokens_high,omitempty"`
-	ModelOnlyUSDLow     *float64 `json:"model_only_usd_low,omitempty"`
-	ModelOnlyUSDHigh    *float64 `json:"model_only_usd_high,omitempty"`
 	ModelStat
 	CostUSD              *float64 `json:"estimated_cost"`
 	ModelOnlyTotalTokens *float64 `json:"model_only_estimated_total_tokens"`
-	ModelOnlyTotalUSD    *float64 `json:"model_only_estimated_total_usd"`
 }
 
 type quotaCurrentDTO struct {
