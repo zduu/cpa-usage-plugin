@@ -3812,5 +3812,19 @@ test('quota capacity renders reference ranges and reset explanation', async () =
   }, true);
   assert.match(html, /909\.00 M – 1,111\.00 M/);
   assert.match(html, /Usage decreased/);
-  assert.match(html, /new spend divided by new quota consumption/);
+  assert.match(html, /No minimum consumption threshold applies/);
+});
+
+test('Antigravity malformed quota entries cannot hide valid pools or become reset readings', async () => {
+  const { context } = createDashboardHarness({ language: 'en' });
+  await context.load();
+  const valid = { window: 'weekly', remainingFraction: '0.6', resetTime: '2026-10-10T08:00:00Z' };
+  const malformed = [true, false, [0], [1], {}, '0x0', '0b1'];
+  const buckets = context.antigravityQuotaBuckets({ groups: [{ displayName: 'Claude', buckets: malformed.map(remainingFraction => ({ ...valid, remainingFraction })) }] });
+  assert.equal(buckets.length, 0, 'malformed values must not produce full or exhausted quota');
+  const mixed = context.antigravityQuotaBuckets({ groups: [null, [], { displayName: 'Claude', buckets: [null, [], valid] }] });
+  assert.equal(mixed.length, 1, 'invalid entries must not hide the remaining valid pools');
+  assert.equal(mixed[0].remaining_fraction, 0.6);
+  const badNames = context.antigravityQuotaBuckets({ groups: [{ displayName: {}, buckets: [valid] }, { displayName: 'Claude', buckets: [{ ...valid, bucketId: {} }] }] });
+  assert.equal(badNames.length, 0, 'objects must not become invented pool identities');
 });

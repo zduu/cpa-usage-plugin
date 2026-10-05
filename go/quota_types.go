@@ -73,7 +73,6 @@ type quotaState struct {
 }
 
 type quotaCycleDTO struct {
-	WindowSeconds            int64              `json:"-"`
 	ResetBaselineUsedPercent *float64           `json:"reset_baseline_used_percent,omitempty"`
 	Unmapped                 bool               `json:"unmapped,omitempty"`
 	ActualTotalUSD           *float64           `json:"actual_total_usd,omitempty"`

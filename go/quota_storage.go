@@ -299,15 +299,40 @@ func mergeQuotaWindowHistory(w *quotaWindow, incoming quotaWindow) {
 			w.Previous = &quotaPeriod{Start: w.Current.Start.Add(-time.Duration(w.Seconds) * time.Second), End: w.Current.Start,
 				CollectionStartedAt: p.CollectionStartedAt}
 		}
+		var target *quotaPeriod
 		for _, period := range []*quotaPeriod{w.Previous, w.Current} {
 			if period != nil && quotaResetDriftIsSmall(period.End, p.End, w.Seconds) {
-				for _, sample := range p.Samples {
-					quotaAppendSample(period, sample, p.CollectionStartedAt)
-				}
+				target = period
 				break
 			}
 		}
+		if target == nil {
+			// Reset cards may move the deadline beyond ordinary clock drift.
+			// Preserve the preceding observations when both histories describe
+			// overlapping live windows. A real next cycle has no such overlap.
+			for _, period := range []*quotaPeriod{w.Previous, w.Current} {
+				if quotaPeriodsShareObservedWindow(period, p) {
+					// Do not join an ambiguous history to either cycle.
+					if target != nil {
+						target = nil
+						break
+					}
+					target = period
+				}
+			}
+		}
+		if target != nil {
+			for _, sample := range p.Samples {
+				quotaAppendSample(target, sample, p.CollectionStartedAt)
+			}
+		}
 	}
+}
+
+func quotaPeriodsShareObservedWindow(a, b *quotaPeriod) bool {
+	return a != nil && b != nil && len(a.Samples) > 0 && len(b.Samples) > 0 &&
+		a.Start.Before(b.End) && b.Start.Before(a.End) &&
+		a.Samples[0].ObservedAt.Before(b.End) && b.Samples[0].ObservedAt.Before(a.End)
 }
 
 func (s *RequestStatistics) restoreQuotaSnapshotLocked(snapshot StatisticsSnapshot) {

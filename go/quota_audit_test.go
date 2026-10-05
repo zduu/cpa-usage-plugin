@@ -150,3 +150,61 @@ func TestNativeTimestampNumericUnitsAndJSONBounds(t *testing.T) {
 		}
 	}
 }
+
+func TestQuotaResetDeadlineShiftMergesHistoryInEitherImportOrder(t *testing.T) {
+	for _, reverse := range []bool{false, true} {
+		for _, shift := range []time.Duration{time.Hour, -time.Hour} {
+			t.Run(shift.String()+map[bool]string{false: "/old-first", true: "/new-first"}[reverse], func(t *testing.T) {
+				now := time.Now().UTC().Truncate(time.Second)
+				resetAt := now.Add(-30 * time.Minute)
+				end := now.Add(3 * time.Hour)
+				old := NewRequestStatistics()
+				defer old.Close()
+				old.startedAt = now.Add(-4 * time.Hour)
+				r := quotaTestRecord("before-reset-import", "m", now.Add(-40*time.Minute), 10_000_000)
+				old.Record(r)
+				quotaTestObserve(old, now.Add(-35*time.Minute), end, .8, 18000)
+				newer := NewRequestStatistics()
+				defer newer.Close()
+				newer.startedAt = old.startedAt
+				quotaTestObserve(newer, resetAt, end.Add(shift), .2, 18000)
+				newer.Record(quotaTestRecord("after-reset-import", "m", now.Add(-time.Minute), 1_000_000))
+				quotaTestObserve(newer, now, end.Add(shift), .3, 18000)
+				snapshots := []StatisticsSnapshot{old.Snapshot(), newer.Snapshot()}
+				if reverse {
+					snapshots[0], snapshots[1] = snapshots[1], snapshots[0]
+				}
+				dest := NewRequestStatistics()
+				defer dest.Close()
+				dest.modelPrices = map[string]ModelPrice{"m": {Prompt: 5}}
+				for range 2 {
+					for _, snapshot := range snapshots {
+						if _, err := dest.mergeSnapshotChecked(snapshot); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				cycle := dest.QueryAPIDetailAt(usageGroupKey(r), "all", 10, 10, now).QuotaCycles[0].Groups[0].Current
+				if cycle.Summary == nil || cycle.Summary.TotalRequests != 1 || !cycle.StartAt.Equal(resetAt) {
+					t.Fatalf("import lost reset boundary and included old requests: start=%v summary=%+v", cycle.StartAt, cycle.Summary)
+				}
+				quotaModelAssert(t, cycle.EstimatedTotalUSD, 5/.3)
+				if dest.totalRequests != 2 {
+					t.Fatal("history was deleted instead of excluded from reset segment")
+				}
+				if !cycle.EndAt.Equal(end.Add(shift)) {
+					t.Fatal("older import replaced the new deadline")
+				}
+				backup := dest.Snapshot()
+				if err := validateQuotaSnapshot(backup.QuotaCycles, nil); err != nil {
+					t.Fatal(err)
+				}
+				for _, w := range backup.QuotaCycles.Windows {
+					if len(w.Current.Samples) != 3 {
+						t.Fatal("repeated import duplicated or lost observations")
+					}
+				}
+			})
+		}
+	}
+}

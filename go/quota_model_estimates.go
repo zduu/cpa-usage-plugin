@@ -6,18 +6,10 @@ import (
 	"time"
 )
 
-// A conservative one-percentage-point endpoint-difference error, even when
-// raw upstream values expose more precision. Longer windows allow earlier,
-// wider estimates; disconnected intervals still accumulate endpoint error.
+// Use a one-percentage-point endpoint-difference error and a three-point
+// minimum for all windows. Disconnected intervals accumulate endpoint error.
 const quotaModelQuantum = .01
-const quotaModelMinDelta = .10
-
-func quotaMinimumDelta(seconds int64) float64 {
-	if seconds >= 7*86400 {
-		return .03
-	}
-	return quotaModelMinDelta
-}
+const quotaModelMinDelta = .03
 
 type quotaModelInterval struct {
 	start, end time.Time
@@ -180,7 +172,7 @@ func applyQuotaModelEstimates(dto *quotaCycleDTO, w quotaWindow, p *quotaPeriod,
 		end                              time.Time
 		unpriced                         bool
 	}
-	minimumDelta := quotaMinimumDelta(w.Seconds)
+	minimumDelta := quotaModelMinDelta
 	models := make(map[string]calibration)
 	var eligible []quotaModelInterval
 	bad := 0

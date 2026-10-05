@@ -124,9 +124,9 @@ func TestQuotaMixedPerfectFitStillHasQuantizationUncertainty(t *testing.T) {
 	}
 }
 
-func TestQuotaWeeklyMixedFitUsesLowerContributionThreshold(t *testing.T) {
+func TestQuotaMixedFitUsesSameThresholdForAllWindows(t *testing.T) {
 	w, p, facts, now := quotaMixedFixture()
-	// A contributes 7 points: above the weekly floor, below the short-window floor.
+	// A contributes 7 points, sufficient in both short and weekly windows.
 	for i := range p.Samples {
 		p.Samples[i].Used = .1 + (p.Samples[i].Used-.1)/2
 	}
@@ -139,7 +139,7 @@ func TestQuotaWeeklyMixedFitUsesLowerContributionThreshold(t *testing.T) {
 	}
 	w.Seconds = 18000
 	rows = quotaModelTestResult(w, p, facts, nil, now, true)
-	if rows["a"].ModelOnlyTotalTokens != nil {
-		t.Fatal("short-window fit bypassed threshold")
+	if rows["a"].ModelOnlyTotalTokens == nil {
+		t.Fatal("short-window fit still requires ten points")
 	}
 }

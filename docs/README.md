@@ -4,6 +4,7 @@
 
 - [guides/cpa-usage.md](guides/cpa-usage.md): 安装、配置、部署和更新说明
 - [guides/quota-cycles.md](guides/quota-cycles.md): CPA v8 凭证额度周期、模型分布、备份与验收
+- [reviews/2026-10-05.md](reviews/2026-10-05.md): 多轮项目复审、修复与验证记录
 - [releases/changelog.md](releases/changelog.md): `v2` 起的正式发布说明
 - [releases/v1-history.md](releases/v1-history.md): `v1` 历史标签归档
 

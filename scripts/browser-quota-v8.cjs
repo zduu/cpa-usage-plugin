@@ -168,6 +168,16 @@ const { chromium } = require(process.env.CPA_PLAYWRIGHT || 'playwright');
     await page.evaluate(() => renderApiDetail());
     await quota.screenshot({ path: path.join(output, 'mobile-period.png') });
     assert.ok(await quota.locator('.tableWrap').evaluate(el => el.scrollWidth > el.clientWidth), 'wide model table should scroll on mobile');
+    const mobileTable = await quota.locator('.tableWrap').evaluate(el => ({
+      tableWidth: el.querySelector('table').getBoundingClientRect().width,
+      headerHeight: el.querySelector('thead').getBoundingClientRect().height,
+      rowHeight: el.querySelector('tbody tr').getBoundingClientRect().height,
+      pageOverflow: document.documentElement.scrollWidth > window.innerWidth,
+    }));
+    assert.ok(mobileTable.tableWidth >= 1000, 'quota columns must retain readable widths');
+    assert.ok(mobileTable.headerHeight < 80, 'mobile headers must not wrap one character per line');
+    assert.ok(mobileTable.rowHeight < 80, 'ordinary model rows must stay visible beneath the header');
+    assert.equal(mobileTable.pageOverflow, false, 'table scrolling must not widen the whole page');
     assert.deepEqual(errors, []);
     assert.deepEqual(unauthenticated, []);
     const report = { passed: true, checks: ['native usage', 'current and previous models and costs', 'recorded cost / used fraction', 'full current amount equals recorded spend', 'partial previous estimate and full previous actual capacity', 'collapsed default and layout position', 'expanded state and selection survive refresh', 'million tokens, cache rate and model-only capacity columns', 'live countdown', 'weekly-only Codex', 'Devin browser collection', 'Antigravity independent pools, expanded-only collection and throttle', 'management authentication', 'mobile table'], submissions: submissions.length };

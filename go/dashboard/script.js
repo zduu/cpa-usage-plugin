@@ -1651,15 +1651,26 @@ function quotaCyclesHtml(credentials, refs = []) {
 function antigravityQuotaBuckets(payload) {
   const buckets = [];
   for (const group of (Array.isArray(payload && payload.groups) ? payload.groups : [])) {
-    const name = String(group.displayName || group.display_name || '').trim();
+    if (!group || typeof group !== 'object' || Array.isArray(group)) continue;
+    const rawName = group.displayName || group.display_name;
+    if (typeof rawName !== 'string') continue;
+    const name = rawName.trim();
     if (!name || name.length > 256) continue;
     for (const bucket of (Array.isArray(group.buckets) ? group.buckets : [])) {
-      const rawWindow = String(bucket.window || '').trim().toLowerCase();
+      if (!bucket || typeof bucket !== 'object' || Array.isArray(bucket) || typeof bucket.window !== 'string') continue;
+      const rawWindow = bucket.window.trim().toLowerCase();
       const window = ['5h', 'five-hour', 'five_hour'].includes(rawWindow) ? '5h' : ['weekly', 'week'].includes(rawWindow) ? 'weekly' : '';
       const raw = bucket.remainingFraction ?? bucket.remaining_fraction;
-      const remaining = raw === null || raw === undefined || String(raw).trim() === '' ? NaN : Number(raw);
-      const reset = String(bucket.resetTime || bucket.reset_time || '').trim();
-      const id = String(bucket.bucketId || bucket.bucket_id || window).trim();
+      // Number(true), Number([0]) and Number('0x0') would invent valid quota
+      // readings, potentially triggering a false reset or exhaustion.
+      if (typeof raw !== 'number' && typeof raw !== 'string') continue;
+      if (typeof raw === 'string' && !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(raw.trim())) continue;
+      const remaining = Number(raw);
+      const rawReset = bucket.resetTime || bucket.reset_time;
+      const rawID = bucket.bucketId || bucket.bucket_id || window;
+      if (typeof rawReset !== 'string' || typeof rawID !== 'string') continue;
+      const reset = rawReset.trim();
+      const id = rawID.trim();
       if (!window || !Number.isFinite(remaining) || remaining < 0 || remaining > 1 || !Number.isFinite(Date.parse(reset)) || reset.length > 128 || id.length > 256 || /[\x00-\x1f\x7f]/.test(name + id)) continue;
       buckets.push({ group: name, id, window, remaining_fraction: remaining, reset_time: reset });
       if (buckets.length === 64) return buckets;
