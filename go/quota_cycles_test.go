@@ -361,8 +361,8 @@ func TestQuotaCycleBoundaryLateUsageAndGap(t *testing.T) {
 	}
 	quotaTestObserve(s, end.Add(11*time.Hour), end.Add(15*time.Hour), .2, 18000)
 	group = s.QueryAPIDetailAt(usageGroupKey(r), "all", 10, 10, end.Add(11*time.Hour)).QuotaCycles[0].Groups[0]
-	if group.Previous != nil {
-		t.Fatal("unobserved gap was treated as an adjacent previous period")
+	if group.Previous == nil || *group.Previous.UsedPercent != 10 {
+		t.Fatal("idle gap discarded the last completed period")
 	}
 }
 
@@ -1348,8 +1348,8 @@ func TestQuotaSummaryKeepsDetailDiscoverableAfterRetention(t *testing.T) {
 				}
 			}
 			for _, rangeKey := range []string{"all", "7h"} {
-				if names := s.SummaryWithoutDetailsForRangeAt(rangeKey, later).Meta.QuotaAPIs; len(names) != 0 {
-					t.Fatalf("expired or revoked quota remained selectable: %v", names)
+				if names := s.SummaryWithoutDetailsForRangeAt(rangeKey, later).Meta.QuotaAPIs; (hide && len(names) != 0) || (!hide && len(names) != 1) {
+					t.Fatalf("retained or revoked quota visibility is incorrect: %v", names)
 				}
 			}
 		})

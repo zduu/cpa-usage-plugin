@@ -183,11 +183,15 @@ func (s *RequestStatistics) applyQuotaObservationLocked(o quotaObservation) bool
 			}
 		}
 		// Observations can be delivered out of order, including across a
-		// journal restart. A real adjacent window may not have a slot yet.
-		if w.Seconds == o.Seconds && w.Current != nil && w.Previous == nil &&
-			quotaResetDriftIsSmall(w.Current.Start, o.Reset, o.Seconds) {
-			w.Previous = &quotaPeriod{Start: w.Current.Start.Add(-time.Duration(o.Seconds) * time.Second),
-				End: w.Current.Start, CollectionStartedAt: o.CollectionStartedAt, Samples: []quotaObservation{o}}
+		// journal restart. Retain the latest observed predecessor, even across an idle gap.
+		if w.Seconds == o.Seconds && w.Current != nil && (w.Previous == nil || o.Reset.After(w.Previous.End)) &&
+			quotaPeriodPrecedes(o.Reset, w.Current.Start, o.Seconds) {
+			end := o.Reset
+			if quotaResetDriftIsSmall(end, w.Current.Start, o.Seconds) {
+				end = w.Current.Start
+			}
+			w.Previous = &quotaPeriod{Start: end.Add(-time.Duration(o.Seconds) * time.Second),
+				End: end, CollectionStartedAt: o.CollectionStartedAt, Samples: []quotaObservation{o}}
 			return commit()
 		}
 		return false
@@ -229,7 +233,7 @@ func (s *RequestStatistics) applyQuotaObservationLocked(o quotaObservation) bool
 			// window too so a request cannot belong to both periods after drift.
 			w.Previous.End = w.Current.Start
 			w.Previous.Start = w.Previous.End.Add(-time.Duration(o.Seconds) * time.Second)
-		} else {
+		} else if !quotaPeriodPrecedes(w.Previous.End, w.Current.Start, o.Seconds) {
 			w.Previous = nil
 		}
 	}
@@ -237,6 +241,12 @@ func (s *RequestStatistics) applyQuotaObservationLocked(o quotaObservation) bool
 	w.UpdatedAt, w.Hidden = o.ObservedAt, false
 	w.EstimateExpired = false
 	return commit()
+}
+
+// The previous period is the latest observed completed window, regardless of
+// how long the credential was idle. Only small drift may overlap the boundary.
+func quotaPeriodPrecedes(end, start time.Time, seconds int64) bool {
+	return !end.After(start) || quotaResetDriftIsSmall(end, start, seconds)
 }
 
 func quotaResetDriftIsSmall(previous, next time.Time, seconds int64) bool {
@@ -282,6 +292,7 @@ func (s *RequestStatistics) pruneQuotaLocked(now time.Time) {
 	}
 	s.quota.NextPrune = now.Add(time.Minute)
 	starts := make(map[string]time.Time)
+	periods := make(map[string][]*quotaPeriod)
 	for key, w := range s.quota.Windows {
 		p := w.Current
 		if p == nil {
@@ -297,8 +308,8 @@ func (s *RequestStatistics) pruneQuotaLocked(now time.Time) {
 			}
 			continue
 		}
-		if now.After(p.End.Add(time.Duration(w.Seconds) * time.Second)) {
-			if w.Hidden && !now.After(w.UpdatedAt.Add(revocationRetention)) {
+		if w.Hidden && now.After(p.End.Add(time.Duration(w.Seconds)*time.Second)) {
+			if !now.After(w.UpdatedAt.Add(revocationRetention)) {
 				// Expiring old usage must not erase a newer revocation. Keep
 				// only its marker; late observations can still carry new periods.
 				w.Current, w.Previous, w.Seconds = nil, nil, 0
@@ -316,6 +327,7 @@ func (s *RequestStatistics) pruneQuotaLocked(now time.Time) {
 			start = w.Previous.Start
 		}
 		credential := quotaCredentialKey(w.Provider, w.AuthIndex, w.AuthID)
+		periods[credential] = append(periods[credential], w.Current, w.Previous)
 		if old, ok := starts[credential]; !ok || start.Before(old) {
 			starts[credential] = start
 		}
@@ -326,8 +338,15 @@ func (s *RequestStatistics) pruneQuotaLocked(now time.Time) {
 		if s.retention <= 0 {
 			continue
 		}
-		if start, ok := starts[quotaCredentialKey(f.Provider, f.AuthIndex, f.AuthID)]; ok && start.Before(keepAfter) {
-			keepAfter = start
+		retained := false
+		for _, p := range periods[quotaCredentialKey(f.Provider, f.AuthIndex, f.AuthID)] {
+			if p != nil && !f.Timestamp.Before(p.Start) && f.Timestamp.Before(p.End) {
+				retained = true
+				break
+			}
+		}
+		if retained {
+			continue
 		}
 		if f.Timestamp.Before(keepAfter) {
 			delete(s.quota.Facts, id)

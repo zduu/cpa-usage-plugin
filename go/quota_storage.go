@@ -278,7 +278,7 @@ func (s *RequestStatistics) mergeQuotaSnapshotLocked(in *quotaSnapshot) {
 	s.invalidateCachedResponsesLocked()
 }
 
-// Keep the newest window metadata, while retaining samples and a real adjacent
+// Keep the newest window metadata, while retaining samples and the latest observed
 // previous period from either backup. Import order must not discard history.
 func mergeQuotaWindowHistory(w *quotaWindow, incoming quotaWindow) {
 	if w.Hidden && incoming.Seconds > 0 && (w.Seconds == 0 || quotaWindowObservedAt(incoming).After(quotaWindowObservedAt(*w))) {
@@ -295,8 +295,12 @@ func mergeQuotaWindowHistory(w *quotaWindow, incoming quotaWindow) {
 		if p == nil {
 			continue
 		}
-		if w.Current != nil && w.Previous == nil && quotaResetDriftIsSmall(w.Current.Start, p.End, w.Seconds) {
-			w.Previous = &quotaPeriod{Start: w.Current.Start.Add(-time.Duration(w.Seconds) * time.Second), End: w.Current.Start,
+		if w.Current != nil && (w.Previous == nil || (p.End.After(w.Previous.End) && !quotaResetDriftIsSmall(p.End, w.Previous.End, w.Seconds))) && quotaPeriodPrecedes(p.End, w.Current.Start, w.Seconds) {
+			end := p.End
+			if quotaResetDriftIsSmall(end, w.Current.Start, w.Seconds) {
+				end = w.Current.Start
+			}
+			w.Previous = &quotaPeriod{Start: end.Add(-time.Duration(w.Seconds) * time.Second), End: end,
 				CollectionStartedAt: p.CollectionStartedAt}
 		}
 		var target *quotaPeriod
