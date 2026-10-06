@@ -489,7 +489,8 @@ func TestNormalizeAnthropicUsageDetailPreservesInputOnOverflow(t *testing.T) {
 }
 
 func TestProtocolCorrelationRejectsUnknownFutureSchema(t *testing.T) {
-	base := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	// Record applies retention against the wall clock; keep fixtures recent.
+	base := time.Now().UTC().Add(-time.Minute)
 	knownIO := protocolCorrelationKnownInput | protocolCorrelationKnownOutput | protocolCorrelationKnownTotal
 	fallback := testCorrelationRecord("openai-compatible", responseInterceptorFallbackExecutor, "model", "model", "/v1/responses", "client", base.Add(time.Second), 0,
 		UsageDetail{InputTokens: 100, OutputTokens: 20, TotalTokens: 120},
@@ -508,6 +509,7 @@ func TestProtocolCorrelationRejectsUnknownFutureSchema(t *testing.T) {
 	}
 
 	stored := NewRequestStatistics()
+	t.Cleanup(stored.Close)
 	stored.Record(fallback)
 	stored.Record(native)
 	reconciled, removed := reconcileProtocolFallbackSnapshot(stored.Snapshot())
@@ -517,7 +519,7 @@ func TestProtocolCorrelationRejectsUnknownFutureSchema(t *testing.T) {
 }
 
 func TestRequestedModelSurvivesDetailAndSnapshotRoundTrip(t *testing.T) {
-	at := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	at := time.Now().UTC().Add(-time.Minute)
 	record := testCorrelationRecord("codex", "CodexExecutor", "route-model", "requested-model", "/v1/responses", "client", at, time.Second,
 		UsageDetail{InputTokens: 10, OutputTokens: 2, TotalTokens: 12}, nil)
 	detail := requestDetailFromUsageRecord(record, at, headerWhitelist{})
@@ -538,9 +540,14 @@ func TestRequestedModelSurvivesDetailAndSnapshotRoundTrip(t *testing.T) {
 	}
 
 	stats := NewRequestStatistics()
+	t.Cleanup(stats.Close)
 	stats.Record(record)
 	snapshot := stats.Snapshot()
-	got := snapshot.APIs[usageGroupKey(record)].Models[record.Model].Details[0]
+	details := snapshot.APIs[usageGroupKey(record)].Models[record.Model].Details
+	if len(details) != 1 || details[0].Correlation == nil {
+		t.Fatalf("snapshot details = %#v, want one record with correlation metadata", details)
+	}
+	got := details[0]
 	got.Correlation.KnownFields = 0
 	if stats.Snapshot().APIs[usageGroupKey(record)].Models[record.Model].Details[0].Correlation.KnownFields == 0 {
 		t.Fatal("snapshot correlation pointer aliases stored detail")
