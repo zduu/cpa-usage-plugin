@@ -737,6 +737,38 @@ test('quota collector submits authenticated v8 observations once and strips unre
   assert.equal(calls.filter(call => call.options.method === 'POST').length, 2, 'restart must resubmit observations lost by an in-memory backend');
 });
 
+test('quota collector only retries rejected observations after a cooldown', async () => {
+  const { context } = createDashboardHarness({ pathname: '/proxy/v0/resource/plugins/usage-dashboard-zduu/dashboard' });
+  await context.load();
+  context.localStorage.setItem('managementKey', 'fixture-key');
+  const posts = [];
+  const file = (index) => ({ provider: 'devin', auth_index: index, id: `${index}.json`,
+    quota: { observed_at: '2026-10-02T08:00:00Z', signals: { weekly_quota_remaining_percent: '60%', weekly_quota_reset_at: '2026-10-05T08:00:00Z' } } });
+  context.fetch = async (url, options) => {
+    let payload = { files: [file('good'), file('bad')] };
+    if (options.method === 'POST') {
+      const observations = JSON.parse(options.body).observations;
+      posts.push(observations.map((row) => row.auth_index));
+      const rejected = observations.map((row, index) => row.auth_index === 'bad' ? index : -1).filter((index) => index >= 0);
+      payload = { accepted: observations.length - rejected.length, skipped: 0, rejected: rejected.length, rejected_indexes: rejected };
+    }
+    return { ok: true, status: 200, headers: { get() { return ''; } }, text: async () => JSON.stringify(payload) };
+  };
+  const realNow = Date.now;
+  let now = realNow();
+  context.Date.now = () => now;
+  try {
+    await context.collectQuotaObservations('instance');
+    await context.collectQuotaObservations('instance');
+    assert.deepEqual(posts, [['good', 'bad']], 'neither accepted nor rejected rows are resent on the next poll');
+    now += 300001;
+    await context.collectQuotaObservations('instance');
+    assert.deepEqual(posts, [['good', 'bad'], ['bad']], 'only the rejected row is retried after the cooldown');
+  } finally {
+    context.Date.now = realNow;
+  }
+});
+
 test('quota periods keep unknown values and separate the previous model table', async () => {
   const { context } = createDashboardHarness({ language: 'en' });
   await context.load();

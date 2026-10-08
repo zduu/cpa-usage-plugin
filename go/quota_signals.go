@@ -149,7 +149,7 @@ func parseQuotaSignals(input quotaSignalsInput) []quotaObservation {
 			if reset.IsZero() {
 				delta, err := strconv.ParseInt(signals[prefix+"reset-after-seconds"], 10, 64)
 				if err == nil && delta >= 0 && delta <= int64(math.MaxInt64)/int64(time.Second) {
-					reset = input.ObservedAt.Add(time.Duration(delta) * time.Second)
+					reset = input.ObservedAt.UTC().Add(time.Duration(delta) * time.Second)
 				}
 			}
 			add(group, name, slot, minutes*60, used, reset, unmapped)

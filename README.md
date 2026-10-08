@@ -189,7 +189,7 @@ GET  /v0/management/plugins/usage-dashboard-zduu/health
 | `/dashboard-events-export-download` | GET | 下载已完成的后台事件导出任务结果，使用 `?id=<job_id>`；可协商分块下载，详见[部署文档](docs/guides/cpa-usage.md#按筛选导出事件)。 |
 | `/dashboard-api-detail` | GET | 单个上游接口详情，支持 `?api=xxx&range=24h&client_api=xxx`，返回模型分布、来源、错误统计和最近请求；最近请求携带完整上游接口 `api`，并在有数据时返回推理强度 `thinking`、请求端点 `endpoint` 和流式标记 `stream`。 |
 | `/dashboard-data` | GET | 兼容旧版，返回含全部 `details` 数组的完整数据。 |
-| `/dashboard-quota-observations` | POST | 保存经过宿主凭证身份校验的额度观测，返回接受、跳过、拒绝数量；不增加请求计数。 |
+| `/dashboard-quota-observations` | POST | 保存经过宿主凭证身份校验的额度观测，返回接受、跳过、拒绝数量及被拒绝条目的下标 `rejected_indexes`；不增加请求计数。 |
 | `/health` | GET | 运行健康状态：`status`、`alerts`、`detail_count`、`evicted_total`、`total_requests`。 |
 
 `/dashboard-summary`、`/dashboard-events`、`/dashboard-api-detail` 和 `/dashboard-events-export` 支持弱 ETag；内置看板轮询会自动使用 `If-None-Match`，外部脚本也可用条件请求减少未变化数据的重复传输。`/health.runtime.conditional_requests` 会按端点统计条件请求的 304 命中率。

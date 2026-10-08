@@ -29,22 +29,28 @@ func handleQuotaObservations(body []byte) ([]byte, error) {
 		return dashboardExportJobJSON(http.StatusBadRequest, map[string]string{"error": "invalid quota observation batch"})
 	}
 	accepted, skipped, rejected := 0, 0, 0
+	// Indexes let the dashboard stop resubmitting the accepted part of a
+	// batch while only the rejected entries wait for a retry.
+	rejectedIndexes := []int{}
 	now := time.Now()
 	var persist []persistedDetail
-	for _, input := range batch.Observations {
+	for index, input := range batch.Observations {
 		input.Provider = strings.ToLower(strings.TrimSpace(input.Provider))
 		if !quotaProvider(input.Provider) || input.AuthIndex == "" || input.AuthID == "" || len(input.AuthID) > 512 || len(input.AuthIndex) > 512 || len(input.Signals) > 64 || len(input.AntigravityBuckets) > 64 || input.ObservedAt.IsZero() || input.ObservedAt.After(now.Add(5*time.Minute)) {
 			rejected++
+			rejectedIndexes = append(rejectedIndexes, index)
 			continue
 		}
 		auth, err := resolveQuotaHostAuth(input.AuthIndex)
 		if err != nil || auth.RuntimeOnly || !quotaEligible(RequestDetail{Provider: auth.Provider, AuthID: auth.ID, AuthType: auth.AccountType}) || auth.Provider != input.Provider || auth.ID != input.AuthID || auth.AuthIndex != input.AuthIndex {
 			rejected++
+			rejectedIndexes = append(rejectedIndexes, index)
 			continue
 		}
 		observations := parseQuotaSignals(input)
 		if len(observations) == 0 {
 			rejected++
+			rejectedIndexes = append(rejectedIndexes, index)
 			continue
 		}
 		stats.mu.Lock()
@@ -71,9 +77,10 @@ func handleQuotaObservations(body []byte) ([]byte, error) {
 	}
 	version := stats.DashboardVersion()
 	return dashboardExportJobJSON(http.StatusOK, struct {
-		Accepted int    `json:"accepted"`
-		Skipped  int    `json:"skipped"`
-		Rejected int    `json:"rejected"`
-		Version  uint64 `json:"quota_version"`
-	}{accepted, skipped, rejected, version})
+		Accepted        int    `json:"accepted"`
+		Skipped         int    `json:"skipped"`
+		Rejected        int    `json:"rejected"`
+		RejectedIndexes []int  `json:"rejected_indexes"`
+		Version         uint64 `json:"quota_version"`
+	}{accepted, skipped, rejected, rejectedIndexes, version})
 }

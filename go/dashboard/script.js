@@ -47,6 +47,8 @@ const conditionalPayloadCacheMax = 64;
 let apiDetailLastRender = null;
 const quotaPeriodSelections = new Map();
 const quotaSubmittedObservations = new Map();
+// Rejected signatures wait before retrying instead of resending every poll.
+const quotaRejectedObservations = new Map();
 let quotaCollectionRequest = null;
 let quotaCollectionInstance = '';
 let quotaCollectionRetryAt = 0;
@@ -1734,6 +1736,7 @@ async function collectQuotaObservations(instanceID = '') {
   if (instanceID !== quotaCollectionInstance) {
     quotaCollectionInstance = instanceID;
     quotaSubmittedObservations.clear();
+    quotaRejectedObservations.clear();
     quotaCollectionRetryAt = 0;
     apiDetailCache.clear();
     apiDetailSeq++;
@@ -1760,6 +1763,8 @@ async function collectQuotaObservations(instanceID = '') {
         const input = { provider, auth_index: file.auth_index, auth_id: file.id, observed_at: file.quota.observed_at, signals };
         const signature = JSON.stringify(input);
         const key = JSON.stringify([input.provider, input.auth_index, input.auth_id]);
+        const rejectedRow = quotaRejectedObservations.get(key);
+        if (rejectedRow && rejectedRow.signature === signature && Date.now() < rejectedRow.retryAt) continue;
         if (quotaSubmittedObservations.get(key) !== signature && Object.keys(signals).length) pending.push({ input, key, signature });
       }
       let changed = false;
@@ -1774,10 +1779,20 @@ async function collectQuotaObservations(instanceID = '') {
         }
         const response = await fetchManagementJsonPayload('dashboard-quota-observations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ version: 1, observations: batch.map((row) => row.input) }), cache: 'no-store' });
         changed = changed || num(response && response.accepted) > 0;
-        if (!num(response && response.rejected)) for (const row of batch) {
+        // Without per-entry results, treat the whole batch as rejected when any entry was.
+        const rejectedIndexes = response && Array.isArray(response.rejected_indexes)
+          ? new Set(response.rejected_indexes)
+          : new Set(num(response && response.rejected) ? batch.map((_, index) => index) : []);
+        batch.forEach((row, index) => {
+          if (rejectedIndexes.has(index)) {
+            quotaRejectedObservations.set(row.key, { signature: row.signature, retryAt: Date.now() + hiddenPollDelayMs });
+            while (quotaRejectedObservations.size > 1024) quotaRejectedObservations.delete(quotaRejectedObservations.keys().next().value);
+            return;
+          }
+          quotaRejectedObservations.delete(row.key);
           quotaSubmittedObservations.set(row.key, row.signature);
           while (quotaSubmittedObservations.size > 1024) quotaSubmittedObservations.delete(quotaSubmittedObservations.keys().next().value);
-        }
+        });
       }
       return changed;
     } catch (_) {

@@ -62,6 +62,11 @@ func (s *RequestStatistics) addQuotaFactLocked(api string, d RequestDetail) {
 	}
 	f := quotaFactFromDetail(api, d)
 	f.ID = id
+	// Snapshot loading rejects invalid facts and then disables storage, so
+	// oversized identities must never enter the live quota state.
+	if !validQuotaFact(f) {
+		return
+	}
 	if old, exists := q.Facts[id]; exists && quotaFactsEqual(old, f) {
 		return
 	}
@@ -80,7 +85,7 @@ func quotaFactFromDetail(api string, d RequestDetail) quotaFact {
 
 func quotaAppendSample(period *quotaPeriod, o quotaObservation, started time.Time) bool {
 	for _, old := range period.Samples {
-		if old == o {
+		if quotaSameObservation(old, o) {
 			return false
 		}
 	}
@@ -114,6 +119,16 @@ func quotaAppendSample(period *quotaPeriod, o quotaObservation, started time.Tim
 		period.Samples = kept
 	}
 	return true
+}
+
+// quotaSameObservation ignores the collection baseline: the dashboard resubmits
+// identical observations after every restart, which assigns a new baseline.
+// Times compare by instant so zone or monotonic readings do not matter.
+func quotaSameObservation(a, b quotaObservation) bool {
+	return a.Provider == b.Provider && a.AuthIndex == b.AuthIndex && a.AuthID == b.AuthID &&
+		a.Group == b.Group && a.Name == b.Name && a.Slot == b.Slot && a.Seconds == b.Seconds &&
+		a.Reset.Equal(b.Reset) && a.ObservedAt.Equal(b.ObservedAt) && a.Used == b.Used &&
+		a.Model == b.Model && a.Unmapped == b.Unmapped && a.Revoked == b.Revoked
 }
 
 func quotaWindowObservedAt(w quotaWindow) time.Time {
@@ -204,10 +219,12 @@ func (s *RequestStatistics) applyQuotaObservationLocked(o quotaObservation) bool
 		w.Previous, w.Current = w.Current, nil
 	}
 	p := w.Current
-	if p == nil && w.Previous != nil && w.Previous.End.Equal(o.Reset) {
+	// A late sample for an expired period may carry a slightly drifted
+	// relative reset. Match it to that period instead of recreating it.
+	if p == nil && w.Previous != nil && quotaResetDriftIsSmall(w.Previous.End, o.Reset, o.Seconds) {
 		p = w.Previous
 	}
-	if p != nil && p.End.Equal(o.Reset) && w.Seconds == o.Seconds {
+	if p != nil && (p.End.Equal(o.Reset) || p == w.Previous) && w.Seconds == o.Seconds {
 		if !quotaAppendSample(p, o, o.CollectionStartedAt) {
 			return false
 		}
@@ -231,6 +248,13 @@ func (s *RequestStatistics) applyQuotaObservationLocked(o quotaObservation) bool
 		if quotaResetDriftIsSmall(w.Previous.End, w.Current.Start, o.Seconds) {
 			// The newer observation fixes the shared boundary. Align the old
 			// window too so a request cannot belong to both periods after drift.
+			w.Previous.End = w.Current.Start
+			w.Previous.Start = w.Previous.End.Add(-time.Duration(o.Seconds) * time.Second)
+		} else if w.Previous.End.After(w.Current.Start) && w.Previous.Start.Before(w.Current.Start) &&
+			w.Previous.End.Sub(w.Current.Start) <= time.Duration(o.Seconds)*time.Second/4 {
+			// A relative reset computed after a long stream can move the
+			// current window minutes earlier. Keep the completed predecessor
+			// and shift it to the new boundary rather than discarding it.
 			w.Previous.End = w.Current.Start
 			w.Previous.Start = w.Previous.End.Add(-time.Duration(o.Seconds) * time.Second)
 		} else if !quotaPeriodPrecedes(w.Previous.End, w.Current.Start, o.Seconds) {
