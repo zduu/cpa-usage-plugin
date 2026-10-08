@@ -769,6 +769,27 @@ test('quota collector only retries rejected observations after a cooldown', asyn
   }
 });
 
+test('collapsing during an Antigravity refresh keeps the earlier error', async () => {
+  const { context } = createDashboardHarness({ language: 'en', pathname: '/proxy/v0/resource/plugins/usage-dashboard-zduu/dashboard' });
+  await context.load();
+  context.localStorage.setItem('managementKey', 'fixture-key');
+  context.load = async () => {};
+  let fetches = 0;
+  context.fetch = async () => {
+    fetches++;
+    // The panel is collapsed while the credential list is loading.
+    vm.runInContext('quotaExpandedApis.delete(selectedApi)', context);
+    return { ok: true, status: 200, headers: { get() { return ''; } }, text: async () => JSON.stringify({ files: [] }) };
+  };
+  vm.runInContext('selectedApi = "antigravity-upstream"; quotaExpandedApis.add(selectedApi); antigravityQuotaErrors.add(selectedApi);', context);
+  const refs = [{ provider: 'antigravity', auth_index: 'ag-index', auth_id: 'antigravity.json' }];
+  // Rendering an expanded panel starts the automatic refresh.
+  context.renderApiDetailContent({ total_requests: 1, models: {} }, { detail: { summary: { total_requests: 1 }, quota_credentials: refs } });
+  await vm.runInContext('antigravityQuotaRequest', context);
+  assert.equal(fetches, 1, 'the refresh must reach the credential list');
+  assert.equal(vm.runInContext('antigravityQuotaErrors.has(selectedApi)', context), true);
+});
+
 test('quota periods keep unknown values and separate the previous model table', async () => {
   const { context } = createDashboardHarness({ language: 'en' });
   await context.load();

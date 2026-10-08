@@ -1694,12 +1694,12 @@ async function refreshAntigravityQuotaForSelectedApi(force = false) {
   if (refreshButton) refreshButton.disabled = true;
   setText('antigravityQuotaStatus', t('quota_fetch_loading'));
   antigravityQuotaRequest = (async () => {
-    let failed = false, changed = false;
+    let failed = false, changed = false, interrupted = false;
     try {
       const credentialsUrl = managementEndpoint('').replace(/\/v0\/management\/plugins\/.*$/, '/v8/management/credentials');
       const data = await fetchJsonPayload(credentialsUrl, managementFetchOptions({ cache: 'no-store' }));
       for (const ref of due) {
-        if (api !== selectedApi || document.visibilityState === 'hidden' || !quotaExpandedApis.has(api)) break;
+        if (api !== selectedApi || document.visibilityState === 'hidden' || !quotaExpandedApis.has(api)) { interrupted = true; break; }
         const key = ref.auth_index + ':' + ref.auth_id;
         try {
           const file = (data.files || []).find((row) => row.auth_index === ref.auth_index && row.id === ref.auth_id && String(row.provider || row.type || '').trim().toLowerCase() === 'antigravity' && !row.runtime_only && !row.disabled);
@@ -1716,7 +1716,8 @@ async function refreshAntigravityQuotaForSelectedApi(force = false) {
       failed = true;
       for (const ref of due) antigravityQuotaRefreshAt.set(ref.auth_index + ':' + ref.auth_id, Date.now() + 60000);
     }
-    if (failed) antigravityQuotaErrors.add(api); else antigravityQuotaErrors.delete(api);
+    // An interrupted run did not check every credential, so keep the earlier error.
+    if (failed) antigravityQuotaErrors.add(api); else if (!interrupted) antigravityQuotaErrors.delete(api);
     while (antigravityQuotaErrors.size > 64) antigravityQuotaErrors.delete(antigravityQuotaErrors.values().next().value);
     if (api !== selectedApi) return;
     if (changed) await renderApiDetail();
