@@ -139,7 +139,9 @@ def main():
                           f"detail cap did not truncate: {health['detail_count']} visible, want {visible_limit}")
         shutdown(validator, container)
         legacy = snapshot_shape(Path(temp / "data") / f"{Path(STORAGE).name}/snapshot.json")
-        validator.require(not legacy["has_accounting_field"] and legacy["visible_details"] == visible_limit
+        # v2.6.6 already writes accounting entries; the released format is the
+        # pre-quota snapshot version, which the candidate must upgrade to v3.
+        validator.require(legacy["version"] < 3 and legacy["visible_details"] == visible_limit
                           and legacy["total_requests"] == args.records,
                           f"released plugin did not leave the expected truncated snapshot: {legacy}")
         report["phases"].append({"phase": "released", "before": before["usage"], "health_detail_count": health["detail_count"],
