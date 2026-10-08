@@ -29,24 +29,72 @@ func quotaPriceKnown(f quotaFact, pricing *pricingSnapshot) bool {
 	return ok
 }
 
-// Use the first observation after the latest usage decrease as a conservative
-// reset boundary. The exact reset time is not supplied; never reuse old spend.
+// Concurrent requests, asynchronous upstream accounting and differently rounded
+// sources make usage jitter by about a point. Only a larger fall below the
+// peak since the previous reset, or a fall to zero, is a reset candidate.
+const quotaResetDropTolerance = .02
+
+func quotaResetCandidate(peak, used float64) bool {
+	return used < peak-quotaResetDropTolerance || (used == 0 && peak > 0)
+}
+
+// quotaLatestReset returns the latest confirmed reset sample and the peak it
+// fell from, or -1 for both. A stale sample is followed by values back near
+// the peak, so a candidate is confirmed only when the next sample stays
+// closer to the decreased value than to the peak.
+func quotaLatestReset(samples []quotaObservation, end time.Time) (peak, drop int) {
+	peak, drop = -1, -1
+	current := -1
+	for i, sample := range samples {
+		if current >= 0 && i+1 < len(samples) && sample.ObservedAt.Before(end) &&
+			quotaResetCandidate(samples[current].Used, sample.Used) &&
+			samples[i+1].Used < (samples[current].Used+sample.Used)/2 {
+			peak, drop, current = current, i, i
+			continue
+		}
+		if current < 0 || sample.Used > samples[current].Used {
+			current = i
+		}
+	}
+	return peak, drop
+}
+
+// A reset card restarts the window, so upstream moves the deadline later.
+// Samples that still carry an earlier deadline were observed before the card.
+// The threshold stays far above relative-deadline drift.
+func quotaPreResetSamples(p *quotaPeriod) int {
+	threshold := max(p.End.Sub(p.Start)/24, time.Minute)
+	count := 0
+	for i, sample := range p.Samples {
+		if p.End.Sub(sample.Reset) > threshold {
+			count = i + 1
+		}
+	}
+	return count
+}
+
+// The moved deadline gives the exact reset time when it falls between the
+// last pre-reset and the first post-reset observation. Otherwise, and for a
+// reset seen only as a usage decrease, use the first observation after it as a
+// conservative boundary; never reuse old spend.
 func quotaEffectivePeriod(p *quotaPeriod) (*quotaPeriod, *float64) {
 	if p == nil {
 		return nil, nil
 	}
-	index := -1
-	for i := 1; i < len(p.Samples); i++ {
-		if p.Samples[i].Used < p.Samples[i-1].Used && p.Samples[i].ObservedAt.Before(p.End) {
-			index = i
+	copy := *p
+	reset := false
+	if before := quotaPreResetSamples(p); before > 0 && before < len(p.Samples) {
+		copy.Samples, reset = p.Samples[before:], true
+		if p.Start.Before(p.Samples[before-1].ObservedAt) || p.Start.After(copy.Samples[0].ObservedAt) {
+			copy.Start = copy.Samples[0].ObservedAt
 		}
 	}
-	if index < 0 {
+	if _, index := quotaLatestReset(copy.Samples, copy.End); index >= 0 {
+		copy.Start, copy.Samples, reset = copy.Samples[index].ObservedAt, copy.Samples[index:], true
+	}
+	if !reset {
 		return p, nil
 	}
-	copy := *p
-	copy.Start = p.Samples[index].ObservedAt
-	copy.Samples = p.Samples[index:]
 	used := copy.Samples[0].Used * 100
 	return &copy, &used
 }

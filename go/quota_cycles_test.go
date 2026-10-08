@@ -299,6 +299,8 @@ func TestQuotaEstimateUsesSameRatioAfterRestartOrDecrease(t *testing.T) {
 		t.Fatalf("post-restart ratio incorrect: %v", got)
 	}
 	s.quota.StartedAt = start.Add(-time.Hour)
+	// A single decrease is confirmed by the next observation.
+	quotaTestObserve(s, now.Add(-time.Minute), start.Add(5*time.Hour), .2, 18000)
 	quotaTestObserve(s, now, start.Add(5*time.Hour), .2, 18000)
 	if got := s.QueryAPIDetailAt(api, "all", 10, 10, now).QuotaCycles[0].Groups[0].Current.EstimatedTotalUSD; got != nil {
 		t.Fatal("reset must discard pre-reset spend")
@@ -661,8 +663,9 @@ func TestQuotaRelativeResetDriftUsesCorrectedRatio(t *testing.T) {
 				t.Fatal("decrease with relative-reset drift rejected")
 			}
 			cycle := s.QueryAPIDetailAt(usageGroupKey(r), "all", 10, 10, now).QuotaCycles[0].Groups[0].Current
-			if *cycle.UsedPercent != 20 || cycle.EstimatedTotalUSD != nil || cycle.Summary != nil {
-				t.Fatalf("decrease retained old watermark or estimate: %+v", cycle)
+			// The decrease awaits confirmation by the next observation.
+			if *cycle.UsedPercent != 20 {
+				t.Fatalf("latest usage was not shown: %+v", cycle)
 			}
 			r.RequestID, r.RequestedAt = "after", now.Add(-2*time.Minute)
 			s.Record(r)
@@ -1379,8 +1382,13 @@ func TestQuotaResetCardSurvivesCompactionAndSnapshot(t *testing.T) {
 			api := usageGroupKey(old)
 			check := func(stats *RequestStatistics) {
 				t.Helper()
+				// A later deadline gives the exact reset time.
+				want := resetAt
+				if shift > 0 {
+					want = end.Add(shift - 5*time.Hour)
+				}
 				cycle := stats.QueryAPIDetailAt(api, "all", 10, 10, now).QuotaCycles[0].Groups[0].Current
-				if !cycle.StartAt.Equal(resetAt) || !cycle.EndAt.Equal(end.Add(shift)) ||
+				if !cycle.StartAt.Equal(want) || !cycle.EndAt.Equal(end.Add(shift)) ||
 					cycle.Summary == nil || cycle.Summary.TotalRequests != 1 {
 					t.Fatalf("reset boundary or post-reset requests lost: %+v", cycle)
 				}

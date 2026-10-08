@@ -99,20 +99,19 @@ func quotaAppendSample(period *quotaPeriod, o quotaObservation, started time.Tim
 	sort.SliceStable(period.Samples, func(i, j int) bool { return period.Samples[i].ObservedAt.Before(period.Samples[j].ObservedAt) })
 	if len(period.Samples) > 64 {
 		// Preserve the first observation of this run and both sides of the
-		// latest decrease. Keeping only the global first sample can erase a
+		// latest reset. Keeping only the global first sample can erase a
 		// reset and make later estimates include costs from before the reset.
-		first, drop := -1, -1
+		first := -1
 		for i, sample := range period.Samples {
-			if first < 0 && !sample.ObservedAt.Before(period.CollectionStartedAt) {
+			if !sample.ObservedAt.Before(period.CollectionStartedAt) {
 				first = i
-			}
-			if i > 0 && sample.Used < period.Samples[i-1].Used {
-				drop = i
+				break
 			}
 		}
+		peak, drop := quotaLatestReset(period.Samples, period.End)
 		kept := make([]quotaObservation, 0, 64)
 		for i, sample := range period.Samples {
-			if i == 0 || i == first || i == drop-1 || i == drop || i >= len(period.Samples)-60 {
+			if i == 0 || i == first || (peak >= 0 && i == peak) || (drop >= 0 && (i == drop || i == drop+1)) || i >= len(period.Samples)-60 {
 				kept = append(kept, sample)
 			}
 		}
@@ -407,8 +406,11 @@ func (s *RequestStatistics) observeQuotaUsageLocked(record UsageRecord, now time
 			signals[key] = values[len(values)-1]
 		}
 	}
-	observed := record.RequestedAt.Add(record.Latency)
-	if record.RequestedAt.IsZero() || record.Latency < 0 || observed.After(now.Add(time.Minute)) {
+	// Upstream computes these headers when it admits the request. Using the
+	// completion time would order a long stream after shorter, later requests
+	// and make its older, lower usage look like a reset card.
+	observed := record.RequestedAt
+	if record.RequestedAt.IsZero() || observed.After(now.Add(time.Minute)) {
 		observed = now
 	}
 	input := quotaSignalsInput{Provider: record.Provider, AuthIndex: record.AuthIndex, AuthID: record.AuthID, ObservedAt: observed, Signals: signals}

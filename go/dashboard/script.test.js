@@ -3845,7 +3845,7 @@ test('quota capacity shows a single token estimate and keeps the reset explanati
   }, true);
   assert.match(html, /3\.333 M/);
   assert.doesNotMatch(html, /909\.00 M|1,111\.00 M|Model-only estimated total cost/);
-  assert.match(html, /Usage decreased/);
+  assert.match(html, /Quota reset detected/);
   assert.match(html, /No minimum consumption threshold applies/);
 });
 
