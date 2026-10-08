@@ -435,6 +435,13 @@ func (s *RequestStatistics) removeQuotaFactLocked(d RequestDetail) {
 		s.quota.Deleted = make(map[string]time.Time)
 	}
 	delete(s.quota.Facts, d.RecordID)
+	// Such IDs can never hold a fact, and snapshot loading rejects their
+	// tombstones, which would disable storage after a restart.
+	if len(d.RecordID) > 256 || d.Timestamp.IsZero() {
+		s.quota.VersionCounter++
+		s.invalidateCachedResponsesLocked()
+		return
+	}
 	s.quota.Deleted[d.RecordID] = d.Timestamp
 	s.quota.VersionCounter++
 	s.invalidateCachedResponsesLocked()

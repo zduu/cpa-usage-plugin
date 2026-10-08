@@ -121,3 +121,22 @@ func TestQuotaObservationsReportRejectedIndexes(t *testing.T) {
 		t.Fatalf("response did not list rejected entries: %+v", result)
 	}
 }
+
+func TestQuotaInvalidTombstoneDoesNotBreakSnapshot(t *testing.T) {
+	s := NewRequestStatistics()
+	defer s.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+	s.mu.Lock()
+	s.ensureQuotaLocked()
+	s.removeQuotaFactLocked(RequestDetail{RecordID: strings.Repeat("r", 300), Timestamp: now})
+	s.removeQuotaFactLocked(RequestDetail{RecordID: "no-time"})
+	s.removeQuotaFactLocked(RequestDetail{RecordID: "valid", Timestamp: now})
+	s.mu.Unlock()
+	snapshot := s.Snapshot()
+	if err := validateQuotaSnapshot(snapshot.QuotaCycles, nil); err != nil {
+		t.Fatalf("snapshot with invalid tombstone must still load: %v", err)
+	}
+	if len(snapshot.QuotaCycles.Deleted) != 1 {
+		t.Fatal("valid tombstone was not kept")
+	}
+}
