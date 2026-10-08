@@ -2,7 +2,7 @@
 
 此功能位于上游接口详情的「额度周期」区域，适用于 Claude、Codex、Devin、Antigravity 的认证文件凭证。只有取得真实上游窗口时才显示周期卡片；仅有周额度的凭证不会出现 5h 占位。Antigravity 在首次观测前会显示可展开的查询面板。
 
-本功能尚未发布，插件版本号暂保持 `2.6.6`。验收宿主为 CPA v8；宿主的插件管理接口仍使用 `/v0/management/plugins/usage-dashboard-zduu`，原生凭证列表使用 `/v8/management/credentials`。
+本功能自 `v2.7.0` 起提供。验收宿主为 CPA v8；宿主的插件管理接口仍使用 `/v0/management/plugins/usage-dashboard-zduu`，原生凭证列表使用 `/v8/management/credentials`。
 
 ## 页面用法
 
