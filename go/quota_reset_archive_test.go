@@ -417,3 +417,48 @@ func TestQuotaInvalidPeriodDoesNotRejectStorageSnapshot(t *testing.T) {
 		t.Fatalf("import rejected backup with one invalid period: %v", err)
 	}
 }
+
+func TestQuotaOversizedLegacyPeriodIsCompactedOnLoad(t *testing.T) {
+	s := NewRequestStatistics()
+	defer s.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+	end := now.Add(6 * 24 * time.Hour)
+	r := quotaTestRecord("r", "m", now.Add(-time.Hour), 1_000)
+	s.Record(r)
+	for i := 100; i > 0; i-- {
+		quotaTestObserve(s, now.Add(-time.Duration(i)*time.Minute), end, .2, 604800)
+	}
+	usage := s.Snapshot()
+	usage.QuotaCycles = cloneQuotaSnapshot(usage.QuotaCycles)
+	for key, w := range usage.QuotaCycles.Windows {
+		// v2.7.1 kept the last 60 samples plus up to five anchors: 65 in all.
+		extra := w.Current.Samples[0]
+		extra.ObservedAt = extra.ObservedAt.Add(-time.Hour)
+		w.Current.Samples = append([]quotaObservation{extra}, w.Current.Samples...)
+		usage.QuotaCycles.Windows[key] = w
+	}
+	if err := validateQuotaSnapshot(usage.QuotaCycles, nil); err == nil {
+		t.Fatal("65-sample period passed validation")
+	}
+	payload, err := json.Marshal(persistedStorageSnapshot{Version: currentStorageSnapshotVersion, GeneratedAt: now.Format(time.RFC3339Nano), Usage: usage})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(storageSnapshotPath(dir), payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dest := NewRequestStatistics()
+	defer dest.Close()
+	dest.mu.Lock()
+	_, err = dest.loadStorageSnapshotLocked(dir, now)
+	dest.mu.Unlock()
+	if err != nil {
+		t.Fatalf("legacy 65-sample period rejected the snapshot: %v", err)
+	}
+	for _, w := range dest.Snapshot().QuotaCycles.Windows {
+		if w.Current == nil || len(w.Current.Samples) != 64 {
+			t.Fatalf("expected the period kept and compacted to 64 samples: %+v", w.Current)
+		}
+	}
+}
