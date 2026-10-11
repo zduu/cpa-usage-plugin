@@ -121,6 +121,7 @@ func validateQuotaImport(snapshot StatisticsSnapshot, current *quotaState, repai
 // before checking identities or persisting either representation. Never mutate
 // the caller's backup, including when a later conflict rejects the import.
 func (s *RequestStatistics) prepareQuotaImportSnapshotLocked(snapshot StatisticsSnapshot) StatisticsSnapshot {
+	snapshot.QuotaCycles = dropInvalidQuotaPeriods(snapshot.QuotaCycles)
 	snapshot = backfillQuotaTimestampMetadata(snapshot)
 	if !s.claudeCacheRepairEnabled || snapshot.QuotaCycles == nil {
 		return snapshot
@@ -224,9 +225,7 @@ func validateQuotaSnapshot(in *quotaSnapshot, current *quotaState) error {
 			if p == nil {
 				continue
 			}
-			duration := p.End.Sub(p.Start)
-			if len(p.Samples) > 64 || duration <= 0 || duration > time.Duration(w.Seconds)*time.Second ||
-				(!p.EndedByReset && duration != time.Duration(w.Seconds)*time.Second) {
+			if len(p.Samples) > 64 || !validQuotaPeriodSpan(p, w.Seconds) {
 				return errors.New("invalid quota period")
 			}
 			for _, sample := range p.Samples {
@@ -243,6 +242,7 @@ func validateQuotaSnapshot(in *quotaSnapshot, current *quotaState) error {
 }
 
 func (s *RequestStatistics) mergeQuotaSnapshotLocked(in *quotaSnapshot) {
+	in = dropInvalidQuotaPeriods(in)
 	if in == nil || validateQuotaSnapshot(in, s.quota) != nil {
 		return
 	}
@@ -515,4 +515,39 @@ func writeQuotaSnapshot(w io.Writer, snapshot *quotaSnapshot) error {
 	}
 	_, err := io.WriteString(w, "}}")
 	return err
+}
+
+func validQuotaPeriodSpan(p *quotaPeriod, seconds int64) bool {
+	duration, window := p.End.Sub(p.Start), time.Duration(seconds)*time.Second
+	return duration > 0 && duration <= window && (p.EndedByReset || duration == window)
+}
+
+// A single malformed period must not reject the whole snapshot: on startup
+// that disables persistence and every later record is lost. Drop only the
+// period; its requests stay in the ledger and quota facts. Clone lazily so
+// importing a backup never changes the caller's data.
+func dropInvalidQuotaPeriods(in *quotaSnapshot) *quotaSnapshot {
+	if in == nil {
+		return nil
+	}
+	out := in
+	for key, w := range in.Windows {
+		current := w.Current != nil && !validQuotaPeriodSpan(w.Current, w.Seconds)
+		previous := w.Previous != nil && !validQuotaPeriodSpan(w.Previous, w.Seconds)
+		if !current && !previous {
+			continue
+		}
+		if out == in {
+			out = cloneQuotaSnapshot(in)
+		}
+		w = out.Windows[key]
+		if current {
+			w.Current = nil
+		}
+		if previous {
+			w.Previous = nil
+		}
+		out.Windows[key] = w
+	}
+	return out
 }

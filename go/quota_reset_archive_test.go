@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"os"
 	"testing"
 	"time"
 )
@@ -353,5 +354,66 @@ func TestQuotaLateArchiveSampleSkipsLaterWindow(t *testing.T) {
 	g := s.QueryAPIDetailAt(usageGroupKey(r), "all", 10, 10, now).QuotaCycles[0].Groups[0]
 	if !g.Previous.EndAt.Equal(card) || !g.Current.StartAt.Equal(e1) || g.Current.ResetBaselineUsedPercent != nil {
 		t.Fatal("late archive sample corrupted the next window")
+	}
+}
+
+func TestQuotaInvalidPeriodDoesNotRejectStorageSnapshot(t *testing.T) {
+	s := NewRequestStatistics()
+	defer s.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+	start := now.Add(-2 * time.Hour)
+	card := start.Add(time.Hour)
+	s.modelPrices = map[string]ModelPrice{"m": {Prompt: 1}}
+	r := quotaTestRecord("old", "m", start.Add(time.Minute), 1_000_000)
+	s.Record(r)
+	quotaTestObserve(s, start.Add(2*time.Minute), start.Add(5*time.Hour), .8, 18000)
+	quotaTestObserve(s, card, start.Add(5*time.Hour), .1, 18000)
+	quotaTestObserve(s, card.Add(time.Minute), start.Add(5*time.Hour), .2, 18000)
+	usage := s.Snapshot()
+	usage.QuotaCycles = cloneQuotaSnapshot(usage.QuotaCycles)
+	for key, w := range usage.QuotaCycles.Windows {
+		if w.Current == nil || w.Previous == nil {
+			t.Fatalf("missing periods: %+v", w)
+		}
+		// A malformed current period must cost only that period.
+		w.Current.Start = w.Current.Start.Add(time.Second)
+		usage.QuotaCycles.Windows[key] = w
+	}
+	if err := validateQuotaSnapshot(usage.QuotaCycles, nil); err == nil {
+		t.Fatal("corrupted period passed validation")
+	}
+	payload, err := json.Marshal(persistedStorageSnapshot{Version: currentStorageSnapshotVersion, GeneratedAt: now.Format(time.RFC3339Nano), Usage: usage})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(storageSnapshotPath(dir), payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dest := NewRequestStatistics()
+	defer dest.Close()
+	dest.mu.Lock()
+	_, err = dest.loadStorageSnapshotLocked(dir, now)
+	dest.mu.Unlock()
+	if err != nil {
+		t.Fatalf("one invalid quota period rejected the snapshot: %v", err)
+	}
+	restored := dest.Snapshot()
+	if restored.TotalRequests != 1 || len(restored.QuotaCycles.Facts) != 1 {
+		t.Fatalf("ledger or quota facts lost: requests=%d facts=%d", restored.TotalRequests, len(restored.QuotaCycles.Facts))
+	}
+	for _, w := range restored.QuotaCycles.Windows {
+		if w.Current != nil || w.Previous == nil || !w.Previous.EndedByReset {
+			t.Fatalf("expected only the invalid period dropped: %+v", w)
+		}
+	}
+	if err := validateQuotaSnapshot(restored.QuotaCycles, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Importing the same backup also succeeds instead of failing the request.
+	imported := NewRequestStatistics()
+	defer imported.Close()
+	if _, err := imported.mergeSnapshotChecked(usage); err != nil {
+		t.Fatalf("import rejected backup with one invalid period: %v", err)
 	}
 }
