@@ -87,10 +87,12 @@ func quotaEffectivePeriod(p *quotaPeriod) (*quotaPeriod, *float64) {
 		copy.Samples, reset = p.Samples[before:], true
 		if p.Start.Before(p.Samples[before-1].ObservedAt) || p.Start.After(copy.Samples[0].ObservedAt) {
 			copy.Start = copy.Samples[0].ObservedAt
+			copy.ResetTimeEstimated = true
 		}
 	}
 	if _, index := quotaLatestReset(copy.Samples, copy.End); index >= 0 {
 		copy.Start, copy.Samples, reset = copy.Samples[index].ObservedAt, copy.Samples[index:], true
+		copy.ResetTimeEstimated = true
 	}
 	if !reset {
 		return p, nil
@@ -104,10 +106,19 @@ func quotaBuildPeriod(w quotaWindow, p *quotaPeriod, facts []quotaFact, pricing 
 		return nil
 	}
 	p, resetUsed := quotaEffectivePeriod(p)
-	v := &quotaCycleDTO{ResetBaselineUsedPercent: resetUsed, StartAt: p.Start, EndAt: p.End, ModelStats: []quotaModelStat{}, Unmapped: w.Unmapped}
+	v := &quotaCycleDTO{EndedByReset: p.EndedByReset, ResetTimeEstimated: p.ResetTimeEstimated,
+		ResetBaselineUsedPercent: resetUsed, StartAt: p.Start, EndAt: p.End, ModelStats: []quotaModelStat{}, Unmapped: w.Unmapped}
 	if len(p.Samples) > 0 {
 		last := p.Samples[len(p.Samples)-1]
 		percent := last.Used * 100
+		// A rounded reading cannot undo exhaustion, but an unconfirmed reset
+		// candidate must not be hidden behind it until the next sample arrives.
+		for _, sample := range p.Samples {
+			if sample.Used == 1 && !quotaResetCandidate(1, last.Used) {
+				percent = 100
+				break
+			}
+		}
 		v.UsedPercent, v.ObservedAt = &percent, last.ObservedAt
 	}
 	if w.Unmapped {
@@ -220,7 +231,7 @@ func (s *RequestStatistics) quotaCyclesForAPILocked(api string, now time.Time) [
 					zero := 0.0
 					remaining = &zero
 				}
-			} else if !current.ObservedAt.After(now) && now.Sub(current.ObservedAt) <= time.Duration(w.Seconds)*time.Second/4 {
+			} else if !current.ObservedAt.After(now) {
 				current.EstimatedTotalUSD, remaining = quotaEstimate(current)
 			}
 			applyQuotaModelEstimates(current)

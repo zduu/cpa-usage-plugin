@@ -279,13 +279,9 @@ func TestQuotaModelCapacityBackupRepricingAndRollover(t *testing.T) {
 	}
 	quotaModelAssert(t, current.EstimatedTotalUSD, 140)
 	stale := restored.QueryAPIDetailAt(api, "all", 10, 10, now.Add(2*time.Hour)).QuotaCycles[0].Groups[0].Current
-	if stale.EstimatedTotalUSD != nil {
-		t.Fatal("stale period retained its budget")
-	}
-	for _, row := range stale.ModelStats {
-		if row.ModelOnlyTotalTokens != nil {
-			t.Fatal("model capacity survived an unavailable period budget")
-		}
+	quotaModelAssert(t, stale.EstimatedTotalUSD, 140)
+	for i, row := range stale.ModelStats {
+		quotaModelAssert(t, row.ModelOnlyTotalTokens, *current.ModelStats[i].ModelOnlyTotalTokens)
 	}
 	previous := restored.QueryAPIDetailAt(api, "all", 10, 10, reset.Add(time.Minute)).QuotaCycles[0].Groups[0].Previous
 	if previous == nil {

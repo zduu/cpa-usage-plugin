@@ -830,6 +830,29 @@ test('quota current capacity uses the full amount only at exactly 100 percent', 
   assert.doesNotMatch(unknown, /3\.57|NaN|Infinity/);
 });
 
+test('quota previous periods show early reset duration and estimated boundaries', async () => {
+  const { context } = createDashboardHarness({ language: 'en' });
+  await context.load();
+  const cycle = { start_at: '2026-10-02T08:00:00Z', end_at: '2026-10-02T09:10:00Z',
+    observed_at: '2026-10-02T09:09:00Z', ended_by_reset: true, reset_time_estimated: true,
+    used_percent: 99, estimated_total_usd: 28, summary: { estimated_cost: 27.72 }, model_stats: [] };
+  const html = context.quotaPeriodHtml(cycle, false);
+  assert.match(html, /Reset early · Actual duration: 01:10:00/);
+  assert.match(html, /Reset time estimated from the first observation/);
+  assert.match(html, /Quota observed at:/);
+  assert.match(html, /Estimated capacity/);
+  assert.doesNotMatch(html, /data-quota-reset/);
+  const exact = context.quotaPeriodHtml({ ...cycle, reset_time_estimated: false }, false);
+  assert.doesNotMatch(exact, /Reset time estimated/);
+  const tabs = context.quotaCyclesHtml([{ provider: 'claude', auth_index: 'index', groups: [{ group_id: 'shared:5h', window_seconds: 18000, previous: cycle }] }]);
+  assert.match(tabs, /Previous period/);
+  assert.doesNotMatch(tabs, /Previous complete period/);
+  for (const key of ['anthropic-ratelimit-unified-status', 'anthropic-ratelimit-unified-representative-claim', 'anthropic-ratelimit-unified-5h-status']) {
+    assert.equal(context.quotaSignalAllowed('claude', key), true);
+  }
+  assert.equal(context.quotaSignalAllowed('claude', 'authorization'), false);
+});
+
 test('quota model table shows budget-based token capacity without a model-only cost column', async () => {
   const { context } = createDashboardHarness({ language: 'en' });
   await context.load();

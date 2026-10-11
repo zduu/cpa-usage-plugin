@@ -1580,7 +1580,7 @@ function updateQuotaCountdowns() {
   if (refresh) renderApiDetail();
 }
 function quotaSignalAllowed(provider, key) {
-  if (provider === 'claude') return /^anthropic-ratelimit-unified-(5h|7d)-(utilization|reset)$/.test(key);
+  if (provider === 'claude') return /^anthropic-ratelimit-unified-(?:(5h|7d)-(utilization|reset|status)|status|representative-claim)$/.test(key);
   if (provider === 'devin') return /^(daily|weekly)_quota_(remaining_percent|reset_at)$/.test(key);
   return provider === 'codex' && /^x-codex-(?:[a-z0-9.-]+-)*(?:(?:primary|secondary)-(?:used-percent|window-minutes|reset-at|reset-after-seconds)|limit-name)$/.test(key);
 }
@@ -1608,6 +1608,12 @@ function quotaPeriodHtml(cycle, current) {
     html += metricHtml(t(full ? 'quota_actual_total' : 'quota_estimated_total'), quotaValue(full ? cycle.actual_total_usd : cycle.estimated_total_usd, true));
   }
   html += '</div>';
+  if (cycle.ended_by_reset) {
+    const duration = quotaCountdownText(timestampMs(cycle.end_at), timestampMs(cycle.start_at));
+    html += '<div class="subtle quotaDates">' + esc(t('quota_early_reset') + ' · ' + t('quota_actual_duration') + ': ' + duration) + '</div>';
+  }
+  if (cycle.reset_time_estimated) html += '<div class="subtle quotaDates">' + esc(t('quota_reset_time_estimated')) + '</div>';
+  if (cycle.observed_at) html += '<div class="subtle quotaDates">' + esc(t('quota_observed_at') + ': ' + formatDateTime(timestampMs(cycle.observed_at))) + '</div>';
   if (cycle.reset_baseline_used_percent != null) html += '<div class="subtle quotaEstimateHint">' + esc(t('quota_reset_detected_hint')) + '</div>';
   if (cycle.unmapped) return html + '<div class="subtle">' + t('quota_scope_unknown') + '</div>';
   if (cycle.reset_baseline_used_percent == null) html += '<div class="subtle quotaDates">' + esc(t(cycle.used_percent === 100 ? 'quota_full_hint' : 'quota_estimate_hint')) + '</div>';

@@ -35,6 +35,8 @@ type quotaObservation struct {
 }
 
 type quotaPeriod struct {
+	EndedByReset        bool               `json:"ended_by_reset,omitempty"`
+	ResetTimeEstimated  bool               `json:"reset_time_estimated,omitempty"`
 	Start               time.Time          `json:"start"`
 	End                 time.Time          `json:"end"`
 	CollectionStartedAt time.Time          `json:"collection_started_at,omitempty"`
@@ -42,20 +44,19 @@ type quotaPeriod struct {
 }
 
 type quotaWindow struct {
-	Provider        string       `json:"provider"`
-	AuthIndex       string       `json:"auth_index"`
-	AuthID          string       `json:"auth_id"`
-	Group           string       `json:"group"`
-	Name            string       `json:"name"`
-	Slot            string       `json:"slot"`
-	Seconds         int64        `json:"seconds"`
-	Model           string       `json:"model,omitempty"`
-	Unmapped        bool         `json:"unmapped,omitempty"`
-	Hidden          bool         `json:"hidden,omitempty"`
-	UpdatedAt       time.Time    `json:"updated_at"`
-	Current         *quotaPeriod `json:"current,omitempty"`
-	Previous        *quotaPeriod `json:"previous,omitempty"`
-	EstimateExpired bool         `json:"-"`
+	Provider  string       `json:"provider"`
+	AuthIndex string       `json:"auth_index"`
+	AuthID    string       `json:"auth_id"`
+	Group     string       `json:"group"`
+	Name      string       `json:"name"`
+	Slot      string       `json:"slot"`
+	Seconds   int64        `json:"seconds"`
+	Model     string       `json:"model,omitempty"`
+	Unmapped  bool         `json:"unmapped,omitempty"`
+	Hidden    bool         `json:"hidden,omitempty"`
+	UpdatedAt time.Time    `json:"updated_at"`
+	Current   *quotaPeriod `json:"current,omitempty"`
+	Previous  *quotaPeriod `json:"previous,omitempty"`
 }
 
 type quotaSnapshot struct {
@@ -73,6 +74,8 @@ type quotaState struct {
 }
 
 type quotaCycleDTO struct {
+	EndedByReset             bool               `json:"ended_by_reset,omitempty"`
+	ResetTimeEstimated       bool               `json:"reset_time_estimated,omitempty"`
 	ResetBaselineUsedPercent *float64           `json:"reset_baseline_used_percent,omitempty"`
 	Unmapped                 bool               `json:"unmapped,omitempty"`
 	ActualTotalUSD           *float64           `json:"actual_total_usd,omitempty"`

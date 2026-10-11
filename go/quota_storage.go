@@ -224,7 +224,9 @@ func validateQuotaSnapshot(in *quotaSnapshot, current *quotaState) error {
 			if p == nil {
 				continue
 			}
-			if len(p.Samples) > 64 || !p.Start.Before(p.End) || p.End.Sub(p.Start) != time.Duration(w.Seconds)*time.Second {
+			duration := p.End.Sub(p.Start)
+			if len(p.Samples) > 64 || duration <= 0 || duration > time.Duration(w.Seconds)*time.Second ||
+				(!p.EndedByReset && duration != time.Duration(w.Seconds)*time.Second) {
 				return errors.New("invalid quota period")
 			}
 			for _, sample := range p.Samples {
@@ -272,6 +274,7 @@ func (s *RequestStatistics) mergeQuotaSnapshotLocked(in *quotaSnapshot) {
 			}
 			mergeQuotaWindowHistory(&w, old)
 		}
+		quotaArchiveResetPeriod(&w)
 		q.Windows[key] = w
 	}
 	q.VersionCounter++
@@ -300,8 +303,16 @@ func mergeQuotaWindowHistory(w *quotaWindow, incoming quotaWindow) {
 			if quotaResetDriftIsSmall(end, w.Current.Start, w.Seconds) {
 				end = w.Current.Start
 			}
-			w.Previous = &quotaPeriod{Start: end.Add(-time.Duration(w.Seconds) * time.Second), End: end,
-				CollectionStartedAt: p.CollectionStartedAt}
+			copy := *p
+			copy.End, copy.Samples = end, nil
+			if !p.EndedByReset {
+				copy.Start = end.Add(-time.Duration(w.Seconds) * time.Second)
+			}
+			// Aligning a short reset archive to the local boundary can leave
+			// nothing of it; never install an empty or inverted period.
+			if copy.Start.Before(copy.End) {
+				w.Previous = &copy
+			}
 		}
 		var target *quotaPeriod
 		for _, period := range []*quotaPeriod{w.Previous, w.Current} {

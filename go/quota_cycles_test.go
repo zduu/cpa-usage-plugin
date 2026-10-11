@@ -444,14 +444,17 @@ func TestQuotaConflictingImportDoesNotChangeEitherLedger(t *testing.T) {
 	}
 }
 
-func TestQuotaExpiredEstimateInvalidatesAllTimeDashboard(t *testing.T) {
+func TestQuotaEstimateRemainsUntilPeriodEnds(t *testing.T) {
 	s := NewRequestStatistics()
 	defer s.Close()
 	now := time.Now().UTC().Truncate(time.Second)
 	quotaTestObserve(s, now, now.Add(5*time.Hour), .4, 18000)
 	version := s.dashboardVersionAt(now)
-	if s.dashboardVersionAt(now.Add(76*time.Minute)) == version {
-		t.Fatal("expired estimate can be reused through a stale ETag")
+	if s.dashboardVersionAt(now.Add(76*time.Minute)) != version {
+		t.Fatal("idle observation unnecessarily changed the dashboard version")
+	}
+	if s.dashboardVersionAt(now.Add(5*time.Hour)) == version {
+		t.Fatal("period rollover did not invalidate the dashboard")
 	}
 }
 

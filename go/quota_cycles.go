@@ -109,9 +109,25 @@ func quotaAppendSample(period *quotaPeriod, o quotaObservation, started time.Tim
 			}
 		}
 		peak, drop := quotaLatestReset(period.Samples, period.End)
+		deadline := quotaPreResetSamples(period)
+		keep := map[int]bool{0: true}
+		for _, i := range []int{first, peak, drop, drop + 1, deadline - 1, deadline} {
+			if i >= 0 && i < len(period.Samples) {
+				keep[i] = true
+			}
+		}
+		for i := len(period.Samples) - 1; i >= 0; i-- {
+			if period.Samples[i].Used == 1 {
+				keep[i] = true
+				break
+			}
+		}
+		for i := len(period.Samples) - 1; i >= 0 && len(keep) < 64; i-- {
+			keep[i] = true
+		}
 		kept := make([]quotaObservation, 0, 64)
 		for i, sample := range period.Samples {
-			if i == 0 || i == first || (peak >= 0 && i == peak) || (drop >= 0 && (i == drop || i == drop+1)) || i >= len(period.Samples)-60 {
+			if keep[i] {
 				kept = append(kept, sample)
 			}
 		}
@@ -180,6 +196,7 @@ func (s *RequestStatistics) applyQuotaObservationLocked(o quotaObservation) bool
 		revokedAt, w.UpdatedAt = w.UpdatedAt, quotaWindowObservedAt(w)
 	}
 	commit := func() bool {
+		quotaArchiveResetPeriod(&w)
 		if !revokedAt.IsZero() {
 			w.Hidden, w.UpdatedAt = true, revokedAt
 		}
@@ -189,6 +206,21 @@ func (s *RequestStatistics) applyQuotaObservationLocked(o quotaObservation) bool
 		return true
 	}
 	if o.ObservedAt.Before(w.UpdatedAt) || (w.Hidden && o.ObservedAt.Equal(w.UpdatedAt)) {
+		// A reset archive ends at the card time, while its observations still
+		// carry the original deadline. Match late responses by both identities.
+		if p := w.Previous; p != nil && p.EndedByReset && w.Seconds == o.Seconds &&
+			!o.ObservedAt.Before(p.Start) && o.ObservedAt.Before(p.End) && len(p.Samples) > 0 &&
+			quotaResetDriftIsSmall(p.Samples[len(p.Samples)-1].Reset, o.Reset, o.Seconds) {
+			if !quotaAppendSample(p, o, o.CollectionStartedAt) {
+				return false
+			}
+			// Only the window that was reset keeps pre-reset observations; a
+			// later natural window installed by a backup merge must not.
+			if w.Current != nil && !w.Current.Start.After(p.End) {
+				quotaAppendSample(w.Current, o, o.CollectionStartedAt)
+			}
+			return commit()
+		}
 		for _, p := range []*quotaPeriod{w.Current, w.Previous} {
 			// Boundary alignment must still accept delayed relative-reset samples
 			// without moving the shared boundary back to their older timestamp.
@@ -243,7 +275,7 @@ func (s *RequestStatistics) applyQuotaObservationLocked(o quotaObservation) bool
 		}
 		w.Current = &quotaPeriod{Start: start, End: o.Reset, CollectionStartedAt: o.CollectionStartedAt, Samples: []quotaObservation{o}}
 	}
-	if w.Current != nil && w.Previous != nil {
+	if w.Current != nil && w.Previous != nil && !w.Previous.EndedByReset {
 		if quotaResetDriftIsSmall(w.Previous.End, w.Current.Start, o.Seconds) {
 			// The newer observation fixes the shared boundary. Align the old
 			// window too so a request cannot belong to both periods after drift.
@@ -262,8 +294,62 @@ func (s *RequestStatistics) applyQuotaObservationLocked(o quotaObservation) bool
 	}
 	w.Seconds, w.Name, w.Model, w.Unmapped = o.Seconds, o.Name, o.Model, o.Unmapped
 	w.UpdatedAt, w.Hidden = o.ObservedAt, false
-	w.EstimateExpired = false
 	return commit()
+}
+
+// Preserve the segment ended by the latest early reset. Keep the original
+// observations in Current so late callbacks and old backups can still refine
+// the reset boundary; the effective current view excludes those observations.
+func quotaArchiveResetPeriod(w *quotaWindow) bool {
+	p := w.Current
+	effective, reset := quotaEffectivePeriod(p)
+	if reset == nil {
+		return false
+	}
+	before := len(p.Samples) - len(effective.Samples)
+	if before <= 0 {
+		return false
+	}
+	last := p.Samples[before-1]
+	previous := &quotaPeriod{Start: last.Reset.Add(-time.Duration(w.Seconds) * time.Second),
+		End: last.Reset, CollectionStartedAt: p.CollectionStartedAt, Samples: p.Samples[:before]}
+	previous, _ = quotaEffectivePeriod(previous)
+	copy := *previous
+	copy.End, copy.EndedByReset = effective.Start, true
+	copy.ResetTimeEstimated = effective.ResetTimeEstimated
+	if !copy.Start.Before(copy.End) || (w.Previous != nil && !w.Previous.EndedByReset && w.Previous.End.After(copy.End)) {
+		return false
+	}
+	copy.Samples = append([]quotaObservation(nil), previous.Samples...)
+	if old := w.Previous; old != nil && old.EndedByReset && copy.End.After(old.End) &&
+		copy.Start.Before(old.End) && !last.ObservedAt.Before(old.End) {
+		// The previous archive also proves where the intervening segment
+		// began, even after Current compacts older reset observations.
+		copy.Start = old.End
+	}
+	if old := w.Previous; old != nil && old.EndedByReset && old.Start.Before(copy.End) && !copy.End.After(old.End) {
+		// Sample compaction in Current must not erase the archive's start,
+		// exhaustion signal or earlier observations, including when a late
+		// decrease moves the same reset boundary earlier.
+		copy.Start = old.Start
+		for _, sample := range old.Samples {
+			if sample.ObservedAt.Before(copy.End) {
+				quotaAppendSample(&copy, sample, old.CollectionStartedAt)
+			}
+		}
+	}
+	if old := w.Previous; old != nil && old.Start.Equal(copy.Start) && old.End.Equal(copy.End) &&
+		old.EndedByReset && old.ResetTimeEstimated == copy.ResetTimeEstimated && len(old.Samples) == len(copy.Samples) {
+		same := true
+		for i := range old.Samples {
+			same = same && quotaSameObservation(old.Samples[i], copy.Samples[i])
+		}
+		if same {
+			return false
+		}
+	}
+	w.Previous = &copy
+	return true
 }
 
 // The previous period is the latest observed completed window, regardless of
@@ -284,13 +370,9 @@ func (s *RequestStatistics) advanceQuotaCyclesLocked(now time.Time) {
 	}
 	changed := false
 	for key, w := range s.quota.Windows {
-		if w.Current != nil && !w.EstimateExpired && len(w.Current.Samples) > 0 {
-			last := w.Current.Samples[len(w.Current.Samples)-1]
-			if now.Sub(last.ObservedAt) > time.Duration(w.Seconds)*time.Second/4 {
-				w.EstimateExpired = true
-				s.quota.Windows[key] = w
-				changed = true
-			}
+		if quotaArchiveResetPeriod(&w) {
+			s.quota.Windows[key] = w
+			changed = true
 		}
 		if w.Current != nil && !now.Before(w.Current.End) {
 			w.Previous, w.Current = w.Current, nil
@@ -336,7 +418,6 @@ func (s *RequestStatistics) pruneQuotaLocked(now time.Time) {
 				// Expiring old usage must not erase a newer revocation. Keep
 				// only its marker; late observations can still carry new periods.
 				w.Current, w.Previous, w.Seconds = nil, nil, 0
-				w.EstimateExpired = false
 				s.quota.Windows[key] = w
 			} else {
 				delete(s.quota.Windows, key)

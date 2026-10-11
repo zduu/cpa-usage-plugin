@@ -108,7 +108,18 @@ func parseQuotaSignals(input quotaSignalsInput) []quotaObservation {
 				revoke("shared", w.slot)
 				continue
 			}
-			if used, ok := quotaNumber(signals[prefix+"utilization"], 1); ok {
+			used, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimSuffix(signals[prefix+"utilization"], "%")), 64)
+			ok := err == nil && !math.IsNaN(used) && !math.IsInf(used, 0) && used >= 0
+			// Rejected quota can still report rounded utilization as 0.99.
+			// A global rejection identifies a window only with its claim;
+			// it must not mark both the five-hour and weekly quotas exhausted.
+			claim := signals["anthropic-ratelimit-unified-representative-claim"]
+			claimed := (w.slot == "5h" && claim == "five_hour") || (w.slot == "7d" && claim == "seven_day")
+			if signals[prefix+"status"] == "rejected" || (claimed && signals["anthropic-ratelimit-unified-status"] == "rejected") {
+				used, ok = 1, true
+			}
+			if ok {
+				used = math.Min(used, 1)
 				add("shared", "", w.slot, w.seconds, used, quotaTime(signals[prefix+"reset"]), false)
 			}
 		}
