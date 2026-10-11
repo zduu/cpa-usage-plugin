@@ -121,6 +121,7 @@ func validateQuotaImport(snapshot StatisticsSnapshot, current *quotaState, repai
 // before checking identities or persisting either representation. Never mutate
 // the caller's backup, including when a later conflict rejects the import.
 func (s *RequestStatistics) prepareQuotaImportSnapshotLocked(snapshot StatisticsSnapshot) StatisticsSnapshot {
+	snapshot.QuotaCycles = repairQuotaPeriods(snapshot.QuotaCycles)
 	snapshot = backfillQuotaTimestampMetadata(snapshot)
 	if !s.claudeCacheRepairEnabled || snapshot.QuotaCycles == nil {
 		return snapshot
@@ -224,9 +225,7 @@ func validateQuotaSnapshot(in *quotaSnapshot, current *quotaState) error {
 			if p == nil {
 				continue
 			}
-			duration := p.End.Sub(p.Start)
-			if len(p.Samples) > 64 || duration <= 0 || duration > time.Duration(w.Seconds)*time.Second ||
-				(!p.EndedByReset && duration != time.Duration(w.Seconds)*time.Second) {
+			if len(p.Samples) > 64 || !validQuotaPeriodSpan(p, w.Seconds) {
 				return errors.New("invalid quota period")
 			}
 			for _, sample := range p.Samples {
@@ -234,7 +233,7 @@ func validateQuotaSnapshot(in *quotaSnapshot, current *quotaState) error {
 					return errors.New("invalid quota observation")
 				}
 			}
-			if !sort.SliceIsSorted(p.Samples, func(i, j int) bool { return p.Samples[i].ObservedAt.Before(p.Samples[j].ObservedAt) }) {
+			if !quotaSamplesSorted(p) {
 				return errors.New("unordered quota observations")
 			}
 		}
@@ -243,6 +242,7 @@ func validateQuotaSnapshot(in *quotaSnapshot, current *quotaState) error {
 }
 
 func (s *RequestStatistics) mergeQuotaSnapshotLocked(in *quotaSnapshot) {
+	in = repairQuotaPeriods(in)
 	if in == nil || validateQuotaSnapshot(in, s.quota) != nil {
 		return
 	}
@@ -515,4 +515,49 @@ func writeQuotaSnapshot(w io.Writer, snapshot *quotaSnapshot) error {
 	}
 	_, err := io.WriteString(w, "}}")
 	return err
+}
+
+func validQuotaPeriodSpan(p *quotaPeriod, seconds int64) bool {
+	duration, window := p.End.Sub(p.Start), time.Duration(seconds)*time.Second
+	return duration > 0 && duration <= window && (p.EndedByReset || duration == window)
+}
+
+func quotaSamplesSorted(p *quotaPeriod) bool {
+	return sort.SliceIsSorted(p.Samples, func(i, j int) bool { return p.Samples[i].ObservedAt.Before(p.Samples[j].ObservedAt) })
+}
+
+// A single malformed period must not reject the whole snapshot: on startup
+// that disables persistence and every later record is lost. v2.7.1 and
+// earlier could compact a period to 65 samples, so order and compact samples
+// again. Drop only a period with an impossible span; its requests stay in the
+// ledger and quota facts. Clone lazily so importing a backup never changes
+// the caller's data.
+func repairQuotaPeriods(in *quotaSnapshot) *quotaSnapshot {
+	if in == nil {
+		return nil
+	}
+	out := in
+	for key, w := range in.Windows {
+		broken := func(p *quotaPeriod) bool {
+			return p != nil && (len(p.Samples) > 64 || !validQuotaPeriodSpan(p, w.Seconds) || !quotaSamplesSorted(p))
+		}
+		if !broken(w.Current) && !broken(w.Previous) {
+			continue
+		}
+		if out == in {
+			out = cloneQuotaSnapshot(in)
+		}
+		w = out.Windows[key]
+		repair := func(p *quotaPeriod) *quotaPeriod {
+			if p == nil || !validQuotaPeriodSpan(p, w.Seconds) {
+				return nil
+			}
+			sort.SliceStable(p.Samples, func(i, j int) bool { return p.Samples[i].ObservedAt.Before(p.Samples[j].ObservedAt) })
+			quotaCompactSamples(p)
+			return p
+		}
+		w.Current, w.Previous = repair(w.Current), repair(w.Previous)
+		out.Windows[key] = w
+	}
+	return out
 }

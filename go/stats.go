@@ -1810,6 +1810,7 @@ func (s *RequestStatistics) loadStorageSnapshotLocked(dir string, now time.Time)
 	// Validate before changing live counters or replay cutoff. Previously a
 	// malformed generated_at restored the counters first and then returned
 	// an error, leaving a partially accepted snapshot in live statistics.
+	persisted.Usage.QuotaCycles = repairQuotaPeriods(persisted.Usage.QuotaCycles)
 	if err := validateQuotaSnapshot(persisted.Usage.QuotaCycles, nil); err != nil {
 		return time.Time{}, err
 	}

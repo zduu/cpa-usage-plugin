@@ -97,6 +97,12 @@ func quotaAppendSample(period *quotaPeriod, o quotaObservation, started time.Tim
 		period.CollectionStartedAt = started
 	}
 	sort.SliceStable(period.Samples, func(i, j int) bool { return period.Samples[i].ObservedAt.Before(period.Samples[j].ObservedAt) })
+	quotaCompactSamples(period)
+	return true
+}
+
+// quotaCompactSamples keeps at most 64 ordered samples.
+func quotaCompactSamples(period *quotaPeriod) {
 	if len(period.Samples) > 64 {
 		// Preserve the first observation of this run and both sides of the
 		// latest reset. Keeping only the global first sample can erase a
@@ -133,7 +139,6 @@ func quotaAppendSample(period *quotaPeriod, o quotaObservation, started time.Tim
 		}
 		period.Samples = kept
 	}
-	return true
 }
 
 // quotaSameObservation ignores the collection baseline: the dashboard resubmits
