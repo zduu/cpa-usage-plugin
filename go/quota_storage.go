@@ -117,27 +117,34 @@ func validateQuotaImport(snapshot StatisticsSnapshot, current *quotaState, repai
 	return nil
 }
 
-// Import quota-only facts using the same opt-in normalization as main details,
-// before checking identities or persisting either representation. Never mutate
-// the caller's backup, including when a later conflict rejects the import.
+// Normalize quota facts to match main details before checking identities or
+// persisting either representation. Model decoding is unconditional; cache
+// repair remains opt-in. Never mutate the caller's backup, including when a
+// later conflict rejects the import.
 func (s *RequestStatistics) prepareQuotaImportSnapshotLocked(snapshot StatisticsSnapshot) StatisticsSnapshot {
 	snapshot.QuotaCycles = repairQuotaPeriods(snapshot.QuotaCycles)
 	snapshot = backfillQuotaTimestampMetadata(snapshot)
-	if !s.claudeCacheRepairEnabled || snapshot.QuotaCycles == nil {
+	if snapshot.QuotaCycles == nil {
 		return snapshot
 	}
 	copied := false
 	for id, fact := range snapshot.QuotaCycles.Facts {
-		detail := fact.detail()
-		if !validQuotaFact(fact) || !isPollutedClaudeCacheFallbackDetail(detail) {
+		normalized := fact
+		normalized.Model = decodeClaudeCloakedModel(fact.Model)
+		if s.claudeCacheRepairEnabled && validQuotaFact(fact) {
+			detail := normalized.detail()
+			if isPollutedClaudeCacheFallbackDetail(detail) {
+				normalized.Tokens = repairClaudeCacheFallbackTokens(detail).Tokens
+			}
+		}
+		if normalized == fact {
 			continue
 		}
 		if !copied {
 			snapshot.QuotaCycles = cloneQuotaSnapshot(snapshot.QuotaCycles)
 			copied = true
 		}
-		fact.Tokens = repairClaudeCacheFallbackTokens(detail).Tokens
-		snapshot.QuotaCycles.Facts[id] = fact
+		snapshot.QuotaCycles.Facts[id] = normalized
 	}
 	return snapshot
 }
@@ -541,7 +548,8 @@ func repairQuotaPeriods(in *quotaSnapshot) *quotaSnapshot {
 		broken := func(p *quotaPeriod) bool {
 			return p != nil && (len(p.Samples) > 64 || !validQuotaPeriodSpan(p, w.Seconds) || !quotaSamplesSorted(p))
 		}
-		if !broken(w.Current) && !broken(w.Previous) {
+		emptyArchive := quotaEmptyResetArchive(w.Previous)
+		if !broken(w.Current) && !broken(w.Previous) && !emptyArchive {
 			continue
 		}
 		if out == in {
@@ -557,6 +565,9 @@ func repairQuotaPeriods(in *quotaSnapshot) *quotaSnapshot {
 			return p
 		}
 		w.Current, w.Previous = repair(w.Current), repair(w.Previous)
+		// Snapshots written while an unused pool still rolled its deadline keep
+		// an empty reset archive. Clear it on load so it stops rendering.
+		quotaDropEmptyResetArchive(&w)
 		out.Windows[key] = w
 	}
 	return out

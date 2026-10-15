@@ -73,6 +73,21 @@ func quotaPreResetSamples(p *quotaPeriod) int {
 	return count
 }
 
+// A moved deadline only proves a reset when the segment it ends actually
+// consumed quota. An unused Antigravity pool reports its deadline as
+// "now + window" on every query, so each observation moves the deadline about
+// as much as time passed without any usage to rebase. Reading that as a reset
+// card archived an empty previous period and restarted the current one on
+// every poll.
+func quotaSamplesConsumed(samples []quotaObservation) bool {
+	for _, sample := range samples {
+		if sample.Used > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // The moved deadline gives the exact reset time when it falls between the
 // last pre-reset and the first post-reset observation. Otherwise, and for a
 // reset seen only as a usage decrease, use the first observation after it as a
@@ -83,13 +98,14 @@ func quotaEffectivePeriod(p *quotaPeriod) (*quotaPeriod, *float64) {
 	}
 	copy := *p
 	reset := false
-	if before := quotaPreResetSamples(p); before > 0 && before < len(p.Samples) {
+	if before := quotaPreResetSamples(p); before > 0 && before < len(p.Samples) && quotaSamplesConsumed(p.Samples[:before]) {
 		copy.Samples, reset = p.Samples[before:], true
 		if p.Start.Before(p.Samples[before-1].ObservedAt) || p.Start.After(copy.Samples[0].ObservedAt) {
 			copy.Start = copy.Samples[0].ObservedAt
 			copy.ResetTimeEstimated = true
 		}
 	}
+	// A usage decrease is self-evident: it needs a peak above zero to exist.
 	if _, index := quotaLatestReset(copy.Samples, copy.End); index >= 0 {
 		copy.Start, copy.Samples, reset = copy.Samples[index].ObservedAt, copy.Samples[index:], true
 		copy.ResetTimeEstimated = true
@@ -99,6 +115,21 @@ func quotaEffectivePeriod(p *quotaPeriod) (*quotaPeriod, *float64) {
 	}
 	used := copy.Samples[0].Used * 100
 	return &copy, &used
+}
+
+// A reset-ended archive that never consumed quota carries no history: it is
+// the artifact of a rolling unused deadline, and the panel should not present
+// it as a completed previous period.
+func quotaEmptyResetArchive(p *quotaPeriod) bool {
+	return p != nil && p.EndedByReset && len(p.Samples) > 0 && !quotaSamplesConsumed(p.Samples)
+}
+
+func quotaDropEmptyResetArchive(w *quotaWindow) bool {
+	if !quotaEmptyResetArchive(w.Previous) {
+		return false
+	}
+	w.Previous = nil
+	return true
 }
 
 func quotaBuildPeriod(w quotaWindow, p *quotaPeriod, facts []quotaFact, pricing *pricingSnapshot) *quotaCycleDTO {

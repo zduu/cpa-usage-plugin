@@ -1485,7 +1485,7 @@ func usageRecordFingerprint(record UsageRecord) string {
 	}
 	parts := []string{
 		upstreamIdentity,
-		strings.ToLower(strings.TrimSpace(firstNonEmpty(record.Alias, record.Model))),
+		strings.ToLower(decodeClaudeCloakedModel(strings.TrimSpace(firstNonEmpty(record.Alias, record.Model)))),
 		canonicalClientAPIKey(record.APIKey),
 		fmt.Sprintf("%d", inputTokens),
 		fmt.Sprintf("%d", outputTokens),

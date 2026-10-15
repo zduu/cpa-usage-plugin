@@ -499,7 +499,7 @@ func protocolObservationFromUsageRecord(record UsageRecord) protocolCorrelationO
 	meta := protocolCorrelationMetaForUsageRecord(record)
 	return protocolCorrelationObservation{
 		Role:           role,
-		RequestedModel: strings.TrimSpace(firstNonEmpty(record.Alias, record.Model)),
+		RequestedModel: decodeClaudeCloakedModel(strings.TrimSpace(firstNonEmpty(record.Alias, record.Model))),
 		ClientIdentity: canonicalClientAPIKey(record.APIKey),
 		Failed:         record.Failed,
 		StatusCode:     record.Failure.StatusCode,
@@ -512,7 +512,7 @@ func protocolObservationFromUsageRecord(record UsageRecord) protocolCorrelationO
 			Timestamp:  record.RequestedAt,
 			Completion: record.RequestedAt.Add(record.Latency),
 			API:        usageGroupKey(record),
-			Model:      strings.TrimSpace(firstNonEmpty(record.Alias, record.Model)),
+			Model:      decodeClaudeCloakedModel(strings.TrimSpace(firstNonEmpty(record.Alias, record.Model))),
 			Provider:   strings.TrimSpace(record.Provider),
 			Auth:       strings.TrimSpace(firstNonEmpty(record.AuthID, record.AuthIndex)),
 			Signature:  usageRecordFingerprint(record),
@@ -1824,7 +1824,7 @@ func (s *RequestStatistics) RemoveRecordedUsage(record UsageRecord) bool {
 		return false
 	}
 	apiName := usageGroupKey(record)
-	modelName := firstNonEmpty(record.Model, "unknown")
+	modelName := decodeClaudeCloakedModel(firstNonEmpty(record.Model, "unknown"))
 	target := dedupKey(apiName, modelName, requestDetailFromUsageRecord(record, record.RequestedAt, headerWhitelist{}))
 	s.mu.Lock()
 	defer s.mu.Unlock()

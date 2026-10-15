@@ -202,6 +202,9 @@ func (s *RequestStatistics) applyQuotaObservationLocked(o quotaObservation) bool
 	}
 	commit := func() bool {
 		quotaArchiveResetPeriod(&w)
+		// Clean up archives written before the unused-deadline guard existed, so
+		// a stored snapshot stops showing the placeholder as a previous period.
+		quotaDropEmptyResetArchive(&w)
 		if !revokedAt.IsZero() {
 			w.Hidden, w.UpdatedAt = true, revokedAt
 		}

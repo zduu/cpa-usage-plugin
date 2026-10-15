@@ -888,7 +888,7 @@ func (s *RequestStatistics) Record(record UsageRecord) {
 		timestamp = time.Now()
 	}
 	statsKey := usageGroupKey(record)
-	modelName := firstNonEmpty(record.Model, "unknown")
+	modelName := decodeClaudeCloakedModel(firstNonEmpty(record.Model, "unknown"))
 	var persistDetail *persistedDetail
 	s.mu.Lock()
 	detail := requestDetailFromUsageRecord(record, timestamp, s.logResponseHeaders)
@@ -936,8 +936,8 @@ func requestDetailFromUsageRecord(record UsageRecord, timestamp time.Time, white
 	totalTokens := usageDetailTotalTokens(record.Detail, record.Provider)
 	detail := RequestDetail{
 		RecordID:       quotaRequestID(record),
-		Model:          firstNonEmpty(record.Model, "unknown"),
-		RequestedModel: strings.TrimSpace(firstNonEmpty(record.Alias, record.Model)),
+		Model:          decodeClaudeCloakedModel(firstNonEmpty(record.Model, "unknown")),
+		RequestedModel: decodeClaudeCloakedModel(strings.TrimSpace(firstNonEmpty(record.Alias, record.Model))),
 		Timestamp:      timestamp,
 		LatencyMs:      record.Latency.Milliseconds(),
 		TTFTMs:         record.TTFT.Milliseconds(),
@@ -981,7 +981,7 @@ func (s *RequestStatistics) EnrichRecordedUsage(record UsageRecord, enrichment U
 		return false
 	}
 	apiName := usageGroupKey(record)
-	modelName := firstNonEmpty(record.Model, "unknown")
+	modelName := decodeClaudeCloakedModel(firstNonEmpty(record.Model, "unknown"))
 	target := dedupKey(apiName, modelName, requestDetailFromUsageRecord(record, record.RequestedAt, headerWhitelist{}))
 
 	s.mu.Lock()
@@ -6638,7 +6638,9 @@ func normalizeModelName(model string) string {
 	if model == "" {
 		return "unknown"
 	}
-	return model
+	// Snapshots written before the decode existed still hold cloaked catalog
+	// names, so normalizing every stored model name repairs them on restore.
+	return decodeClaudeCloakedModel(model)
 }
 
 func (s *RequestStatistics) pruneSeenLocked(now time.Time) {
