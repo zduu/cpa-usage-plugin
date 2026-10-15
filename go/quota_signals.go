@@ -25,6 +25,29 @@ func quotaWindowKey(o quotaObservation) string {
 	return quotaCredentialKey(o.Provider, o.AuthIndex, o.AuthID) + "\x00" + o.Group + "\x00" + o.Slot
 }
 
+// Google identifies the Gemini Flash/Pro pool with gemini-{5h,weekly}, and
+// Claude Opus/Sonnet plus GPT-OSS with 3p-{5h,weekly}. Match those exact
+// bucket identities, never a fuzzy display-name or equal reset/usage values.
+// Checking the persisted hashes also recognizes windows saved before mapping
+// was supported, without changing their keys or losing history.
+func quotaAntigravityFamily(w quotaWindow) string {
+	if w.Provider != "antigravity" || (w.Seconds != 18000 && w.Seconds != 604800) {
+		return ""
+	}
+	suffix := "5h"
+	if w.Seconds == 604800 {
+		suffix = "weekly"
+	}
+	for _, pool := range []struct{ name, family string }{{"Gemini Models", "gemini"}, {"Claude and GPT models", "3p"}} {
+		group := sha256.Sum256([]byte(pool.name))
+		bucket := sha256.Sum256([]byte(pool.family + "-" + suffix + "\x00" + strconv.FormatInt(w.Seconds, 10)))
+		if w.Group == "antigravity-"+hex.EncodeToString(group[:16]) && w.Slot == hex.EncodeToString(bucket[:16]) {
+			return pool.family
+		}
+	}
+	return ""
+}
+
 func quotaNumber(raw string, scale float64) (float64, bool) {
 	x, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(raw), "%")), 64)
 	return x / scale, err == nil && !math.IsNaN(x) && !math.IsInf(x, 0) && x >= 0 && x <= scale
@@ -95,8 +118,9 @@ func parseQuotaSignals(input quotaSignalsInput) []quotaObservation {
 			}
 			groupHash := sha256.Sum256([]byte(bucket.Group))
 			bucketHash := sha256.Sum256([]byte(bucket.ID + "\x00" + strconv.FormatInt(seconds, 10)))
-			add("antigravity-"+hex.EncodeToString(groupHash[:16]), bucket.Group, hex.EncodeToString(bucketHash[:16]), seconds,
-				1-remaining, quotaTime(bucket.ResetTime), true)
+			group, slot := "antigravity-"+hex.EncodeToString(groupHash[:16]), hex.EncodeToString(bucketHash[:16])
+			unmapped := quotaAntigravityFamily(quotaWindow{Provider: provider, Group: group, Slot: slot, Seconds: seconds}) == ""
+			add(group, bucket.Group, slot, seconds, 1-remaining, quotaTime(bucket.ResetTime), unmapped)
 		}
 	case "claude":
 		for _, w := range []struct {

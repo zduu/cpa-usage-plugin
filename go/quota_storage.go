@@ -225,7 +225,7 @@ func validateQuotaSnapshot(in *quotaSnapshot, current *quotaState) error {
 			return errors.New("invalid quota window")
 		}
 		o := quotaObservation{Provider: w.Provider, AuthIndex: w.AuthIndex, AuthID: w.AuthID, Group: w.Group, Slot: w.Slot}
-		if key != quotaWindowKey(o) || (!revocationOnly && w.Group != "shared" && !w.Unmapped && w.Model == "") {
+		if key != quotaWindowKey(o) || (!revocationOnly && w.Group != "shared" && !w.Unmapped && w.Model == "" && quotaAntigravityFamily(w) == "") {
 			return errors.New("invalid quota group")
 		}
 		for _, p := range []*quotaPeriod{w.Current, w.Previous} {

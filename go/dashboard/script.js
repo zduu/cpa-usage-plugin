@@ -46,6 +46,7 @@ const conditionalPayloadRequests = new Map();
 const conditionalPayloadCacheMax = 64;
 let apiDetailLastRender = null;
 const quotaPeriodSelections = new Map();
+const quotaWindowSelections = new Map();
 const quotaSubmittedObservations = new Map();
 // Rejected signatures wait before retrying instead of resending every poll.
 const quotaRejectedObservations = new Map();
@@ -1628,10 +1629,14 @@ function quotaCyclesHtml(credentials, refs = []) {
     (canFetchAntigravity ? '<div class="toolbar"><button type="button" class="btn" id="refreshAntigravityQuota">' + t('quota_refresh_antigravity') + '</button><span class="subtle" id="antigravityQuotaStatus" role="status">' + t(antigravityQuotaErrors.has(selectedApi) ? 'quota_fetch_failed' : 'quota_antigravity_refresh_hint') + '</span></div>' : '') +
     (!rows.length ? '<div class="empty">' + t('quota_antigravity_empty') + '</div>' : '') +
     rows.map((credential) => '<div class="quotaCredential"><div class="subtle quotaCredentialName">' + esc(credential.credential_name || credential.auth_index) + '</div>' + (credential.groups || []).map((group) => {
-    const key = JSON.stringify([selectedApi, credential.provider, credential.auth_index, credential.credential_name, group.group_id]);
+    const poolKey = JSON.stringify([selectedApi, credential.provider, credential.auth_index, credential.credential_name, group.group_id]);
+    const windows = Array.isArray(group.windows) && group.windows.length ? group.windows : [group];
+    const window = windows.find((item) => item.group_id === quotaWindowSelections.get(poolKey)) || windows[0];
+    const key = JSON.stringify([poolKey, window.group_id]);
     const selected = quotaPeriodSelections.get(key) || 'current';
-    const label = (group.name ? esc(group.name) + ' · ' : '') + esc(quotaWindowLabel(Number(group.window_seconds)));
-    return '<div class="quotaWindow"><strong>' + label + '</strong><div class="quotaTabs" role="group" aria-label="' + esc(label) + '">' + ['current', 'previous'].map((period) => '<button type="button" class="btn" data-quota-key="' + esc(key) + '" data-quota-period="' + period + '" aria-pressed="' + (period === selected) + '">' + t(period === 'current' ? 'quota_current' : 'quota_previous') + '</button>').join('') + '</div>' + quotaPeriodHtml(group[selected], selected === 'current') + '</div>';
+    const label = (group.name ? group.name + ' · ' : '') + quotaWindowLabel(Number(window.window_seconds));
+    const windowTabs = windows.length > 1 ? '<div class="quotaTabs" role="group" aria-label="' + esc(group.name || '') + '">' + windows.map((item) => '<button type="button" class="btn" data-quota-window-key="' + esc(poolKey) + '" data-quota-window="' + esc(item.group_id) + '" aria-pressed="' + (item === window) + '">' + esc(quotaWindowLabel(Number(item.window_seconds))) + '</button>').join('') + '</div>' : '';
+    return '<div class="quotaWindow"><strong>' + esc(windows.length > 1 ? group.name : label) + '</strong>' + windowTabs + '<div class="quotaTabs" role="group" aria-label="' + esc(label) + '">' + ['current', 'previous'].map((period) => '<button type="button" class="btn" data-quota-key="' + esc(key) + '" data-quota-period="' + period + '" aria-pressed="' + (period === selected) + '">' + t(period === 'current' ? 'quota_current' : 'quota_previous') + '</button>').join('') + '</div>' + quotaPeriodHtml(window[selected], selected === 'current') + '</div>';
   }).join('') + '</div>').join('') + '</div></details>';
 }
 
@@ -3001,6 +3006,11 @@ $('priceReferenceOptions').onclick = (event) => {
 };
 if (document.addEventListener) document.addEventListener('click', (event) => {
   const target = event && event.target;
+  if (target && target.dataset && target.dataset.quotaWindowKey && target.dataset.quotaWindow) {
+    quotaWindowSelections.set(target.dataset.quotaWindowKey, target.dataset.quotaWindow);
+    while (quotaWindowSelections.size > 64) quotaWindowSelections.delete(quotaWindowSelections.keys().next().value);
+    renderApiDetailFromCache();
+  }
   if (target && target.dataset && target.dataset.quotaKey && ['current', 'previous'].includes(target.dataset.quotaPeriod)) {
     quotaPeriodSelections.set(target.dataset.quotaKey, target.dataset.quotaPeriod);
     while (quotaPeriodSelections.size > 64) quotaPeriodSelections.delete(quotaPeriodSelections.keys().next().value);

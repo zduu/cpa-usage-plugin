@@ -107,6 +107,7 @@ type quotaCurrentDTO struct {
 type quotaGroupDTO struct {
 	GroupID       string           `json:"group_id"`
 	Name          string           `json:"name"`
+	Windows       []quotaGroupDTO  `json:"windows,omitempty"`
 	WindowSeconds int64            `json:"window_seconds"`
 	Current       *quotaCurrentDTO `json:"current"`
 	Previous      *quotaCycleDTO   `json:"previous"`
@@ -128,9 +129,8 @@ type quotaSignalsInput struct {
 	AntigravityBuckets []quotaAntigravityBucket `json:"antigravity_buckets,omitempty"`
 }
 
-// retrieveUserQuotaSummary provides explicit windows, but no model-to-pool
-// membership. Preserve each real pool without attributing all credential
-// requests to every independent pool.
+// retrieveUserQuotaSummary supplies two independent model pools, each with
+// explicit five-hour and weekly windows. Unknown buckets remain unmapped.
 type quotaAntigravityBucket struct {
 	Group             string   `json:"group"`
 	ID                string   `json:"id"`

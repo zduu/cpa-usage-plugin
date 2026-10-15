@@ -129,3 +129,80 @@ func TestStoredEmptyResetArchiveIsClearedOnLoad(t *testing.T) {
 		t.Fatal("repair mutated the caller's snapshot")
 	}
 }
+
+func TestConsumedResetHistorySurvivesIdleRollingPollsAndRestore(t *testing.T) {
+	s := NewRequestStatistics()
+	defer s.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+	first := now.Add(-4 * time.Hour)
+	card := first.Add(time.Hour)
+	observe := func(at time.Time, used float64) {
+		t.Helper()
+		o := quotaObservation{Provider: "antigravity", AuthIndex: "ag", AuthID: "ag.json", Group: "g", Slot: "s", Seconds: 18000, Reset: at.Add(5 * time.Hour), ObservedAt: at, Used: used, Unmapped: true}
+		if !s.applyQuotaObservationLocked(o) {
+			t.Fatalf("observation rejected: %+v", o)
+		}
+	}
+	observe(first, .4)
+	observe(card, 0)
+	check := func(target *RequestStatistics) {
+		t.Helper()
+		for _, w := range target.quota.Windows {
+			if w.Previous == nil || !w.Previous.End.Equal(card) || !quotaSamplesConsumed(w.Previous.Samples) {
+				t.Fatalf("idle deadline erased consumed history: %+v", w.Previous)
+			}
+			current, baseline := quotaEffectivePeriod(w.Current)
+			if !current.Start.Equal(card) || baseline == nil || *baseline != 0 {
+				t.Fatalf("idle poll moved the real reset: %+v baseline=%v", current, baseline)
+			}
+		}
+	}
+	check(s)
+	beforeIdle := s.Snapshot()
+	for i := 1; i <= 100; i++ {
+		observe(card.Add(time.Duration(i)*time.Minute), 0)
+		check(s)
+	}
+	// Delayed observations refine the consumed archive without reviving a
+	// fictitious later reset, even after the current samples were compacted.
+	observe(first.Add(time.Minute), .5)
+	check(s)
+	backup := s.Snapshot()
+	if err := validateQuotaSnapshot(backup.QuotaCycles, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, oldFirst := range []bool{false, true} {
+		dest := NewRequestStatistics()
+		if oldFirst {
+			dest.MergeSnapshot(beforeIdle)
+		}
+		dest.MergeSnapshot(backup)
+		if !oldFirst {
+			dest.MergeSnapshot(beforeIdle)
+		}
+		check(dest)
+		dest.Close()
+	}
+	// Older builds could already have erased Previous. The retained reset
+	// observations must recover it on load, without waiting for another poll.
+	legacy := cloneQuotaSnapshot(backup.QuotaCycles)
+	for key, w := range legacy.Windows {
+		w.Previous = nil
+		legacy.Windows[key] = w
+	}
+	dest := NewRequestStatistics()
+	defer dest.Close()
+	dest.restoreQuotaSnapshotLocked(StatisticsSnapshot{QuotaCycles: legacy})
+	dest.pruneQuotaLocked(now) // The first dashboard read advances restored history.
+	check(dest)
+	// Resuming consumption can still establish a genuine subsequent reset.
+	observe(card.Add(110*time.Minute), .3)
+	secondCard := card.Add(150 * time.Minute)
+	observe(secondCard, 0)
+	for _, w := range s.quota.Windows {
+		current, _ := quotaEffectivePeriod(w.Current)
+		if w.Previous == nil || !w.Previous.Start.Equal(card) || !w.Previous.End.Equal(secondCard) || !current.Start.Equal(secondCard) {
+			t.Fatalf("subsequent consumed reset was lost: previous=%+v current=%+v", w.Previous, current)
+		}
+	}
+}

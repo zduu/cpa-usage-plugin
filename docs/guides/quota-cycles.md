@@ -33,7 +33,7 @@ Claude/Codex 优先读取原生 usage 的响应头，不依赖 `log_response_hea
 
 Antigravity 没有原生被动额度信号，因此看板只为当前所选接口实际使用过的凭证，通过管理鉴权的 `POST /v0/management/api-call` 查询 Google `v1internal:retrieveUserQuotaSummary`。认证文件必须提供 `project_id`；宿主替换 `$TOKEN$`，浏览器不下载认证文件或 OAuth token。依次尝试 daily、daily sandbox、cloudcode 三个官方地址。只在额度面板展开且页面可见时查询，自动间隔至少 5 分钟，失败后至少 60 秒再尝试，也可手动刷新。折叠面板或切换接口后不再启动后续凭证查询，已发出的请求可能完成。查询失败保留已有历史。
 
-Antigravity 的组名和 bucket 标识保留为独立额度池，接受 `5h` / `five-hour` / `five_hour` 和 `weekly` / `week`，不会仅凭重置时间猜测窗口长度。该摘要没有提供各池对应的模型范围，因此目前能展示分组已用比例、重置时间及本期/上期历史，请求量、花费、模型表和金额推算保持未知；普通接口统计仍完整保留全部请求。
+Antigravity 按 Google 的模型组展示额度池，每个池内可切换 5 小时和周额度，各自保留用量、起止时间及本期/上期历史，不合并两个窗口的统计。接受 `5h` / `five-hour` / `five_hour` 和 `weekly` / `week`，不会仅凭重置时间猜测窗口长度。已核对 Google 原始摘要的模型归属：`Gemini Models` 的 `gemini-5h` / `gemini-weekly` 对应 Gemini，`Claude and GPT models` 的 `3p-5h` / `3p-weekly` 对应 Claude 和 GPT-OSS。仅这些精确组、bucket 标识及窗口组合会按 `gemini-`、`claude-`、`gpt-oss-` 模型名计入请求、token、花费和金额推算，旧快照中的相同标识也可直接使用。自定义模型别名需保留可识别的模型名；未知池继续显示归属未知，不把整份凭证请求重复计入每个池。
 
 缺少某个响应头不表示撤销窗口。明确传递为 `null` 的使用率信号会隐藏对应窗口并保留历史；如果宿主把上游 null 丢弃、只传递其余字段，插件不会猜测撤销。没有后续观测时，到期的本期转为上期；无论之后空闲多久，上期及其用量都会保留，直到下一个实际观测到的周期结束后替换，不虚构空闲期间的新周期。撤销标记独立保留，防止迟到观测重新显示已撤销的窗口。
 
@@ -72,7 +72,7 @@ macOS 构建会将 Go 动态库映像保留到宿主进程退出，避免宿主�
 
 ## 管理 API
 
-`GET /v0/management/plugins/usage-dashboard-zduu/dashboard-api-detail?api=…` 增加可选 `credential_quota_cycles`：按凭证返回 `groups`，每组含 `window_seconds`、`current`、`previous`。周期包含 `start_at`、`end_at`、`observed_at`、`used_percent`、`summary`、`model_stats` 和 `estimated_total_usd`。本期或上期达到 100% 且费用已知时返回 `actual_total_usd`，未用满时返回可用的 `estimated_total_usd`；未知值为 null。达到 100% 时 `estimated_total_usd` 为 null；已映射额度池的本期剩余金额为 0，不受价格是否已知或估算新鲜度影响。只有 `current` 含 `estimated_remaining_usd`。
+`GET /v0/management/plugins/usage-dashboard-zduu/dashboard-api-detail?api=…` 增加可选 `credential_quota_cycles`：按凭证返回 `groups`。Antigravity 每组代表一个模型池，包含 `group_id`、`name` 及 `windows`；每个窗口含 `window_seconds`、`current`、`previous`。其他提供商沿用组内直接返回这些窗口字段的结构。周期包含 `start_at`、`end_at`、`observed_at`、`used_percent`、`summary`、`model_stats` 和 `estimated_total_usd`。本期或上期达到 100% 且费用已知时返回 `actual_total_usd`，未用满时返回可用的 `estimated_total_usd`；未知值为 null。达到 100% 时 `estimated_total_usd` 为 null；已映射额度池的本期剩余金额为 0，不受价格是否已知或估算新鲜度影响。只有 `current` 含 `estimated_remaining_usd`。
 
 详情还可返回 `quota_credentials`，包含当前接口用过的 Antigravity 凭证的 `provider`、`auth_index`、`auth_id`，用于首次额度查询。这些身份可在首次额度观测前取得，不包含 OAuth token。升级前的历史请求即使没有额度事实，也会从保留的普通请求账本发现凭证；查询返回后可展示对应额度池。
 
@@ -118,3 +118,5 @@ python3 scripts/validate-quota-v8.py --cpa /path/to/CLIProxyAPI \
 ```
 
 加 `--browser` 运行真实浏览器验收，`--restarts 5` 连续验证五次重启。需要安装 Playwright 及 Chromium；也可用 `CPA_PLAYWRIGHT=/path/to/node_modules/playwright` 和 `CPA_CHROME=/path/to/chrome` 指定已有安装。脚本验证原生 usage、凭证采集、两期模型与金额、管理鉴权、重启恢复及同进程重新启用后的完整备份，结果和截图写入 `docs/validation/quota-cycle-details-v8/`。
+
+未使用的 Antigravity 窗口可能在每次查询时返回「当前时间 + 窗口长度」作为截止时间。截止时间后移只在刚结束的有效片段确实消耗额度时证明发生重置；更早已归档片段的消耗不作证明，避免真实重置后的空闲轮询覆盖上一期历史。

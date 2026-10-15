@@ -707,7 +707,8 @@ function createDashboardHarness(options = {}) {
     failDashboardEvents = !!value;
   };
 
-  return { context, document, fetchCalls, fetchRequests, downloads, timeoutDelays, setVisibility, setLanguage, setSummaryLastRecordedAt, setSummaryVersion, setDashboardEventsFailure };
+  const clickDocument = (target) => (listeners.get('click') || []).forEach((handler) => handler({ target }));
+  return { context, document, fetchCalls, fetchRequests, downloads, timeoutDelays, setVisibility, setLanguage, setSummaryLastRecordedAt, setSummaryVersion, setDashboardEventsFailure, clickDocument };
 }
 
 test('quota collector submits authenticated v8 observations once and strips unrelated signals', async () => {
@@ -882,7 +883,7 @@ test('quota model table shows budget-based token capacity without a model-only c
     assert.doesNotMatch(unknown, /NaN|Infinity|10\.00 M/);
   }
   assert.equal(context.quotaTokens(0), '0.00 M');
-  assert.doesNotMatch(context.quotaPeriodHtml({ summary: null, model_stats: [] }, true), /does not identify the models/);
+  assert.doesNotMatch(context.quotaPeriodHtml({ summary: null, model_stats: [] }, true), /models sharing this quota pool have not been confirmed/);
   // Claude's prompt denominator includes its separate cache reads and writes.
   const claude = { ...cheap, providers: [{ provider: 'claude', input_tokens: 100, output_tokens: 20, cached_tokens: 40, cache_write_tokens: 10, total_tokens: 170 }] };
   assert.match(context.quotaModelsHtml({ ...cycle, model_stats: [claude] }), /26\.7%/);
@@ -967,7 +968,7 @@ test('Antigravity collector only probes selected credentials while expanded and 
   await context.refreshAntigravityQuotaForSelectedApi(true);
   assert.equal(calls.length, 6, 'manual refresh can bypass the throttle');
   const html = context.quotaPeriodHtml({ unmapped: true, used_percent: 100, start_at: '2026-10-02T08:00:00Z', end_at: '2026-10-02T13:00:00Z', summary: null, model_stats: null }, true);
-  assert.match(html, /does not identify the models/);
+  assert.match(html, /models sharing this quota pool have not been confirmed/);
 });
 
 test('quota previous capacity distinguishes fully used and estimated amounts', async () => {
@@ -3884,4 +3885,43 @@ test('Antigravity malformed quota entries cannot hide valid pools or become rese
   assert.equal(mixed[0].remaining_fraction, 0.6);
   const badNames = context.antigravityQuotaBuckets({ groups: [{ displayName: {}, buckets: [valid] }, { displayName: 'Claude', buckets: [{ ...valid, bucketId: {} }] }] });
   assert.equal(badNames.length, 0, 'objects must not become invented pool identities');
+});
+
+
+test('Antigravity renders two pools and switches independent windows and histories', async () => {
+  const { context, clickDocument } = createDashboardHarness({ language: 'en' });
+  await context.load();
+  vm.runInContext('selectedApi = "ag"', context);
+  const cycle = (model, used, end) => ({ start_at: '2026-10-14T22:34:53Z', end_at: end,
+    used_percent: used, summary: { total_requests: 1, total_tokens: 175959, estimated_cost: .12 },
+    model_stats: [{ model, total_requests: 1, total_tokens: 175959, estimated_cost: .12 }] });
+  const groups = [
+    { group_id: 'gemini', name: 'Gemini Models', windows: [
+      { group_id: 'gemini:5h', window_seconds: 18000, current: cycle('gemini-five', 5.6, '2026-10-15T03:34:53Z'), previous: cycle('gemini-five-previous', 80, '2026-10-14T22:34:53Z') },
+      { group_id: 'gemini:week', window_seconds: 604800, current: cycle('gemini-week', 2.3, '2026-10-21T22:34:53Z') },
+    ] },
+    { group_id: '3p', name: 'Claude and GPT models', windows: [
+      { group_id: '3p:5h', window_seconds: 18000, current: cycle('claude-five', 0, '2026-10-15T04:32:00Z') },
+      { group_id: '3p:week', window_seconds: 604800, current: cycle('claude-week', 0, '2026-10-21T23:32:00Z') },
+    ] },
+  ];
+  const render = () => context.quotaCyclesHtml([{ provider: 'antigravity', auth_index: 'i', credential_name: 'ag.json', groups }]);
+  const poolKey = JSON.stringify(['ag', 'antigravity', 'i', 'ag.json', 'gemini']);
+  let html = render();
+  assert.equal((html.match(/class="quotaWindow"/g) || []).length, 2);
+  assert.match(html, /5\.6%/);
+  assert.match(html, /gemini-five|claude-five/);
+  assert.doesNotMatch(html, /2\.3%|gemini-week|claude-week/);
+  assert.match(html, new RegExp('data-quota-reset="' + Date.parse('2026-10-15T03:34:53Z') + '"'));
+  clickDocument({ dataset: { quotaKey: JSON.stringify([poolKey, 'gemini:5h']), quotaPeriod: 'previous' } });
+  assert.match(render(), /gemini-five-previous/);
+  clickDocument({ dataset: { quotaWindowKey: poolKey, quotaWindow: 'gemini:week' } });
+  html = render();
+  assert.match(html, /2\.3%/);
+  assert.match(html, /gemini-week/);
+  assert.match(html, /claude-five/);
+  assert.doesNotMatch(html, /5\.6%|gemini-five-previous|claude-week/);
+  assert.match(html, new RegExp('data-quota-reset="' + Date.parse('2026-10-21T22:34:53Z') + '"'));
+  clickDocument({ dataset: { quotaWindowKey: poolKey, quotaWindow: 'gemini:5h' } });
+  assert.match(render(), /gemini-five-previous/, 'each window retains its own current/previous selection');
 });

@@ -3,6 +3,7 @@ package main
 import (
 	"math"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -11,6 +12,13 @@ func (f quotaFact) detail() RequestDetail {
 }
 
 func quotaFactMatches(f quotaFact, w quotaWindow, p *quotaPeriod) bool {
+	if family := quotaAntigravityFamily(w); family != "" {
+		model := strings.ToLower(f.Model)
+		if (family == "gemini" && !strings.HasPrefix(model, "gemini-")) ||
+			(family == "3p" && !strings.HasPrefix(model, "claude-") && !strings.HasPrefix(model, "gpt-oss-")) {
+			return false
+		}
+	}
 	return p != nil && f.Provider == w.Provider && f.AuthIndex == w.AuthIndex && f.AuthID == w.AuthID &&
 		!f.Timestamp.Before(p.Start) && f.Timestamp.Before(p.End) && (w.Model == "" || f.Model == w.Model)
 }
@@ -98,11 +106,21 @@ func quotaEffectivePeriod(p *quotaPeriod) (*quotaPeriod, *float64) {
 	}
 	copy := *p
 	reset := false
-	if before := quotaPreResetSamples(p); before > 0 && before < len(p.Samples) && quotaSamplesConsumed(p.Samples[:before]) {
-		copy.Samples, reset = p.Samples[before:], true
-		if p.Start.Before(p.Samples[before-1].ObservedAt) || p.Start.After(copy.Samples[0].ObservedAt) {
-			copy.Start = copy.Samples[0].ObservedAt
-			copy.ResetTimeEstimated = true
+	if before := quotaPreResetSamples(p); before > 0 && before < len(p.Samples) {
+		// Older samples can contain a consumed period followed by an already
+		// reset, idle segment. Only that latest segment can prove another reset.
+		last := p.Samples[before-1]
+		prior := &quotaPeriod{Start: last.Reset.Add(-p.End.Sub(p.Start)), End: last.Reset, Samples: p.Samples[:before]}
+		prior, priorReset := quotaEffectivePeriod(prior)
+		if quotaSamplesConsumed(prior.Samples) {
+			copy.Samples, reset = p.Samples[before:], true
+			if p.Start.Before(last.ObservedAt) || p.Start.After(copy.Samples[0].ObservedAt) {
+				copy.Start = copy.Samples[0].ObservedAt
+				copy.ResetTimeEstimated = true
+			}
+		} else if priorReset != nil {
+			copy.Start, copy.ResetTimeEstimated = prior.Start, prior.ResetTimeEstimated
+			copy.Samples, reset = p.Samples[before-len(prior.Samples):], true
 		}
 	}
 	// A usage decrease is self-evident: it needs a peak above zero to exist.
@@ -244,6 +262,11 @@ func (s *RequestStatistics) quotaCyclesForAPILocked(api string, now time.Time) [
 	pricing := s.pricingSnapshotLocked()
 	byCredential := make(map[string]*quotaCredentialDTO)
 	for _, w := range s.quota.Windows {
+		// Recognize pre-upgrade persisted buckets too, without requiring a new
+		// live observation or rewriting their identities and history.
+		if quotaAntigravityFamily(w) != "" {
+			w.Unmapped = false
+		}
 		key := quotaCredentialKey(w.Provider, w.AuthIndex, w.AuthID)
 		if !credentials[key] || w.Hidden {
 			continue
@@ -283,6 +306,26 @@ func (s *RequestStatistics) quotaCyclesForAPILocked(api string, now time.Time) [
 			}
 			return v.Groups[i].GroupID < v.Groups[j].GroupID
 		})
+		if v.Provider == "antigravity" {
+			var pools []quotaGroupDTO
+			for _, window := range v.Groups {
+				poolID, _, _ := strings.Cut(window.GroupID, ":")
+				index := -1
+				for i := range pools {
+					if pools[i].GroupID == poolID {
+						index = i
+						break
+					}
+				}
+				if index < 0 {
+					pools = append(pools, quotaGroupDTO{GroupID: poolID, Name: window.Name})
+					index = len(pools) - 1
+				}
+				pools[index].Windows = append(pools[index].Windows, window)
+			}
+			sort.Slice(pools, func(i, j int) bool { return pools[i].GroupID < pools[j].GroupID })
+			v.Groups = pools
+		}
 		out = append(out, *v)
 	}
 	sort.Slice(out, func(i, j int) bool {

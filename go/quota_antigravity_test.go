@@ -70,7 +70,7 @@ func TestAntigravityCyclesPreserveRequestsAndPoolHistoryAcrossBackup(t *testing.
 	if detail.Summary.TotalRequests != 2 || len(detail.QuotaCycles) != 1 || len(detail.QuotaCycles[0].Groups) != 1 {
 		t.Fatalf("quota altered ordinary requests: %+v", detail)
 	}
-	group := detail.QuotaCycles[0].Groups[0]
+	group := detail.QuotaCycles[0].Groups[0].Windows[0]
 	if group.Current == nil || group.Previous == nil || *group.Previous.UsedPercent != 75 {
 		t.Fatal("previous pool watermark was lost")
 	}
@@ -87,7 +87,7 @@ func TestAntigravityCyclesPreserveRequestsAndPoolHistoryAcrossBackup(t *testing.
 		t.Fatalf("restore: %+v", result)
 	}
 	restored := dest.QueryAPIDetailAt(api, "all", 10, 10, now)
-	if len(restored.QuotaCycles) != 1 || restored.QuotaCycles[0].Groups[0].Previous == nil {
+	if len(restored.QuotaCycles) != 1 || restored.QuotaCycles[0].Groups[0].Windows[0].Previous == nil {
 		t.Fatal("backup lost pool history")
 	}
 }
@@ -170,11 +170,102 @@ func TestAntigravityLegacyRequestsDiscoverCredentialsWithoutQuotaFacts(t *testin
 	if len(s.quota.Facts) != 0 || detail.Summary.TotalRequests != 1 {
 		t.Fatal("discovery changed accounting")
 	}
-	if detail.QuotaCycles[0].Groups[0].Current.Summary != nil {
+	if detail.QuotaCycles[0].Groups[0].Windows[0].Current.Summary != nil {
 		t.Fatal("unmapped pool acquired invented usage")
 	}
 	// A new quota fact must not duplicate an identity discovered from history.
 	r.RequestID, r.RequestedAt = "new-ag", now
 	s.Record(r)
 	check()
+}
+
+// The actual Google response has two pools, each containing both windows.
+// Requests belong to one model pool and are independently counted in its
+// overlapping windows, never in the other model pool.
+func TestAntigravityTwoPoolsKeepWindowAccountingAndRestoreLegacyMapping(t *testing.T) {
+	s := NewRequestStatistics()
+	defer s.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+	s.startedAt = now.Add(-48 * time.Hour)
+	models := []string{"gemini-3.8-flash-high", "claude-sonnet-4-6", "gpt-oss-120b-medium", "unknown-model"}
+	s.modelPrices = make(map[string]ModelPrice)
+	var api string
+	for i, model := range append(models, models[0]) {
+		s.modelPrices[model] = ModelPrice{Prompt: 1}
+		at := now.Add(-time.Minute)
+		if i == 4 {
+			at = now.Add(-20 * time.Hour)
+		}
+		r := quotaTestRecord(model+at.String(), model, at, 175959)
+		r.Provider, r.AuthID = "antigravity", "antigravity.json"
+		s.Record(r)
+		api = usageGroupKey(r)
+	}
+	remainingFive, remainingWeek := .944, .977
+	input := quotaSignalsInput{Provider: "antigravity", AuthIndex: "account-index", AuthID: "antigravity.json", ObservedAt: now,
+		AntigravityBuckets: []quotaAntigravityBucket{
+			{Group: "Gemini Models", ID: "gemini-5h", Window: "5h", RemainingFraction: &remainingFive, ResetTime: now.Add(4 * time.Hour).Format(time.RFC3339)},
+			{Group: "Gemini Models", ID: "gemini-weekly", Window: "weekly", RemainingFraction: &remainingWeek, ResetTime: now.Add(6 * 24 * time.Hour).Format(time.RFC3339)},
+			{Group: "Claude and GPT models", ID: "3p-5h", Window: "5h", RemainingFraction: &remainingFive, ResetTime: now.Add(4 * time.Hour).Format(time.RFC3339)},
+			{Group: "Claude and GPT models", ID: "3p-weekly", Window: "weekly", RemainingFraction: &remainingWeek, ResetTime: now.Add(6 * 24 * time.Hour).Format(time.RFC3339)},
+		}}
+	for _, o := range parseQuotaSignals(input) {
+		if o.Unmapped || !s.applyQuotaObservationLocked(o) {
+			t.Fatalf("known upstream bucket not mapped: %+v", o)
+		}
+	}
+	check := func(target *RequestStatistics) {
+		t.Helper()
+		detail := target.QueryAPIDetailAt(api, "all", 10, 10, now)
+		if detail.Summary.TotalRequests != 5 || len(detail.QuotaCycles) != 1 || len(detail.QuotaCycles[0].Groups) != 2 {
+			t.Fatalf("expected two pools without changing requests: %+v", detail)
+		}
+		for _, pool := range detail.QuotaCycles[0].Groups {
+			if len(pool.Windows) != 2 || pool.Current != nil || pool.Previous != nil {
+				t.Fatalf("pool must contain independent windows: %+v", pool)
+			}
+			for i, window := range pool.Windows {
+				current := window.Current
+				wantRequests := int64(2)
+				if pool.Name == "Gemini Models" && i == 0 {
+					wantRequests = 1
+				}
+				if current == nil || current.Unmapped || current.Summary == nil || int64(current.Summary.TotalRequests) != wantRequests || current.Summary.TotalTokens != wantRequests*175959 {
+					t.Fatalf("wrong model/window attribution: pool=%s window=%+v", pool.Name, window)
+				}
+				for _, row := range current.ModelStats {
+					if pool.Name == "Gemini Models" && row.Model != models[0] || pool.Name != "Gemini Models" && row.Model != models[1] && row.Model != models[2] {
+						t.Fatalf("model charged to wrong pool: %+v", row)
+					}
+				}
+				remaining := remainingFive
+				seconds := int64(18000)
+				if i == 1 {
+					remaining = remainingWeek
+					seconds = 604800
+				}
+				if window.WindowSeconds != seconds || !current.StartAt.Equal(current.EndAt.Add(-time.Duration(seconds)*time.Second)) {
+					t.Fatalf("window boundaries merged: %+v", window)
+				}
+				quotaModelAssert(t, current.UsedPercent, (1-remaining)*100)
+				quotaModelAssert(t, current.Summary.CostUSD, float64(wantRequests)*.175959)
+				quotaModelAssert(t, current.EstimatedTotalUSD, float64(wantRequests)*.175959/(1-remaining))
+			}
+		}
+	}
+	check(s)
+	snapshot := s.Snapshot()
+	if err := validateQuotaSnapshot(snapshot.QuotaCycles, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Existing snapshots marked these exact bucket identities as unmapped.
+	for key, w := range snapshot.QuotaCycles.Windows {
+		w.Unmapped = true
+		snapshot.QuotaCycles.Windows[key] = w
+	}
+	dest := NewRequestStatistics()
+	defer dest.Close()
+	dest.modelPrices = s.modelPrices
+	dest.MergeSnapshot(snapshot)
+	check(dest)
 }
