@@ -37,6 +37,99 @@ func TestAntigravityBucketsUseExplicitWindowsAndPreserveExhaustion(t *testing.T)
 	}
 }
 
+func TestAntigravityHubSourceDoesNotReuseLegacyCycles(t *testing.T) {
+	s := NewRequestStatistics()
+	defer s.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+	r := quotaTestRecord("gemini-request", "gemini-test", now.Add(-time.Hour), 1000)
+	r.Provider, r.AuthID = "antigravity", "antigravity.json"
+	s.Record(r)
+	observe := func(source string, at, weekEnd time.Time, remainingWeek, remainingFive float64) {
+		t.Helper()
+		input := quotaSignalsInput{Provider: r.Provider, AuthIndex: r.AuthIndex, AuthID: r.AuthID, ObservedAt: at,
+			AntigravityBuckets: []quotaAntigravityBucket{
+				{Source: source, Group: "Gemini Models", ID: "gemini-weekly", Window: "weekly", RemainingFraction: &remainingWeek, ResetTime: weekEnd.Format(time.RFC3339)},
+				{Source: source, Group: "Gemini Models", ID: "gemini-5h", Window: "5h", RemainingFraction: &remainingFive, ResetTime: at.Add(4*time.Hour + 6*time.Minute).Format(time.RFC3339)},
+			}}
+		observations := parseQuotaSignals(input)
+		if len(observations) != 2 {
+			t.Fatalf("source rejected: %q", source)
+		}
+		for _, o := range observations {
+			if o.Source != source || o.Unmapped || !s.applyQuotaObservationLocked(o) {
+				t.Fatalf("source or model attribution was lost: %+v", o)
+			}
+		}
+	}
+	legacyEnd := now.Add(3*24*time.Hour + 7*time.Hour)
+	dailyEnd := now.Add(6*24*time.Hour + 2*time.Hour)
+	observe("", now.Add(-10*time.Minute), legacyEnd, .9087964, 1)
+	legacy := s.Snapshot()
+	observe("hub-daily", now, dailyEnd, .93627316, .9554956)
+	// A partial daily refresh updates the weekly reading without removing the
+	// previously observed five-hour window from the same source.
+	remainingWeek := .93627316
+	partial := parseQuotaSignals(quotaSignalsInput{Provider: r.Provider, AuthIndex: r.AuthIndex, AuthID: r.AuthID,
+		ObservedAt: now.Add(30 * time.Second), AntigravityBuckets: []quotaAntigravityBucket{
+			{Source: "hub-daily", Group: "Gemini Models", ID: "gemini-weekly", Window: "weekly",
+				RemainingFraction: &remainingWeek, ResetTime: dailyEnd.Format(time.RFC3339)},
+		}})
+	if len(partial) != 1 || !s.applyQuotaObservationLocked(partial[0]) {
+		t.Fatal("partial daily refresh was rejected")
+	}
+	// An old browser can still submit legacy observations after the new source
+	// arrives. Its timestamp must not restore the wrong environment.
+	observe("", now.Add(time.Minute), legacyEnd, .9087964, 1)
+	check := func(target *RequestStatistics) {
+		t.Helper()
+		detail := target.QueryAPIDetailAt(usageGroupKey(r), "all", 10, 10, now.Add(2*time.Minute))
+		if len(detail.QuotaCycles) != 1 || detail.QuotaCycles[0].Source != "hub-daily" || len(detail.QuotaCycles[0].Groups) != 1 {
+			t.Fatalf("wrong quota source selected: %+v", detail.QuotaCycles)
+		}
+		windows := detail.QuotaCycles[0].Groups[0].Windows
+		if len(windows) != 2 {
+			t.Fatalf("legacy windows leaked into the current pool: %+v", windows)
+		}
+		for _, window := range windows {
+			current := window.Current
+			if current == nil || current.ResetTimeUnknown || current.ResetBaselineUsedPercent != nil || window.Previous != nil {
+				t.Fatalf("source correction became a reset card: %+v", window)
+			}
+			if window.WindowSeconds == 604800 {
+				if !current.EndAt.Equal(dailyEnd) || !current.StartAt.Equal(dailyEnd.Add(-7*24*time.Hour)) {
+					t.Fatalf("weekly boundaries did not use daily: %+v", current)
+				}
+				quotaModelAssert(t, current.UsedPercent, (1-.93627316)*100)
+			} else {
+				if !current.EndAt.Equal(now.Add(4*time.Hour + 6*time.Minute)) {
+					t.Fatalf("five-hour deadline did not use daily: %+v", current)
+				}
+				quotaModelAssert(t, current.UsedPercent, (1-.9554956)*100)
+			}
+		}
+		if len(target.quota.Windows) != 4 || len(target.quota.Facts) != 1 || detail.Summary.TotalRequests != 1 {
+			t.Fatal("source isolation discarded observations or changed request accounting")
+		}
+	}
+	check(s)
+	backup := s.Snapshot()
+	if err := validateQuotaSnapshot(backup.QuotaCycles, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, oldFirst := range []bool{false, true} {
+		dest := NewRequestStatistics()
+		if oldFirst {
+			dest.MergeSnapshot(legacy)
+		}
+		dest.MergeSnapshot(backup)
+		if !oldFirst {
+			dest.MergeSnapshot(legacy)
+		}
+		check(dest)
+		dest.Close()
+	}
+}
+
 func TestAntigravityCyclesPreserveRequestsAndPoolHistoryAcrossBackup(t *testing.T) {
 	s := NewRequestStatistics()
 	defer s.Close()

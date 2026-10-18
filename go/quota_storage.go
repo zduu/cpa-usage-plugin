@@ -11,7 +11,7 @@ import (
 
 func validQuotaObservation(o quotaObservation) bool {
 	identityValid := quotaProvider(o.Provider) && (o.AuthIndex != "" || o.AuthID != "") && len(o.AuthID) <= 512 && len(o.AuthIndex) <= 512 &&
-		o.Group != "" && len(o.Group) <= 256 && o.Slot != "" && len(o.Slot) <= 64 && len(o.Name) <= 256 && !o.ObservedAt.IsZero()
+		o.Group != "" && len(o.Group) <= 256 && o.Slot != "" && len(o.Slot) <= 64 && len(o.Name) <= 256 && !o.ObservedAt.IsZero() && quotaSourceValid(o.Provider, o.Source)
 	if !identityValid || o.Revoked {
 		return identityValid && o.Revoked
 	}
@@ -221,10 +221,10 @@ func validateQuotaSnapshot(in *quotaSnapshot, current *quotaState) error {
 		revocationOnly := w.Hidden && w.Seconds == 0 && w.Current == nil && w.Previous == nil && !w.UpdatedAt.IsZero()
 		if !quotaProvider(w.Provider) || (!revocationOnly && w.Seconds <= 0) || w.Seconds > 366*86400 ||
 			(w.AuthID == "" && w.AuthIndex == "") || len(w.AuthID) > 512 || len(w.AuthIndex) > 512 ||
-			w.Group == "" || len(w.Group) > 256 || w.Slot == "" || len(w.Slot) > 64 || len(w.Name) > 256 || len(w.Model) > 1024 {
+			w.Group == "" || len(w.Group) > 256 || w.Slot == "" || len(w.Slot) > 64 || len(w.Name) > 256 || len(w.Model) > 1024 || !quotaSourceValid(w.Provider, w.Source) {
 			return errors.New("invalid quota window")
 		}
-		o := quotaObservation{Provider: w.Provider, AuthIndex: w.AuthIndex, AuthID: w.AuthID, Group: w.Group, Slot: w.Slot}
+		o := quotaObservation{Provider: w.Provider, AuthIndex: w.AuthIndex, AuthID: w.AuthID, Group: w.Group, Slot: w.Slot, Source: w.Source}
 		if key != quotaWindowKey(o) || (!revocationOnly && w.Group != "shared" && !w.Unmapped && w.Model == "" && quotaAntigravityFamily(w) == "") {
 			return errors.New("invalid quota group")
 		}

@@ -150,6 +150,22 @@ func quotaDropEmptyResetArchive(w *quotaWindow) bool {
 	return true
 }
 
+// An unused Antigravity bucket can return query time + window length. That
+// moving placeholder does not establish either boundary of an active period.
+// Allow for timestamp truncation and the delay in delivering the observation.
+// A zero reading with a deadline already counting down remains a real window.
+func quotaResetTimeUnknown(w quotaWindow, p *quotaPeriod) bool {
+	if w.Provider != "antigravity" || p == nil || p.EndedByReset || w.Seconds <= 0 || len(p.Samples) == 0 {
+		return false
+	}
+	last := p.Samples[len(p.Samples)-1]
+	if last.Used != 0 {
+		return false
+	}
+	elapsed := last.ObservedAt.Sub(last.Reset.Add(-time.Duration(w.Seconds) * time.Second))
+	return elapsed >= 0 && elapsed <= time.Minute
+}
+
 func quotaBuildPeriod(w quotaWindow, p *quotaPeriod, facts []quotaFact, pricing *pricingSnapshot) *quotaCycleDTO {
 	if p == nil {
 		return nil
@@ -169,6 +185,11 @@ func quotaBuildPeriod(w quotaWindow, p *quotaPeriod, facts []quotaFact, pricing 
 			}
 		}
 		v.UsedPercent, v.ObservedAt = &percent, last.ObservedAt
+	}
+	if quotaResetTimeUnknown(w, p) {
+		v.ResetTimeUnknown = true
+		v.ModelStats = nil
+		return v
 	}
 	if w.Unmapped {
 		v.ModelStats = nil
@@ -260,6 +281,20 @@ func (s *RequestStatistics) quotaCyclesForAPILocked(api string, now time.Time) [
 		}
 	}
 	pricing := s.pricingSnapshotLocked()
+	// Google serves different Gemini quota environments at daily and production.
+	// Keep their histories separate, and never let a legacy browser observation
+	// replace the corrected hub source. All windows use one source per credential.
+	sources := make(map[string]quotaWindow)
+	for _, w := range s.quota.Windows {
+		if w.Provider != "antigravity" || w.Source == "" || w.Hidden {
+			continue
+		}
+		key := quotaCredentialKey(w.Provider, w.AuthIndex, w.AuthID)
+		old, exists := sources[key]
+		if !exists || w.UpdatedAt.After(old.UpdatedAt) || (w.UpdatedAt.Equal(old.UpdatedAt) && w.Source == "hub-daily") {
+			sources[key] = w
+		}
+	}
 	byCredential := make(map[string]*quotaCredentialDTO)
 	for _, w := range s.quota.Windows {
 		// Recognize pre-upgrade persisted buckets too, without requiring a new
@@ -271,10 +306,13 @@ func (s *RequestStatistics) quotaCyclesForAPILocked(api string, now time.Time) [
 		if !credentials[key] || w.Hidden {
 			continue
 		}
+		if source, ok := sources[key]; ok && w.Source != source.Source {
+			continue
+		}
 		facts := factsByCredential[key]
 		v := byCredential[key]
 		if v == nil {
-			v = &quotaCredentialDTO{Provider: w.Provider, AuthIndex: w.AuthIndex, CredentialName: w.AuthID}
+			v = &quotaCredentialDTO{Provider: w.Provider, AuthIndex: w.AuthIndex, CredentialName: w.AuthID, Source: w.Source}
 			byCredential[key] = v
 		}
 		group := quotaGroupDTO{GroupID: w.Group + ":" + w.Slot, Name: w.Name, WindowSeconds: w.Seconds}

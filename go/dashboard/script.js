@@ -1595,20 +1595,25 @@ function quotaModelsHtml(cycle) {
 }
 function quotaPeriodHtml(cycle, current) {
   if (!cycle) return '<div class="empty">' + t(current ? 'quota_no_current' : 'quota_no_previous') + '</div>';
+  const resetUnknown = cycle.reset_time_unknown === true;
   const summary = cycle.summary;
   const percent = cycle.used_percent === null || cycle.used_percent === undefined ? '—' :
     (cycle.used_percent >= 99.95 && cycle.used_percent < 100 ? '&lt;100%' : pct(cycle.used_percent));
-  const range = esc(formatDateTime(timestampMs(cycle.start_at))) + ' – ' + esc(formatDateTime(timestampMs(cycle.end_at)));
+  const range = resetUnknown ? esc(t('quota_reset_time_unknown')) : esc(formatDateTime(timestampMs(cycle.start_at))) + ' – ' + esc(formatDateTime(timestampMs(cycle.end_at)));
   let html = '<div class="subtle quotaDates">' + range + '</div><div class="detailGrid">' + metricHtml(t('quota_actual_cost'), quotaValue(summary && summary.estimated_cost, true)) + metricHtml(t('quota_used'), percent) + metricHtml(t('requests_label'), quotaValue(summary && summary.total_requests, false)) + metricHtml(t('total_tokens_label'), quotaTokens(summary && summary.total_tokens));
   if (current) {
     const end = timestampMs(cycle.end_at);
     const full = cycle.used_percent === 100;
-    html += metricHtml(t(full ? 'quota_actual_total' : 'quota_estimated_total'), quotaValue(full ? cycle.actual_total_usd : cycle.estimated_total_usd, true)) + metricHtml(t('quota_estimated_remaining'), quotaValue(cycle.estimated_remaining_usd, true)) + metricHtml(t('quota_reset'), '<span data-quota-reset="' + end + '">' + quotaCountdownText(end, Date.now()) + '</span>');
+    html += metricHtml(t(full ? 'quota_actual_total' : 'quota_estimated_total'), quotaValue(full ? cycle.actual_total_usd : cycle.estimated_total_usd, true)) + metricHtml(t('quota_estimated_remaining'), quotaValue(cycle.estimated_remaining_usd, true)) + metricHtml(t('quota_reset'), resetUnknown ? '—' : '<span data-quota-reset="' + end + '">' + quotaCountdownText(end, Date.now()) + '</span>');
   } else {
     const full = cycle.used_percent === 100;
     html += metricHtml(t(full ? 'quota_actual_total' : 'quota_estimated_total'), quotaValue(full ? cycle.actual_total_usd : cycle.estimated_total_usd, true));
   }
   html += '</div>';
+  if (resetUnknown) {
+    if (cycle.observed_at) html += '<div class="subtle quotaDates">' + esc(t('quota_observed_at') + ': ' + formatDateTime(timestampMs(cycle.observed_at))) + '</div>';
+    return html + '<div class="subtle quotaDates">' + esc(t('quota_reset_time_unknown_hint')) + '</div>';
+  }
   if (cycle.ended_by_reset) {
     const duration = quotaCountdownText(timestampMs(cycle.end_at), timestampMs(cycle.start_at));
     html += '<div class="subtle quotaDates">' + esc(t('quota_early_reset') + ' · ' + t('quota_actual_duration') + ': ' + duration) + '</div>';
@@ -1674,21 +1679,42 @@ function antigravityQuotaBuckets(payload) {
   return buckets;
 }
 
+// Must match CPA's hub client; the daily endpoint omits Gemini for older CLI agents.
+// Keep in sync with CPA's hub client version when it changes.
+const ANTIGRAVITY_HUB_USER_AGENT = 'antigravity/hub/2.23.0 darwin/arm64';
+
 async function fetchAntigravityQuota(file) {
   const project = typeof file.project_id === 'string' ? file.project_id.trim() : '';
   if (!project) throw new Error('Missing Antigravity project');
   const apiCall = managementEndpoint('').replace(/\/v0\/management\/plugins\/.*$/, '/v0/management/api-call');
-  for (const base of ['https://daily-cloudcode-pa.googleapis.com', 'https://daily-cloudcode-pa.sandbox.googleapis.com', 'https://cloudcode-pa.googleapis.com']) {
-    try {
-      const result = await fetchJsonPayloadWithMeta(apiCall, managementFetchOptions({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
-        auth_index: file.auth_index, method: 'POST', url: base + '/v1internal:retrieveUserQuotaSummary',
-        header: { Authorization: 'Bearer $TOKEN$', 'Content-Type': 'application/json', 'User-Agent': 'antigravity/cli/1.0.13 (aidev_client; os_type=darwin; arch=arm64)' },
-        data: JSON.stringify({ project }),
-      }) }));
-      if (result.statusCode < 200 || result.statusCode >= 300) continue;
-      const buckets = antigravityQuotaBuckets(result.data);
-      if (buckets.length) return buckets;
-    } catch (_) { /* Try the next Google endpoint without exposing its body. */ }
+  // The old CLI user agent can omit Gemini on daily, while production returns a
+  // different Gemini quota. Only combine responses within the same environment.
+  // Any valid daily reading takes priority, even when production has more
+  // windows. Missing windows retain their stored history for that source.
+  const bucketKey = (bucket) => JSON.stringify([bucket.group, bucket.id, bucket.window]);
+  const expected = [['Gemini Models', 'gemini'], ['Claude and GPT models', '3p']].flatMap(([group, prefix]) =>
+    ['5h', 'weekly'].map((window) => bucketKey({ group, id: prefix + '-' + window, window })));
+  for (const environment of [
+    { source: 'hub-daily', bases: ['https://daily-cloudcode-pa.googleapis.com', 'https://daily-cloudcode-pa.sandbox.googleapis.com'] },
+    { source: 'hub-production', bases: ['https://cloudcode-pa.googleapis.com'] },
+  ]) {
+    const collected = new Map();
+    for (const base of environment.bases) {
+      try {
+        const result = await fetchJsonPayloadWithMeta(apiCall, managementFetchOptions({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+          auth_index: file.auth_index, method: 'POST', url: base + '/v1internal:retrieveUserQuotaSummary',
+          header: { Authorization: 'Bearer $TOKEN$', 'Content-Type': 'application/json', 'User-Agent': ANTIGRAVITY_HUB_USER_AGENT },
+          data: JSON.stringify({ project }),
+        }) }));
+        if (result.statusCode < 200 || result.statusCode >= 300) continue;
+        for (const bucket of antigravityQuotaBuckets(result.data)) {
+          const key = bucketKey(bucket);
+          if (!collected.has(key) && collected.size < 64) collected.set(key, { ...bucket, source: environment.source });
+        }
+        if (expected.every((key) => collected.has(key))) break;
+      } catch (_) { /* Try the next Google endpoint without exposing its body. */ }
+    }
+    if (collected.size) return [...collected.values()];
   }
   throw new Error('Antigravity quota unavailable');
 }

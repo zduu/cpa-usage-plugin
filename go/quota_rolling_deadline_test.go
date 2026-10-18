@@ -5,6 +5,65 @@ import (
 	"time"
 )
 
+func TestAntigravityPlaceholderResetTimeIsUnknown(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, tc := range []struct {
+		name     string
+		provider string
+		seconds  int64
+		used     float64
+		elapsed  time.Duration
+		unknown  bool
+	}{
+		{"unused five hour", "antigravity", 18000, 0, 0, true},
+		{"unused weekly", "antigravity", 604800, 0, 500 * time.Millisecond, true},
+		{"delivery delay", "antigravity", 18000, 0, 30 * time.Second, true},
+		{"fixed five hour at zero", "antigravity", 18000, 0, 10 * time.Minute, false},
+		{"fixed weekly at zero", "antigravity", 604800, 0, 24 * time.Hour, false},
+		{"consumed", "antigravity", 18000, .1, 0, false},
+		{"other provider", "codex", 18000, 0, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := quotaWindow{Provider: tc.provider, Seconds: tc.seconds}
+			start := now.Add(-tc.elapsed)
+			end := start.Add(time.Duration(tc.seconds) * time.Second)
+			p := &quotaPeriod{Start: start, End: end, Samples: []quotaObservation{{ObservedAt: now, Reset: end, Used: tc.used}}}
+			cycle := quotaBuildPeriod(w, p, nil, nil)
+			if cycle.ResetTimeUnknown != tc.unknown {
+				t.Fatalf("reset time unknown = %v, want %v", cycle.ResetTimeUnknown, tc.unknown)
+			}
+			if cycle.UsedPercent == nil || *cycle.UsedPercent != tc.used*100 || !cycle.ObservedAt.Equal(now) {
+				t.Fatalf("placeholder handling changed the quota reading: %+v", cycle)
+			}
+		})
+	}
+}
+
+func TestAntigravityPlaceholderBecomesFixedWithoutLosingHistory(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	w := quotaWindow{Provider: "antigravity", Seconds: 18000}
+	p := &quotaPeriod{Start: now, End: now.Add(5 * time.Hour), Samples: []quotaObservation{{ObservedAt: now, Reset: now.Add(5 * time.Hour)}}}
+	if cycle := quotaBuildPeriod(w, p, nil, nil); !cycle.ResetTimeUnknown {
+		t.Fatal("unused placeholder was shown as a fixed period")
+	}
+	// A later query reports a new placeholder; reloading must still show no
+	// countdown. The raw observations remain available for reset history.
+	for i := 1; i <= 3; i++ {
+		at := now.Add(time.Duration(i) * 5 * time.Minute)
+		p.Start, p.End = at, at.Add(5*time.Hour)
+		p.Samples = append(p.Samples, quotaObservation{ObservedAt: at, Reset: p.End})
+		if cycle := quotaBuildPeriod(w, p, nil, nil); !cycle.ResetTimeUnknown || cycle.Summary != nil || len(cycle.ModelStats) != 0 {
+			t.Fatalf("rolling placeholder became a real accounting period: %+v", cycle)
+		}
+	}
+	fixed := p.End
+	p.Samples = append(p.Samples, quotaObservation{ObservedAt: now.Add(20 * time.Minute), Reset: fixed, Used: .01})
+	cycle := quotaBuildPeriod(w, p, nil, nil)
+	if cycle.ResetTimeUnknown || !cycle.EndAt.Equal(fixed) || len(p.Samples) != 5 {
+		t.Fatalf("first consumption failed to establish a fixed deadline: %+v", cycle)
+	}
+}
+
 // An Antigravity pool that was never charged reports its deadline as
 // "now + window" on every query. Each observation therefore moves the deadline
 // by about the elapsed time even though nothing was consumed. Once the slide

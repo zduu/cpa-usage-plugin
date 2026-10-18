@@ -22,7 +22,15 @@ func quotaCredentialKey(provider, index, id string) string {
 }
 
 func quotaWindowKey(o quotaObservation) string {
-	return quotaCredentialKey(o.Provider, o.AuthIndex, o.AuthID) + "\x00" + o.Group + "\x00" + o.Slot
+	key := quotaCredentialKey(o.Provider, o.AuthIndex, o.AuthID) + "\x00" + o.Group + "\x00" + o.Slot
+	if o.Source != "" {
+		key += "\x00" + o.Source
+	}
+	return key
+}
+
+func quotaSourceValid(provider, source string) bool {
+	return source == "" || (provider == "antigravity" && (source == "hub-daily" || source == "hub-production"))
 }
 
 // Google identifies the Gemini Flash/Pro pool with gemini-{5h,weekly}, and
@@ -82,13 +90,13 @@ func parseQuotaSignals(input quotaSignalsInput) []quotaObservation {
 		out = append(out, quotaObservation{Provider: provider, AuthIndex: input.AuthIndex, AuthID: input.AuthID,
 			Group: group, Slot: slot, ObservedAt: input.ObservedAt.UTC(), Revoked: true})
 	}
-	add := func(group, name, slot string, seconds int64, used float64, reset time.Time, unmapped bool) {
+	add := func(group, name, slot string, seconds int64, used float64, reset time.Time, unmapped bool, source string) {
 		if reset.IsZero() || seconds <= 0 || seconds > 366*86400 {
 			return
 		}
 		o := quotaObservation{Provider: provider, AuthIndex: input.AuthIndex, AuthID: input.AuthID,
 			Group: group, Name: name, Slot: slot, Seconds: seconds, Used: used, Reset: reset,
-			ObservedAt: input.ObservedAt.UTC(), Unmapped: unmapped}
+			ObservedAt: input.ObservedAt.UTC(), Unmapped: unmapped, Source: source}
 		if validQuotaObservation(o) {
 			out = append(out, o)
 		}
@@ -99,6 +107,9 @@ func parseQuotaSignals(input quotaSignalsInput) []quotaObservation {
 			return nil
 		}
 		for _, bucket := range input.AntigravityBuckets {
+			if !quotaSourceValid(provider, bucket.Source) {
+				continue
+			}
 			bucket.Group, bucket.ID = strings.TrimSpace(bucket.Group), strings.TrimSpace(bucket.ID)
 			if bucket.Group == "" || len(bucket.Group) > 256 || len(bucket.ID) > 256 || len(bucket.Window) > 64 || len(bucket.ResetTime) > 128 || strings.IndexFunc(bucket.Group+bucket.ID, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 || bucket.RemainingFraction == nil {
 				continue
@@ -120,7 +131,7 @@ func parseQuotaSignals(input quotaSignalsInput) []quotaObservation {
 			bucketHash := sha256.Sum256([]byte(bucket.ID + "\x00" + strconv.FormatInt(seconds, 10)))
 			group, slot := "antigravity-"+hex.EncodeToString(groupHash[:16]), hex.EncodeToString(bucketHash[:16])
 			unmapped := quotaAntigravityFamily(quotaWindow{Provider: provider, Group: group, Slot: slot, Seconds: seconds}) == ""
-			add(group, bucket.Group, slot, seconds, 1-remaining, quotaTime(bucket.ResetTime), unmapped)
+			add(group, bucket.Group, slot, seconds, 1-remaining, quotaTime(bucket.ResetTime), unmapped, bucket.Source)
 		}
 	case "claude":
 		for _, w := range []struct {
@@ -144,7 +155,7 @@ func parseQuotaSignals(input quotaSignalsInput) []quotaObservation {
 			}
 			if ok {
 				used = math.Min(used, 1)
-				add("shared", "", w.slot, w.seconds, used, quotaTime(signals[prefix+"reset"]), false)
+				add("shared", "", w.slot, w.seconds, used, quotaTime(signals[prefix+"reset"]), false, "")
 			}
 		}
 	case "codex":
@@ -187,7 +198,7 @@ func parseQuotaSignals(input quotaSignalsInput) []quotaObservation {
 					reset = input.ObservedAt.UTC().Add(time.Duration(delta) * time.Second)
 				}
 			}
-			add(group, name, slot, minutes*60, used, reset, unmapped)
+			add(group, name, slot, minutes*60, used, reset, unmapped, "")
 		}
 	case "devin":
 		for _, w := range []struct {
@@ -199,7 +210,7 @@ func parseQuotaSignals(input quotaSignalsInput) []quotaObservation {
 				continue
 			}
 			if remaining, ok := quotaNumber(signals[w.slot+"_quota_remaining_percent"], 100); ok {
-				add("shared", "", w.slot, w.seconds, 1-remaining, quotaTime(signals[w.slot+"_quota_reset_at"]), false)
+				add("shared", "", w.slot, w.seconds, 1-remaining, quotaTime(signals[w.slot+"_quota_reset_at"]), false, "")
 			}
 		}
 	}

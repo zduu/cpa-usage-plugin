@@ -931,10 +931,13 @@ test('Antigravity collector only probes selected credentials while expanded and 
       { provider: 'antigravity', id: 'antigravity.json', auth_index: 'ag-index', project_id: 'fixture-project', access_token: 'private-token' },
       { provider: 'antigravity', id: 'unselected.json', auth_index: 'other-index', project_id: 'other-project' },
     ] };
-    else if (url.endsWith('/api-call')) payload = { status_code: 200, body: JSON.stringify({ groups: [{ displayName: '<Claude>', access_token: 'private-token', buckets: [
-      { bucketId: 'five-hour', window: '5h', remainingFraction: 0, resetTime: '2026-10-05T08:00:00Z' },
-      { bucketId: 'weekly', window: 'weekly', remainingFraction: '0.6', resetTime: '2026-10-10T08:00:00Z' },
+    else if (url.endsWith('/api-call')) payload = { status_code: 200, body: JSON.stringify({ groups: [{ displayName: 'Claude and GPT models', access_token: 'private-token', buckets: [
+      { bucketId: '3p-5h', window: '5h', remainingFraction: 0, resetTime: '2026-10-05T08:00:00Z' },
+      { bucketId: '3p-weekly', window: 'weekly', remainingFraction: '0.6', resetTime: '2026-10-10T08:00:00Z' },
       { window: 'monthly', remainingFraction: 0.5, resetTime: '2026-10-10T08:00:00Z' },
+    ] }, { displayName: 'Gemini Models', buckets: [
+      { bucketId: 'gemini-5h', window: '5h', remainingFraction: 1, resetTime: '2026-10-05T08:00:00Z' },
+      { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.9, resetTime: '2026-10-10T08:00:00Z' },
     ] }] }) };
     else payload = { accepted: 1, rejected: 0 };
     return { ok: true, status: 200, headers: { get() { return ''; } }, text: async () => JSON.stringify(payload) };
@@ -950,12 +953,14 @@ test('Antigravity collector only probes selected credentials while expanded and 
   assert.equal(probe.auth_index, 'ag-index');
   assert.equal(probe.header.Authorization, 'Bearer $TOKEN$');
   assert.equal(probe.url, 'https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary');
+  assert.equal(probe.header['User-Agent'], 'antigravity/hub/2.23.0 darwin/arm64');
   assert.equal(calls[1].url, '/proxy/v0/management/api-call');
   assert.equal(calls[1].options.headers.Authorization, 'Bearer fixture-key');
   const observation = JSON.parse(calls[2].options.body).observations[0];
   assert.equal(observation.provider, 'antigravity');
-  assert.equal(observation.antigravity_buckets.length, 2, 'unsupported durations must not create guessed cycles');
+  assert.equal(observation.antigravity_buckets.length, 4, 'both model pools must be collected without guessed cycles');
   assert.equal(observation.antigravity_buckets[0].remaining_fraction, 0, 'zero is exhausted quota');
+  assert.ok(observation.antigravity_buckets.every(bucket => bucket.source === 'hub-daily'));
   assert.ok(!JSON.stringify(calls).includes('private-token'));
   assert.equal(detailRefreshes, 1);
   await context.refreshAntigravityQuotaForSelectedApi();
@@ -969,6 +974,99 @@ test('Antigravity collector only probes selected credentials while expanded and 
   assert.equal(calls.length, 6, 'manual refresh can bypass the throttle');
   const html = context.quotaPeriodHtml({ unmapped: true, used_percent: 100, start_at: '2026-10-02T08:00:00Z', end_at: '2026-10-02T13:00:00Z', summary: null, model_stats: null }, true);
   assert.match(html, /models sharing this quota pool have not been confirmed/);
+});
+
+test('Antigravity incomplete successful responses keep probing and merge missing windows', async () => {
+  const { context } = createDashboardHarness({ language: 'en' });
+  context.atob = atob;
+  await context.load();
+  const group = (name, prefix, remaining, windows = ['5h', 'weekly']) => ({ displayName: name,
+    buckets: windows.map(window => ({ bucketId: prefix + '-' + window, window, remainingFraction: remaining, resetTime: '2026-10-20T08:00:00Z' })) });
+  const probes = [];
+  context.fetch = async (url, options) => {
+    const request = JSON.parse(options.body);
+    probes.push(request.url);
+    const groups = request.url.includes('.sandbox.') ? [group('Claude and GPT models', '3p', 1), group('Gemini Models', 'gemini', 0.7)] :
+      [group('Claude and GPT models', '3p', 0.8), group('Gemini Models', 'gemini', 0.9, ['weekly'])];
+    return { ok: true, status: 200, headers: { get() { return ''; } }, text: async () => JSON.stringify({ status_code: 200, body: JSON.stringify({ groups }) }) };
+  };
+  const buckets = await context.fetchAntigravityQuota({ auth_index: 'index', project_id: 'project' });
+  assert.equal(probes.length, 2, 'partial daily responses may be completed by sandbox without mixing production quotas');
+  assert.equal(probes[0], 'https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary');
+  assert.equal(buckets.length, 4, 'duplicate windows from fallbacks must not be submitted twice');
+  assert.equal(buckets.find(bucket => bucket.id === 'gemini-5h').remaining_fraction, 0.7);
+  assert.equal(buckets.find(bucket => bucket.id === 'gemini-weekly').remaining_fraction, 0.9);
+  assert.equal(buckets.find(bucket => bucket.id === '3p-weekly').remaining_fraction, 0.8, 'fallbacks must not replace primary readings');
+  assert.ok(buckets.every(bucket => bucket.source === 'hub-daily'));
+});
+
+test('Antigravity retains valid partial quota when the remaining endpoints fail', async () => {
+  const { context } = createDashboardHarness({ language: 'en' });
+  context.atob = atob;
+  await context.load();
+  let probes = 0;
+  context.fetch = async () => {
+    probes++;
+    const payload = probes === 1 ? { status_code: 200, body: JSON.stringify({ groups: [{ displayName: 'Gemini Models', buckets: [
+      { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.9, resetTime: '2026-10-20T08:00:00Z' },
+    ] }] }) } : { status_code: 503, body: 'Unavailable' };
+    return { ok: true, status: 200, headers: { get() { return ''; } }, text: async () => JSON.stringify(payload) };
+  };
+  const buckets = await context.fetchAntigravityQuota({ auth_index: 'index', project_id: 'project' });
+  assert.equal(probes, 2, 'valid partial daily quota must not probe a different production environment');
+  assert.equal(buckets.length, 1);
+  assert.equal(buckets[0].id, 'gemini-weekly');
+  assert.equal(buckets[0].remaining_fraction, 0.9);
+  assert.equal(buckets[0].source, 'hub-daily');
+});
+
+test('Antigravity partial daily quota keeps the correct reset even when production offers all windows', async () => {
+  const { context } = createDashboardHarness({ language: 'en' });
+  context.atob = atob;
+  await context.load();
+  const group = (name, prefix, remaining) => ({ displayName: name,
+    buckets: ['5h', 'weekly'].map(window => ({ bucketId: prefix + '-' + window, window, remainingFraction: remaining, resetTime: '2026-10-20T08:00:00Z' })) });
+  const probes = [];
+  context.fetch = async (url, options) => {
+    const request = JSON.parse(options.body);
+    probes.push(request.url);
+    const isProduction = request.url.startsWith('https://cloudcode-pa.');
+    const groups = isProduction ? [group('Claude and GPT models', '3p', 0.4), group('Gemini Models', 'gemini', 0.5)] :
+      [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.93627316, resetTime: '2026-10-24T09:35:32Z' }] }];
+    if (isProduction) groups[1].buckets.find(bucket => bucket.window === 'weekly').resetTime = '2026-10-21T14:34:53Z';
+    return { ok: true, status: 200, headers: { get() { return ''; } }, text: async () => JSON.stringify({ status_code: 200, body: JSON.stringify({ groups }) }) };
+  };
+  const buckets = await context.fetchAntigravityQuota({ auth_index: 'index', project_id: 'project' });
+  assert.equal(probes.length, 2, 'partial daily quota must not be replaced by complete production quota');
+  assert.ok(probes.every(url => url.startsWith('https://daily-cloudcode-pa.')));
+  assert.equal(buckets.length, 1, 'missing windows must be left to the stored daily history');
+  assert.equal(buckets[0].source, 'hub-daily');
+  assert.equal(buckets[0].id, 'gemini-weekly');
+  assert.equal(buckets[0].remaining_fraction, 0.93627316);
+  assert.equal(buckets[0].reset_time, '2026-10-24T09:35:32Z');
+});
+
+test('Antigravity falls back to production only when both daily endpoints have no valid windows', async () => {
+  const { context } = createDashboardHarness({ language: 'en' });
+  context.atob = atob;
+  await context.load();
+  const probes = [];
+  context.fetch = async (url, options) => {
+    const request = JSON.parse(options.body);
+    probes.push(request.url);
+    const isProduction = request.url.startsWith('https://cloudcode-pa.');
+    const payload = request.url.includes('.sandbox.') ? { status_code: 503, body: 'Unavailable' } :
+      { status_code: 200, body: JSON.stringify({ groups: isProduction ? [{ displayName: 'Gemini Models', buckets: [
+        { bucketId: 'gemini-weekly', window: 'weekly', remainingFraction: 0.9, resetTime: '2026-10-21T14:34:53Z' },
+      ] }] : [] }) };
+    return { ok: true, status: 200, headers: { get() { return ''; } }, text: async () => JSON.stringify(payload) };
+  };
+  const buckets = await context.fetchAntigravityQuota({ auth_index: 'index', project_id: 'project' });
+  assert.equal(probes.length, 3);
+  assert.equal(probes[2], 'https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary');
+  assert.equal(buckets.length, 1);
+  assert.equal(buckets[0].source, 'hub-production');
+  assert.equal(buckets[0].reset_time, '2026-10-21T14:34:53Z');
 });
 
 test('quota previous capacity distinguishes fully used and estimated amounts', async () => {
@@ -1025,7 +1123,7 @@ test('Antigravity query failures preserve history, back off, and allow manual fa
   assert.equal(probes, 3, 'failed queries must not retry on every detail render');
   recovered = true;
   await context.refreshAntigravityQuotaForSelectedApi(true);
-  assert.equal(probes, 5, 'manual refresh tries the primary endpoint then the sandbox fallback');
+  assert.equal(probes, 5, 'manual refresh stops after the sandbox returns valid daily quota');
   assert.equal(submissions, 1);
   assert.equal(vm.runInContext('antigravityQuotaErrors.has("ag")', context), false);
 });
@@ -3887,6 +3985,31 @@ test('Antigravity malformed quota entries cannot hide valid pools or become rese
   assert.equal(badNames.length, 0, 'objects must not become invented pool identities');
 });
 
+
+test('unconfirmed Antigravity reset times show no moving dates or countdown across refreshes', async () => {
+  const { context } = createDashboardHarness({ language: 'en' });
+  await context.load();
+  const cycle = { reset_time_unknown: true, used_percent: 0, summary: null, model_stats: null,
+    start_at: '2026-10-18T06:43:36Z', end_at: '2026-10-18T11:43:36Z', observed_at: '2026-10-18T06:43:36.900Z' };
+  for (const current of [true, false]) {
+    for (const end_at of ['2026-10-18T11:43:36Z', '2026-10-18T11:48:36Z']) {
+      const html = context.quotaPeriodHtml({ ...cycle, end_at }, current);
+      assert.match(html, /Reset time not yet confirmed/);
+      assert.match(html, /query time plus window length/);
+      assert.match(html, /Quota observed at/);
+      assert.match(html, /0\.0%/);
+      assert.doesNotMatch(html, /data-quota-reset|05:00:00| – |19:43:36|19:48:36/);
+    }
+  }
+  const fixed = context.quotaPeriodHtml({ ...cycle, reset_time_unknown: false }, true);
+  assert.match(fixed, /data-quota-reset/);
+  assert.match(fixed, / – /);
+  assert.doesNotMatch(fixed, /Reset time not yet confirmed/);
+  for (const language of ['zh-CN', 'zh-TW', 'en', 'ru']) {
+    const map = context.I18N_MAP[language];
+    assert.ok(map.quota_reset_time_unknown && map.quota_reset_time_unknown_hint, language);
+  }
+});
 
 test('Antigravity renders two pools and switches independent windows and histories', async () => {
   const { context, clickDocument } = createDashboardHarness({ language: 'en' });

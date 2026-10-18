@@ -145,7 +145,7 @@ func quotaCompactSamples(period *quotaPeriod) {
 // identical observations after every restart, which assigns a new baseline.
 // Times compare by instant so zone or monotonic readings do not matter.
 func quotaSameObservation(a, b quotaObservation) bool {
-	return a.Provider == b.Provider && a.AuthIndex == b.AuthIndex && a.AuthID == b.AuthID &&
+	return a.Provider == b.Provider && a.AuthIndex == b.AuthIndex && a.AuthID == b.AuthID && a.Source == b.Source &&
 		a.Group == b.Group && a.Name == b.Name && a.Slot == b.Slot && a.Seconds == b.Seconds &&
 		a.Reset.Equal(b.Reset) && a.ObservedAt.Equal(b.ObservedAt) && a.Used == b.Used &&
 		a.Model == b.Model && a.Unmapped == b.Unmapped && a.Revoked == b.Revoked
@@ -181,7 +181,7 @@ func (s *RequestStatistics) applyQuotaObservationLocked(o quotaObservation) bool
 		if !exists {
 			// Remember revocation even before the first window arrives. A
 			// delayed usage callback must not make that older window visible.
-			w = quotaWindow{Provider: o.Provider, AuthIndex: o.AuthIndex, AuthID: o.AuthID, Group: o.Group, Slot: o.Slot}
+			w = quotaWindow{Provider: o.Provider, AuthIndex: o.AuthIndex, AuthID: o.AuthID, Group: o.Group, Slot: o.Slot, Source: o.Source}
 		}
 		w.Hidden, w.UpdatedAt = true, o.ObservedAt
 		q.Windows[key] = w
@@ -192,7 +192,7 @@ func (s *RequestStatistics) applyQuotaObservationLocked(o quotaObservation) bool
 	start := o.Reset.Add(-time.Duration(o.Seconds) * time.Second)
 	if !exists {
 		w = quotaWindow{Provider: o.Provider, AuthIndex: o.AuthIndex, AuthID: o.AuthID, Group: o.Group,
-			Name: o.Name, Slot: o.Slot, Seconds: o.Seconds, Model: o.Model, Unmapped: o.Unmapped}
+			Name: o.Name, Slot: o.Slot, Seconds: o.Seconds, Model: o.Model, Unmapped: o.Unmapped, Source: o.Source}
 	}
 	var revokedAt time.Time
 	if w.Hidden && !o.ObservedAt.After(w.UpdatedAt) {

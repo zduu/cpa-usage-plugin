@@ -18,6 +18,7 @@ type quotaFact struct {
 }
 
 type quotaObservation struct {
+	Source              string    `json:"source,omitempty"`
 	CollectionStartedAt time.Time `json:"collection_started_at,omitempty"`
 	Provider            string    `json:"provider"`
 	AuthIndex           string    `json:"auth_index"`
@@ -44,6 +45,7 @@ type quotaPeriod struct {
 }
 
 type quotaWindow struct {
+	Source    string       `json:"source,omitempty"`
 	Provider  string       `json:"provider"`
 	AuthIndex string       `json:"auth_index"`
 	AuthID    string       `json:"auth_id"`
@@ -76,6 +78,7 @@ type quotaState struct {
 type quotaCycleDTO struct {
 	EndedByReset             bool               `json:"ended_by_reset,omitempty"`
 	ResetTimeEstimated       bool               `json:"reset_time_estimated,omitempty"`
+	ResetTimeUnknown         bool               `json:"reset_time_unknown,omitempty"`
 	ResetBaselineUsedPercent *float64           `json:"reset_baseline_used_percent,omitempty"`
 	Unmapped                 bool               `json:"unmapped,omitempty"`
 	ActualTotalUSD           *float64           `json:"actual_total_usd,omitempty"`
@@ -114,6 +117,7 @@ type quotaGroupDTO struct {
 }
 
 type quotaCredentialDTO struct {
+	Source         string          `json:"source,omitempty"`
 	Provider       string          `json:"provider"`
 	AuthIndex      string          `json:"auth_index"`
 	CredentialName string          `json:"credential_name"`
@@ -132,6 +136,7 @@ type quotaSignalsInput struct {
 // retrieveUserQuotaSummary supplies two independent model pools, each with
 // explicit five-hour and weekly windows. Unknown buckets remain unmapped.
 type quotaAntigravityBucket struct {
+	Source            string   `json:"source,omitempty"`
 	Group             string   `json:"group"`
 	ID                string   `json:"id"`
 	Window            string   `json:"window"`

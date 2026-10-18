@@ -31,9 +31,11 @@ Claude/Codex 优先读取原生 usage 的响应头，不依赖 `log_response_hea
 
 看板复用管理鉴权读取 v8 凭证列表，并提交白名单中的观测字段。原始观测时间会保留，同一运行实例内不重复提交同一份观测；插件重启或重新启用后会重新提交，以恢复内存模式的数据。可见页面沿用 30 秒轮询，隐藏页面沿用 300 秒轮询；读取失败保留已有历史。浏览器关闭期间，原生 usage 继续入账，但仅存在于宿主凭证列表中的新观测要等看板再次打开后才能保存。
 
-Antigravity 没有原生被动额度信号，因此看板只为当前所选接口实际使用过的凭证，通过管理鉴权的 `POST /v0/management/api-call` 查询 Google `v1internal:retrieveUserQuotaSummary`。认证文件必须提供 `project_id`；宿主替换 `$TOKEN$`，浏览器不下载认证文件或 OAuth token。依次尝试 daily、daily sandbox、cloudcode 三个官方地址。只在额度面板展开且页面可见时查询，自动间隔至少 5 分钟，失败后至少 60 秒再尝试，也可手动刷新。折叠面板或切换接口后不再启动后续凭证查询，已发出的请求可能完成。查询失败保留已有历史。
+Antigravity 没有原生被动额度信号，因此看板只为当前所选接口实际使用过的凭证，通过管理鉴权的 `POST /v0/management/api-call` 查询 Google `v1internal:retrieveUserQuotaSummary`。认证文件必须提供 `project_id`；宿主替换 `$TOKEN$`，浏览器不下载认证文件或 OAuth token。请求与 CPA 额度管理页保持一致，使用 `antigravity/hub/2.23.0 darwin/arm64` 客户端标识，优先查询 daily；摘要不完整时尝试 daily sandbox，补齐同一环境的缺失窗口。只有 daily 与 daily sandbox 都没有有效窗口时才回退 cloudcode 正式地址。daily 即使只返回部分窗口，也保留该环境读数；缺失窗口沿用同来源已有历史，不因正式环境窗口更多而切换来源。不同客户端标识或环境可能返回不同的 Gemini 周期与使用率，因此不混合 daily 与正式环境的读数。只在额度面板展开且页面可见时查询，自动间隔至少 5 分钟，失败后至少 60 秒再尝试，也可手动刷新。折叠面板或切换接口后不再启动后续凭证查询，已发出的请求可能完成。查询失败保留已有历史。
 
 Antigravity 按 Google 的模型组展示额度池，每个池内可切换 5 小时和周额度，各自保留用量、起止时间及本期/上期历史，不合并两个窗口的统计。接受 `5h` / `five-hour` / `five_hour` 和 `weekly` / `week`，不会仅凭重置时间猜测窗口长度。已核对 Google 原始摘要的模型归属：`Gemini Models` 的 `gemini-5h` / `gemini-weekly` 对应 Gemini，`Claude and GPT models` 的 `3p-5h` / `3p-weekly` 对应 Claude 和 GPT-OSS。仅这些精确组、bucket 标识及窗口组合会按 `gemini-`、`claude-`、`gpt-oss-` 模型名计入请求、token、花费和金额推算，旧快照中的相同标识也可直接使用。自定义模型别名需保留可识别的模型名；未知池继续显示归属未知，不把整份凭证请求重复计入每个池。
+
+Antigravity 观测以 `hub-daily` 或 `hub-production` 标识来源，分别保存周期历史。取得带来源的观测后，整份凭证只展示最近更新的来源；时间相同时优先 daily。旧版无来源的周期保留在存储与备份中，但不再覆盖已纠正的读数。来源切换不会被误判为使用重置卡，原有请求事实仍用于正确周期的用量统计。
 
 缺少某个响应头不表示撤销窗口。明确传递为 `null` 的使用率信号会隐藏对应窗口并保留历史；如果宿主把上游 null 丢弃、只传递其余字段，插件不会猜测撤销。没有后续观测时，到期的本期转为上期；无论之后空闲多久，上期及其用量都会保留，直到下一个实际观测到的周期结束后替换，不虚构空闲期间的新周期。撤销标记独立保留，防止迟到观测重新显示已撤销的窗口。
 
@@ -66,13 +68,13 @@ Claude 的使用率达到或超过 1，或者对应窗口的 `Status` 明确为 
 
 完整备份的外层格式仍为 version 1，`usage.quota_cycles.version` 为 1。完整导出、后台分块备份、快照和导入均包含周期数据；筛选事件导出仍只导出事件。重复导入按稳定记录 ID 去重，两个内容相同但 ID 不同的真实请求分别保留。导入删除标记会同时回退主账和额度统计，乱序观测及备份合并会保留最近一次已观测的上期，包括提前重置的统计段。新增的提前重置和边界估计标记随周期保存；旧备份如仍保留重置前后的观测，会重新构建提前结束的上期，已经丢失的观测无法恢复。冲突的记录或周期扩展会在写入前拒绝。
 
-存储快照版本升为 3，可读取旧版快照。升级前备份原数据目录；回退时同时恢复旧插件和升级前的数据目录。旧插件不能直接读取 v3 快照。现有实验性 SQLite 迁移工具会拒绝 v3 快照，避免丢弃周期数据；运行时持久化仍使用 JSONL。
+存储快照版本升为 3，可读取旧版快照。升级前备份原数据目录；回退时同时恢复旧插件和升级前的数据目录。旧插件不能直接读取 v3 快照。本次 Antigravity 修正还会保存带来源的周期标识，即使回退到未包含此修正的 v2.7.5，也必须恢复修正前的数据目录。现有实验性 SQLite 迁移工具会拒绝 v3 快照，避免丢弃周期数据；运行时持久化仍使用 JSONL。
 
 macOS 构建会将 Go 动态库映像保留到宿主进程退出，避免宿主卸载动态库时仍存活的 Go 运行时线程访问已释放代码。停用时统计和导出 worker 正常关闭，重新启用时重建服务并从存储恢复数据。macOS 更新或覆盖插件文件后应重启 CPA，使新映像生效并释放旧映像。
 
 ## 管理 API
 
-`GET /v0/management/plugins/usage-dashboard-zduu/dashboard-api-detail?api=…` 增加可选 `credential_quota_cycles`：按凭证返回 `groups`。Antigravity 每组代表一个模型池，包含 `group_id`、`name` 及 `windows`；每个窗口含 `window_seconds`、`current`、`previous`。其他提供商沿用组内直接返回这些窗口字段的结构。周期包含 `start_at`、`end_at`、`observed_at`、`used_percent`、`summary`、`model_stats` 和 `estimated_total_usd`。本期或上期达到 100% 且费用已知时返回 `actual_total_usd`，未用满时返回可用的 `estimated_total_usd`；未知值为 null。达到 100% 时 `estimated_total_usd` 为 null；已映射额度池的本期剩余金额为 0，不受价格是否已知或估算新鲜度影响。只有 `current` 含 `estimated_remaining_usd`。
+`GET /v0/management/plugins/usage-dashboard-zduu/dashboard-api-detail?api=…` 增加可选 `credential_quota_cycles`：按凭证返回 `groups`，Antigravity 还返回当前选用的 `source`。Antigravity 每组代表一个模型池，包含 `group_id`、`name` 及 `windows`；每个窗口含 `window_seconds`、`current`、`previous`。其他提供商沿用组内直接返回这些窗口字段的结构。周期包含 `start_at`、`end_at`、`observed_at`、`used_percent`、`summary`、`model_stats` 和 `estimated_total_usd`。本期或上期达到 100% 且费用已知时返回 `actual_total_usd`，未用满时返回可用的 `estimated_total_usd`；未知值为 null。达到 100% 时 `estimated_total_usd` 为 null；已映射额度池的本期剩余金额为 0，不受价格是否已知或估算新鲜度影响。只有 `current` 含 `estimated_remaining_usd`。
 
 详情还可返回 `quota_credentials`，包含当前接口用过的 Antigravity 凭证的 `provider`、`auth_index`、`auth_id`，用于首次额度查询。这些身份可在首次额度观测前取得，不包含 OAuth token。升级前的历史请求即使没有额度事实，也会从保留的普通请求账本发现凭证；查询返回后可展示对应额度池。
 
@@ -101,10 +103,10 @@ macOS 构建会将 Go 动态库映像保留到宿主进程退出，避免宿主�
 Antigravity 使用同一接口，`provider` 为 `antigravity`，把 `signals` 设为空对象，另提供 `antigravity_buckets`：
 
 ```json
-[{"group":"Claude","id":"claude-5h","window":"5h","remaining_fraction":0.6,"reset_time":"2026-10-05T08:00:00Z"}]
+[{"group":"Claude","id":"claude-5h","window":"5h","remaining_fraction":0.6,"reset_time":"2026-10-05T08:00:00Z","source":"hub-daily"}]
 ```
 
-`remaining_fraction` 范围为 0 到 1，0 表示已用尽，不等同于缺失。每条最多 64 个 bucket，组名及 ID 最多 256 字节；窗口别名统一为同一周期身份，避免更换拼写丢失历史。
+`remaining_fraction` 范围为 0 到 1，0 表示已用尽，不等同于缺失。`source` 可省略以兼容旧版提交；非空时只接受 `hub-daily` 或 `hub-production`。每条最多 64 个 bucket，组名及 ID 最多 256 字节；窗口别名统一为同一周期身份，避免更换拼写丢失历史。
 
 响应为 `accepted`、`skipped`、`rejected`、`quota_version`，计数单位是观测条目，不是请求。请求体最多 256 KiB，每批 100 条，每条最多 64 个信号、单值最多 512 字符。后端通过 `host.auth.get_runtime` 核对实时凭证身份，拒绝 runtime-only 条目。该接口需要管理鉴权，匿名 resource 别名返回 404；提交方具有管理权限，观测值本身不属于宿主签名数据。
 
@@ -119,4 +121,6 @@ python3 scripts/validate-quota-v8.py --cpa /path/to/CLIProxyAPI \
 
 加 `--browser` 运行真实浏览器验收，`--restarts 5` 连续验证五次重启。需要安装 Playwright 及 Chromium；也可用 `CPA_PLAYWRIGHT=/path/to/node_modules/playwright` 和 `CPA_CHROME=/path/to/chrome` 指定已有安装。脚本验证原生 usage、凭证采集、两期模型与金额、管理鉴权、重启恢复及同进程重新启用后的完整备份，结果和截图写入 `docs/validation/quota-cycle-details-v8/`。
 
-未使用的 Antigravity 窗口可能在每次查询时返回「当前时间 + 窗口长度」作为截止时间。截止时间后移只在刚结束的有效片段确实消耗额度时证明发生重置；更早已归档片段的消耗不作证明，避免真实重置后的空闲轮询覆盖上一期历史。
+未使用的 Antigravity 窗口可能在每次查询时返回「当前时间 + 窗口长度」作为截止时间。已用比例为 0 且该时间与观测时间加窗口长度相差不超过 1 分钟时，页面显示「重置时间待确认」，隐藏周期起止与倒计时，避免每次刷新重新从 5 小时或 7 天计时；不按这个占位范围分配请求和花费。取得固定重置时间后恢复正常显示，已用比例为 0 但已开始倒数的固定窗口不受影响。API 对这种观测返回 `reset_time_unknown: true`，此时 `start_at` / `end_at` 仅保留上游占位范围，不代表已确认的周期起止。
+
+截止时间后移只在刚结束的有效片段确实消耗额度时证明发生重置；更早已归档片段的消耗不作证明，避免真实重置后的空闲轮询覆盖上一期历史。
