@@ -1,5 +1,27 @@
 # CPA 用量统计插件 — 使用文档
 
+## v2.7.7 - 2026-10-20
+
+本版本修复热更新后旧插件实例在退出时覆盖新快照、导致历史请求、花费和周额度统计回退的问题。无需新增配置，存储快照格式保持 v3。
+
+### 修复
+
+- 实现 `plugin.quiesce`：热替换前等待已开始的调用和兜底入账结束，排空持久化队列、保存快照并释放数据目录。暂停后拒绝新的业务调用，重复 shutdown 不再写出旧快照。
+- 为持久化目录增加操作系统独占写入锁 `.writer.lock`，覆盖加载、写入和分片清理。其他实例占用目录时停止当前实例的持久化，并通过存储状态及健康告警报告错误，避免两个实例互相覆盖数据。锁随正常交接或进程退出自动释放，无需删除锁文件。
+- 支持热替换失败后，由宿主通过 `plugin.reconfigure` 重新启用已暂停的旧实例并从磁盘恢复统计。
+
+### 首次升级步骤
+
+**从 v2.7.6 及更早版本首次升级到 v2.7.7，必须停服替换，不能直接在运行中的旧实例上热更新。** 旧二进制不支持暂停和写入锁，新版无法约束已驻留的旧代码。
+
+1. 停服前先做完整用量导出，另备份存储目录和模型价格文件；事件筛选导出不能替代完整用量备份。
+2. 停止 CPA 服务或容器，再替换对应平台的插件文件并启动，保留原持久化路径。
+3. 核对总请求数、token、花费及 `/health` 的存储错误。若停服时已驻留的旧实例覆盖了快照，导入停服前的完整用量备份恢复记录。
+
+已支持此交接协议的版本之间可由宿主在热替换前暂停旧实例并移交写入权。多实例部署仍应分别使用独立数据目录。排除写入锁冲突后需重新配置或重启，以恢复持久化。
+
+本修复防止后续覆盖，无法补回已经丢失且没有备份的历史请求与花费。回退到旧版前应保留当前完整导出及数据目录，并使用升级前的备份恢复旧版。
+
 ## 1. 下载插件
 
 从 [GitHub Releases](https://github.com/zduu/cpa-usage-plugin/releases) 下载最新版本的插件：
@@ -31,8 +53,8 @@ plugins:
     usage-dashboard-zduu:
       enabled: true
       store:
-        version: "2.7.6"
-        release-tag: "v2.7.6"
+        version: "2.7.7"
+        release-tag: "v2.7.7"
         repository: "https://github.com/zduu/cpa-usage-plugin"
       # 其他配置项见第 4 节 ...
 ```
@@ -265,8 +287,8 @@ plugins:
     usage-dashboard-zduu:
       enabled: true
       store:
-        version: "2.7.6"
-        release-tag: "v2.7.6"
+        version: "2.7.7"
+        release-tag: "v2.7.7"
         repository: "https://github.com/zduu/cpa-usage-plugin"
       # 每个上游接口/模型最多保留的请求明细条数。默认 5000。
       max_details_per_model: 5000
@@ -316,7 +338,7 @@ plugins:
       claude_cache_repair_enabled: false
       # 可选：允许外部脚本更新插件文件。默认 false。
       update_enabled: false
-      # 可选：latest 或指定版本号，例如 v2.7.6。
+      # 可选：latest 或指定版本号，例如 v2.7.7。
       update_version: latest
 ```
 
@@ -342,8 +364,8 @@ cd CLIProxyAPI
 启动后查看日志确认插件加载成功：
 
 ```text
-pluginhost: plugin loaded plugin_id=usage-dashboard-zduu version=2.7.6 path=plugins/usage-dashboard-zduu-v2.7.6.so
-pluginhost: plugin registered plugin_id=usage-dashboard-zduu plugin_name=用量统计 version=2.7.6 path=plugins/usage-dashboard-zduu-v2.7.6.so
+pluginhost: plugin loaded plugin_id=usage-dashboard-zduu version=2.7.7 path=plugins/usage-dashboard-zduu-v2.7.7.so
+pluginhost: plugin registered plugin_id=usage-dashboard-zduu plugin_name=用量统计 version=2.7.7 path=plugins/usage-dashboard-zduu-v2.7.7.so
 ```
 
 > `store-sources` 引入插件商店注册表，管理面板可浏览安装。`store` 块标记当前期望版本，pluginhost 会匹配 `usage-dashboard-zduu-v{版本号}.{ext}` 文件名，并自动清理旧版本文件。
@@ -609,7 +631,7 @@ plugins:
     usage-dashboard-zduu:
       enabled: true
       update_enabled: true
-      update_version: latest   # 或 v2.7.6
+      update_version: latest   # 或 v2.7.7
 ```
 
 执行脚本：

@@ -2,11 +2,11 @@
 
 CPA 用量统计插件，用于在 CLIProxyAPI/CPA v7、v8 插件系统中记录请求用量，并提供管理页面查看统计数据。
 
-当前代码版本：`2.7.6`。本版本修复 Antigravity Gemini 额度缺失与重置周期不准确，并避免将有效的 daily 读数切换为不同周期的正式环境读数。v2.7.5 起额度按 Google 模型池分别显示 5 小时和周窗口；v2.7.0 起存储快照为 v3。回退到不支持额度来源隔离的版本时，需同时恢复升级前的数据目录。变更和已知边界见[更新日志](docs/releases/changelog.md)。
+当前代码版本：`2.7.7`。本版本修复热更新后旧实例在退出时覆盖新快照、导致历史用量及额度统计回退的问题，增加暂停交接、幂等关闭和数据目录独占写入锁。**从 v2.7.6 及更早版本首次升级时，须先完整导出并备份，再停服替换插件。** 存储快照仍为 v3，已丢失的历史不会自动恢复。变更和升级步骤见[发布说明](docs/guides/cpa-usage.md#v277---2026-10-20)。
 
 > **2.4.0 迁移提示**：插件 ID 已从 `usage-statistics` 改为 `usage-dashboard-zduu`，用于避开 CPA 官方商店中同 ID 插件造成的安装状态、配置和路由冲突。升级时必须先停用并删除旧插件，再安装新插件；历史统计数据路径保持不变。详细步骤见[部署文档的 2.3.4 → 2.4.0 迁移章节](docs/guides/cpa-usage.md#从-234-迁移到-240)。
 
-`v1.0.0` 到 `v1.2.18` 属于规范化发布流程建立前的 legacy 历史版本；tag、release 和资产下载地址保持不变，说明见 [docs/releases/v1-history.md](docs/releases/v1-history.md)。
+`v1.0.0` 到 `v1.2.18` 属于规范化发布流程建立前的 legacy 历史版本；tag、release 和资产下载地址保持不变，说明见 [GitHub Releases](https://github.com/zduu/cpa-usage-plugin/releases)。
 
 ## 功能
 
@@ -73,7 +73,7 @@ CPA 用量统计插件，用于在 CLIProxyAPI/CPA v7、v8 插件系统中记录
 4. Release 中会上传按平台命名的资产，例如 `usage-dashboard-zduu-linux-amd64.so`、`usage-dashboard-zduu-darwin-arm64.dylib`、`usage-dashboard-zduu-windows-amd64.dll`，并保留 `usage-dashboard-zduu.so` 作为 `linux-amd64` 兼容别名。
 5. CI 同时生成插件商店兼容的 zip 资产（`usage-dashboard-zduu_{version}_{goos}_{goarch}.zip`）和 `checksums.txt`，可直接用于 CPA 插件商店一键安装。
 
-自 `v2.0.0` 起，发布说明以 [docs/releases/changelog.md](docs/releases/changelog.md) 为准，并由 workflow 在打 `vX.Y.Z` tag 时校验版本号并生成 GitHub Release。
+发布说明保存在[部署指南](docs/guides/cpa-usage.md)对应的版本小节，workflow 在打 `vX.Y.Z` tag 时校验版本号、提取该小节并生成 GitHub Release；旧版发布说明可查阅 GitHub Releases。
 
 本地构建（需要 Go 1.26.6+ 和 CGO；已提高补丁版本下限以修复已知标准库安全问题）：
 
@@ -107,10 +107,8 @@ cpa-usage-plugin/
 ├── docs/
 │   ├── README.md
 │   ├── guides/
-│   │   └── cpa-usage.md
-│   ├── releases/
-│   │   ├── changelog.md
-│   │   └── v1-history.md
+│   │   ├── cpa-usage.md
+│   │   └── quota-cycles.md
 │   └── images/
 │       └── readme/
 │           ├── plugin-management.png

@@ -2,7 +2,7 @@
 set -eu
 
 tag="${1:-}"
-changelog="${2:-docs/releases/changelog.md}"
+changelog="${2:-docs/guides/cpa-usage.md}"
 output="${3:-release-notes.md}"
 
 if [ -z "$tag" ]; then

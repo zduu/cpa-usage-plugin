@@ -2,11 +2,10 @@
 
 仓库文档按用途归档在 `docs/` 下：
 
-- [guides/cpa-usage.md](guides/cpa-usage.md): 安装、配置、部署和更新说明
+- [guides/cpa-usage.md](guides/cpa-usage.md): 安装、配置、部署、更新及版本发布说明
 - [guides/quota-cycles.md](guides/quota-cycles.md): CPA v8 凭证额度周期、模型分布、备份与验收
-- [reviews/2026-10-05.md](reviews/2026-10-05.md): 多轮项目复审、修复与验证记录
-- [releases/changelog.md](releases/changelog.md): `v2` 起的正式发布说明
-- [releases/v1-history.md](releases/v1-history.md): `v1` 历史标签归档
+
+历史版本发布说明和资产见 [GitHub Releases](https://github.com/zduu/cpa-usage-plugin/releases)。CI 从部署指南对应的 `## vX.Y.Z - 日期` 小节提取新版本发布说明。
 
 图片资源位于 `docs/images/readme/`，供根目录 `README.md` 引用。
 
