@@ -804,6 +804,7 @@ func usageDetailHasTokens(detail UsageDetail) bool {
 
 type usageFallbackCoordinator struct {
 	mu                       sync.Mutex
+	committing               sync.WaitGroup
 	pending                  map[string][]*pendingUsageFallback
 	pendingCorrelated        map[string][]*pendingUsageFallback
 	nativeRecent             map[string][]*usageFallbackOccurrence
@@ -1029,6 +1030,9 @@ func (c *usageFallbackCoordinator) Flush() {
 	}
 	c.pendingCorrelated = make(map[string][]*pendingUsageFallback)
 	c.mu.Unlock()
+	// A timer may already have removed its record from pending without having
+	// recorded it yet. Drain it before closing stats or replacing global state.
+	c.committing.Wait()
 	for _, record := range records {
 		stats.Record(record)
 	}
@@ -1063,6 +1067,8 @@ func (c *usageFallbackCoordinator) commit(pending *pendingUsageFallback) {
 	}
 	c.cleanupLocked(now)
 	record := pending.record
+	c.committing.Add(1)
+	defer c.committing.Done()
 	c.mu.Unlock()
 	// A native record for the same credential may have arrived while this
 	// fallback was waiting; prefer the CPA auth index it taught us.

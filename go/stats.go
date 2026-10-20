@@ -36,6 +36,7 @@ type RequestStatistics struct {
 	// complete transition so another change or Close cannot replace a worker
 	// between its stop and restart.
 	configMu sync.Mutex
+	closed   bool // Written under both configMu and mu; reads hold either lock.
 
 	storageControlMu sync.Mutex
 	storageEnqueueWG sync.WaitGroup
@@ -88,6 +89,7 @@ type RequestStatistics struct {
 	storagePath                   string
 	storageFlush                  time.Duration
 	storageDir                    string
+	storageOwner                  *os.File
 	storageLegacyPath             string
 	storageLoadedPath             string
 	storageActiveDate             string
@@ -676,6 +678,9 @@ func (s *RequestStatistics) ConfigurePatch(cfg runtimeConfigPatch) {
 	}
 	s.configMu.Lock()
 	defer s.configMu.Unlock()
+	if s.closed {
+		return
+	}
 	storageConfigTouched := cfg.StorageEnabled != nil ||
 		cfg.StoragePath != nil ||
 		cfg.StorageFlushSeconds != nil ||
@@ -891,6 +896,10 @@ func (s *RequestStatistics) Record(record UsageRecord) {
 	modelName := decodeClaudeCloakedModel(firstNonEmpty(record.Model, "unknown"))
 	var persistDetail *persistedDetail
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
 	detail := requestDetailFromUsageRecord(record, timestamp, s.logResponseHeaders)
 	// Native callbacks count executions, and retries can reuse the host request
 	// ID. Keep their persisted identities distinct just as their main-ledger
@@ -1721,6 +1730,12 @@ func (s *RequestStatistics) configureStorageLocked() {
 		s.storageLastError = err.Error()
 		return
 	}
+	owner, err := acquireStorageDirectory(dir)
+	if err != nil {
+		s.storageLastError = err.Error()
+		return
+	}
+	s.storageOwner = owner
 	now := time.Now()
 	var warnings []string
 	snapshotAt, err := s.loadStorageSnapshotLocked(dir, now)
@@ -1731,6 +1746,8 @@ func (s *RequestStatistics) configureStorageLocked() {
 		// Close also writes a snapshot without a worker, so clear its target.
 		s.storageDir = ""
 		s.storageLegacyPath = ""
+		_ = s.storageOwner.Close()
+		s.storageOwner = nil
 		s.storageLastError = err.Error()
 		return
 	}
@@ -3555,6 +3572,16 @@ func (s *RequestStatistics) closeStorageLocked() {
 			s.storageLastError = err.Error()
 		}
 	}
+	// Releasing the writer also revokes its target. Later cleanup cannot
+	// overwrite a successor's snapshot, even if Close is called again.
+	if s.storageOwner != nil {
+		if err := s.storageOwner.Close(); err != nil {
+			s.storageLastError = err.Error()
+		}
+		s.storageOwner = nil
+	}
+	s.storageDir = ""
+	s.storageLegacyPath = ""
 }
 
 type modelsDevProviderPayload struct {
@@ -8704,6 +8731,12 @@ func (s *RequestStatistics) Close() {
 	}
 	s.configMu.Lock()
 	defer s.configMu.Unlock()
+	if s.closed {
+		return
+	}
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
 	s.stopStorageWorker()
 	s.stopModelsDevPriceWorker()
 	s.stopExchangeRateWorker()

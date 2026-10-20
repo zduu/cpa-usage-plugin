@@ -84,7 +84,7 @@ import (
 func main() {}
 
 var pluginLifecycle struct {
-	sync.Mutex
+	sync.RWMutex
 	stopped bool
 }
 
@@ -93,6 +93,10 @@ var pluginLifecycle struct {
 func restartPluginState() {
 	pluginLifecycle.Lock()
 	defer pluginLifecycle.Unlock()
+	restartPluginStateLocked()
+}
+
+func restartPluginStateLocked() {
 	if !pluginLifecycle.stopped {
 		return
 	}
@@ -185,6 +189,12 @@ func cliproxyPluginFree(ptr unsafe.Pointer, len C.size_t) {
 func cliproxyPluginShutdown() {
 	pluginLifecycle.Lock()
 	defer pluginLifecycle.Unlock()
+	stopPluginStateLocked()
+}
+
+// Quiesce and final shutdown share the same transition. A retired image can
+// remain mapped, but must never save its old statistics after a successor runs.
+func stopPluginStateLocked() {
 	if pluginLifecycle.stopped {
 		return
 	}
@@ -202,10 +212,30 @@ func cliproxyPluginShutdown() {
 
 func handleMethod(method string, requestBody []byte) ([]byte, error) {
 	switch method {
-	case "plugin.register":
-		return handleRegister(requestBody)
-	case "plugin.reconfigure":
+	case "plugin.quiesce":
+		pluginLifecycle.Lock()
+		defer pluginLifecycle.Unlock()
+		stopPluginStateLocked()
+		return okEnvelopeJSON("{}")
+	case "plugin.register", "plugin.reconfigure":
+		pluginLifecycle.Lock()
+		defer pluginLifecycle.Unlock()
+		// CPA rolls back a failed replacement by reconfiguring the quiesced
+		// image without calling its ABI init entry point again.
+		restartPluginStateLocked()
+		if method == "plugin.register" {
+			return handleRegister(requestBody)
+		}
 		return handleReconfigure(requestBody)
+	}
+	// Wait for admitted calls before closing workers, and reject late calls
+	// until an explicit register/reconfigure restores this image.
+	pluginLifecycle.RLock()
+	defer pluginLifecycle.RUnlock()
+	if pluginLifecycle.stopped {
+		return errorEnvelope("plugin_stopped", "plugin is quiesced or shut down"), nil
+	}
+	switch method {
 	case "management.register":
 		return handleManagementRegister()
 	case "usage.handle":
