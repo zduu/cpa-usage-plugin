@@ -48,6 +48,8 @@ var I18N_MAP = {
     export_data: '导出数据',
     import_data: '导入数据',
     refresh_btn: '刷新',
+    management_auth_missing: '未找到管理密钥，已停止自动请求。请在主管理面板重新登录并勾选“记住密码”，再点击此处“刷新”。',
+    management_auth_failed: '管理认证失败或访问受限（HTTP {0}），已停止自动请求。请在主管理面板确认登录及封禁状态，恢复后点击“刷新”。',
     loading: '正在加载...',
 
     // ---- stat cards ----
@@ -339,6 +341,8 @@ var I18N_MAP = {
     export_data: '匯出資料',
     import_data: '匯入資料',
     refresh_btn: '重新整理',
+    management_auth_missing: '找不到管理金鑰，已停止自動請求。請在主管理面板重新登入並勾選「記住密碼」，再點擊此處「重新整理」。',
+    management_auth_failed: '管理驗證失敗或存取受限（HTTP {0}），已停止自動請求。請在主管理面板確認登入及封鎖狀態，恢復後點擊「重新整理」。',
     loading: '正在載入...',
 
     total_requests: '總請求數',
@@ -609,6 +613,8 @@ var I18N_MAP = {
     export_data: 'Export',
     import_data: 'Import',
     refresh_btn: 'Refresh',
+    management_auth_missing: 'No management key found. Automatic requests stopped. Sign in to the main management panel with “Remember password” enabled, then click Refresh here.',
+    management_auth_failed: 'Management authentication failed or access is restricted (HTTP {0}). Automatic requests stopped. Check your login and any IP ban in the main panel, then click Refresh once access is restored.',
     loading: 'Loading...',
 
     total_requests: 'Total Requests',
@@ -879,6 +885,8 @@ var I18N_MAP = {
     export_data: 'Экспорт',
     import_data: 'Импорт',
     refresh_btn: 'Обновить',
+    management_auth_missing: 'Ключ управления не найден. Автоматические запросы остановлены. Войдите в основную панель с включённым сохранением пароля, затем нажмите «Обновить» здесь.',
+    management_auth_failed: 'Ошибка авторизации или ограничение доступа (HTTP {0}). Автоматические запросы остановлены. Проверьте вход и блокировку IP в основной панели, затем нажмите «Обновить» после восстановления доступа.',
     loading: 'Загрузка...',
 
     total_requests: 'Всего запросов',

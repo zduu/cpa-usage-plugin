@@ -155,9 +155,10 @@ function managementEndpoint(path, pathname) {
 }
 function decodeManagementStorage(value, host, userAgent) {
   const raw = String(value || '');
-  const prefix = 'enc::v1::';
+  const prefix = raw.startsWith('enc::v2::') ? 'enc::v2::' : 'enc::v1::';
   if (!raw.startsWith(prefix)) return raw;
-  const keyText = 'cli-proxy-api-webui::secure-storage|' + String(host || '') + '|' + String(userAgent || '');
+  const keyText = 'cli-proxy-api-webui::secure-storage|' + String(host || '') +
+    (prefix === 'enc::v1::' ? '|' + String(userAgent || '') : '');
   const key = new TextEncoder().encode(keyText);
   const binary = atob(raw.slice(prefix.length));
   const bytes = new Uint8Array(binary.length);
@@ -167,7 +168,11 @@ function decodeManagementStorage(value, host, userAgent) {
 function parseManagementStorage(value, host, userAgent) {
   if (!value) return null;
   const decoded = decodeManagementStorage(value, host, userAgent);
-  try { return JSON.parse(decoded) } catch { return decoded }
+  try { return JSON.parse(decoded) } catch {
+    // Only unencoded plain strings are valid legacy keys. Never send an
+    // unknown encoding, failed decryption or truncated JSON as a credential.
+    return String(value).startsWith('enc::') || /^[\s]*[\[{\"]/.test(decoded) ? null : decoded;
+  }
 }
 function currentManagementKey(storage, host, userAgent) {
   let store;
@@ -179,11 +184,16 @@ function currentManagementKey(storage, host, userAgent) {
     try { return parseManagementStorage(store.getItem(name), currentHost, currentUA); } catch (_) { return null; }
   };
   const auth = read('cli-proxy-auth');
-  const key = auth && typeof auth === 'object' ? ((auth.state && auth.state.managementKey) || auth.managementKey || '') : '';
-  if (typeof key === 'string' && key.trim()) return key.trim();
+  const loginKey = (value) => {
+    const key = (value.state && value.state.managementKey) ?? value.managementKey;
+    return typeof key === 'string' ? key.trim() : '';
+  };
+  // An empty modern login state means logged out or not remembered. Falling
+  // back here could send an obsolete legacy password and count a failed login.
+  if (auth && typeof auth === 'object' && !Array.isArray(auth)) return loginKey(auth);
   const legacy = read('managementKey');
   if (typeof legacy === 'string') return legacy.trim();
-  if (legacy && typeof legacy === 'object') return String((legacy.state && legacy.state.managementKey) || legacy.managementKey || '').trim();
+  if (legacy && typeof legacy === 'object' && !Array.isArray(legacy)) return loginKey(legacy);
   return '';
 }
 function groupedRows(rows, keyFn, nameFn) {

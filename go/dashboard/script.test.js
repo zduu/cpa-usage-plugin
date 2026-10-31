@@ -76,6 +76,7 @@ function createDashboardHarness(options = {}) {
   const fetchCalls = [];
   const fetchRequests = [];
   const timeoutDelays = [];
+  const activeTimeouts = new Map();
   let summaryLastRecordedAt = options.lastRecordedAt || '2023-11-15T06:13:20Z';
   let summaryVersion = options.summaryVersion || 1;
   let prices = options.prices || { 'gpt-4.1': { prompt: 2, completion: 8, cache: 0.5, cache_write: 0.5 } };
@@ -554,14 +555,15 @@ function createDashboardHarness(options = {}) {
     location: { pathname: options.pathname || '/v0/management/plugins/usage-dashboard-zduu/dashboard', host: 'test.local' },
     navigator: { userAgent: 'node-test', language: options.navigatorLanguage || 'zh-CN' },
     window: { innerWidth: 1200, innerHeight: 800 },
-    setTimeout(_fn, delay) { timeoutDelays.push(delay); return timeoutDelays.length; },
-    clearTimeout() {},
+    setTimeout(fn, delay) { timeoutDelays.push(delay); activeTimeouts.set(timeoutDelays.length, fn); return timeoutDelays.length; },
+    clearTimeout(id) { activeTimeouts.delete(id); },
     setInterval() { return 1; },
     clearInterval() {},
     alert(message) { downloads.push({ alert: message }); },
     fetch: async (url, options = {}) => {
       fetchCalls.push(String(url));
       fetchRequests.push({ url: String(url), options });
+      if (harnessManagementStatus) return { ok: false, status: harnessManagementStatus, text: async () => 'IP banned due to too many failed attempts' };
       let payload;
       const route = dashboardRoute(url);
       if (String(url).includes('model-prices')) {
@@ -658,9 +660,9 @@ function createDashboardHarness(options = {}) {
       }
     },
   };
-  if (options.managementKey) {
-    localStorage.setItem('cli-proxy-auth', JSON.stringify({ state: { managementKey: options.managementKey } }));
-  }
+  const harnessManagementStatus = options.managementStatus;
+  if (options.managementKey !== null) localStorage.setItem('managementKey', options.managementKey || 'fixture-key');
+  if (options.authStorage !== undefined) localStorage.setItem('cli-proxy-auth', options.authStorage);
   context.window.document = document;
   context.window.localStorage = localStorage;
   context.window.parent = context.window;
@@ -708,8 +710,128 @@ function createDashboardHarness(options = {}) {
   };
 
   const clickDocument = (target) => (listeners.get('click') || []).forEach((handler) => handler({ target }));
-  return { context, document, fetchCalls, fetchRequests, downloads, timeoutDelays, setVisibility, setLanguage, setSummaryLastRecordedAt, setSummaryVersion, setDashboardEventsFailure, clickDocument };
+  return { context, document, fetchCalls, fetchRequests, downloads, timeoutDelays, activeTimeouts, setVisibility, setLanguage, setSummaryLastRecordedAt, setSummaryVersion, setDashboardEventsFailure, clickDocument };
 }
+
+test('missing or unreadable management keys stop all requests before sending', async () => {
+  for (const options of [
+    { managementKey: null }, { denyStorageReads: true }, { denyStorageAccess: true },
+    { managementKey: null, authStorage: 'enc::v2::!invalid' },
+    { authStorage: JSON.stringify({ state: { managementKey: '', rememberPassword: false } }) },
+  ]) {
+    const { context, document, fetchCalls, activeTimeouts, setVisibility } = createDashboardHarness(options);
+    await context.load();
+    setVisibility('hidden');
+    setVisibility('visible');
+    document.getElementById('range').value = '7d';
+    await document.getElementById('range').onchange();
+    await context.collectQuotaObservations('test');
+    await assert.rejects(context.fetchUsageExportFile());
+    assert.strictEqual(fetchCalls.length, 0);
+    assert.strictEqual(activeTimeouts.size, 0);
+    assert.match(document.getElementById('updated').textContent, /未找到管理密钥.*停止自动请求/);
+  }
+});
+
+test('initial 401 and 403 stop polling and never fall back to dashboard-data', async () => {
+  for (const status of [401, 403]) {
+    const { context, document, fetchCalls, activeTimeouts, setVisibility } = createDashboardHarness({ managementStatus: status });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.strictEqual(fetchCalls.length, 1);
+    assert.ok(fetchCalls[0].includes('dashboard-summary'));
+    await context.load();
+    setVisibility('hidden');
+    setVisibility('visible');
+    await assert.rejects(context.fetchModelPrices(''));
+    await context.collectQuotaObservations('test');
+    await assert.rejects(context.fetchUsageExportFile());
+    assert.strictEqual(fetchCalls.length, 1);
+    assert.strictEqual(activeTimeouts.size, 0);
+    assert.match(document.getElementById('updated').textContent, new RegExp('HTTP ' + status));
+    assert.match(document.getElementById('updated').textContent, /IP banned/);
+  }
+});
+
+test('authentication failures on every response format cancel an existing poll', async () => {
+  for (const format of ['json', 'text']) {
+    for (const wrapped of [false, true]) {
+      for (const status of [401, 403]) {
+        const { context, document, activeTimeouts, timeoutDelays, setVisibility } = createDashboardHarness();
+        await context.load();
+        assert.ok(activeTimeouts.size > 0);
+        let calls = 0;
+        context.fetch = async () => {
+          calls++;
+          return { ok: wrapped, status: wrapped ? 200 : status,
+            text: async () => wrapped ? JSON.stringify({ ok: true, result: { status_code: status, body: 'access denied' } }) : 'access denied' };
+        };
+        const read = format === 'json' ? context.fetchJsonPayload : context.fetchTextPayload;
+        await assert.rejects(read('./model-prices'), error => error.statusCode === status);
+        const timers = timeoutDelays.length;
+        await context.load();
+        setVisibility('visible');
+        await assert.rejects(context.fetchUsageExportFile());
+        assert.strictEqual(calls, 1);
+        assert.strictEqual(activeTimeouts.size, 0);
+        assert.strictEqual(timeoutDelays.length, timers);
+        assert.match(document.getElementById('updated').textContent, /停止自动请求/);
+      }
+    }
+  }
+});
+
+test('authentication stops on failure headers even if the response body is unreadable', async () => {
+  const { context, activeTimeouts } = createDashboardHarness();
+  await context.load();
+  let calls = 0;
+  context.fetch = async () => {
+    calls++;
+    return { ok: false, status: 401, text: async () => { throw new Error('connection lost'); } };
+  };
+  await context.load();
+  await context.load();
+  assert.strictEqual(calls, 1);
+  assert.strictEqual(activeTimeouts.size, 0);
+});
+
+test('a failed compatibility endpoint also stops authentication retries', async () => {
+  const { context, activeTimeouts } = createDashboardHarness();
+  await context.load();
+  const calls = [];
+  context.fetch = async url => {
+    calls.push(String(url));
+    return { ok: false, status: String(url).includes('dashboard-summary') ? 500 : 403, text: async () => 'failed' };
+  };
+  await context.load();
+  await context.load();
+  assert.strictEqual(calls.length, 2);
+  assert.ok(calls[1].endsWith('/dashboard-data'));
+  assert.strictEqual(activeTimeouts.size, 0);
+});
+
+test('login recovery requires an explicit refresh and sends the new key', async () => {
+  const { context, document, fetchRequests, activeTimeouts, setVisibility } = createDashboardHarness({ managementKey: null });
+  context.localStorage.setItem('cli-proxy-auth', JSON.stringify({ state: { managementKey: 'new-synthetic-key' } }));
+  await context.load();
+  setVisibility('visible');
+  assert.strictEqual(fetchRequests.length, 0);
+  await document.getElementById('refreshBtn').onclick();
+  assert.ok(fetchRequests.some(request => request.url.includes('dashboard-events')));
+  assert.ok(activeTimeouts.size > 0);
+  for (const { options } of fetchRequests) {
+    assert.strictEqual(options.headers.Authorization, 'Bearer new-synthetic-key');
+    assert.strictEqual(options.headers['x-management-key'], 'new-synthetic-key');
+  }
+  assert.doesNotMatch(document.getElementById('updated').textContent, /停止自动请求/);
+});
+
+test('an upstream api-call denial does not stop the management session', async () => {
+  const { context } = createDashboardHarness();
+  await context.load();
+  context.fetch = async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ status_code: 403, body: 'Google credential denied' }) });
+  await assert.rejects(context.fetchJsonPayloadWithMeta('/v0/management/api-call'), error => error.statusCode === 403);
+  assert.strictEqual(vm.runInContext('managementAuthError', context), null);
+});
 
 test('quota collector submits authenticated v8 observations once and strips unrelated signals', async () => {
   const { context } = createDashboardHarness({ pathname: '/proxy/v0/resource/plugins/usage-dashboard-zduu/dashboard' });
@@ -1280,16 +1402,14 @@ test('tiny USD costs stay visible as escaped text in dashboard HTML', async () =
   assert.ok(!models.includes(formatted));
 });
 
-test('dashboard loads and changes range when browser storage is unavailable', async () => {
-  for (const denied of ['denyStorageReads', 'denyStorageWrites', 'denyStorageAccess']) {
-    const { document, fetchCalls } = createDashboardHarness({ [denied]: true });
-    await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-events?')));
-    const range = document.getElementById('range');
-    assert.strictEqual(range.value, '24h');
-    range.value = '7d';
-    assert.doesNotThrow(() => range.onchange());
-    await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-summary?range=7d')));
-  }
+test('dashboard loads and changes range when browser storage writes are unavailable', async () => {
+  const { document, fetchCalls } = createDashboardHarness({ denyStorageWrites: true });
+  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-events?')));
+  const range = document.getElementById('range');
+  assert.strictEqual(range.value, '24h');
+  range.value = '7d';
+  assert.doesNotThrow(() => range.onchange());
+  await waitFor(() => fetchCalls.some((url) => url.includes('dashboard-summary?range=7d')));
 });
 
 test('invalid price inputs are rejected before saving instead of becoming free prices', async () => {
@@ -2543,8 +2663,8 @@ test('dashboard defaults the zero-success preference to off when storage is empt
 
   // 存储被拒时不能抛错,退回默认关闭。
   const denied = createDashboardHarness({ denyStorageReads: true });
-  await waitFor(() => denied.document.getElementById('apiStats').innerHTML.includes('openai'));
   assert.strictEqual(vm.runInContext('hideZeroUpstream', denied.context), false);
+  assert.strictEqual(denied.fetchCalls.length, 0);
 });
 
 test('dashboard renders sub-0.1% success rates without showing a misleading 0.0%', async () => {
@@ -3746,8 +3866,6 @@ test('full usage backup streams authenticated Blob chunks and restores the butto
 });
 
 test('full backup does not fall back on auth, resource, server or transport failures', async () => {
-  const { context, document } = createDashboardHarness();
-  await waitFor(() => document.getElementById('apiSelect').value === 'openai');
   const failures = [
     ...[401, 403, 429, 500, 503].map(status => ({ ok: false, status, body: 'request failed' })),
     { ok: false, status: 503, body: JSON.stringify({ error: { code: 'not_found', message: 'masked server failure' } }) },
@@ -3756,6 +3874,8 @@ test('full backup does not fall back on auth, resource, server or transport fail
     { network: true },
   ];
   for (const failure of failures) {
+    const { context } = createDashboardHarness();
+    await context.load();
     const calls = [];
     context.fetch = async url => {
       calls.push(String(url));
@@ -3936,14 +4056,14 @@ test('full backup cleans up corrupt downloads and restores its button after fail
 });
 
 test('full backup handles old not-found envelopes but rejects invalid fallback documents', async () => {
-  const { context, document } = createDashboardHarness();
-  await waitFor(() => document.getElementById('apiSelect').value === 'openai');
-  context.Blob = Blob;
-  context.atob = atob;
   const payload = '{"version":1,"usage":{"total_tokens":9007199254740993}}';
   for (const raw of [payload, 'null', '<html>not a backup</html>', '{"version":1,"events":[]}', '{"version":2,"usage":{}}',
     JSON.stringify({ status_code: 403, body: Buffer.from('denied').toString('base64') }),
     JSON.stringify({ ok: false, error: { code: 'internal', message: 'failed' } })]) {
+    const { context } = createDashboardHarness();
+    await context.load();
+    context.Blob = Blob;
+    context.atob = atob;
     const calls = [];
     context.fetch = async url => {
       calls.push(String(url));

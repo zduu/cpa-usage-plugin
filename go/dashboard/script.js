@@ -28,6 +28,7 @@ let filteredSummaryContext = '';
 let filteredSummaryError = null;
 let trendMetric = 'cost'; // 'cost' | 'requests' | 'tokens' | 'rpm'
 let pollTimer = null, pollFailures = 0;
+let managementAuthError = null;
 let currentRange = '';
 const eventsLimit = 50;
 let eventsOffset = 0;
@@ -186,6 +187,12 @@ function statusText(failed) { return failed ? t('failure_label') : t('success_la
 function renderUpdated() {
   const el = $('updated');
   if (!el) return;
+  if (managementAuthError) {
+    setText('updated', managementAuthError.code === 'management_key_missing'
+      ? t('management_auth_missing')
+      : t('management_auth_failed', managementAuthError.statusCode) + ' ' + managementAuthError.message);
+    return;
+  }
   if (updatedState.type === 'success') {
     setText('updated', withLabel('updated_at', formatTime(updatedState.generatedAt || Date.now())));
     return;
@@ -356,7 +363,27 @@ function etagMatches(ifNoneMatch, etag) {
 }
 
 async function fetchJsonPayloadWithMeta(url, options) {
-  const response = await fetch(url, options);
+  try {
+    return await readJsonPayloadWithMeta(url, options);
+  } catch (error) {
+    throw stopOnManagementAuthError(error);
+  }
+}
+
+async function fetchManagementResponse(url, options) {
+  const response = await fetch(url, managementFetchOptions(options));
+  if (response.status === 401 || response.status === 403) {
+    // Stop on headers, even if reading the failure body later fails.
+    const error = stopOnManagementAuthError(pluginResponseError('HTTP ' + response.status, response.status));
+    try { error.message = (await response.text()) || error.message; } catch (_) {}
+    renderUpdated();
+    throw error;
+  }
+  return response;
+}
+
+async function readJsonPayloadWithMeta(url, options) {
+  const response = await fetchManagementResponse(url, options);
   const text = await response.text();
   const responseHeaders = {};
   const responseEtag = headerValue(response.headers, 'ETag');
@@ -378,7 +405,15 @@ async function fetchJsonPayloadWithMeta(url, options) {
     const message = payload && payload.error && payload.error.message ? payload.error.message : (text || (t('request_failed_colon') + response.status));
     throw pluginResponseError(message, response.status, payload && payload.error && payload.error.code);
   }
-  const meta = unwrapPluginPayloadWithMeta(payload);
+  let meta;
+  try {
+    meta = unwrapPluginPayloadWithMeta(payload);
+  } catch (error) {
+    // api-call returns Google's status inside a successful management HTTP
+    // response. A rejected upstream token does not invalidate the admin login.
+    if (/\/management\/api-call(?:\?|$)/.test(String(url))) error.upstreamResponse = true;
+    throw error;
+  }
   meta.headers = Object.assign({}, meta.headers || {});
   if (responseEtag && !headerValue(meta.headers, 'ETag')) meta.headers.ETag = responseHeaders.ETag;
   if (!meta.statusCode) meta.statusCode = response.status || 200;
@@ -396,11 +431,15 @@ async function fetchTextPayload(url, options) {
 }
 
 async function fetchTextPayloadWithMeta(url, options) {
-  const response = await fetch(url, options);
-  const text = await response.text();
-  if (!response.ok) throw pluginResponseError(text || (t('request_failed_colon') + response.status), response.status);
-  if (!text) return { data: '', statusCode: response.status || 200, headers: {} };
-  return unwrapPluginTextWithMeta(text);
+  try {
+    const response = await fetchManagementResponse(url, options);
+    const text = await response.text();
+    if (!response.ok) throw pluginResponseError(text || (t('request_failed_colon') + response.status), response.status);
+    if (!text) return { data: '', statusCode: response.status || 200, headers: {} };
+    return unwrapPluginTextWithMeta(text);
+  } catch (error) {
+    throw stopOnManagementAuthError(error);
+  }
 }
 
 function cacheConditionalPayload(cacheKey, value) {
@@ -460,14 +499,27 @@ function requireObjectPayload(data, label) {
   return data;
 }
 
-function managementFetchOptions(options) {
-  const merged = Object.assign({}, options || {});
-  const headers = Object.assign({}, merged.headers || {});
-  const key = currentManagementKey();
-  if (key) {
-    headers.Authorization = headers.Authorization || ('Bearer ' + key);
-    headers['x-management-key'] = headers['x-management-key'] || key;
+function stopOnManagementAuthError(error) {
+  if (error && !error.upstreamResponse && (error.code === 'management_key_missing' || error.statusCode === 401 || error.statusCode === 403)) {
+    if (!managementAuthError) managementAuthError = error;
+    if (pollTimer) clearTimeout(pollTimer);
+    pollTimer = null;
+    if (priceSearchTimer) clearTimeout(priceSearchTimer);
+    priceSearchTimer = null;
+    priceSearchSeq++;
+    renderUpdated();
   }
+  return error;
+}
+
+function managementFetchOptions(options) {
+  if (managementAuthError) throw managementAuthError;
+  const key = currentManagementKey();
+  if (!key) throw stopOnManagementAuthError(pluginResponseError(t('management_auth_missing'), 0, 'management_key_missing'));
+  const merged = Object.assign({}, options || {});
+  const headers = cloneHeaders(merged.headers);
+  headers.Authorization = headers.Authorization || ('Bearer ' + key);
+  headers['x-management-key'] = headers['x-management-key'] || key;
   merged.headers = headers;
   return merged;
 }
@@ -1712,7 +1764,10 @@ async function fetchAntigravityQuota(file) {
           if (!collected.has(key) && collected.size < 64) collected.set(key, { ...bucket, source: environment.source });
         }
         if (expected.every((key) => collected.has(key))) break;
-      } catch (_) { /* Try the next Google endpoint without exposing its body. */ }
+      } catch (error) {
+        if (managementAuthError) throw error;
+        // Try the next Google endpoint without exposing its body.
+      }
     }
     if (collected.size) return [...collected.values()];
   }
@@ -1747,6 +1802,7 @@ async function refreshAntigravityQuotaForSelectedApi(force = false) {
           changed = changed || num(result.accepted) > 0;
           antigravityQuotaRefreshAt.set(key, Date.now() + 300000);
         } catch (_) { failed = true; antigravityQuotaRefreshAt.set(key, Date.now() + 60000); }
+        if (managementAuthError) break;
         while (antigravityQuotaRefreshAt.size > 1024) antigravityQuotaRefreshAt.delete(antigravityQuotaRefreshAt.keys().next().value);
       }
     } catch (_) {
@@ -2222,6 +2278,7 @@ async function deleteExportJob(id, path = 'dashboard-events-export-jobs') {
 async function waitForExportJob(job, path = 'dashboard-events-export-jobs', kind = '') {
   let current = job;
   for (let i = 0; i < 120; i++) {
+    if (managementAuthError) throw managementAuthError;
     if (kind && (!current || current.id !== job.id || current.kind !== kind)) throw new Error(t('export_failed'));
     if (current && current.status === 'succeeded') return current;
     if (current && current.status === 'failed') throw new Error(current.error || t('export_job_failed'));
@@ -2336,6 +2393,7 @@ async function fetchExportJobChunks(job, downloadPath, asFile = false) {
         chunk = await fetchJsonPayload(url, pluginFetchOptions({ cache: 'no-store' }));
         break;
       } catch (error) {
+        if (managementAuthError) throw error;
         if (attempt === 2) throw error;
         await delay(250 * (attempt + 1));
       }
@@ -2870,10 +2928,11 @@ async function rerender(options) {
 }
 
 function pollDelay() { return document.visibilityState === 'hidden' ? hiddenPollDelayMs : visiblePollDelayMs }
-function schedulePoll(delayMs) { if (pollTimer) clearTimeout(pollTimer); pollTimer = setTimeout(load, delayMs) }
+function schedulePoll(delayMs) { if (pollTimer) clearTimeout(pollTimer); pollTimer = managementAuthError ? null : setTimeout(load, delayMs) }
 function nextFailureDelay() { return Math.min(300000, [5000, 15000, 45000, 90000, 180000][Math.min(pollFailures - 1, 4)] || 300000) }
 
 async function load(options) {
+  if (managementAuthError) { renderUpdated(); return; }
   const forceDetails = options && options.forceDetails;
   const requestSeq = ++summaryLoadSeq;
   try {
@@ -2889,10 +2948,10 @@ async function load(options) {
     summaryData = requireObjectPayload(data, 'dashboard-summary');
     applyCurrencySummary(summaryData);
     const quotaChanged = summaryData._meta && summaryData._meta.quota_cycles_enabled ? await collectQuotaObservations(summaryData._meta.instance_id || '') : false;
-    if (requestSeq !== summaryLoadSeq) return;
+    if (requestSeq !== summaryLoadSeq || managementAuthError) return;
     let filteredResult = null;
     if (selectedClientApi) filteredResult = await refreshFilteredSummary();
-    if (requestSeq !== summaryLoadSeq) return;
+    if (requestSeq !== summaryLoadSeq || managementAuthError) return;
     if (summaryResult.notModified && previousSummary === summaryData && updatedState.type === 'success' && currentRange === selectedRange && !forceDetails && !quotaChanged && (!selectedClientApi || (filteredResult && filteredResult.notModified))) {
       currentRange = selectedRange;
       pollFailures = 0;
@@ -2912,6 +2971,7 @@ async function load(options) {
     pollFailures = 0; schedulePoll(pollDelay());
   } catch (error) {
     if (requestSeq !== summaryLoadSeq) return;
+    if (managementAuthError) { renderUpdated(); return; }
     // Fallback: try old dashboard-data endpoint
     try {
       const previousSummary = summaryData;
@@ -2935,6 +2995,7 @@ async function load(options) {
       pollFailures = 0; schedulePoll(pollDelay());
     } catch (fallbackError) {
       if (requestSeq !== summaryLoadSeq) return;
+      if (managementAuthError) { renderUpdated(); return; }
       updatedState = { type: 'error', generatedAt: null, message: (fallbackError && fallbackError.message) || (error && error.message) || '' };
       renderUpdated();
       pollFailures++; schedulePoll(nextFailureDelay());
@@ -2962,7 +3023,18 @@ $('range').onchange = () => {
 };
 if ($('currencyUSD')) $('currencyUSD').onclick = () => chooseCurrency('USD');
 if ($('currencyCNY')) $('currencyCNY').onclick = () => chooseCurrency('CNY');
-$('refreshBtn').onclick = () => load({ forceDetails: true });
+$('refreshBtn').onclick = () => {
+  // Authentication failures require an explicit retry after logging in.
+  // Visibility changes, filters and background tasks cannot clear this latch.
+  if (managementAuthError) {
+    managementAuthError = null;
+    conditionalPayloadCache.clear();
+    apiDetailCache.clear();
+    quotaCollectionRetryAt = 0;
+    pollFailures = 0;
+  }
+  return load({ forceDetails: true });
+};
 $('priceSettings').ontoggle = async () => {
   if (!$('priceSettings').open) return;
   try {

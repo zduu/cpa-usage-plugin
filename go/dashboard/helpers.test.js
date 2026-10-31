@@ -519,6 +519,31 @@ test('currentManagementKey tolerates unavailable or corrupt storage', () => {
   assert.strictEqual(helpers.currentManagementKey(storage), 'sk-legacy');
 });
 
+test('management storage supports v2 independently of the browser user agent', () => {
+  const host = 'cpa.example.test:8317';
+  const key = Buffer.from('cli-proxy-api-webui::secure-storage|' + host);
+  const plain = Buffer.from(JSON.stringify({ state: { managementKey: 'synthetic-v2-key', rememberPassword: true }, version: 0 }));
+  const encoded = 'enc::v2::' + Buffer.from(plain.map((byte, i) => byte ^ key[i % key.length])).toString('base64');
+  const storage = { getItem(name) { return name === 'cli-proxy-auth' ? encoded : null; } };
+  for (const ua of ['Browser/1.0', 'Browser/2.0']) {
+    assert.strictEqual(helpers.currentManagementKey(storage, host, ua), 'synthetic-v2-key');
+  }
+  assert.strictEqual(helpers.currentManagementKey(storage, 'other.example.test', 'Browser/1.0'), '');
+});
+
+test('management storage never treats corrupt encoded data as a legacy key', () => {
+  for (const value of ['enc::v1::!invalid', 'enc::v2::!invalid', 'enc::v3::YWJj', '{broken', '"broken']) {
+    assert.strictEqual(helpers.currentManagementKey({ getItem() { return value; } }, 'test.local', 'node-test'), '');
+  }
+});
+
+test('an explicit empty login state does not reuse a stale legacy key', () => {
+  for (const auth of [{ state: { managementKey: '', rememberPassword: false } }, { state: { managementKey: null } }, { state: {} }]) {
+    const storage = { getItem(name) { return name === 'cli-proxy-auth' ? JSON.stringify(auth) : 'stale-legacy-key'; } };
+    assert.strictEqual(helpers.currentManagementKey(storage), '');
+  }
+});
+
 test('groupedRows groups by key', () => {
   const rows = [
     { model: 'gpt-4', total_tokens: 100, cached_tokens: 0, reasoning_tokens: 0, cost: 0.5, failed: false, latency_ms: 200, ttft_ms: 50 },

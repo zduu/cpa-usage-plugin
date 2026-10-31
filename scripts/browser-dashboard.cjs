@@ -9,6 +9,15 @@ const path = require('node:path');
 const { chromium } = require(process.env.CPA_PLAYWRIGHT || 'playwright');
 const root = path.resolve(__dirname, '..');
 
+// Match the current management panel's host-bound v2 storage, with a
+// synthetic key. No real management credentials or browser profiles are used.
+function seedManagementAuth() {
+  const bytes = new TextEncoder().encode(JSON.stringify({ state: { managementKey: 'browser-fixture-key', rememberPassword: true }, version: 0 }));
+  const key = new TextEncoder().encode('cli-proxy-api-webui::secure-storage|' + location.host);
+  const binary = Array.from(bytes, (byte, index) => String.fromCharCode(byte ^ key[index % key.length])).join('');
+  localStorage.setItem('cli-proxy-auth', 'enc::v2::' + btoa(binary));
+}
+
 (async () => {
   const host = spawn('go', ['test', '-run', '^TestDashboardBrowserServer$', '-count=1', '-v'], {
     cwd: path.join(root, 'go'), env: { ...process.env, CPA_BROWSER_TEST: '1' }, stdio: ['ignore', 'pipe', 'pipe'],
@@ -29,11 +38,16 @@ const root = path.resolve(__dirname, '..');
     });
     browser = await chromium.launch({ headless: true, ...(process.env.CPA_CHROME ? { executablePath: process.env.CPA_CHROME } : {}) });
     const context = await browser.newContext({ acceptDownloads: true, viewport: { width: 1440, height: 1000 } });
+    await context.addInitScript(seedManagementAuth);
     const page = await context.newPage();
     page.setDefaultTimeout(20000);
     page.setDefaultNavigationTimeout(20000);
-    const errors = [];
+    const errors = [], unauthenticated = [];
     page.on('pageerror', error => errors.push(error.message));
+    page.on('request', request => {
+      if (request.resourceType() !== 'fetch') return;
+      if (request.headers().authorization !== 'Bearer browser-fixture-key' || request.headers()['x-management-key'] !== 'browser-fixture-key') unauthenticated.push(request.url());
+    });
     const cdp = await context.newCDPSession(page);
     await cdp.send('Performance.enable');
     const heap = async () => (await cdp.send('Performance.getMetrics')).metrics.find(x => x.name === 'JSHeapUsedSize').value;
@@ -91,12 +105,12 @@ const root = path.resolve(__dirname, '..');
     } finally { clearInterval(timer); }
     assert.ok(chunkRequests > 2, 'browser did not use chunk transport');
     await page.waitForFunction(async () => {
-      const response = await fetch('dashboard-events-export-jobs');
+      const response = await fetch('dashboard-events-export-jobs', managementFetchOptions());
       return (await response.json()).jobs.length === 0;
     });
 
     // Privacy settings can throw while accessing localStorage itself, before
-    // getItem runs. Verify the real browser still loads and changes range.
+    // getItem runs. Without a key the dashboard must send no data requests.
     const blockedContext = await browser.newContext();
     try {
       await blockedContext.addInitScript(() => {
@@ -105,17 +119,44 @@ const root = path.resolve(__dirname, '..');
         });
       });
       const blockedPage = await blockedContext.newPage();
+      await blockedPage.clock.install();
       blockedPage.setDefaultTimeout(20000);
       blockedPage.on('pageerror', error => errors.push(error.message));
+      const blockedRequests = [];
+      blockedPage.on('request', request => { if (request.resourceType() === 'fetch') blockedRequests.push(request.url()); });
       await blockedPage.goto(base);
-      await blockedPage.waitForFunction(() => document.querySelector('#totalRequests').textContent.replace(/\D/g, '') === '12000');
+      await blockedPage.waitForFunction(() => document.querySelector('#updated').textContent.includes('未找到管理密钥'));
       assert.equal(await blockedPage.inputValue('#range'), '24h');
-      const changedRange = blockedPage.waitForResponse(response => response.url().includes('dashboard-summary?range=7d'));
       await blockedPage.selectOption('#range', '7d');
-      assert.equal((await changedRange).status(), 200);
+      await blockedPage.click('#refreshBtn');
+      await blockedPage.clock.runFor(600000);
+      assert.deepEqual(blockedRequests, []);
     } finally { await blockedContext.close(); }
+
+    for (const status of [401, 403]) {
+      const authContext = await browser.newContext();
+      try {
+        await authContext.addInitScript(seedManagementAuth);
+        const authPage = await authContext.newPage();
+        await authPage.clock.install();
+        authPage.on('pageerror', error => errors.push(error.message));
+        const requests = [];
+        authPage.on('request', request => { if (request.resourceType() === 'fetch') requests.push(request.url()); });
+        await authPage.route('**/dashboard-summary?*', route => route.fulfill({ status, body: status === 403 ? 'IP banned due to too many failed attempts' : 'Invalid management key' }));
+        await authPage.goto(base);
+        await authPage.waitForFunction(code => document.querySelector('#updated').textContent.includes('HTTP ' + code), status);
+        await authPage.selectOption('#range', '7d');
+        await authPage.clock.runFor(600000);
+        assert.equal(requests.length, 1, `HTTP ${status} must not trigger retries or compatibility requests`);
+        await authPage.unroute('**/dashboard-summary?*');
+        await authPage.click('#refreshBtn');
+        await authPage.waitForFunction(() => document.querySelector('#totalRequests').textContent.replace(/\D/g, '') === '12000');
+        assert.ok(requests.length > 1, 'explicit refresh must recover the authenticated dashboard');
+      } finally { await authContext.close(); }
+    }
+    assert.deepEqual(unauthenticated, []);
     assert.deepEqual(errors, []);
-    console.log(JSON.stringify({ browser: browser.version(), records: 12000, filteredRecords: 4000, firstRenderMs, initialHeap, sampledPeakHeap, finalHeap: await heap(), chunkRequests, injectedFailures: 1, blockedStorage: 'passed', downloads, pageErrors: errors }, null, 2));
+    console.log(JSON.stringify({ browser: browser.version(), records: 12000, filteredRecords: 4000, firstRenderMs, initialHeap, sampledPeakHeap, finalHeap: await heap(), chunkRequests, injectedFailures: 1, v2Auth: 'passed', authStopAndRecovery: 'passed', blockedStorage: 'passed', downloads, pageErrors: errors }, null, 2));
   } finally {
     if (browser) await browser.close();
     if (base) await fetch(new URL('/__stop', base), { method: 'POST' }).catch(() => {});
