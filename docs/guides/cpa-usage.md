@@ -1,9 +1,20 @@
 # CPA 用量统计插件 — 使用文档
 
-## 未发布
+## v2.7.8 - 2026-10-31
+
+本版本修复新版管理面板登录存储不兼容造成的持续认证失败，并调整 Linux amd64 产物的 CPU 兼容设置。无需新增配置，存储快照格式保持 v3。
+
+### 修复
 
 - 兼容新版管理面板 `enc::v2::` 登录存储，同时保留 `enc::v1::` 和旧明文格式。损坏或未知编码不会作为管理密钥发送；已有登录状态明确未保存密钥时，不再使用残留的旧密钥。
 - 看板缺少管理密钥或收到管理接口 401/403 时停止自动请求、轮询和兼容回退，显示重新登录或访问受限提示。确认主管理面板登录和 IP 封禁状态恢复后，点击看板“刷新”重新请求，避免失败请求持续触发宿主 IP 封禁。
+- Linux amd64 构建同时显式设置 `GOAMD64=v1` 和 C/C++ 编译参数 `-march=x86-64 -mtune=generic`，避免 CGO 初始化代码使用旧 CPU 不支持的 AVX2/BMI2 指令而在加载时触发 `SIGILL`。仅设置 `GOAMD64` 不足以限制 C 编译器的目标指令集。
+
+### 升级与登录
+
+升级后刷新已打开的统计页面，使新版认证脚本生效。看板需要同源主管理面板保存的管理密钥；登录时未勾选“记住密码”或浏览器禁止读取 localStorage 时，会提示重新登录并停止请求。已经被宿主封禁的 IP 仍须等待封禁到期或由管理员恢复，新脚本不会自动解除封禁。
+
+从 v2.7.6 及更早版本升级仍须按下方首次升级步骤先导出并备份，再停服替换。已有历史数据可继续使用，额度周期和价格格式不变；无需清空历史统计。
 
 ## v2.7.7 - 2026-10-20
 
@@ -58,8 +69,8 @@ plugins:
     usage-dashboard-zduu:
       enabled: true
       store:
-        version: "2.7.7"
-        release-tag: "v2.7.7"
+        version: "2.7.8"
+        release-tag: "v2.7.8"
         repository: "https://github.com/zduu/cpa-usage-plugin"
       # 其他配置项见第 4 节 ...
 ```
@@ -292,8 +303,8 @@ plugins:
     usage-dashboard-zduu:
       enabled: true
       store:
-        version: "2.7.7"
-        release-tag: "v2.7.7"
+        version: "2.7.8"
+        release-tag: "v2.7.8"
         repository: "https://github.com/zduu/cpa-usage-plugin"
       # 每个上游接口/模型最多保留的请求明细条数。默认 5000。
       max_details_per_model: 5000
@@ -343,7 +354,7 @@ plugins:
       claude_cache_repair_enabled: false
       # 可选：允许外部脚本更新插件文件。默认 false。
       update_enabled: false
-      # 可选：latest 或指定版本号，例如 v2.7.7。
+      # 可选：latest 或指定版本号，例如 v2.7.8。
       update_version: latest
 ```
 
@@ -369,8 +380,8 @@ cd CLIProxyAPI
 启动后查看日志确认插件加载成功：
 
 ```text
-pluginhost: plugin loaded plugin_id=usage-dashboard-zduu version=2.7.7 path=plugins/usage-dashboard-zduu-v2.7.7.so
-pluginhost: plugin registered plugin_id=usage-dashboard-zduu plugin_name=用量统计 version=2.7.7 path=plugins/usage-dashboard-zduu-v2.7.7.so
+pluginhost: plugin loaded plugin_id=usage-dashboard-zduu version=2.7.8 path=plugins/usage-dashboard-zduu-v2.7.8.so
+pluginhost: plugin registered plugin_id=usage-dashboard-zduu plugin_name=用量统计 version=2.7.8 path=plugins/usage-dashboard-zduu-v2.7.8.so
 ```
 
 > `store-sources` 引入插件商店注册表，管理面板可浏览安装。`store` 块标记当前期望版本，pluginhost 会匹配 `usage-dashboard-zduu-v{版本号}.{ext}` 文件名，并自动清理旧版本文件。
@@ -388,7 +399,7 @@ pluginhost: plugin registered plugin_id=usage-dashboard-zduu plugin_name=用量�
 
 看板从同源管理面板保存的登录状态读取管理密钥。请在主管理面板登录时勾选“记住密码”；未保存密钥、浏览器禁止读取 localStorage 或存储损坏时，看板会提示重新登录并停止请求。当前代码支持新版 `enc::v2::`、旧版 `enc::v1::` 及旧明文登录存储。
 
-管理请求返回 401/403 后，看板停止自动轮询、兼容回退及后续额度和导出请求；切换时间范围或重新显示页面不会自动重试。请先在主管理面板确认密钥、访问权限及 IP 封禁状态，恢复后点击看板右上角“刷新”。看板会显示宿主返回的错误信息，包括封禁剩余时间；不会自动解除宿主封禁。此行为见上方“未发布”修复，已发布的旧版插件可能仍会持续发送失败请求。
+管理请求返回 401/403 后，看板停止自动轮询、兼容回退及后续额度和导出请求；切换时间范围或重新显示页面不会自动重试。请先在主管理面板确认密钥、访问权限及 IP 封禁状态，恢复后点击看板右上角“刷新”。看板会显示宿主返回的错误信息，包括封禁剩余时间；不会自动解除宿主封禁。此行为从 v2.7.8 起提供，旧版插件可能仍会持续发送失败请求。
 
 > 管理 API 调用需要在请求头中包含管理密钥（`x-management-key`），密钥为 CPA 配置中 `remote-management.secret-key` 设置的值。
 
@@ -640,7 +651,7 @@ plugins:
     usage-dashboard-zduu:
       enabled: true
       update_enabled: true
-      update_version: latest   # 或 v2.7.7
+      update_version: latest   # 或 v2.7.8
 ```
 
 执行脚本：

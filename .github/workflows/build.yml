@@ -151,6 +151,13 @@ jobs:
           export CGO_ENABLED=1
           export GOOS="${{ matrix.goos }}"
           export GOARCH="${{ matrix.goarch }}"
+          if [ "$GOOS/$GOARCH" = "linux/amd64" ]; then
+            # Go's GOAMD64 setting does not constrain instructions emitted by GCC.
+            # Keep cgo initialization compatible with CPUs without AVX2/BMI2.
+            export GOAMD64=v1
+            export CGO_CFLAGS="-O2 -g -march=x86-64 -mtune=generic"
+            export CGO_CXXFLAGS="-O2 -g -march=x86-64 -mtune=generic"
+          fi
           go build -buildmode=c-shared -buildvcs=false -trimpath -ldflags="-s -w" -o "$output" .
           cd ..
           rm -f usage-dashboard-zduu*.h
