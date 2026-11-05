@@ -2260,12 +2260,13 @@ test('dashboard api detail renders long error and source cells with safe wrapper
   assert.match(barsHtml, /class="barValue">8 请求/);
 });
 
-test('dashboard api detail shows reasoning effort, endpoint and generation speed', () => {
+test('dashboard api detail shows reasoning effort, fast mode, endpoint and generation speed', () => {
   const { context } = createDashboardHarness();
   const recentHtml = context.apiDetailRecentHtml([{
     timestamp_ms: Date.UTC(2026, 6, 21, 12, 0, 0),
     model: 'gpt-5.5',
     thinking: { intensity: 'xhigh' },
+    service_tier: 'priority',
     endpoint: '/v1/responses',
     failed: false,
     stream: true,
@@ -2277,12 +2278,26 @@ test('dashboard api detail shows reasoning effort, endpoint and generation speed
     provider: 'codex',
   }], false, null);
 
-  assert.match(recentHtml, />推理强度</);
+  assert.match(recentHtml, /<th>推理强度<\/th><th>Fast 模式<\/th><th>端点<\/th>/);
+  assert.match(recentHtml, /<td>xhigh<\/td><td>fast<\/td><td class="nameCell">\/v1\/responses<\/td>/);
   assert.match(recentHtml, />端点</);
   assert.match(recentHtml, />生成速度</);
   assert.match(recentHtml, />xhigh</);
   assert.match(recentHtml, />\/v1\/responses</);
   assert.match(recentHtml, />35\.8 t\/s</);
+});
+
+test('dashboard shows fast or the reported service tier and preserves missing history', () => {
+  const { context } = createDashboardHarness();
+  assert.strictEqual(context.fastModeText({ service_tier: ' Priority ' }), 'fast');
+  for (const tier of ['fast', 'auto', 'default', 'flex', 'scale', 'future-tier']) {
+    assert.strictEqual(context.fastModeText({ service_tier: tier }), tier);
+  }
+  for (const detail of [null, {}, { service_tier: '' }, { model: 'gpt-5.5-fast' }]) {
+    assert.strictEqual(context.fastModeText(detail), '-');
+  }
+  const normalized = context.normalizeApiDetailEvent({ service_tier: 'priority', tokens: {} });
+  assert.strictEqual(context.fastModeText(normalized), 'fast');
 });
 
 test('dashboard api detail suppresses invalid generation speeds', () => {
@@ -2296,7 +2311,7 @@ test('dashboard api detail suppresses invalid generation speeds', () => {
 test('dashboard translations include recent request metadata columns', () => {
   const { context } = createDashboardHarness();
   for (const language of ['zh-CN', 'zh-TW', 'en', 'ru']) {
-    for (const key of ['col_reasoning_effort', 'col_endpoint', 'col_generation_speed']) {
+    for (const key of ['col_reasoning_effort', 'col_fast_mode', 'col_endpoint', 'col_generation_speed']) {
       assert.ok(context.I18N_MAP[language][key], language + ' missing ' + key);
     }
   }

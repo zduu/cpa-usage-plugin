@@ -20,6 +20,7 @@ var requestMetadata = newRequestMetadataCache()
 type requestMetadataObservation struct {
 	endExclusive                                  bool
 	id, authID, authIndex, model, alias, endpoint string
+	serviceTier                                   string
 	stream                                        bool
 	start, end                                    time.Time
 }
@@ -86,8 +87,9 @@ func (c *requestMetadataCache) observe(req requestMetadataRequest, now time.Time
 		id: strings.TrimSpace(req.RequestID), authID: metadataString(req.Metadata, "selected_auth_id"),
 		authIndex: metadataString(req.Metadata, "selected_auth_index"),
 		model:     strings.TrimSpace(req.Model), alias: strings.TrimSpace(req.RequestedModel),
-		endpoint: requestMetadataEndpoint(metadataString(req.Metadata, "request_path")),
-		stream:   req.Stream, start: now,
+		endpoint:    requestMetadataEndpoint(metadataString(req.Metadata, "request_path")),
+		serviceTier: metadataString(req.Metadata, "service_tier"),
+		stream:      req.Stream, start: now,
 	}
 	if o.id == "" || o.authID == "" || o.model == "" {
 		return
@@ -143,6 +145,7 @@ func (c *requestMetadataCache) enrich(record UsageRecord, now time.Time) UsageRe
 		return record
 	}
 	var matched *requestMetadataObservation
+	tierAmbiguous := false
 	for _, o := range c.byAuth[strings.TrimSpace(record.AuthID)] {
 		if record.RequestedAt.Before(o.start) || (!o.end.IsZero() &&
 			(record.RequestedAt.After(o.end) || (o.endExclusive && record.RequestedAt.Equal(o.end)))) {
@@ -163,6 +166,9 @@ func (c *requestMetadataCache) enrich(record UsageRecord, now time.Time) UsageRe
 		if matched != nil && (matched.endpoint != o.endpoint || matched.stream != o.stream) {
 			return record
 		}
+		if matched != nil && matched.serviceTier != o.serviceTier {
+			tierAmbiguous = true
+		}
 		matched = o
 	}
 	if matched != nil {
@@ -171,6 +177,9 @@ func (c *requestMetadataCache) enrich(record UsageRecord, now time.Time) UsageRe
 		}
 		if !record.streamPresent {
 			record.Stream = matched.stream
+		}
+		if strings.TrimSpace(record.ServiceTier) == "" && !tierAmbiguous {
+			record.ServiceTier = matched.serviceTier
 		}
 	}
 	return record

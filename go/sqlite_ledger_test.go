@@ -37,6 +37,7 @@ func sqliteTestRecord(i int) sqliteLedgerRecord {
 		Tokens:    TokenStats{InputTokens: math.MaxInt64, OutputTokens: 22, ReasoningTokens: 3, CacheReadTokens: 4, CachedTokens: 5, CacheTokens: 6, CacheWriteTokens: 7, TotalTokens: math.MaxInt64},
 		LatencyMs: 100, TTFTMs: 20, Failed: true, StatusCode: 503, Failure: "test failure", Stream: true,
 		Thinking:    UsageThinking{Intensity: "high", Mode: "enabled", Level: "test", Budget: 150},
+		ServiceTier: "priority",
 		Correlation: &ProtocolCorrelationMeta{SchemaVersion: 1, KnownFields: 7, InputMode: "input", OutputMode: "output", CacheMode: "cache"},
 		Headers:     map[string][]string{"x-test": {"one", "two"}},
 	}}

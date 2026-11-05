@@ -15,7 +15,7 @@ CPA 用量统计插件，用于在 CLIProxyAPI/CPA v7、v8 插件系统中记录
 - 记录 input/output/reasoning/cache/total token。
 - 按上游接口、模型、来源、CPA 凭证和调用 CPA 的客户端 API key 聚合统计。上游接口统计面板可用「隐藏成功率 0%」按钮隐藏成功率为 0 的上游；开关状态保存在浏览器 localStorage 中，只影响这张表格的显示，详情下拉、导出和 API Key 联动仍保留全部上游。
 - API 详细统计支持主动选择脱敏后的客户端 API key，并联动筛选上游接口统计、上游接口详情、模型统计、请求事件明细和用量趋势；默认仍展示当前时间范围内的全量数据。
-- 上游接口详情的最近请求展示推理强度、请求端点和生成速度；流式请求按首个 token 后的生成时长计算速度，非流式请求按完整响应耗时计算。
+- 上游接口详情的最近请求依次展示推理强度、Fast 模式、请求端点和生成速度；Fast 模式按请求的 `service_tier` 判断，`priority` 显示为 `fast`，其他等级显示原值（如 `default`、`auto`、`flex`），字段缺失时显示 `-`。流式请求按首个 token 后的生成时长计算速度，非流式请求按完整响应耗时计算。
 - 用量计数仅使用 CPA 原生 usage 上报，关闭实时响应兜底和流式拦截。`v2.6.4` 通过宿主已有的请求拦截/完成回调补齐端点和流式标记，不需要修改或重编译 CPA。并发关联有歧义时保留未知值；兼容范围与缓存边界见 [部署文档](docs/guides/cpa-usage.md#cpa-版本兼容与统计兜底)。旧版兜底记录仍支持历史去重修复。
 - 轻量级首屏摘要：首包不包含逐请求明细；分组维度数量仍会影响响应体积。
 - 请求事件明细支持按模型、来源、凭证、时间范围筛选，页面以滚动表格展示；来源列显示完整上游接口标识，便于区分同一 Codex、Claude 等提供商下的不同上游凭证。
@@ -185,7 +185,7 @@ GET  /v0/management/plugins/usage-dashboard-zduu/health
 | `/dashboard-events-export` | GET | 按筛选条件导出事件，默认 JSON；支持 `format=csv|jsonl`、`gzip=1` 和 `limit`，默认受 `export_max_records` 保护。`gzip=1` 返回 gzip 文件内容，不使用 `Content-Encoding`。 |
 | `/dashboard-events-export-jobs` | POST/GET/DELETE | 创建、查询或删除后台事件导出任务，参数与 `/dashboard-events-export` 一致。 |
 | `/dashboard-events-export-download` | GET | 下载已完成的后台事件导出任务结果，使用 `?id=<job_id>`；可协商分块下载，详见[部署文档](docs/guides/cpa-usage.md#按筛选导出事件)。 |
-| `/dashboard-api-detail` | GET | 单个上游接口详情，支持 `?api=xxx&range=24h&client_api=xxx`，返回模型分布、来源、错误统计和最近请求；最近请求携带完整上游接口 `api`，并在有数据时返回推理强度 `thinking`、请求端点 `endpoint` 和流式标记 `stream`。 |
+| `/dashboard-api-detail` | GET | 单个上游接口详情，支持 `?api=xxx&range=24h&client_api=xxx`，返回模型分布、来源、错误统计和最近请求；最近请求携带完整上游接口 `api`，并在有数据时返回推理强度 `thinking`、服务等级 `service_tier`、请求端点 `endpoint` 和流式标记 `stream`。 |
 | `/dashboard-data` | GET | 兼容旧版，返回含全部 `details` 数组的完整数据。 |
 | `/dashboard-quota-observations` | POST | 保存经过宿主凭证身份校验的额度观测，返回接受、跳过、拒绝数量及被拒绝条目的下标 `rejected_indexes`；不增加请求计数。 |
 | `/health` | GET | 运行健康状态：`status`、`alerts`、`detail_count`、`evicted_total`、`total_requests`。 |

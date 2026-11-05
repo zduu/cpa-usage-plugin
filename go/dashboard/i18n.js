@@ -178,6 +178,7 @@ var I18N_MAP = {
     col_cost: '花费',
     col_status: '状态码',
     col_reasoning_effort: '推理强度',
+    col_fast_mode: 'Fast 模式',
     col_endpoint: '端点',
     col_generation_speed: '生成速度',
 
@@ -462,6 +463,7 @@ var I18N_MAP = {
     col_cost: '花費',
     col_status: '狀態碼',
     col_reasoning_effort: '推理強度',
+    col_fast_mode: 'Fast 模式',
     col_endpoint: '端點',
     col_generation_speed: '生成速度',
 
@@ -734,6 +736,7 @@ var I18N_MAP = {
     col_cost: 'Cost',
     col_status: 'Status',
     col_reasoning_effort: 'Reasoning Effort',
+    col_fast_mode: 'Fast Mode',
     col_endpoint: 'Endpoint',
     col_generation_speed: 'Generation Speed',
 
@@ -1006,6 +1009,7 @@ var I18N_MAP = {
     col_cost: 'Стоимость',
     col_status: 'Статус',
     col_reasoning_effort: 'Усилие рассуждения',
+    col_fast_mode: 'Быстрый режим',
     col_endpoint: 'Эндпоинт',
     col_generation_speed: 'Скорость генерации',
 

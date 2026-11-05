@@ -181,7 +181,7 @@ func eventResultEstimatedBytes(result EventsResult) int64 {
 	n := int64(unsafe.Sizeof(result)) + int64(len(result.Events))*int64(unsafe.Sizeof(RequestDetail{})) + int64(len(result.GeneratedAt))
 	for _, d := range result.Events {
 		n += int64(len(d.UpstreamAPI) + len(d.Model) + len(d.RequestedModel) + len(d.APIKey) + len(d.APIKeyHash) + len(d.Source) + len(d.Provider) + len(d.ExecutorType) + len(d.AuthID) + len(d.AuthIndex) + len(d.AuthType) + len(d.Endpoint) + len(d.BaseURL) + len(d.Failure))
-		n += int64(len(d.Thinking.Intensity) + len(d.Thinking.Mode) + len(d.Thinking.Level))
+		n += int64(len(d.Thinking.Intensity) + len(d.Thinking.Mode) + len(d.Thinking.Level) + len(d.ServiceTier))
 		if d.Correlation != nil {
 			n += int64(unsafe.Sizeof(*d.Correlation))
 			n += int64(len(d.Correlation.InputMode) + len(d.Correlation.OutputMode) + len(d.Correlation.CacheMode))

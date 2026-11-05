@@ -962,6 +962,7 @@ func requestDetailFromUsageRecord(record UsageRecord, timestamp time.Time, white
 		BaseURL:        strings.TrimSpace(record.BaseURL),
 		Stream:         record.Stream,
 		Thinking:       usageThinking(record),
+		ServiceTier:    strings.TrimSpace(record.ServiceTier),
 		Tokens: TokenStats{
 			InputTokens:      nonNegativeInt64(record.Detail.InputTokens),
 			OutputTokens:     nonNegativeInt64(record.Detail.OutputTokens),
@@ -1043,6 +1044,10 @@ func enrichRequestDetailMetadata(detail *RequestDetail, update RequestDetail) bo
 	}
 	if detail.Thinking == (UsageThinking{}) && update.Thinking != (UsageThinking{}) {
 		detail.Thinking = update.Thinking
+		changed = true
+	}
+	if detail.ServiceTier == "" && strings.TrimSpace(update.ServiceTier) != "" {
+		detail.ServiceTier = strings.TrimSpace(update.ServiceTier)
 		changed = true
 	}
 	if !detail.Stream && update.Stream {

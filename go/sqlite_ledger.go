@@ -510,7 +510,7 @@ func encodeSQLiteLedgerRecord(r sqliteLedgerRecord, encodingBudget int64) ([]byt
 	// A multi-record batch also bounds the encoder's input before allocating
 	// escaped JSON. A single large record is deliberately allowed through.
 	minimum := len(r.API) + len(r.Model) + len(zone) + len(d.Model) + len(d.Provider) + len(d.Source) + len(d.AuthIndex) + len(d.AuthID) + len(d.AuthType) + len(d.APIKey) + len(d.APIKeyHash) + len(d.BaseURL) + len(d.RequestedModel) + len(d.ExecutorType) + len(d.Endpoint) + len(d.Failure)
-	minimum += len(d.Thinking.Intensity) + len(d.Thinking.Mode) + len(d.Thinking.Level)
+	minimum += len(d.Thinking.Intensity) + len(d.Thinking.Mode) + len(d.Thinking.Level) + len(d.ServiceTier)
 	if d.Correlation != nil {
 		minimum += len(d.Correlation.InputMode) + len(d.Correlation.OutputMode) + len(d.Correlation.CacheMode)
 	}

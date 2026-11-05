@@ -31,6 +31,7 @@ func TestRequestMetadataStockABIToDashboard(t *testing.T) {
 	for i, path := range paths {
 		id := fmt.Sprint(i)
 		req := metadataRequest(id, path+"?key=secret", i%2 == 0)
+		req.Metadata["service_tier"] = "priority"
 		for _, method := range []string{"request.intercept_before", "request.intercept_after"} {
 			raw, err := handleMethod(method, mustMarshal(req))
 			if err != nil {
@@ -73,6 +74,9 @@ func TestRequestMetadataStockABIToDashboard(t *testing.T) {
 			seen := map[string]bool{}
 			for _, event := range events {
 				seen[event.Endpoint] = event.Stream
+				if event.ServiceTier != "priority" {
+					t.Fatalf("%s: service tier lost for %s: %q", rangeKey, event.Endpoint, event.ServiceTier)
+				}
 			}
 			for i, path := range paths {
 				if stream, ok := seen[path]; !ok || stream != (i%2 == 0) {
@@ -217,5 +221,31 @@ func TestRequestMetadataExpiredCompletionAndConcurrentAccess(t *testing.T) {
 	c.cleanupLocked(base.Add(requestMetadataTTL + 3*time.Second))
 	if c.count != 0 || len(c.byID) != 0 || len(c.byAuth) != 0 || !c.unsafeUntil.IsZero() {
 		t.Fatal("completed metadata not released")
+	}
+}
+
+func TestRequestMetadataServiceTierConsensus(t *testing.T) {
+	base := time.Now()
+	for _, tc := range []struct {
+		name, otherTier, nativeTier, want string
+	}{
+		{"agreement", "priority", "", "priority"},
+		{"conflicting tiers", "default", "", ""},
+		{"missing tier", "", "", ""},
+		{"native wins", "default", "priority", "priority"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newRequestMetadataCache()
+			a, b := metadataRequest("a", "/v1/responses", true), metadataRequest("b", "/v1/responses", true)
+			a.Metadata["service_tier"], b.Metadata["service_tier"] = "priority", tc.otherTier
+			c.observe(a, base)
+			c.observe(b, base)
+			record := metadataUsage(base.Add(time.Millisecond))
+			record.ServiceTier = tc.nativeTier
+			got := c.enrich(record, base.Add(time.Second))
+			if got.ServiceTier != tc.want || got.Endpoint != "/v1/responses" || !got.Stream {
+				t.Fatalf("tier consensus affected request metadata: %+v, want tier %q", got, tc.want)
+			}
+		})
 	}
 }

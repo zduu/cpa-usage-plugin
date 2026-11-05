@@ -895,6 +895,7 @@ type RequestDetail struct {
 	BaseURL        string                   `json:"base_url,omitempty"`
 	Stream         bool                     `json:"stream,omitempty"`
 	Thinking       UsageThinking            `json:"thinking,omitempty"`
+	ServiceTier    string                   `json:"service_tier,omitempty"`
 	Tokens         TokenStats               `json:"tokens"`
 	Failed         bool                     `json:"failed"`
 	StatusCode     int                      `json:"status_code,omitempty"`

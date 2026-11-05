@@ -976,6 +976,9 @@ func enrichUsageRecord(record UsageRecord, enrichment UsageRecord) UsageRecord {
 	if strings.TrimSpace(record.ReasoningEffort) == "" {
 		record.ReasoningEffort = strings.TrimSpace(enrichment.ReasoningEffort)
 	}
+	if strings.TrimSpace(record.ServiceTier) == "" {
+		record.ServiceTier = strings.TrimSpace(enrichment.ServiceTier)
+	}
 	if enrichment.Stream {
 		record.Stream = true
 	}
