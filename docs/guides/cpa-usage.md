@@ -1,5 +1,13 @@
 # CPA 用量统计插件 — 使用文档
 
+## v2.7.9 - 2026-11-05
+
+上游接口详情的最近请求新增 Fast 模式，按请求记录中的 `service_tier` 展示服务等级。`priority` 显示为 `fast`，其他等级显示原值，缺失时显示 `-`。存储快照格式保持 v3，无需新增配置。
+
+### 新增
+
+- 最近请求详情增加 Fast 模式列。优先使用原生 usage 服务等级；原生字段缺失时，可在请求元数据匹配无歧义的情况下补齐。历史记录不会根据模型名或速度推测服务等级。
+
 ## v2.7.8 - 2026-10-31
 
 本版本修复新版管理面板登录存储不兼容造成的持续认证失败，并调整 Linux amd64 产物的 CPU 兼容设置。无需新增配置，存储快照格式保持 v3。
@@ -69,8 +77,8 @@ plugins:
     usage-dashboard-zduu:
       enabled: true
       store:
-        version: "2.7.8"
-        release-tag: "v2.7.8"
+        version: "2.7.9"
+        release-tag: "v2.7.9"
         repository: "https://github.com/zduu/cpa-usage-plugin"
       # 其他配置项见第 4 节 ...
 ```
@@ -303,8 +311,8 @@ plugins:
     usage-dashboard-zduu:
       enabled: true
       store:
-        version: "2.7.8"
-        release-tag: "v2.7.8"
+        version: "2.7.9"
+        release-tag: "v2.7.9"
         repository: "https://github.com/zduu/cpa-usage-plugin"
       # 每个上游接口/模型最多保留的请求明细条数。默认 5000。
       max_details_per_model: 5000
@@ -354,7 +362,7 @@ plugins:
       claude_cache_repair_enabled: false
       # 可选：允许外部脚本更新插件文件。默认 false。
       update_enabled: false
-      # 可选：latest 或指定版本号，例如 v2.7.8。
+      # 可选：latest 或指定版本号，例如 v2.7.9。
       update_version: latest
 ```
 
@@ -380,8 +388,8 @@ cd CLIProxyAPI
 启动后查看日志确认插件加载成功：
 
 ```text
-pluginhost: plugin loaded plugin_id=usage-dashboard-zduu version=2.7.8 path=plugins/usage-dashboard-zduu-v2.7.8.so
-pluginhost: plugin registered plugin_id=usage-dashboard-zduu plugin_name=用量统计 version=2.7.8 path=plugins/usage-dashboard-zduu-v2.7.8.so
+pluginhost: plugin loaded plugin_id=usage-dashboard-zduu version=2.7.9 path=plugins/usage-dashboard-zduu-v2.7.9.so
+pluginhost: plugin registered plugin_id=usage-dashboard-zduu plugin_name=用量统计 version=2.7.9 path=plugins/usage-dashboard-zduu-v2.7.9.so
 ```
 
 > `store-sources` 引入插件商店注册表，管理面板可浏览安装。`store` 块标记当前期望版本，pluginhost 会匹配 `usage-dashboard-zduu-v{版本号}.{ext}` 文件名，并自动清理旧版本文件。
@@ -651,7 +659,7 @@ plugins:
     usage-dashboard-zduu:
       enabled: true
       update_enabled: true
-      update_version: latest   # 或 v2.7.8
+      update_version: latest   # 或 v2.7.9
 ```
 
 执行脚本：
