@@ -1,8 +1,7 @@
 package main
 
 /*
-#include <stdint.h>
-#include <stdlib.h>
+#include "plugin_abi.h"
 #if defined(__APPLE__)
 #include <dlfcn.h>
 #endif
@@ -23,36 +22,6 @@ static int pin_go_runtime_image(void) {
 #endif
 }
 
-typedef struct {
-	void* ptr;
-	size_t len;
-} cliproxy_buffer;
-
-typedef int (*cliproxy_host_call_fn)(void*, const char*, const uint8_t*, size_t, cliproxy_buffer*);
-typedef void (*cliproxy_host_free_fn)(void*, size_t);
-
-typedef struct {
-	uint32_t abi_version;
-	void* host_ctx;
-	cliproxy_host_call_fn call;
-	cliproxy_host_free_fn free_buffer;
-} cliproxy_host_api;
-
-typedef int (*cliproxy_plugin_call_fn)(char*, uint8_t*, size_t, cliproxy_buffer*);
-typedef void (*cliproxy_plugin_free_fn)(void*, size_t);
-typedef void (*cliproxy_plugin_shutdown_fn)(void);
-
-typedef struct {
-	uint32_t abi_version;
-	cliproxy_plugin_call_fn call;
-	cliproxy_plugin_free_fn free_buffer;
-	cliproxy_plugin_shutdown_fn shutdown;
-} cliproxy_plugin_api;
-
-extern int cliproxyPluginCall(char*, uint8_t*, size_t, cliproxy_buffer*);
-extern void cliproxyPluginFree(void*, size_t);
-extern void cliproxyPluginShutdown(void);
-
 static const cliproxy_host_api* stored_host;
 
 static void store_host_api(const cliproxy_host_api* host) {
@@ -63,13 +32,34 @@ static int call_host_api(const char* method, const uint8_t* request, size_t requ
 	if (stored_host == NULL || stored_host->call == NULL) {
 		return 1;
 	}
+#if defined(__APPLE__) && defined(__x86_64__)
+	return cliproxy_bridge_host_call(stored_host->call, stored_host->host_ctx, method, request, request_len, response);
+#else
 	return stored_host->call(stored_host->host_ctx, method, request, request_len, response);
+#endif
 }
 
 static void free_host_buffer(void* ptr, size_t len) {
 	if (stored_host != NULL && stored_host->free_buffer != NULL && ptr != NULL) {
+#if defined(__APPLE__) && defined(__x86_64__)
+		cliproxy_bridge_host_free(stored_host->free_buffer, ptr, len);
+#else
 		stored_host->free_buffer(ptr, len);
+#endif
 	}
+}
+
+static void set_plugin_api(cliproxy_plugin_api* plugin, uint32_t version) {
+	plugin->abi_version = version;
+#if defined(__APPLE__) && defined(__x86_64__)
+	plugin->call = cliproxy_bridge_call;
+	plugin->free_buffer = cliproxy_bridge_free;
+	plugin->shutdown = cliproxy_bridge_shutdown;
+#else
+	plugin->call = cliproxyPluginCall;
+	plugin->free_buffer = cliproxyPluginFree;
+	plugin->shutdown = cliproxyPluginShutdown;
+#endif
 }
 */
 import "C"
@@ -135,8 +125,7 @@ func callQuotaHostAuth(index string) (quotaHostAuth, error) {
 	return result.Result.Auth, nil
 }
 
-//export cliproxy_plugin_init
-func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_api) C.int {
+func initializePlugin(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_api) C.int {
 	if plugin == nil {
 		return 1
 	}
@@ -145,10 +134,7 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 	}
 	restartPluginState()
 	C.store_host_api(host)
-	plugin.abi_version = C.uint32_t(abiVersion)
-	plugin.call = C.cliproxy_plugin_call_fn(C.cliproxyPluginCall)
-	plugin.free_buffer = C.cliproxy_plugin_free_fn(C.cliproxyPluginFree)
-	plugin.shutdown = C.cliproxy_plugin_shutdown_fn(C.cliproxyPluginShutdown)
+	C.set_plugin_api(plugin, C.uint32_t(abiVersion))
 	return 0
 }
 

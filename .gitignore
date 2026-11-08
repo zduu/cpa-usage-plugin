@@ -3,6 +3,7 @@
 *.dylib
 *.dll
 *.h
+!/go/plugin_abi.h
 /go/cpa-usage-plugin
 /go/*.test
 /go/*.test.exe

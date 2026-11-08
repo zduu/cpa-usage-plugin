@@ -1,5 +1,12 @@
 # Stock CPA ABI smoke test
 
+The harness also exercises 8 concurrent callers, 160 host credential callbacks that
+re-enter the plugin, host buffer frees with Go allocations, 16 foreign C threads and
+their teardown, quiesce/reconfigure/shutdown/reinitialize, and replacement with
+a distinct library image followed by rollback. These paths catch
+Darwin amd64 runtime state corruption at both sides of the shared-library ABI.
+CI executes the built macOS libraries on native Intel and Apple Silicon runners.
+
 This isolated test module pins the unmodified CPA `v7.2.152` SDK. It loads the built plugin through `cliproxy_plugin_init`, serializes the real SDK request/completion/usage structures, and queries the plugin's management ABI. It requires a native Linux or macOS shared library. It does not read or change a local CPA checkout, launch CPA, or send upstream requests.
 
 From the repository root:

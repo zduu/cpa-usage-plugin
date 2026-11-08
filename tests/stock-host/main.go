@@ -3,8 +3,9 @@
 package main
 
 /*
-#cgo linux LDFLAGS: -ldl
+#cgo linux LDFLAGS: -ldl -pthread
 #include <dlfcn.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
 typedef struct { void *ptr; size_t len; } buffer;
@@ -14,19 +15,58 @@ typedef struct {
   void (*free_buffer)(void *, size_t);
   void (*shutdown)(void);
 } plugin_api;
+typedef struct {
+  uint32_t version;
+  void *ctx;
+  int (*call)(void *, const char *, const uint8_t *, size_t, buffer *);
+  void (*free_buffer)(void *, size_t);
+} host_api;
+extern int stockHostCall(char *, uint8_t *, size_t, buffer *);
+extern void stockHostFree(void *, size_t);
+static int host_call(void *ctx, const char *method, const uint8_t *body, size_t len, buffer *out) {
+  (void)ctx;
+  return stockHostCall((char *)method, (uint8_t *)body, len, out);
+}
+static host_api host = {1, NULL, host_call, stockHostFree};
 static plugin_api api;
+static plugin_api retired_api;
+static void save_plugin(void) { retired_api = api; }
+static void swap_plugin(void) {
+  plugin_api saved = api;
+  api = retired_api;
+  retired_api = saved;
+}
 static int load_plugin(const char *path) {
   void *lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
   if (!lib) return 1;
   int (*init)(void *, plugin_api *) = dlsym(lib, "cliproxy_plugin_init");
   if (!init) return 2;
-  return init(NULL, &api);
+  return init(&host, &api);
 }
 static int invoke(const char *method, const uint8_t *body, size_t len, buffer *out) {
   return api.call(method, body, len, out);
 }
 static void release_buffer(buffer b) { api.free_buffer(b.ptr, b.len); }
 static void shutdown_plugin(void) { api.shutdown(); }
+typedef struct {
+  const char *method;
+  const uint8_t *body;
+  size_t len;
+  buffer *out;
+  int status;
+} thread_call;
+static void *invoke_worker(void *arg) {
+  thread_call *call = arg;
+  call->status = invoke(call->method, call->body, call->len, call->out);
+  return NULL;
+}
+static int invoke_thread(const char *method, const uint8_t *body, size_t len, buffer *out) {
+  thread_call call = {method, body, len, out, 1};
+  pthread_t thread;
+  if (pthread_create(&thread, NULL, invoke_worker, &call)) return 1;
+  if (pthread_join(thread, NULL)) return 1;
+  return call.status;
+}
 */
 import "C"
 
@@ -38,15 +78,18 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
-func call(method string, request any, result any) {
+func rawCall(method string, request any) (int, []byte) {
 	raw, err := json.Marshal(request)
 	check(err)
 	m := C.CString(method)
@@ -57,6 +100,11 @@ func call(method string, request any, result any) {
 	status := C.invoke(m, (*C.uint8_t)(b), C.size_t(len(raw)), &out)
 	defer C.release_buffer(out)
 	response := C.GoBytes(out.ptr, C.int(out.len))
+	return int(status), response
+}
+
+func call(method string, request any, result any) {
+	status, response := rawCall(method, request)
 	var env struct {
 		OK     bool            `json:"ok"`
 		Result json.RawMessage `json:"result"`
@@ -66,6 +114,46 @@ func call(method string, request any, result any) {
 		panic(fmt.Sprintf("%s: %s", method, response))
 	}
 	check(json.Unmarshal(env.Result, result))
+}
+
+var hostCalls, hostFrees atomic.Int64
+
+//export stockHostCall
+func stockHostCall(method *C.char, body *C.uint8_t, size C.size_t, out *C.buffer) C.int {
+	out.ptr, out.len = nil, 0
+	if C.GoString(method) != "host.auth.get_runtime" {
+		return 1
+	}
+	var request struct {
+		Index string `json:"auth_index"`
+	}
+	if json.Unmarshal(C.GoBytes(unsafe.Pointer(body), C.int(size)), &request) != nil || request.Index != "abi-index" {
+		return 1
+	}
+	// Re-enter the plugin on the host callback thread. Both Go runtimes must
+	// retain their own machine/stack state throughout the nested callback.
+	var health pluginapi.ManagementResponse
+	call("management.handle", pluginapi.ManagementRequest{Method: "GET", Path: "/health"}, &health)
+	if health.StatusCode != http.StatusOK {
+		return 1
+	}
+	ch := make(chan []byte, 1)
+	ch <- make([]byte, 4096)
+	runtime.KeepAlive(ch)
+	runtime.GC()
+	raw := []byte(`{"ok":true,"result":{"auth":{"id":"abi-account.json","auth_index":"abi-index","provider":"devin","account_type":"oauth"}}}`)
+	out.ptr, out.len = C.CBytes(raw), C.size_t(len(raw))
+	hostCalls.Add(1)
+	return 0
+}
+
+//export stockHostFree
+func stockHostFree(ptr unsafe.Pointer, size C.size_t) {
+	_ = size
+	C.free(ptr)
+	hostFrees.Add(1)
+	// Exercise Go allocations in the host free callback too.
+	runtime.KeepAlive(make(chan int, 32))
 }
 
 func check(err error) {
@@ -205,7 +293,143 @@ func main() {
 		panic("404 ABI response lost")
 	}
 	verifyExportChunks(len(paths))
+	verifyConcurrentCallbacks()
+	verifyForeignThreadCallbacks()
+	verifyLifecycle(path)
+	verifyReplacement(os.Args[1])
 	fmt.Println("PASS: stock CPA v7.2.152 SDK -> shared-library ABI -> dashboard; 4 native records, paths, stream flags, cancellation, both callback orders, all/24h")
+}
+
+func verifyConcurrentCallbacks() {
+	now := time.Now().UTC()
+	body, err := json.Marshal(map[string]any{"version": 1, "observations": []any{map[string]any{
+		"provider": "devin", "auth_index": "abi-index", "auth_id": "abi-account.json", "observed_at": now,
+		"signals": map[string]string{"weekly_quota_remaining_percent": "60%", "weekly_quota_reset_at": now.Add(48 * time.Hour).Format(time.RFC3339)},
+	}}})
+	check(err)
+	var wg sync.WaitGroup
+	for worker := 0; worker < 8; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 20; i++ {
+				var response pluginapi.ManagementResponse
+				call("management.handle", pluginapi.ManagementRequest{Method: "GET", Path: "/health"}, &response)
+				if response.StatusCode != http.StatusOK {
+					panic("concurrent health call failed")
+				}
+				call("management.handle", pluginapi.ManagementRequest{Method: "POST", Path: "/dashboard-quota-observations", Body: body}, &response)
+				var observation struct{ Accepted, Skipped, Rejected int }
+				check(json.Unmarshal(response.Body, &observation))
+				if response.StatusCode != http.StatusOK || observation.Accepted+observation.Skipped != 1 || observation.Rejected != 0 {
+					panic(fmt.Sprintf("host callback failed: %s", response.Body))
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if hostCalls.Load() != 160 || hostFrees.Load() != 160 {
+		panic("host callbacks or buffer releases were lost")
+	}
+	runtime.GC()
+	fmt.Println("PASS: 8 concurrent callers, 160 host callbacks with nested plugin calls, host buffer frees and GC")
+}
+
+func verifyForeignThreadCallbacks() {
+	now := time.Now().UTC()
+	body, err := json.Marshal(pluginapi.ManagementRequest{Method: "POST", Path: "/dashboard-quota-observations", Body: []byte(
+		`{"version":1,"observations":[{"provider":"devin","auth_index":"abi-index","auth_id":"abi-account.json","observed_at":"` + now.Format(time.RFC3339Nano) +
+			`","signals":{"weekly_quota_remaining_percent":"50%","weekly_quota_reset_at":"` + now.Add(48*time.Hour).Format(time.RFC3339) + `"}}]}`)})
+	check(err)
+	method, request := C.CString("management.handle"), C.CBytes(body)
+	defer C.free(unsafe.Pointer(method))
+	defer C.free(request)
+	callsBefore, freesBefore := hostCalls.Load(), hostFrees.Load()
+	for i := 0; i < 16; i++ {
+		var out C.buffer
+		status := C.invoke_thread(method, (*C.uint8_t)(request), C.size_t(len(body)), &out)
+		raw := C.GoBytes(out.ptr, C.int(out.len))
+		C.release_buffer(out)
+		var envelope struct{ OK bool }
+		check(json.Unmarshal(raw, &envelope))
+		if status != 0 || !envelope.OK {
+			panic(fmt.Sprintf("foreign-thread callback failed: %s", raw))
+		}
+	}
+	if hostCalls.Load()-callsBefore != 16 || hostFrees.Load()-freesBefore != 16 {
+		panic("foreign-thread host callbacks were lost")
+	}
+	runtime.GC()
+	fmt.Println("PASS: 16 foreign C threads, bidirectional callbacks and thread teardown")
+}
+
+func assertStopped() {
+	_, raw := rawCall("management.handle", pluginapi.ManagementRequest{Method: "GET", Path: "/health"})
+	var envelope struct{ OK bool }
+	check(json.Unmarshal(raw, &envelope))
+	if envelope.OK {
+		panic("stopped plugin accepted a call")
+	}
+}
+
+func verifyReplacement(source string) {
+	dir, err := os.MkdirTemp("", "stock-host-replacement-")
+	check(err)
+	defer os.RemoveAll(dir)
+	raw, err := os.ReadFile(source)
+	check(err)
+	path := dir + "/replacement.so"
+	check(os.WriteFile(path, raw, 0600))
+	var result map[string]any
+	call("plugin.quiesce", nil, &result)
+	C.save_plugin()
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+	if C.load_plugin(cPath) != 0 {
+		panic("replacement image failed to initialize")
+	}
+	config := map[string]any{"config_yaml": []byte("exchange_rate_enabled: false\nmodels_dev_prices_enabled: false\n")}
+	call("plugin.register", config, &result)
+	C.swap_plugin()
+	assertStopped()
+	C.swap_plugin()
+	var health pluginapi.ManagementResponse
+	call("management.handle", pluginapi.ManagementRequest{Method: "GET", Path: "/health"}, &health)
+	if health.StatusCode != http.StatusOK {
+		panic("replacement image failed")
+	}
+	C.shutdown_plugin()
+	C.swap_plugin()
+	call("plugin.reconfigure", config, &result)
+	call("management.handle", pluginapi.ManagementRequest{Method: "GET", Path: "/health"}, &health)
+	if health.StatusCode != http.StatusOK {
+		panic("rollback to retired image failed")
+	}
+	fmt.Println("PASS: distinct replacement image, retired image stays stopped, rollback to original runtime")
+}
+
+func verifyLifecycle(path *C.char) {
+	var result map[string]any
+	call("plugin.quiesce", nil, &result)
+	assertStopped()
+	config := map[string]any{"config_yaml": []byte("exchange_rate_enabled: false\nmodels_dev_prices_enabled: false\n")}
+	call("plugin.reconfigure", config, &result)
+	var health pluginapi.ManagementResponse
+	call("management.handle", pluginapi.ManagementRequest{Method: "GET", Path: "/health"}, &health)
+	if health.StatusCode != http.StatusOK {
+		panic("quiesced plugin did not restart")
+	}
+	C.shutdown_plugin()
+	assertStopped()
+	if C.load_plugin(path) != 0 {
+		panic("pinned plugin did not reinitialize")
+	}
+	call("plugin.register", config, &result)
+	call("management.handle", pluginapi.ManagementRequest{Method: "GET", Path: "/health"}, &health)
+	if health.StatusCode != http.StatusOK {
+		panic("reinitialized plugin failed")
+	}
+	fmt.Println("PASS: quiesce/reconfigure, shutdown/reinitialize and rejection of stopped calls")
 }
 
 // Exercise the real ABI envelope and byte/base64 conversion, not a direct

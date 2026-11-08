@@ -92,7 +92,7 @@ jobs:
             apt: gcc-aarch64-linux-gnu
             file_pattern: 'ELF 64-bit.*(ARM aarch64|aarch64)'
           - platform: darwin-amd64
-            runner: macos-latest
+            runner: macos-15-intel
             goos: darwin
             goarch: amd64
             ext: dylib
@@ -170,6 +170,18 @@ jobs:
             # -s strips the COFF symbol table, so verify the exported ABI symbol instead.
             windows) x86_64-w64-mingw32-objdump -p "$asset" | grep -q 'cliproxy_plugin_init' ;;
           esac
+
+      - name: Verify macOS shared-library ABI and host callbacks
+        if: matrix.goos == 'darwin'
+        run: |
+          export CC="${{ matrix.cc }}"
+          export CGO_ENABLED=1
+          export GOOS="${{ matrix.goos }}"
+          export GOARCH="${{ matrix.goarch }}"
+          VERSION=$(sed -n 's/^const pluginVersion = "\([^"]*\)"/\1/p' go/register.go)
+          cd tests/stock-host
+          go build -buildvcs=false -trimpath -o "$RUNNER_TEMP/stock-host" .
+          "$RUNNER_TEMP/stock-host" "$GITHUB_WORKSPACE/usage-dashboard-zduu-${{ matrix.platform }}.${{ matrix.ext }}" "$VERSION"
 
       # The shared library embeds SQLite through mattn/go-sqlite3 (MIT) and, for
       # the sqlite_purego build, modernc.org/sqlite (BSD-3-Clause). Both licences
