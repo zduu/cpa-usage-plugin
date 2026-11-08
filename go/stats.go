@@ -132,6 +132,7 @@ type RequestStatistics struct {
 	// 默认关闭:旧数据签名不可判定,须用户确认后启用。
 	claudeCacheRepairEnabled bool
 	priceStorageLoadedPath   string
+	priceStoragePendingWrite bool
 	priceStorageLastError    string
 	modelPrices              map[string]ModelPrice
 	modelPriceIndex          map[string]ModelPrice
@@ -703,6 +704,8 @@ func (s *RequestStatistics) ConfigurePatch(cfg runtimeConfigPatch) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	previousPriceStoragePath := s.priceStoragePath
+	_, previousPriceStorageAbs, _, previousPriceStorageErr := s.resolvePriceStoragePathsLocked()
 	if cfg.MaxDetailsPerModel != nil && *cfg.MaxDetailsPerModel >= 0 {
 		s.maxDetailsPerModel = *cfg.MaxDetailsPerModel
 	}
@@ -823,6 +826,18 @@ func (s *RequestStatistics) ConfigurePatch(cfg runtimeConfigPatch) {
 	// 内存明细执行一次历史缓存修复,置于价格加载与成本序列重建之前,保证
 	// 货币序列从修复后的 token 序列重建。开关关闭时该调用为空操作。
 	s.repairClaudeCacheFallbackDetailsLocked(time.Now())
+	if storageConfigTouched && previousPriceStorageErr == nil &&
+		s.priceStoragePath == previousPriceStoragePath && s.priceStorageLoadedPath == previousPriceStorageAbs {
+		// A live storage move carries the current manual prices, including
+		// deletions and unsaved edits. An old file at the destination may be a
+		// migration backup. Explicit price-path changes still load that file.
+		if _, abs, _, err := s.resolvePriceStoragePathsLocked(); err == nil && abs != previousPriceStorageAbs {
+			s.priceStorageLoadedPath = abs
+			s.priceStoragePendingWrite = true
+			// Storage status is part of the conditional price response.
+			s.priceVersion++
+		}
+	}
 	s.loadModelPricesLocked()
 	s.rebuildCostSeriesLocked()
 	s.pruneLocked(time.Now(), true)
@@ -4139,6 +4154,11 @@ func (s *RequestStatistics) loadModelPricesLocked() {
 		return
 	}
 	if s.priceStorageLoadedPath == abs {
+		// Retry persistence from the current table without reloading an old
+		// migration source and discarding subsequent in-memory edits.
+		if s.priceStoragePendingWrite {
+			_ = s.saveModelPricesLocked()
+		}
 		return
 	}
 	previousVersion := s.priceVersion
@@ -4162,6 +4182,7 @@ func (s *RequestStatistics) loadModelPricesLocked() {
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			s.priceStorageLoadedPath = abs
+			s.priceStoragePendingWrite = false
 			s.modelPrices = make(map[string]ModelPrice)
 			s.modelPriceIndex = make(map[string]ModelPrice)
 			s.priceVersion++
@@ -4191,6 +4212,7 @@ func (s *RequestStatistics) loadModelPricesLocked() {
 		setModelPriceCaseInsensitive(prices, name, normalizeModelPriceRules(price))
 	}
 	s.priceStorageLoadedPath = abs
+	s.priceStoragePendingWrite = false
 	s.modelPrices = prices
 	s.modelPriceIndex = normalizedModelPriceIndex(prices)
 	s.priceVersion++
@@ -4201,7 +4223,7 @@ func (s *RequestStatistics) loadModelPricesLocked() {
 		// the source file available for rollback and retry failed migrations.
 		if err := writeModelPricesFile(abs, s.modelPricesUpdatedAt, s.modelPrices); err != nil {
 			s.priceStorageLastError = fmt.Sprintf("migrate legacy price file: %v", err)
-			s.priceStorageLoadedPath = ""
+			s.priceStoragePendingWrite = true
 		}
 	}
 }
@@ -4216,11 +4238,13 @@ func (s *RequestStatistics) saveModelPricesLocked() error {
 		return err
 	}
 	updatedAt := time.Now().UTC()
+	s.priceStorageLoadedPath = abs
+	s.priceStoragePendingWrite = true
 	if err := writeModelPricesFile(abs, updatedAt, s.modelPrices); err != nil {
 		s.priceStorageLastError = err.Error()
 		return err
 	}
-	s.priceStorageLoadedPath = abs
+	s.priceStoragePendingWrite = false
 	s.modelPricesUpdatedAt = updatedAt
 	s.priceStorageLastError = ""
 	return nil

@@ -2,8 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -256,5 +259,211 @@ func TestDefaultModelPricesFollowStorageReconfiguration(t *testing.T) {
 		if response.ManualPrices["model"].Prompt != 4 || response.Storage.LoadedPath != filepath.Join(dir, filepath.Base(defaultPriceStoragePath)) {
 			t.Fatalf("price did not follow storage reconfiguration: %+v", response)
 		}
+	}
+}
+
+func TestDefaultModelPricesPreserveChangesAcrossStorageToggles(t *testing.T) {
+	for _, layout := range []string{"directory", "jsonl"} {
+		t.Run(layout, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusServiceUnavailable)
+			}))
+			defer server.Close()
+			s := NewRequestStatistics()
+			defer s.Close()
+			s.Configure(runtimeConfig{ModelsDevPricesEnabled: true, ModelsDevPricesURL: server.URL})
+			if _, err := s.UpsertModelPrice("model", ModelPrice{Prompt: 1}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.UpsertModelPrice("deleted", ModelPrice{Prompt: 2}); err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now()
+			s.Record(UsageRecord{Provider: "openai", Model: "model", RequestedAt: now, Detail: UsageDetail{InputTokens: 1000000}})
+			dir := t.TempDir()
+			path := dir
+			if layout == "jsonl" {
+				path = filepath.Join(dir, "usage.jsonl")
+			}
+			s.ConfigurePatch(runtimeConfigPatch{StorageEnabled: boolPtr(true), StoragePath: &path})
+			if _, err := s.UpsertModelPrice("model", ModelPrice{Prompt: 7}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.DeleteModelPrice("deleted"); err != nil {
+				t.Fatal(err)
+			}
+			for _, enabled := range []bool{false, true, false} {
+				previous := s.ModelPrices()
+				want := previous.ManualPrices
+				s.ConfigurePatch(runtimeConfigPatch{StorageEnabled: &enabled})
+				response := s.ModelPrices()
+				if !reflect.DeepEqual(response.ManualPrices, want) || response.Storage.LastError != "" {
+					t.Fatalf("storage_enabled=%v reverted prices: %+v, want %+v", enabled, response, want)
+				}
+				if response.Version == previous.Version {
+					t.Fatal("storage move did not advance the price response version for conditional requests")
+				}
+				for _, rangeKey := range []string{"all", "24h"} {
+					if got := s.SummaryWithoutDetailsForRangeAt(rangeKey, now).Usage.TotalCost; got != want["model"].Prompt {
+						t.Fatalf("%s cost after storage toggle = %g, want %g", rangeKey, got, want["model"].Prompt)
+					}
+				}
+				if _, err := s.UpsertModelPrice("model", ModelPrice{Prompt: want["model"].Prompt + 1}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			want := s.ModelPrices().ManualPrices
+			s.Close()
+			reloaded := NewRequestStatistics()
+			defer reloaded.Close()
+			reloaded.Configure(runtimeConfig{})
+			if got := reloaded.ModelPrices().ManualPrices; !reflect.DeepEqual(got, want) {
+				t.Fatalf("prices after reload = %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+func TestPriceMigrationFailurePreservesMutationsAndRetries(t *testing.T) {
+	for _, mutation := range []string{"upsert", "delete"} {
+		t.Run(mutation, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			if err := os.WriteFile(legacyPriceStoragePath, []byte(`{"prices":{"model":{"prompt":1},"deleted":{"prompt":2}}}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir("data", 0o500); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod("data", 0o700) })
+			if probe, err := os.CreateTemp("data", "write-probe-*"); err == nil {
+				probe.Close()
+				os.Remove(probe.Name())
+				t.Skip("directory permissions do not prevent writes")
+			}
+			s := NewRequestStatistics()
+			defer s.Close()
+			s.Configure(runtimeConfig{})
+			if response := s.ModelPrices(); response.ManualPrices["model"].Prompt != 1 || response.Storage.LastError == "" {
+				t.Fatalf("expected failed migration with loaded source prices: %+v", response)
+			}
+			now := time.Now()
+			s.Record(UsageRecord{Provider: "openai", Model: "model", RequestedAt: now, Detail: UsageDetail{InputTokens: 1000000}})
+			s.SummaryWithoutDetailsForRangeAt("24h", now)
+			want := map[string]ModelPrice{"model": {Prompt: 1}}
+			var err error
+			if mutation == "upsert" {
+				_, err = s.UpsertModelPrice("model", ModelPrice{Prompt: 7})
+				want["model"] = ModelPrice{Prompt: 7}
+				want["deleted"] = ModelPrice{Prompt: 2}
+			} else {
+				_, err = s.DeleteModelPrice("deleted")
+			}
+			if err == nil {
+				t.Fatal("expected price persistence failure")
+			}
+			for range 2 {
+				response := s.QueryModelPrices("all", "", 100, 0)
+				if !reflect.DeepEqual(response.ManualPrices, want) || response.Storage.LastError == "" {
+					t.Fatalf("failed migration discarded %s: %+v, want %+v", mutation, response, want)
+				}
+				if got := s.SummaryWithoutDetailsForRangeAt("24h", now).Usage.TotalCost; got != want["model"].Prompt {
+					t.Fatalf("cost after failed %s = %g, want %g", mutation, got, want["model"].Prompt)
+				}
+			}
+			if err := os.Chmod("data", 0o700); err != nil {
+				t.Fatal(err)
+			}
+			response := s.ModelPrices()
+			if !reflect.DeepEqual(response.ManualPrices, want) || response.Storage.LastError != "" {
+				t.Fatalf("migration retry did not preserve %s: %+v", mutation, response)
+			}
+			reloaded := NewRequestStatistics()
+			defer reloaded.Close()
+			reloaded.Configure(runtimeConfig{})
+			if got := reloaded.ModelPrices().ManualPrices; !reflect.DeepEqual(got, want) {
+				t.Fatalf("retried prices were not persisted: %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+func TestStorageReconfigurationWithExplicitPricePathLoadsTarget(t *testing.T) {
+	t.Chdir(t.TempDir())
+	s := NewRequestStatistics()
+	defer s.Close()
+	s.Configure(runtimeConfig{})
+	if _, err := s.UpsertModelPrice("model", ModelPrice{Prompt: 7}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "prices.json")
+	if err := writeModelPricesFile(path, time.Now(), map[string]ModelPrice{"model": {Prompt: 3}}); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	s.ConfigurePatch(runtimeConfigPatch{StorageEnabled: boolPtr(true), StoragePath: &dir, PriceStoragePath: &path})
+	for _, enabled := range []bool{false, true} {
+		s.ConfigurePatch(runtimeConfigPatch{StorageEnabled: &enabled})
+		if response := s.ModelPrices(); response.ManualPrices["model"].Prompt != 3 || response.Storage.Path != path {
+			t.Fatalf("explicit price file was replaced during reconfiguration: %+v", response)
+		}
+	}
+}
+
+func TestDefaultModelPricesLoadExistingUsageStorageOnStartup(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := writeModelPricesFile(defaultPriceStoragePath, time.Now(), map[string]ModelPrice{"model": {Prompt: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, filepath.Base(defaultPriceStoragePath))
+	if err := writeModelPricesFile(path, time.Now(), map[string]ModelPrice{"model": {Prompt: 7}}); err != nil {
+		t.Fatal(err)
+	}
+	s := NewRequestStatistics()
+	defer s.Close()
+	s.Configure(runtimeConfig{StorageEnabled: true, StoragePath: dir})
+	if response := s.ModelPrices(); response.ManualPrices["model"].Prompt != 7 || response.Storage.LoadedPath != path {
+		t.Fatalf("startup replaced persisted usage-directory prices with a backup: %+v", response)
+	}
+}
+
+func TestDefaultModelPricesRetryFailedStorageMoveFromMemory(t *testing.T) {
+	t.Chdir(t.TempDir())
+	s := NewRequestStatistics()
+	defer s.Close()
+	s.Configure(runtimeConfig{})
+	if _, err := s.UpsertModelPrice("model", ModelPrice{Prompt: 7}); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, filepath.Base(defaultPriceStoragePath))
+	// A directory at the destination allows usage storage but blocks price
+	// writes regardless of user privileges or permission semantics.
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s.ConfigurePatch(runtimeConfigPatch{StorageEnabled: boolPtr(true), StoragePath: &dir})
+	if response := s.ModelPrices(); response.ManualPrices["model"].Prompt != 7 || response.Storage.LastError == "" {
+		t.Fatalf("failed move discarded the current price table: %+v", response)
+	}
+	if _, err := s.DeleteModelPrice("model"); err == nil {
+		t.Fatal("expected deletion persistence failure")
+	}
+	if response := s.ModelPrices(); len(response.ManualPrices) != 0 || response.Storage.LastError == "" {
+		t.Fatalf("failed move restored a deleted price: %+v", response)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if response := s.ModelPrices(); len(response.ManualPrices) != 0 || response.Storage.LastError != "" {
+		t.Fatalf("retry did not persist the empty price table: %+v", response)
+	}
+	s.Close()
+	reloaded := NewRequestStatistics()
+	defer reloaded.Close()
+	reloaded.Configure(runtimeConfig{StorageEnabled: true, StoragePath: dir})
+	if got := reloaded.ModelPrices().ManualPrices; len(got) != 0 {
+		t.Fatalf("reload restored deleted prices after migration recovery: %+v", got)
 	}
 }
