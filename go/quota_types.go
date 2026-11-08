@@ -81,6 +81,7 @@ type quotaCycleDTO struct {
 	ResetTimeUnknown         bool               `json:"reset_time_unknown,omitempty"`
 	ResetBaselineUsedPercent *float64           `json:"reset_baseline_used_percent,omitempty"`
 	Unmapped                 bool               `json:"unmapped,omitempty"`
+	UnpricedModels           []string           `json:"unpriced_models,omitempty"`
 	ActualTotalUSD           *float64           `json:"actual_total_usd,omitempty"`
 	EstimatedTotalUSD        *float64           `json:"estimated_total_usd"`
 	StartAt                  time.Time          `json:"start_at"`

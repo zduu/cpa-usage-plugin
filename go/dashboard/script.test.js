@@ -953,6 +953,39 @@ test('quota current capacity uses the full amount only at exactly 100 percent', 
   assert.doesNotMatch(unknown, /3\.57|NaN|Infinity/);
 });
 
+test('quota missing prices retain amounts, identify excluded models and clear after repricing', async () => {
+  const { context } = createDashboardHarness({ language: 'en' });
+  await context.load();
+  const cycle = { start_at: '2026-10-02T08:00:00Z', end_at: '2026-10-02T13:00:00Z',
+    summary: { estimated_cost: 10 }, used_percent: 40, estimated_total_usd: 25, estimated_remaining_usd: 15,
+    unpriced_models: ['gpt-image-2.5', '<missing-model>'],
+    model_stats: [{ model: 'priced', total_requests: 1, total_tokens: 1000000, estimated_cost: 10 },
+      { model: 'gpt-image-2.5', total_requests: 1, total_tokens: 1000000, estimated_cost: null }] };
+  for (const current of [true, false]) {
+    const html = context.quotaPeriodHtml(cycle, current);
+    assert.match(html, /Priced spend/);
+    assert.match(html, /10\.00/);
+    assert.match(html, /25\.00/);
+    if (current) assert.match(html, /15\.00/);
+    assert.match(html, /Models without prices: gpt-image-2\.5, &lt;missing-model&gt;/);
+    assert.doesNotMatch(html, /<missing-model>|NaN|Infinity/);
+  }
+  const full = context.quotaPeriodHtml({ ...cycle, used_percent: 100, actual_total_usd: 10,
+    estimated_total_usd: null, estimated_remaining_usd: 0 }, true);
+  assert.match(full, /Priced capacity/);
+  assert.doesNotMatch(full, /Actual capacity|Fully used/);
+  const onlyUnknown = context.quotaPeriodHtml({ ...cycle, summary: { estimated_cost: 0 },
+    estimated_total_usd: 0, estimated_remaining_usd: 0 }, true);
+  assert.match(onlyUnknown, /Priced spend/);
+  assert.match(onlyUnknown, /0\.00/);
+  assert.match(onlyUnknown, /If no models are priced, amounts show 0/);
+  const repriced = context.quotaPeriodHtml({ ...cycle, unpriced_models: undefined,
+    summary: { estimated_cost: 15 }, estimated_total_usd: 37.5, estimated_remaining_usd: 22.5 }, true);
+  assert.match(repriced, /Actual cost/);
+  assert.match(repriced, /37\.50/);
+  assert.doesNotMatch(repriced, /Models without prices|Priced spend/);
+});
+
 test('quota previous periods show early reset duration and estimated boundaries', async () => {
   const { context } = createDashboardHarness({ language: 'en' });
   await context.load();

@@ -167,3 +167,94 @@ func TestModelPricesPreserveExplicitLegacyPath(t *testing.T) {
 		})
 	}
 }
+
+func TestDefaultModelPricesSurviveContainerWorkingDirectoryReplacement(t *testing.T) {
+	for _, layout := range []string{"directory", "jsonl"} {
+		t.Run(layout, func(t *testing.T) {
+			mount := t.TempDir()
+			storagePath := filepath.Join(mount, "usage")
+			if layout == "jsonl" {
+				storagePath += ".jsonl"
+			}
+			oldContainer := t.TempDir()
+			t.Chdir(oldContainer)
+			cfg := runtimeConfig{StorageEnabled: true, StoragePath: storagePath}
+			s := NewRequestStatistics()
+			s.Configure(cfg)
+			prompt := 7.0
+			price := ModelPrice{Prompt: 2, Completion: 8, Cache: .5, CacheWrite: 1,
+				TimeRules: []ModelPriceRule{{Name: "night", Start: "00:00", End: "06:00", Prompt: &prompt}}}
+			if _, err := s.UpsertModelPrice("gpt-image-2.5", price); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.UpsertModelPrice("deleted", ModelPrice{Prompt: 10}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.DeleteModelPrice("deleted"); err != nil {
+				t.Fatal(err)
+			}
+			dir, _ := storageLayout(storagePath)
+			wantPath := filepath.Join(dir, filepath.Base(defaultPriceStoragePath))
+			if got := s.ModelPrices().Storage; got.Path != wantPath || got.LoadedPath != wantPath || got.LastError != "" {
+				t.Fatalf("price file is outside persisted usage directory: %+v", got)
+			}
+			s.Close()
+
+			// Only the mounted usage directory survives a container replacement.
+			t.Chdir(t.TempDir())
+			if err := os.RemoveAll(oldContainer); err != nil {
+				t.Fatal(err)
+			}
+			restored := NewRequestStatistics()
+			defer restored.Close()
+			restored.Configure(cfg)
+			prices := restored.ModelPrices().ManualPrices
+			got := prices["gpt-image-2.5"]
+			if len(prices) != 1 || got.Prompt != 2 || got.Completion != 8 || got.Cache != .5 || got.CacheWrite != 1 || len(got.TimeRules) != 1 || got.TimeRules[0].Prompt == nil || *got.TimeRules[0].Prompt != 7 {
+				t.Fatalf("manual prices did not survive replacement: %+v", prices)
+			}
+		})
+	}
+}
+
+func TestDefaultModelPricesMigrateIntoUsageStorage(t *testing.T) {
+	for _, source := range []string{defaultPriceStoragePath, legacyPriceStoragePath} {
+		t.Run(source, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			if err := writeModelPricesFile(source, time.Now(), map[string]ModelPrice{"model": {Prompt: 3}}); err != nil {
+				t.Fatal(err)
+			}
+			dir := t.TempDir()
+			s := NewRequestStatistics()
+			defer s.Close()
+			s.Configure(runtimeConfig{StorageEnabled: true, StoragePath: dir})
+			if got := s.ModelPrices().ManualPrices["model"].Prompt; got != 3 {
+				t.Fatalf("migrated price = %g, want 3", got)
+			}
+			if _, err := os.Stat(filepath.Join(dir, filepath.Base(defaultPriceStoragePath))); err != nil {
+				t.Fatalf("migration did not persist price in usage directory: %v", err)
+			}
+			if _, err := os.Stat(source); err != nil {
+				t.Fatalf("migration removed the old price file: %v", err)
+			}
+		})
+	}
+}
+
+func TestDefaultModelPricesFollowStorageReconfiguration(t *testing.T) {
+	t.Chdir(t.TempDir())
+	s := NewRequestStatistics()
+	defer s.Close()
+	s.Configure(runtimeConfig{})
+	if _, err := s.UpsertModelPrice("model", ModelPrice{Prompt: 4}); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		dir := t.TempDir()
+		s.ConfigurePatch(runtimeConfigPatch{StorageEnabled: boolPtr(true), StoragePath: &dir})
+		response := s.ModelPrices()
+		if response.ManualPrices["model"].Prompt != 4 || response.Storage.LoadedPath != filepath.Join(dir, filepath.Base(defaultPriceStoragePath)) {
+			t.Fatalf("price did not follow storage reconfiguration: %+v", response)
+		}
+	}
+}

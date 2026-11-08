@@ -129,8 +129,8 @@ func TestQuotaPreviousCapacityAndPersistence(t *testing.T) {
 						}
 					}
 					if mode == "unknown" {
-						if amount != nil {
-							t.Fatal("unknown prices became a quota amount")
+						if amount == nil || *amount != 0 || len(p.UnpricedModels) != 1 || p.UnpricedModels[0] != "m" {
+							t.Fatal("unpriced subtotal must remain visible and identify missing prices")
 						}
 					} else if amount == nil || math.Abs(*amount-want) > 1e-9 {
 						t.Fatalf("previous amount=%v, want %g", amount, want)

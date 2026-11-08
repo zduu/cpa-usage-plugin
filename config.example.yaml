@@ -79,8 +79,8 @@ plugins:
       # priority: 1
       # CPA 插件宿主通用字段：插件商店安装元数据。手动放置插件文件时可省略。
       # store:
-      #   version: "2.7.8"
-      #   release-tag: "v2.7.8"
+      #   version: "2.7.9"
+      #   release-tag: "v2.7.9"
       #   repository: "https://github.com/zduu/cpa-usage-plugin"
 
       # 以下为用量统计插件自己的配置字段
@@ -97,6 +97,8 @@ plugins:
       storage_sync_interval_seconds: 0
       storage_sync_record_interval: 0
       export_max_records: 100000
+      # 保持此默认值时，开启持久化后价格文件自动保存到 storage_path 的数据目录。
+      # 自定义其他路径时，请将该文件所在目录也挂载到宿主机。
       price_storage_path: "data/usage-statistics-prices.json"
       models_dev_prices_enabled: false
       models_dev_prices_url: "https://models.dev/api.json"

@@ -4133,7 +4133,7 @@ func (s *RequestStatistics) loadModelPricesLocked() {
 	if s == nil {
 		return
 	}
-	path, abs, legacyAbs, err := resolvePriceStoragePaths(s.priceStoragePath)
+	_, abs, migrationPaths, err := s.resolvePriceStoragePathsLocked()
 	if err != nil {
 		s.priceStorageLastError = err.Error()
 		return
@@ -4152,13 +4152,15 @@ func (s *RequestStatistics) loadModelPricesLocked() {
 	}()
 	raw, err := os.ReadFile(abs)
 	loadedFromLegacy := false
-	if errors.Is(err, os.ErrNotExist) && legacyAbs != "" && legacyAbs != abs {
-		raw, err = os.ReadFile(legacyAbs)
+	for _, source := range migrationPaths {
+		if !errors.Is(err, os.ErrNotExist) {
+			break
+		}
+		raw, err = os.ReadFile(source)
 		loadedFromLegacy = err == nil
 	}
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			s.priceStoragePath = path
 			s.priceStorageLoadedPath = abs
 			s.modelPrices = make(map[string]ModelPrice)
 			s.modelPriceIndex = make(map[string]ModelPrice)
@@ -4188,7 +4190,6 @@ func (s *RequestStatistics) loadModelPricesLocked() {
 		// 否则重叠报错和前端的规则行都会拿到空标识。
 		setModelPriceCaseInsensitive(prices, name, normalizeModelPriceRules(price))
 	}
-	s.priceStoragePath = path
 	s.priceStorageLoadedPath = abs
 	s.modelPrices = prices
 	s.modelPriceIndex = normalizedModelPriceIndex(prices)
@@ -4196,11 +4197,11 @@ func (s *RequestStatistics) loadModelPricesLocked() {
 	s.modelPricesUpdatedAt = parseRFC3339OrZero(persisted.UpdatedAt)
 	s.priceStorageLastError = ""
 	if loadedFromLegacy {
-		// 旧版本默认把价格写在 CPA 工作目录根部。把内容复制到 data 目录后，
-		// CPA/插件更新只要保留数据目录就不会再丢失价格；保留旧文件作为用户
-		// 可回滚的备份，不做删除操作。
+		// Copy old default locations into the persisted usage directory. Keep
+		// the source file available for rollback and retry failed migrations.
 		if err := writeModelPricesFile(abs, s.modelPricesUpdatedAt, s.modelPrices); err != nil {
 			s.priceStorageLastError = fmt.Sprintf("migrate legacy price file: %v", err)
+			s.priceStorageLoadedPath = ""
 		}
 	}
 }
@@ -4209,7 +4210,7 @@ func (s *RequestStatistics) saveModelPricesLocked() error {
 	if s == nil {
 		return nil
 	}
-	path, abs, _, err := resolvePriceStoragePaths(s.priceStoragePath)
+	_, abs, _, err := s.resolvePriceStoragePathsLocked()
 	if err != nil {
 		s.priceStorageLastError = err.Error()
 		return err
@@ -4219,37 +4220,57 @@ func (s *RequestStatistics) saveModelPricesLocked() error {
 		s.priceStorageLastError = err.Error()
 		return err
 	}
-	s.priceStoragePath = path
 	s.priceStorageLoadedPath = abs
 	s.modelPricesUpdatedAt = updatedAt
 	s.priceStorageLastError = ""
 	return nil
 }
 
-// resolvePriceStoragePaths makes the new data-directory location the canonical
-// target while recognizing the old default path as a one-time migration source.
-// Explicit custom paths keep their configured semantics.
-func resolvePriceStoragePaths(configured string) (path, abs, legacyAbs string, err error) {
-	path = strings.TrimSpace(configured)
+// Default prices follow the usage storage directory so mounting that directory
+// also preserves manual prices across container replacement. Custom price paths
+// remain exact. Keep the configured value separate from the resolved location
+// so later storage reconfiguration can move the default again.
+func (s *RequestStatistics) resolvePriceStoragePathsLocked() (path, abs string, migrationPaths []string, err error) {
+	path = strings.TrimSpace(s.priceStoragePath)
 	if path == "" {
 		path = defaultRuntimeConfig().PriceStoragePath
 	}
 	abs, err = filepath.Abs(path)
 	if err != nil {
-		return "", "", "", err
+		return "", "", nil, err
 	}
 	defaultAbs, err := filepath.Abs(defaultPriceStoragePath)
 	if err != nil {
-		return "", "", "", err
+		return "", "", nil, err
 	}
-	legacyAbs, err = filepath.Abs(legacyPriceStoragePath)
+	if abs != defaultAbs {
+		return path, abs, nil, nil
+	}
+	if s.storageEnabled {
+		storagePath := strings.TrimSpace(s.storagePath)
+		if storagePath == "" {
+			storagePath = defaultRuntimeConfig().StoragePath
+		}
+		storageAbs, resolveErr := filepath.Abs(storagePath)
+		if resolveErr != nil {
+			return "", "", nil, resolveErr
+		}
+		dir, _ := storageLayout(storageAbs)
+		abs = filepath.Join(dir, filepath.Base(defaultPriceStoragePath))
+		path = abs
+	}
+	legacyAbs, err := filepath.Abs(legacyPriceStoragePath)
 	if err != nil {
-		return "", "", "", err
+		return "", "", nil, err
 	}
-	if abs == defaultAbs {
-		return defaultPriceStoragePath, defaultAbs, legacyAbs, nil
+	seen := map[string]bool{abs: true, "": true}
+	for _, source := range []string{s.priceStorageLoadedPath, defaultAbs, legacyAbs} {
+		if !seen[source] {
+			migrationPaths = append(migrationPaths, source)
+			seen[source] = true
+		}
 	}
-	return path, abs, "", nil
+	return path, abs, migrationPaths, nil
 }
 
 func writeModelPricesFile(abs string, updatedAt time.Time, prices map[string]ModelPrice) error {
@@ -4273,15 +4294,16 @@ func writeModelPricesFile(abs string, updatedAt time.Time, prices map[string]Mod
 	if err != nil {
 		return err
 	}
-	tmp := abs + ".tmp"
-	if err := os.WriteFile(tmp, append(raw, '\n'), 0o600); err != nil {
+	file, err := os.CreateTemp(filepath.Dir(abs), filepath.Base(abs)+".tmp-*")
+	if err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, abs); err != nil {
-		_ = os.Remove(tmp)
+	defer os.Remove(file.Name())
+	_, writeErr := file.Write(append(raw, '\n'))
+	if err := errors.Join(writeErr, file.Sync(), file.Close()); err != nil {
 		return err
 	}
-	return nil
+	return os.Rename(file.Name(), abs)
 }
 
 func parseRFC3339OrZero(value string) time.Time {
@@ -4818,11 +4840,12 @@ func (s *RequestStatistics) DeleteModelPrice(model string) (ModelPricesResponse,
 }
 
 func (s *RequestStatistics) modelPricesResponseLocked() ModelPricesResponse {
+	path, _, _, _ := s.resolvePriceStoragePathsLocked()
 	response := ModelPricesResponse{
 		Prices:       effectiveModelPrices(s.modelsDevPrices, s.modelPrices),
 		ManualPrices: copyModelPrices(s.modelPrices),
 		Storage: ModelPriceStorageStatus{
-			Path:       s.priceStoragePath,
+			Path:       path,
 			LoadedPath: s.priceStorageLoadedPath,
 			LastError:  s.priceStorageLastError,
 		},

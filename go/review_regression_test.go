@@ -171,7 +171,10 @@ func TestReviewPriceWriteFailureConsistency(t *testing.T) {
 	rec.Detail.InputTokens = 1000000
 	rec.Detail.TotalTokens = 1000000
 	s.Record(rec)
-	if err := os.Mkdir(path+".tmp", 0700); err != nil {
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0700); err != nil {
 		t.Fatal(err)
 	}
 	override := 3.0

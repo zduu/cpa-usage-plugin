@@ -125,7 +125,7 @@ func TestQuotaModelCapacityDoesNotRequireCalibrationIntervals(t *testing.T) {
 
 func TestQuotaModelCapacityUnknownBudgetOrZeroCost(t *testing.T) {
 	w, p, facts, _ := quotaModelFixture()
-	for _, prices := range []map[string]ModelPrice{nil, {"a": {Prompt: 8}}, {"a": {}, "b": {}}} {
+	for _, prices := range []map[string]ModelPrice{nil, {"a": {}, "b": {}}} {
 		dto := quotaModelTestResult(w, p, facts, quotaModelTestPrice(prices))
 		for _, row := range dto.ModelStats {
 			if row.ModelOnlyTotalTokens != nil {
@@ -133,8 +133,15 @@ func TestQuotaModelCapacityUnknownBudgetOrZeroCost(t *testing.T) {
 			}
 		}
 	}
-	dto := quotaModelTestResult(w, p, facts, quotaModelTestPrice(map[string]ModelPrice{"a": {}, "b": {Prompt: 40}}))
+	dto := quotaModelTestResult(w, p, facts, quotaModelTestPrice(map[string]ModelPrice{"a": {Prompt: 8}}))
 	rows := quotaModelRows(dto)
+	quotaModelAssert(t, dto.EstimatedTotalUSD, 32)
+	quotaModelAssert(t, rows["a"].ModelOnlyTotalTokens, 4_000_000)
+	if rows["b"].ModelOnlyTotalTokens != nil || len(dto.UnpricedModels) != 1 || dto.UnpricedModels[0] != "b" {
+		t.Fatal("unpriced model acquired a token estimate or was not identified")
+	}
+	dto = quotaModelTestResult(w, p, facts, quotaModelTestPrice(map[string]ModelPrice{"a": {}, "b": {Prompt: 40}}))
+	rows = quotaModelRows(dto)
 	quotaModelAssert(t, dto.EstimatedTotalUSD, 160)
 	quotaModelAssert(t, rows["b"].ModelOnlyTotalTokens, 4_000_000)
 	if rows["a"].ModelOnlyTotalTokens != nil {

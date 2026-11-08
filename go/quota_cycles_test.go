@@ -396,7 +396,7 @@ func TestQuotaExplicitRevocationKeepsHistoryAndPartialSignalsDoNotRevoke(t *test
 	}
 }
 
-func TestQuotaUnknownPricesRemainNullAndZeroPricesRemainZero(t *testing.T) {
+func TestQuotaUnknownPricesKeepSubtotalAndIdentifyMissingModels(t *testing.T) {
 	for _, known := range []bool{false, true} {
 		t.Run(fmt.Sprint(known), func(t *testing.T) {
 			s := NewRequestStatistics()
@@ -410,8 +410,11 @@ func TestQuotaUnknownPricesRemainNullAndZeroPricesRemainZero(t *testing.T) {
 			s.Record(r)
 			quotaTestObserve(s, now, now.Add(time.Hour), .4, 18000)
 			cycle := s.QueryAPIDetailAt(usageGroupKey(r), "all", 10, 10, now).QuotaCycles[0].Groups[0].Current
-			if (cycle.Summary.CostUSD != nil) != known || (cycle.EstimatedTotalUSD != nil) != known || (cycle.ModelStats[0].CostUSD != nil) != known {
+			if cycle.Summary.CostUSD == nil || *cycle.Summary.CostUSD != 0 || cycle.EstimatedTotalUSD == nil || *cycle.EstimatedTotalUSD != 0 || cycle.EstimatedRemainingUSD == nil || *cycle.EstimatedRemainingUSD != 0 || (cycle.ModelStats[0].CostUSD != nil) != known {
 				t.Fatalf("unknown and zero price confused: %+v", cycle)
+			}
+			if (!known && (len(cycle.UnpricedModels) != 1 || cycle.UnpricedModels[0] != "m")) || (known && len(cycle.UnpricedModels) != 0) {
+				t.Fatalf("missing price identification: %v", cycle.UnpricedModels)
 			}
 			raw, err := json.Marshal(cycle)
 			if err != nil {

@@ -1654,19 +1654,22 @@ function quotaPeriodHtml(cycle, current) {
   if (!cycle) return '<div class="empty">' + t(current ? 'quota_no_current' : 'quota_no_previous') + '</div>';
   const resetUnknown = cycle.reset_time_unknown === true;
   const summary = cycle.summary;
+  const unpriced = Array.isArray(cycle.unpriced_models) ? cycle.unpriced_models : [];
+  const costLabel = unpriced.length ? 'quota_priced_cost' : 'quota_actual_cost';
   const percent = cycle.used_percent === null || cycle.used_percent === undefined ? '—' :
     (cycle.used_percent >= 99.95 && cycle.used_percent < 100 ? '&lt;100%' : pct(cycle.used_percent));
   const range = resetUnknown ? esc(t('quota_reset_time_unknown')) : esc(formatDateTime(timestampMs(cycle.start_at))) + ' – ' + esc(formatDateTime(timestampMs(cycle.end_at)));
-  let html = '<div class="subtle quotaDates">' + range + '</div><div class="detailGrid">' + metricHtml(t('quota_actual_cost'), quotaValue(summary && summary.estimated_cost, true)) + metricHtml(t('quota_used'), percent) + metricHtml(t('requests_label'), quotaValue(summary && summary.total_requests, false)) + metricHtml(t('total_tokens_label'), quotaTokens(summary && summary.total_tokens));
+  let html = '<div class="subtle quotaDates">' + range + '</div><div class="detailGrid">' + metricHtml(t(costLabel), quotaValue(summary && summary.estimated_cost, true)) + metricHtml(t('quota_used'), percent) + metricHtml(t('requests_label'), quotaValue(summary && summary.total_requests, false)) + metricHtml(t('total_tokens_label'), quotaTokens(summary && summary.total_tokens));
   if (current) {
     const end = timestampMs(cycle.end_at);
     const full = cycle.used_percent === 100;
-    html += metricHtml(t(full ? 'quota_actual_total' : 'quota_estimated_total'), quotaValue(full ? cycle.actual_total_usd : cycle.estimated_total_usd, true)) + metricHtml(t('quota_estimated_remaining'), quotaValue(cycle.estimated_remaining_usd, true)) + metricHtml(t('quota_reset'), resetUnknown ? '—' : '<span data-quota-reset="' + end + '">' + quotaCountdownText(end, Date.now()) + '</span>');
+    html += metricHtml(t(full ? (unpriced.length ? 'quota_priced_total' : 'quota_actual_total') : 'quota_estimated_total'), quotaValue(full ? cycle.actual_total_usd : cycle.estimated_total_usd, true)) + metricHtml(t('quota_estimated_remaining'), quotaValue(cycle.estimated_remaining_usd, true)) + metricHtml(t('quota_reset'), resetUnknown ? '—' : '<span data-quota-reset="' + end + '">' + quotaCountdownText(end, Date.now()) + '</span>');
   } else {
     const full = cycle.used_percent === 100;
-    html += metricHtml(t(full ? 'quota_actual_total' : 'quota_estimated_total'), quotaValue(full ? cycle.actual_total_usd : cycle.estimated_total_usd, true));
+    html += metricHtml(t(full ? (unpriced.length ? 'quota_priced_total' : 'quota_actual_total') : 'quota_estimated_total'), quotaValue(full ? cycle.actual_total_usd : cycle.estimated_total_usd, true));
   }
   html += '</div>';
+  if (unpriced.length) html += '<div class="subtle quotaEstimateHint">' + esc(t('quota_unpriced_hint', unpriced.join(', '))) + '</div>';
   if (resetUnknown) {
     if (cycle.observed_at) html += '<div class="subtle quotaDates">' + esc(t('quota_observed_at') + ': ' + formatDateTime(timestampMs(cycle.observed_at))) + '</div>';
     return html + '<div class="subtle quotaDates">' + esc(t('quota_reset_time_unknown_hint')) + '</div>';
@@ -1679,7 +1682,7 @@ function quotaPeriodHtml(cycle, current) {
   if (cycle.observed_at) html += '<div class="subtle quotaDates">' + esc(t('quota_observed_at') + ': ' + formatDateTime(timestampMs(cycle.observed_at))) + '</div>';
   if (cycle.reset_baseline_used_percent != null) html += '<div class="subtle quotaEstimateHint">' + esc(t('quota_reset_detected_hint')) + '</div>';
   if (cycle.unmapped) return html + '<div class="subtle">' + t('quota_scope_unknown') + '</div>';
-  if (cycle.reset_baseline_used_percent == null) html += '<div class="subtle quotaDates">' + esc(t(cycle.used_percent === 100 ? 'quota_full_hint' : 'quota_estimate_hint')) + '</div>';
+  if (cycle.reset_baseline_used_percent == null && !unpriced.length) html += '<div class="subtle quotaDates">' + esc(t(cycle.used_percent === 100 ? 'quota_full_hint' : 'quota_estimate_hint')) + '</div>';
   return html + quotaModelsHtml(cycle);
 }
 function quotaCyclesHtml(credentials, refs = []) {

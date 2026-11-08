@@ -219,6 +219,10 @@ func quotaBuildPeriod(w quotaWindow, p *quotaPeriod, facts []quotaFact, pricing 
 		}
 		v.ModelStats = append(v.ModelStats, row)
 	}
+	for model := range unpriced {
+		v.UnpricedModels = append(v.UnpricedModels, model)
+	}
+	sort.Strings(v.UnpricedModels)
 	sort.Slice(v.ModelStats, func(i, j int) bool {
 		if v.ModelStats[i].TotalRequests != v.ModelStats[j].TotalRequests {
 			return v.ModelStats[i].TotalRequests > v.ModelStats[j].TotalRequests
@@ -227,14 +231,14 @@ func quotaBuildPeriod(w quotaWindow, p *quotaPeriod, facts []quotaFact, pricing 
 	})
 	if acc.summary.TotalRequests > 0 {
 		v.Summary = &quotaUsageSummary{APIDetailSummary: acc.summary}
-		if len(unpriced) == 0 {
-			v.Summary.CostUSD = &v.Summary.APIDetailSummary.EstimatedCost
-			if v.UsedPercent != nil && *v.UsedPercent == 100 {
-				// Exhaustion is a recorded result, not another calibration
-				// sample. Use the same tracked spend for current and previous
-				// periods, including late usage and costs after the watermark.
-				v.ActualTotalUSD = v.Summary.CostUSD
-			}
+		// Keep the priced subtotal visible even when another model has no
+		// price. UnpricedModels identifies excluded costs; individual unknown
+		// model costs stay null so they cannot be mistaken for free models.
+		v.Summary.CostUSD = &v.Summary.APIDetailSummary.EstimatedCost
+		if v.UsedPercent != nil && *v.UsedPercent == 100 {
+			// Exhaustion uses the same recorded spend for both periods,
+			// including late usage and costs after the watermark.
+			v.ActualTotalUSD = v.Summary.CostUSD
 		}
 	}
 	return v

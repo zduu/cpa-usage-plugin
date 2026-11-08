@@ -12,7 +12,7 @@ import (
 
 const pluginID = "usage-dashboard-zduu"
 const legacyPluginID = "usage-statistics"
-const pluginVersion = "2.7.8"
+const pluginVersion = "2.7.9"
 
 func handleRegister(requestBody []byte) ([]byte, error) {
 	applyRuntimeConfig(requestBody)
@@ -108,7 +108,7 @@ func handleRegister(requestBody []byte) ([]byte, error) {
 					Name:        "price_storage_path",
 					Type:        "string",
 					Default:     defaultPriceStoragePath,
-					Description: "模型价格表 JSON 文件路径。相对路径基于 CPA 工作目录。",
+					Description: "模型价格表 JSON 文件路径。默认值在开启统计持久化时跟随 storage_path 的数据目录；其他路径基于 CPA 工作目录读写。",
 				},
 				{
 					Name:        "models_dev_prices_enabled",

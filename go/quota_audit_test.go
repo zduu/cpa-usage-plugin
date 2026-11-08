@@ -108,7 +108,7 @@ func TestQuotaImportedTokenComponentsRequirePricesWithoutTotal(t *testing.T) {
 			t.Fatal(err)
 		}
 		period := restored.QueryAPIDetailAt(usageGroupKey(r), "all", 10, 10, now).QuotaCycles[0].Groups[0].Current
-		if period.Summary.CostUSD != nil || period.ModelStats[0].CostUSD != nil || period.EstimatedTotalUSD != nil {
+		if period.Summary.CostUSD == nil || *period.Summary.CostUSD != 0 || period.ModelStats[0].CostUSD != nil || len(period.UnpricedModels) != 1 || period.UnpricedModels[0] != "m" {
 			restored.Close()
 			t.Fatalf("missing total_tokens turned an unknown price into a free price: %+v", tokens)
 		}

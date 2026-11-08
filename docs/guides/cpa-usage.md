@@ -1,5 +1,13 @@
 # CPA 用量统计插件 — 使用文档
 
+## v2.7.9 - 2026-11-05
+
+上游接口详情的最近请求新增 Fast 模式，按请求记录中的 `service_tier` 展示服务等级。`priority` 显示为 `fast`，其他等级显示原值，缺失时显示 `-`。存储快照格式保持 v3，无需新增配置。
+
+### 新增
+
+- 最近请求详情增加 Fast 模式列。优先使用原生 usage 服务等级；原生字段缺失时，可在请求元数据匹配无歧义的情况下补齐。历史记录不会根据模型名或速度推测服务等级。
+
 ## v2.7.8 - 2026-10-31
 
 本版本修复新版管理面板登录存储不兼容造成的持续认证失败，并调整 Linux amd64 产物的 CPU 兼容设置。无需新增配置，存储快照格式保持 v3。
@@ -69,8 +77,8 @@ plugins:
     usage-dashboard-zduu:
       enabled: true
       store:
-        version: "2.7.8"
-        release-tag: "v2.7.8"
+        version: "2.7.9"
+        release-tag: "v2.7.9"
         repository: "https://github.com/zduu/cpa-usage-plugin"
       # 其他配置项见第 4 节 ...
 ```
@@ -303,8 +311,8 @@ plugins:
     usage-dashboard-zduu:
       enabled: true
       store:
-        version: "2.7.8"
-        release-tag: "v2.7.8"
+        version: "2.7.9"
+        release-tag: "v2.7.9"
         repository: "https://github.com/zduu/cpa-usage-plugin"
       # 每个上游接口/模型最多保留的请求明细条数。默认 5000。
       max_details_per_model: 5000
@@ -354,7 +362,7 @@ plugins:
       claude_cache_repair_enabled: false
       # 可选：允许外部脚本更新插件文件。默认 false。
       update_enabled: false
-      # 可选：latest 或指定版本号，例如 v2.7.8。
+      # 可选：latest 或指定版本号，例如 v2.7.9。
       update_version: latest
 ```
 
@@ -380,8 +388,8 @@ cd CLIProxyAPI
 启动后查看日志确认插件加载成功：
 
 ```text
-pluginhost: plugin loaded plugin_id=usage-dashboard-zduu version=2.7.8 path=plugins/usage-dashboard-zduu-v2.7.8.so
-pluginhost: plugin registered plugin_id=usage-dashboard-zduu plugin_name=用量统计 version=2.7.8 path=plugins/usage-dashboard-zduu-v2.7.8.so
+pluginhost: plugin loaded plugin_id=usage-dashboard-zduu version=2.7.9 path=plugins/usage-dashboard-zduu-v2.7.9.so
+pluginhost: plugin registered plugin_id=usage-dashboard-zduu plugin_name=用量统计 version=2.7.9 path=plugins/usage-dashboard-zduu-v2.7.9.so
 ```
 
 > `store-sources` 引入插件商店注册表，管理面板可浏览安装。`store` 块标记当前期望版本，pluginhost 会匹配 `usage-dashboard-zduu-v{版本号}.{ext}` 文件名，并自动清理旧版本文件。
@@ -621,7 +629,8 @@ plugins:
 - `storage_flush_interval_seconds` 越小，异常退出时最多丢失的数据越少；默认 30 秒，想更稳可以设为 5 或 1。
 - `storage_snapshot_interval_seconds` 和 `storage_snapshot_record_interval` 控制启动恢复成本；默认 300 秒或 1000 条写一次快照，高请求量实例可降低记录间隔，低频实例可保持默认。
 - `storage_sync_interval_seconds` 和 `storage_sync_record_interval` 默认关闭；如果需要更强的异常断电保护，可配置如 `storage_sync_interval_seconds: 30` 或 `storage_sync_record_interval: 1000`，但会增加磁盘 I/O。
-- 模型价格默认保存在同一持久化目录下的 `data/usage-statistics-prices.json`；使用默认路径且新文件不存在时，启动会自动迁移旧版根目录的 `usage-statistics-prices.json`。显式配置旧路径或其他自定义路径时，继续在指定位置读写。若使用 Docker，请确保价格文件所在位置持久化；采用默认路径时请挂载 `data` 目录。
+- 模型价格在保存时同步写入磁盘，包含手动基础价和时段规则。`price_storage_path` 未配置或保持默认值时，开启统计持久化后自动跟随 `storage_path` 的实际数据目录。例如 `storage_path: data/usage-statistics.jsonl` 对应价格文件 `data/usage-statistics/usage-statistics-prices.json`；若 `storage_path` 直接指定目录，则价格文件位于该目录内。新位置不存在时，自动复制原 `data/usage-statistics-prices.json` 或旧版根目录 `usage-statistics-prices.json`，保留原文件作为备份。未开启统计持久化时仍默认写入 `data/usage-statistics-prices.json`。显式配置其他价格路径时继续在指定位置读写。
+- Docker 必须挂载实际保存价格的数据目录，才能在容器重建、更新后保留价格；仅写入容器内部的文件会随容器删除而丢失。按上述示例挂载 `./data:/CLIProxyAPI/data` 即可同时保留统计和默认手动价格；价格持久化独立于 `storage_enabled`，只保存价格时也可挂载 `data` 目录或配置已挂载目录内的 `price_storage_path`。
 - `/health` 的 `storage.write_queue_length` 和 `storage.write_queue_capacity` 可观察后台写入队列积压；`storage.last_write_batch_records`、`storage.last_write_batch_duration_ms`、`storage.last_write_queue_wait_ms` 可观察最近 writer 批次规模、写入耗时和最长排队时长；`storage.write_batch_avg_duration_ms`、`storage.write_batch_p95_duration_ms`、`storage.write_batch_p99_duration_ms`、`storage.write_queue_wait_avg_ms`、`storage.write_queue_wait_p95_ms`、`storage.write_queue_wait_p99_ms` 和 `storage.write_pressure` 可观察持续磁盘压力与长尾抖动。看板底部出现"持久化排队中"或"持久化写入偏慢"时，说明磁盘写入速度短时间低于请求记录速度。
 - 如果已经有内存数据，建议先导出；开启持久化并重启后，再把导出的 JSON 导入一次，后续数据才会继续写入持久化文件。
 
@@ -651,7 +660,7 @@ plugins:
     usage-dashboard-zduu:
       enabled: true
       update_enabled: true
-      update_version: latest   # 或 v2.7.8
+      update_version: latest   # 或 v2.7.9
 ```
 
 执行脚本：

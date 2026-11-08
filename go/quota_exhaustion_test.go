@@ -57,13 +57,22 @@ func TestQuotaExhaustedCurrentUsesRecordedSpend(t *testing.T) {
 				if c.EstimatedTotalUSD != nil {
 					t.Fatalf("exhaustion retained a projection: %v", *c.EstimatedTotalUSD)
 				}
-				unknown := mode == "unknown" || mode == "late-unpriced" || mode == "empty" || mode == "unmapped"
+				unknown := mode == "empty" || mode == "unmapped"
 				if unknown {
 					if c.ActualTotalUSD != nil {
 						t.Fatal("unknown total was presented as known")
 					}
-				} else if c.ActualTotalUSD == nil || math.Abs(*c.ActualTotalUSD-price) > 1e-9 || *c.ActualTotalUSD != *c.Summary.CostUSD {
-					t.Fatalf("capacity does not equal recorded spend: %+v", c)
+				} else {
+					want := price
+					if mode == "unknown" {
+						want = 0
+					}
+					if c.ActualTotalUSD == nil || math.Abs(*c.ActualTotalUSD-want) > 1e-9 || *c.ActualTotalUSD != *c.Summary.CostUSD {
+						t.Fatalf("capacity does not equal recorded spend: %+v", c)
+					}
+					if (len(c.UnpricedModels) > 0) != (mode == "unknown" || mode == "late-unpriced") {
+						t.Fatalf("missing price identification: %v", c.UnpricedModels)
+					}
 				}
 				if mode == "unmapped" {
 					if c.EstimatedRemainingUSD != nil {
